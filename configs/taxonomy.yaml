@@ -1,0 +1,261 @@
+# TDA unified vocabulary -- encodes spec section 6 (统一词表).
+#
+#   6.1  23 classes with their attributes
+#   6.2  per-class state sets, default state, and which states need a mask
+#   6.3  action verbs: what they apply to and their state effect
+#   6.5  tool vocabulary
+#
+# Mask policy (resolved by Taxonomy.needs_mask(cls, state, placement)):
+#   placement == "on_bench"   -> true for every class except `chassis`
+#                                (see on_bench_needs_geom below)
+#   placement == "elsewhere"  -> false (the part is out of every view)
+#   placement == "in_chassis" -> the per-class `needs_mask` table below
+version: 1
+
+# A part lying on the bench always gets its own "detached" geometry, whatever
+# state it is in. `chassis` never goes on the bench, so it is excluded.
+on_bench_needs_geom: true
+
+classes:
+  # --- 结构 / structure ------------------------------------------------------
+  chassis:
+    group: structure
+    attrs: {}
+    states: [present]
+    default_state: present
+    needs_mask: {present: true}
+
+  drive_cage:
+    group: structure
+    attrs:
+      of: [ssd, hdd, optical]
+    states: [installed, displaced, removed]
+    default_state: installed
+    needs_mask: {installed: true, displaced: true, removed: false}
+
+  cover:
+    group: structure
+    attrs:
+      of: [cpu_cooler, motherboard_screws, ram, expansion_slot, front_bezel, drive, other]
+    states: [closed, open, removed]
+    default_state: closed
+    needs_mask: {closed: true, open: true, removed: false}
+
+  cooler_bracket:
+    group: structure
+    attrs: {}
+    states: [installed, displaced, removed]
+    default_state: installed
+    needs_mask: {installed: true, displaced: true, removed: false}
+
+  # --- 主要部件 / major parts -------------------------------------------------
+  motherboard:
+    group: part
+    attrs: {}
+    states: [installed, displaced, removed]
+    default_state: installed
+    needs_mask: {installed: true, displaced: true, removed: false}
+
+  cpu:
+    group: part
+    attrs: {}
+    states: [installed, displaced, removed]
+    default_state: installed
+    needs_mask: {installed: true, displaced: true, removed: false}
+
+  cpu_cooler:
+    group: part
+    attrs:
+      kind: [fan, heatsink, heatsink_fan]
+    states: [installed, displaced, removed]
+    default_state: installed
+    needs_mask: {installed: true, displaced: true, removed: false}
+
+  ram_module:
+    group: part
+    attrs: {}
+    states: [installed, displaced, removed]
+    default_state: installed
+    needs_mask: {installed: true, displaced: true, removed: false}
+
+  psu:
+    group: part
+    attrs: {}
+    states: [installed, displaced, removed]
+    default_state: installed
+    needs_mask: {installed: true, displaced: true, removed: false}
+
+  storage_drive:
+    group: part
+    attrs:
+      kind: [hdd, ssd, unknown]
+    states: [installed, displaced, removed]
+    default_state: installed
+    needs_mask: {installed: true, displaced: true, removed: false}
+
+  optical_drive:
+    group: part
+    attrs: {}
+    states: [installed, displaced, removed]
+    default_state: installed
+    needs_mask: {installed: true, displaced: true, removed: false}
+
+  expansion_card:
+    group: part
+    attrs:
+      kind: [gpu, wlan, other]
+    states: [installed, displaced, removed]
+    default_state: installed
+    needs_mask: {installed: true, displaced: true, removed: false}
+
+  case_fan:
+    group: part
+    attrs: {}
+    states: [installed, displaced, removed]
+    default_state: installed
+    needs_mask: {installed: true, displaced: true, removed: false}
+
+  misc_part:
+    group: part
+    attrs:
+      name: []          # free text, e.g. front_io_module
+    states: [installed, displaced, removed]
+    default_state: installed
+    needs_mask: {installed: true, displaced: true, removed: false}
+
+  # --- 紧固件 / fastener -----------------------------------------------------
+  screw:
+    group: fastener
+    attrs:
+      role: [motherboard, cpu_cooler, cooler_bracket, drive, optical_drive, card, psu, other]
+      head: [PH1, PH2, PH3, T15, T20, unknown]
+      captive: [true, false]
+    states: [fastened, loosened, removed]
+    default_state: fastened
+    needs_mask: {fastened: true, loosened: true, removed: false}
+
+  # --- 锁扣 / latch ----------------------------------------------------------
+  ram_latch:
+    group: latch
+    attrs:
+      of: []            # ram_module instance key
+    states: [closed, open]
+    default_state: closed
+    needs_mask: {closed: true, open: true}
+
+  cpu_socket_lever:
+    group: latch
+    attrs: {}
+    states: [closed, open]
+    default_state: closed
+    needs_mask: {closed: true, open: true}
+
+  psu_latch:
+    group: latch
+    attrs: {}
+    states: [closed, open]
+    default_state: closed
+    needs_mask: {closed: true, open: true}
+
+  drive_latch:
+    group: latch
+    attrs:
+      of: []            # drive_cage or storage_drive instance key
+    states: [closed, open]
+    default_state: closed
+    needs_mask: {closed: true, open: true}
+
+  card_latch:
+    group: latch
+    attrs:
+      of: []            # expansion_card instance key
+    states: [closed, open]
+    default_state: closed
+    needs_mask: {closed: true, open: true}
+
+  cooler_latch:
+    group: latch
+    attrs: {}
+    states: [closed, open]
+    default_state: closed
+    needs_mask: {closed: true, open: true}
+
+  cable_clip:
+    group: latch
+    attrs:
+      holds: []         # virtual cable node id
+    states: [closed, open]
+    default_state: closed
+    needs_mask: {closed: true, open: true}
+
+  # --- 接口 / interface ------------------------------------------------------
+  connector:
+    group: interface
+    attrs:
+      kind: [atx_24pin, cpu_power, sata_data, sata_power, fan, front_panel, usb_header, audio, molex, other]
+      socket_host: []   # instance key of the part carrying the socket
+      cable: []         # virtual cable node id
+    states: [plugged, unplugged, removed]
+    default_state: plugged
+    # `unplugged` is explicitly NOT tracked with geometry (spec 6.2).
+    needs_mask: {plugged: true, unplugged: false, removed: false}
+
+# Virtual (non-visual) nodes. They are not taxonomy classes -- they never carry
+# geometry -- but verbs apply to them and they have their own state machine.
+virtual_nodes:
+  cable:
+    states: [routed, released]
+    default_state: routed
+    needs_mask: {routed: false, released: false}
+
+# --- 6.3 动作动词 ------------------------------------------------------------
+# effect.to         : unconditional new value for effect.attr
+# effect.by_class   : new value keyed by the target class
+# effect.conditional: pick by the truthiness of attribute `if_attr`
+# effect: null      : the verb changes no state (reorient only breaks the pose)
+verbs:
+  unscrew:
+    applies_to: [screw]
+    effect:
+      attr: state
+      conditional:
+        if_attr: captive
+        if_true: loosened
+        if_false: removed
+
+  disconnect:
+    applies_to: [connector]
+    effect: {attr: state, to: unplugged}
+
+  open:
+    applies_to: [ram_latch, cpu_socket_lever, psu_latch, drive_latch, card_latch,
+                 cooler_latch, cable_clip, cover]
+    effect: {attr: state, to: open}
+
+  release:
+    applies_to: [cable_clip, cable]
+    effect:
+      attr: state
+      by_class: {cable_clip: open, cable: released}
+
+  remove:
+    applies_to: [drive_cage, cover, cooler_bracket, motherboard, cpu, cpu_cooler,
+                 ram_module, psu, storage_drive, optical_drive, expansion_card,
+                 case_fan, misc_part, screw, connector]
+    effect: {attr: state, to: removed}
+
+  displace:
+    applies_to: [drive_cage, cooler_bracket, motherboard, cpu, cpu_cooler,
+                 ram_module, psu, storage_drive, optical_drive, expansion_card,
+                 case_fan, misc_part]
+    effect: {attr: state, to: displaced}
+
+  reorient:
+    applies_to: [chassis]
+    effect: null
+
+# --- 6.5 工具 ----------------------------------------------------------------
+tools: [PH1, PH2, PH3, T15, T20, hand, none]
+
+# --- 6.4 方向（机箱坐标系）---------------------------------------------------
+directions: ["+Z", "+X", "-X", "+Y", "-Y", "rotate", "none"]

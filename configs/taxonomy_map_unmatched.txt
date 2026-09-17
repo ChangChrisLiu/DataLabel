@@ -1,0 +1,9 @@
+# Raw step names configs/taxonomy_map.yaml does not resolve.
+# Regenerate with: python scripts/taxonomy_coverage.py
+# rows=2830 unmatched=0 (0.00%) canon_group_mismatch=0
+
+## unmatched (matched_rule == fallback)
+(none)
+
+## canon_group differs from steps_long.csv target_canon
+(none)
