@@ -1,0 +1,2030 @@
+{
+ "exported_at": "2026-09-17T17:51:18.946Z",
+ "source": "app.humansignal.com",
+ "projects": [
+  {
+   "id": 176047,
+   "title": "Scanner_camera",
+   "workspace": "Desktop_19",
+   "task_number": 1,
+   "total_annotations": 1,
+   "label_config": "<View>\n  <Style>\n    .ant-radio-wrapper sup,\n    .ant-checkbox-wrapper sup {\n      display: none !important;\n    }\n  </Style>\n\n  <View>\n    <Header value=\"Sequence Details\"/>\n\n    <Text name=\"seq_number\" value=\"Sequence Number:\"/>\n    <TextArea name=\"seq_number_value\" toName=\"seq_number\" editable=\"true\"/>\n\n    <Text name=\"seq_name\" value=\"Sequence Name:\"/>\n    <Choices\n      name=\"seq_name_value\"\n      toName=\"seq_name\"\n      choice=\"single\"\n      showInLine=\"true\"\n      showHotkeys=\"false\"\n    >\n      <Choice value=\"Initial Conditions\"/>\n      <Choice value=\"Remove CPU Fan Retention Bracket\"/>\n      <Choice value=\"Unscrew Heatsink Screws\"/>\n      <Choice value=\"Remove Heatsink\"/>\n      <Choice value=\"Unscrew CPU Cooling Fan Screws\"/>\n      <Choice value=\"Disconnect CPU Cooling Fan Connector\"/>\n      <Choice value=\"Remove CPU Cooling Fan\"/>\n      <Choice value=\"Disconnect SATA Connector\"/>\n      <Choice value=\"Disconnect Drive Power Connector\"/>\n      <Choice value=\"Pull Out Optical Drive\"/>\n      <Choice value=\"Open Storage Drive Retention Bracket Locker\"/>\n      <Choice value=\"Remove Storage Drive Retention Bracket\"/>\n      <Choice value=\"Remove Solid State Drive (SSD)\"/>\n      <Choice value=\"Remove Hard Disk Drive (HDD)\"/>\n      <Choice value=\"Disconnect Power Supply Unit (PSU) to Motherboard Connector\"/>\n      <Choice value=\"Disconnect Case to Motherboard Connector\"/>\n      <Choice value=\"Release Cable\"/>\n      <Choice value=\"Remove PSU Retention Bracket\"/>\n      <Choice value=\"Remove PSU\"/>\n      <Choice value=\"Open RAM Module Retention Clip\"/>\n      <Choice value=\"Remove RAM Module\"/>\n      <Choice value=\"Release CPU Socket Retention Bracket\"/>\n      <Choice value=\"Remove CPU Chip\"/>\n      <Choice value=\"Release Chassis Latch Above Additional Card\"/>\n      <Choice value=\"Remove Additional Card Upper Cover\"/>\n      <Choice value=\"Remove Additional Card\"/>\n      <Choice value=\"Release GPU Retention Bracket\"/>\n      <Choice value=\"Remove GPU\"/>\n      <Choice value=\"Remove Screw Locker (Big Screw)\"/>\n      <Choice value=\"Remove Chassis Screw Cover on Case\"/>\n      <Choice value=\"Unscrew Motherboard T15 Screw\"/>\n      <Choice value=\"Unscrew Motherboard PH2 Screw\"/>\n      <Choice value=\"Remove Motherboard\"/>\n    </Choices>\n\n    <Text name=\"task_desc\" value=\"Detailed Task Description:\"/>\n    <TextArea name=\"task_desc_value\" toName=\"task_desc\" editable=\"true\"/>\n\n    <Text name=\"complexity\" value=\"Complexity:\"/>\n    <Choices name=\"complexity_value\" toName=\"complexity\" choice=\"single\" showInLine=\"true\">\n      <Choice value=\"1\"/>\n      <Choice value=\"2\"/>\n      <Choice value=\"3\"/>\n      <Choice value=\"4\"/>\n      <Choice value=\"5\"/>\n    </Choices>\n\n    <Text name=\"tool_utility\" value=\"Tool Utility:\"/>\n    <Choices name=\"tool_utility_value\" toName=\"tool_utility\" choice=\"single\" showInLine=\"true\">\n      <Choice value=\"T15 Screwdriver\"/>\n      <Choice value=\"PH2 Screwdriver\"/>\n      <Choice value=\"None\"/>\n    </Choices>\n\n    <Text name=\"notes\" value=\"Notes:\"/>\n    <TextArea name=\"notes_value\" toName=\"notes\" editable=\"true\"/>\n  </View>\n  \n  \n<Header value=\"Target Identification\"/>\n  <Image name=\"target_image\" value=\"$image\" zoom=\"true\"/>\n\n  \n  <Rectangle name=\"target_rect\" toName=\"target_image\"/>\n  <Ellipse name=\"target_ellipse\" toName=\"target_image\"/>\n  <Polygon name=\"target_polygon\" toName=\"target_image\"/>\n  <Brush name=\"target_brush\" toName=\"target_image\"/>\n  <Labels name=\"target_labels\" toName=\"target_image\" fillOpacity=\"0.5\" strokeWidth=\"3\">\n    <Label value=\"Target\" background=\"#FFA500\"/>\n  </Labels>\n\n  <Text name=\"target_desc_label\" value=\"Target Description\"/>\n  <TextArea name=\"target_desc_value\" toName=\"target_desc_label\" editable=\"true\"/>\n  \n  <Text name=\"target_desc_time\" value=\"Target Operation Time (s)\"/>\n  <TextArea name=\"target_ope_time\" toName=\"target_desc_time\" editable=\"true\"/>\n\n  <Text name=\"disassembly_direction_label\" value=\"Disassembly Direction\"/>\n  <Choices name=\"disassembly_direction\" toName=\"disassembly_direction_label\" choice=\"single\" showInLine=\"true\">\n    <Choice value=\"Horizontal\"/>\n    <Choice value=\"Vertical\"/>\n  </Choices>\n\n  <Text name=\"disassembly_operation_label\" value=\"Disassembly Operation\"/>\n  <Choices name=\"disassembly_operation\" toName=\"disassembly_operation_label\" choice=\"multiple\" showInLine=\"true\">\n    <Choice value=\"Unplug\"/>\n    <Choice value=\"Disconnect\"/>\n    <Choice value=\"Press and Unplug\"/>\n    <Choice value=\"Unscrew\"/>\n    <Choice value=\"Remove\"/>\n    <Choice value=\"Press and Release\"/>\n    <Choice value=\"Release Locker\"/>\n    <Choice value=\"Unfold\"/>\n    <Choice value=\"Unclip\"/>\n    <Choice value=\"Pull Out\"/>\n    <Choice value=\"Tilt and Remove\"/>\n  </Choices>\n\n<Header value=\"Valuable Components\"/>\n  <Image name=\"image1\" value=\"$image\" zoom=\"true\"/>\n\n  <Rectangle name=\"rect\" toName=\"image1\" />\n  <Ellipse name=\"ellipse\" toName=\"image1\" />\n  <Polygon name=\"polygon\" toName=\"image1\" />\n  <Brush name=\"brush\" toName=\"image1\" />\n\n<Labels name=\"valuable_component_labels\" toName=\"image1\" fillOpacity=\"0.5\" strokeWidth=\"3\">\n  <Label value=\"CPU Fan Retention Bracket\"              background=\"#E6194B\"/>\n  <Label value=\"Heatsink\"                                background=\"#3CB44B\"/>\n  <Label value=\"Heatsink Screw\"                          background=\"#FFE119\"/>\n  <Label value=\"CPU Cooling Fan\"                         background=\"#0082C8\"/>\n  <Label value=\"CPU Cooling Fan Screw\"                   background=\"#F58231\"/>\n  <Label value=\"CPU Fan Connector\"                       background=\"#911EB4\"/>\n  <Label value=\"CPU Socket Retention Bracket\"            background=\"#46F0F0\"/>\n  <Label value=\"CPU Chip\"                                background=\"#F032E6\"/>\n  <Label value=\"RAM Module Retention Clip (closed)\"      background=\"#D2F53C\"/>\n  <Label value=\"RAM Module Retention Clip (open)\"        background=\"#FABEBE\"/>\n  <Label value=\"RAM Module\"                              background=\"#008080\"/>\n  <Label value=\"Hard Disk Drive (HDD)\"                   background=\"#AA6E28\"/>\n  <Label value=\"Solid State Drive (SSD)\"                 background=\"#FFFAC8\"/>\n  <Label value=\"Storage Drive Retention Bracket\"         background=\"#800000\"/>\n  <Label value=\"Storage Drive Retention Bracket Locker (closed)\" background=\"#808000\"/>\n  <Label value=\"Storage Drive Retention Bracket Locker (open)\"   background=\"#000075\"/>\n  <Label value=\"Optical Drive\"                           background=\"#9A6324\"/>\n  <Label value=\"Motherboard\"                             background=\"#4B6F44\"/>\n  <Label value=\"GPU\"                                     background=\"#808080\"/>\n  <Label value=\"Additional Card\"                         background=\"#000000\"/>\n  <Label value=\"Additional Card Upper Cover\"             background=\"#AAAAAA\"/>\n  <Label value=\"Chassis Latch Above Additional Card\"     background=\"#E6BEFF\"/>\n  <Label value=\"Power Supply Unit (PSU)\"                 background=\"#FFD8B1\"/>\n  <Label value=\"PSU Retention Bracket\"                   background=\"#0000A0\"/>\n  <Label value=\"Cable Locker\"                            background=\"#469990\"/>\n  <Label value=\"Chassis Screw Cover on Case\"             background=\"#3B3B6D\"/>\n  <Label value=\"PSU to Motherboard Connector\"            background=\"#877F8C\"/>\n  <Label value=\"Case to Motherboard Connector\"           background=\"#E08400\"/>\n  <Label value=\"SATA Connector\"                          background=\"#B34D4D\"/>\n  <Label value=\"Drive Power Connector\"                   background=\"#64E986\"/>\n  <Label value=\"Motherboard Screw\"                               background=\"#CDEB8B\"/>\n  <Label value=\"Frame Screw (NRS)\"                       background=\"#BDECB6\"/>\n  <Label value=\"Screw Locker (Big Screw)\"                background=\"#FFB347\"/>\n</Labels>\n  \n<Relations name=\"component_relations\" toName=\"valuable_component_labels\" choice=\"single\" strokeWidth=\"2\">\n  <Relation value=\"is_pre-request_of\"/>\n  <Relation value=\"partner_of\"/>\n</Relations>\n  \n</View>",
+   "tasks": [
+    {
+     "id": 201531339,
+     "agreement": 100,
+     "data": {
+      "image": "/storage-data/uploaded/?filepath=upload/176047/12639e6b-19_52.png"
+     },
+     "predictions": [],
+     "annotations": [
+      {
+       "id": 74192183,
+       "state": null,
+       "result": [
+        {
+         "id": "SDzsGib0J3",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            35.53158741411016,
+            42.022935114764906
+           ],
+           [
+            34.369977825571944,
+            42.569574921135825
+           ],
+           [
+            34.71162770455377,
+            43.32120465489585
+           ],
+           [
+            35.94156726888835,
+            43.18454470330312
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "SDzsGib0J3",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Case to Motherboard Connector"
+          ],
+          "points": [
+           [
+            35.53158741411016,
+            42.022935114764906
+           ],
+           [
+            34.369977825571944,
+            42.569574921135825
+           ],
+           [
+            34.71162770455377,
+            43.32120465489585
+           ],
+           [
+            35.94156726888835,
+            43.18454470330312
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "o96ZAF6Nsn",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            73.45472398109311,
+            37.30816678481567
+           ],
+           [
+            72.90808417472219,
+            36.966516905833835
+           ],
+           [
+            71.6781446103876,
+            36.82985695424111
+           ],
+           [
+            71.54148465879487,
+            37.58148668800113
+           ],
+           [
+            73.31188921138934,
+            37.7892136036566
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "o96ZAF6Nsn",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Case to Motherboard Connector"
+          ],
+          "points": [
+           [
+            73.45472398109311,
+            37.30816678481567
+           ],
+           [
+            72.90808417472219,
+            36.966516905833835
+           ],
+           [
+            71.6781446103876,
+            36.82985695424111
+           ],
+           [
+            71.54148465879487,
+            37.58148668800113
+           ],
+           [
+            73.31188921138934,
+            37.7892136036566
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "BBV31W-X9B",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            77.4861925530787,
+            54.527320685499824
+           ],
+           [
+            75.64128320657683,
+            58.5587892574854
+           ],
+           [
+            76.25625298874411,
+            59.17375903965269
+           ],
+           [
+            78.51114219002417,
+            54.80064058868529
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "BBV31W-X9B",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Case to Motherboard Connector"
+          ],
+          "points": [
+           [
+            77.4861925530787,
+            54.527320685499824
+           ],
+           [
+            75.64128320657683,
+            58.5587892574854
+           ],
+           [
+            76.25625298874411,
+            59.17375903965269
+           ],
+           [
+            78.51114219002417,
+            54.80064058868529
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "rpuzapby3s",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            60.769263974497854,
+            41.65907799364926
+           ],
+           [
+            57.87548949952177,
+            41.49371945222206
+           ],
+           [
+            55.891187002395306,
+            42.98194632506691
+           ],
+           [
+            55.891187002395306,
+            50.42308068929113
+           ],
+           [
+            55.477790648827295,
+            51.99398683284958
+           ],
+           [
+            62.5882079301971,
+            52.6554209985584
+           ],
+           [
+            62.5882079301971,
+            51.580590479281575
+           ],
+           [
+            62.5882079301971,
+            50.67111850143194
+           ],
+           [
+            62.75356647162431,
+            43.22998413720771
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "rpuzapby3s",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "CPU Socket Retention Bracket"
+          ],
+          "points": [
+           [
+            60.769263974497854,
+            41.65907799364926
+           ],
+           [
+            57.87548949952177,
+            41.49371945222206
+           ],
+           [
+            55.891187002395306,
+            42.98194632506691
+           ],
+           [
+            55.891187002395306,
+            50.42308068929113
+           ],
+           [
+            55.477790648827295,
+            51.99398683284958
+           ],
+           [
+            62.5882079301971,
+            52.6554209985584
+           ],
+           [
+            62.5882079301971,
+            51.580590479281575
+           ],
+           [
+            62.5882079301971,
+            50.67111850143194
+           ],
+           [
+            62.75356647162431,
+            43.22998413720771
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "EGtNOWkYTZ",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            45.225561080340576,
+            28.843791033040876
+           ],
+           [
+            44.48144764391815,
+            60.09655536278263
+           ],
+           [
+            84.16749758644735,
+            61.00602734063225
+           ],
+           [
+            84.8289317521562,
+            40.17085112080442
+           ],
+           [
+            84.58089394001537,
+            36.53296320940591
+           ],
+           [
+            85.98644154214664,
+            34.96205706584746
+           ],
+           [
+            85.82108300071941,
+            29.753263010890503
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "EGtNOWkYTZ",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Motherboard"
+          ],
+          "points": [
+           [
+            45.225561080340576,
+            28.843791033040876
+           ],
+           [
+            44.48144764391815,
+            60.09655536278263
+           ],
+           [
+            84.16749758644735,
+            61.00602734063225
+           ],
+           [
+            84.8289317521562,
+            40.17085112080442
+           ],
+           [
+            84.58089394001537,
+            36.53296320940591
+           ],
+           [
+            85.98644154214664,
+            34.96205706584746
+           ],
+           [
+            85.82108300071941,
+            29.753263010890503
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "hlBKdFJPhk",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            47.009713185496,
+            57.48931531258761
+           ],
+           [
+            46.96728564651992,
+            58.337866092109195
+           ],
+           [
+            47.77340888706543,
+            58.46514870903744
+           ],
+           [
+            47.94311904296975,
+            57.57417039053977
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "hlBKdFJPhk",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "RAM Module Retention Clip (closed)"
+          ],
+          "points": [
+           [
+            47.009713185496,
+            57.48931531258761
+           ],
+           [
+            46.96728564651992,
+            58.337866092109195
+           ],
+           [
+            47.77340888706543,
+            58.46514870903744
+           ],
+           [
+            47.94311904296975,
+            57.57417039053977
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "gq9MzpzoKA",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            49.003807517371726,
+            57.36203269565937
+           ],
+           [
+            48.791669822491336,
+            58.337866092109195
+           ],
+           [
+            49.852358296893314,
+            58.46514870903744
+           ],
+           [
+            49.852358296893314,
+            57.27717761770722
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "gq9MzpzoKA",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "RAM Module Retention Clip (closed)"
+          ],
+          "points": [
+           [
+            49.003807517371726,
+            57.36203269565937
+           ],
+           [
+            48.791669822491336,
+            58.337866092109195
+           ],
+           [
+            49.852358296893314,
+            58.46514870903744
+           ],
+           [
+            49.852358296893314,
+            57.27717761770722
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "slyq31wNl3",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            50.31906122563019,
+            57.27717761770722
+           ],
+           [
+            50.14935106972587,
+            58.507576248013514
+           ],
+           [
+            50.9130467712953,
+            58.507576248013514
+           ],
+           [
+            51.082756927199625,
+            57.27717761770722
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "slyq31wNl3",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "RAM Module Retention Clip (closed)"
+          ],
+          "points": [
+           [
+            50.31906122563019,
+            57.27717761770722
+           ],
+           [
+            50.14935106972587,
+            58.507576248013514
+           ],
+           [
+            50.9130467712953,
+            58.507576248013514
+           ],
+           [
+            51.082756927199625,
+            57.27717761770722
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "xge9nkRKGB",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            49.55536552406077,
+            35.6815602788828
+           ],
+           [
+            49.42808290713252,
+            36.657393675332614
+           ],
+           [
+            49.72507567996509,
+            36.91195890918909
+           ],
+           [
+            50.361488764606264,
+            36.82710383123693
+           ],
+           [
+            50.361488764606264,
+            36.53011105840438
+           ],
+           [
+            50.361488764606264,
+            35.55427766195455
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "xge9nkRKGB",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "RAM Module Retention Clip (closed)"
+          ],
+          "points": [
+           [
+            49.55536552406077,
+            35.6815602788828
+           ],
+           [
+            49.42808290713252,
+            36.657393675332614
+           ],
+           [
+            49.72507567996509,
+            36.91195890918909
+           ],
+           [
+            50.361488764606264,
+            36.82710383123693
+           ],
+           [
+            50.361488764606264,
+            36.53011105840438
+           ],
+           [
+            50.361488764606264,
+            35.55427766195455
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "IvOBwwQcQB",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            47.77340888706543,
+            35.89369797376318
+           ],
+           [
+            47.64612627013719,
+            36.614966136356536
+           ],
+           [
+            48.240111815802294,
+            36.6998212143087
+           ],
+           [
+            48.53710458863486,
+            36.10583566864359
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "IvOBwwQcQB",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "RAM Module Retention Clip (closed)"
+          ],
+          "points": [
+           [
+            47.77340888706543,
+            35.89369797376318
+           ],
+           [
+            47.64612627013719,
+            36.614966136356536
+           ],
+           [
+            48.240111815802294,
+            36.6998212143087
+           ],
+           [
+            48.53710458863486,
+            36.10583566864359
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "SBwTtcZOjv",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            46.20358994495049,
+            35.21485735014591
+           ],
+           [
+            46.373300100854806,
+            36.53011105840438
+           ],
+           [
+            47.09456826344815,
+            36.44525598045222
+           ],
+           [
+            47.221850880376394,
+            35.299712428098076
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "SBwTtcZOjv",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "RAM Module Retention Clip (open)"
+          ],
+          "points": [
+           [
+            46.20358994495049,
+            35.21485735014591
+           ],
+           [
+            46.373300100854806,
+            36.53011105840438
+           ],
+           [
+            47.09456826344815,
+            36.44525598045222
+           ],
+           [
+            47.221850880376394,
+            35.299712428098076
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "IbNCZZ77KF",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            45.69908781260937,
+            57.72516355276974
+           ],
+           [
+            45.548761865857365,
+            59.604237887169795
+           ],
+           [
+            46.5258805197454,
+            59.5290749137938
+           ],
+           [
+            46.4507175463694,
+            57.65000057939373
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "IbNCZZ77KF",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "RAM Module Retention Clip (open)"
+          ],
+          "points": [
+           [
+            45.69908781260937,
+            57.72516355276974
+           ],
+           [
+            45.548761865857365,
+            59.604237887169795
+           ],
+           [
+            46.5258805197454,
+            59.5290749137938
+           ],
+           [
+            46.4507175463694,
+            57.65000057939373
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "prASCjIvhM",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            56.31291536825085,
+            33.27581362669369
+           ],
+           [
+            55.611633732282606,
+            33.66151852647623
+           ],
+           [
+            55.646697814081016,
+            34.46799240783972
+           ],
+           [
+            56.137594959258784,
+            34.92382547121909
+           ],
+           [
+            57.01419700421911,
+            34.64331281683179
+           ],
+           [
+            57.08432516781594,
+            33.87190301726671
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "prASCjIvhM",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Screw Locker (Big Screw)"
+          ],
+          "points": [
+           [
+            56.31291536825085,
+            33.27581362669369
+           ],
+           [
+            55.611633732282606,
+            33.66151852647623
+           ],
+           [
+            55.646697814081016,
+            34.46799240783972
+           ],
+           [
+            56.137594959258784,
+            34.92382547121909
+           ],
+           [
+            57.01419700421911,
+            34.64331281683179
+           ],
+           [
+            57.08432516781594,
+            33.87190301726671
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "2ZUmcxFryx",
+         "type": "ellipse",
+         "value": {
+          "x": 84.25086015691889,
+          "y": 35.80490731729562,
+          "radiusX": 0.5466398063709192,
+          "radiusY": 0.6149697821672859,
+          "rotation": 0
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "ellipse",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        },
+        {
+         "id": "2ZUmcxFryx",
+         "type": "labels",
+         "value": {
+          "x": 84.25086015691889,
+          "y": 35.80490731729562,
+          "labels": [
+           "Motherboard Screw"
+          ],
+          "radiusX": 0.5466398063709192,
+          "radiusY": 0.6149697821672859,
+          "rotation": 0
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1600,
+         "original_height": 1600
+        }
+       ],
+       "created_username": "annotator",
+       "created_ago": "11 months, 1 week",
+       "completed_by": {
+        "id": 62203,
+        "first_name": "",
+        "last_name": "",
+        "username": "annotator",
+        "last_activity": "2026-09-17T17:51:35.105398Z",
+        "avatar": null,
+        "email": "annotator@example.org",
+        "initials": "an"
+       },
+       "updated_by": 62203,
+       "last_annotation_history": 80436361,
+       "reviews": [],
+       "was_cancelled": false,
+       "ground_truth": false,
+       "created_at": "2025-10-10T05:43:56.079693Z",
+       "updated_at": "2025-10-10T05:43:56.079705Z",
+       "draft_created_at": "2025-10-10T05:43:27.153607Z",
+       "lead_time": 37.155,
+       "import_id": null,
+       "last_action": "submitted",
+       "bulk_created": false,
+       "task": 201531339,
+       "project": 176047,
+       "parent_prediction": null,
+       "parent_annotation": null,
+       "last_created_by": 62203,
+       "comment_count": 0,
+       "unresolved_comment_count": 0
+      }
+     ],
+     "drafts": [],
+     "annotators": [
+      {
+       "user_id": 62203,
+       "annotated": true,
+       "review": null,
+       "id": 62203,
+       "first_name": "",
+       "last_name": "",
+       "username": "annotator",
+       "last_activity": "2026-09-17T17:51:35.105398Z",
+       "avatar": null,
+       "email": "annotator@example.org",
+       "initials": "an"
+      }
+     ],
+     "inner_id": 4,
+     "cancelled_annotations": 0,
+     "total_annotations": 1,
+     "total_predictions": 0,
+     "completed_at": "2025-10-10T05:43:56.079693Z",
+     "annotations_results": "[{id:SDzsGib0J3, type:polygon, value:{closed:true, points:[[35.53,42.02] [34.37,42.57] [34.71,43.32] [35.94,43.18]]}, origin:manual, to_name:image1, from_name:polygon, image_rotation:0, original_width:1600, original_height:1600},{id:SDzsGib0J3, type:labels, value:{closed:true, labels:[Case to Motherboard Connector], points:[[35.53,42.02] [34.37,42.57] [34.71,43.32] [35.94,43.18]]}, origin:manual, to_name:image1, from_name:valuable_component_labels, i",
+     "predictions_results": "",
+     "predictions_score": null,
+     "file_upload": "12639e6b-19_52.png",
+     "storage_filename": null,
+     "annotations_ids": "74192183",
+     "predictions_model_versions": "",
+     "avg_lead_time": 37.155,
+     "draft_exists": false,
+     "updated_by": [
+      {
+       "user_id": 62203,
+       "id": 62203,
+       "first_name": "",
+       "last_name": "",
+       "username": "annotator",
+       "last_activity": "2026-09-17T17:51:35.105398Z",
+       "avatar": null,
+       "email": "annotator@example.org",
+       "initials": "an"
+      }
+     ],
+     "state": null,
+     "reviewers": [],
+     "comments": "",
+     "comment_authors": [],
+     "agreement_selected": null,
+     "reviewed": false,
+     "reviews_accepted": 0,
+     "reviews_rejected": 0,
+     "reviewed_at": null,
+     "ground_truth": false,
+     "annotators_count": 1,
+     "reviewers_count": 0,
+     "comment_authors_count": 0,
+     "review_time": 0,
+     "annotation_time": 0,
+     "submission": null,
+     "meta": {},
+     "created_at": "2025-07-28T22:06:35.700720Z",
+     "updated_at": "2025-10-10T05:43:56.235880Z",
+     "is_labeled": true,
+     "allow_skip": true,
+     "overlap": 1,
+     "precomputed_agreement": 1,
+     "comment_count": 0,
+     "unresolved_comment_count": 0,
+     "last_comment_updated_at": null,
+     "project": 176047
+    }
+   ]
+  },
+  {
+   "id": 195079,
+   "title": "Realsense_camera",
+   "workspace": "Desktop_24",
+   "task_number": 1,
+   "total_annotations": 1,
+   "label_config": "<View>\n  <Style>\n    .ant-radio-wrapper sup,\n    .ant-checkbox-wrapper sup {\n      display: none !important;\n    }\n  </Style>\n\n  <View>\n    <Header value=\"Sequence Details\"/>\n\n    <Text name=\"seq_number\" value=\"Sequence Number:\"/>\n    <TextArea name=\"seq_number_value\" toName=\"seq_number\" editable=\"true\"/>\n\n    <Text name=\"seq_name\" value=\"Sequence Name:\"/>\n    <Choices\n      name=\"seq_name_value\"\n      toName=\"seq_name\"\n      choice=\"single\"\n      showInLine=\"true\"\n      showHotkeys=\"false\"\n    >\n      <Choice value=\"Initial Conditions\"/>\n      <Choice value=\"Remove CPU Fan Retention Bracket\"/>\n      <Choice value=\"Unscrew Heatsink Screws\"/>\n      <Choice value=\"Remove Heatsink\"/>\n      <Choice value=\"Unscrew CPU Cooling Fan Screws\"/>\n      <Choice value=\"Disconnect CPU Cooling Fan Connector\"/>\n      <Choice value=\"Remove CPU Cooling Fan\"/>\n      <Choice value=\"Disconnect SATA Connector\"/>\n      <Choice value=\"Disconnect Drive Power Connector\"/>\n      <Choice value=\"Pull Out Optical Drive\"/>\n      <Choice value=\"Open Storage Drive Retention Bracket Locker\"/>\n      <Choice value=\"Remove Storage Drive Retention Bracket\"/>\n      <Choice value=\"Remove Solid State Drive (SSD)\"/>\n      <Choice value=\"Remove Hard Disk Drive (HDD)\"/>\n      <Choice value=\"Disconnect Power Supply Unit (PSU) to Motherboard Connector\"/>\n      <Choice value=\"Disconnect Case to Motherboard Connector\"/>\n      <Choice value=\"Release Cable\"/>\n      <Choice value=\"Remove PSU Retention Bracket\"/>\n      <Choice value=\"Remove PSU\"/>\n      <Choice value=\"Open RAM Module Retention Clip\"/>\n      <Choice value=\"Remove RAM Module\"/>\n      <Choice value=\"Release CPU Socket Retention Bracket\"/>\n      <Choice value=\"Remove CPU Chip\"/>\n      <Choice value=\"Release Chassis Latch Above Additional Card\"/>\n      <Choice value=\"Remove Additional Card Upper Cover\"/>\n      <Choice value=\"Remove Additional Card\"/>\n      <Choice value=\"Release GPU Retention Bracket\"/>\n      <Choice value=\"Remove GPU\"/>\n      <Choice value=\"Remove Screw Locker (Big Screw)\"/>\n      <Choice value=\"Remove Chassis Screw Cover on Case\"/>\n      <Choice value=\"Unscrew Motherboard T15 Screw\"/>\n      <Choice value=\"Unscrew Motherboard PH2 Screw\"/>\n      <Choice value=\"Remove Motherboard\"/>\n    </Choices>\n\n    <Text name=\"task_desc\" value=\"Detailed Task Description:\"/>\n    <TextArea name=\"task_desc_value\" toName=\"task_desc\" editable=\"true\"/>\n\n    <Text name=\"complexity\" value=\"Complexity:\"/>\n    <Choices name=\"complexity_value\" toName=\"complexity\" choice=\"single\" showInLine=\"true\">\n      <Choice value=\"1\"/>\n      <Choice value=\"2\"/>\n      <Choice value=\"3\"/>\n      <Choice value=\"4\"/>\n      <Choice value=\"5\"/>\n    </Choices>\n\n    <Text name=\"tool_utility\" value=\"Tool Utility:\"/>\n    <Choices name=\"tool_utility_value\" toName=\"tool_utility\" choice=\"single\" showInLine=\"true\">\n      <Choice value=\"T15 Screwdriver\"/>\n      <Choice value=\"PH2 Screwdriver\"/>\n      <Choice value=\"None\"/>\n    </Choices>\n\n    <Text name=\"notes\" value=\"Notes:\"/>\n    <TextArea name=\"notes_value\" toName=\"notes\" editable=\"true\"/>\n  </View>\n  \n  \n<Header value=\"Target Identification\"/>\n  <Image name=\"target_image\" value=\"$image\" zoom=\"true\"/>\n\n  \n  <Rectangle name=\"target_rect\" toName=\"target_image\"/>\n  <Ellipse name=\"target_ellipse\" toName=\"target_image\"/>\n  <Polygon name=\"target_polygon\" toName=\"target_image\"/>\n  <Brush name=\"target_brush\" toName=\"target_image\"/>\n  <Labels name=\"target_labels\" toName=\"target_image\" fillOpacity=\"0.5\" strokeWidth=\"3\">\n    <Label value=\"Target\" background=\"#FFA500\"/>\n  </Labels>\n\n  <Text name=\"target_desc_label\" value=\"Target Description\"/>\n  <TextArea name=\"target_desc_value\" toName=\"target_desc_label\" editable=\"true\"/>\n  \n  <Text name=\"target_desc_time\" value=\"Target Operation Time (s)\"/>\n  <TextArea name=\"target_ope_time\" toName=\"target_desc_time\" editable=\"true\"/>\n\n  <Text name=\"disassembly_direction_label\" value=\"Disassembly Direction\"/>\n  <Choices name=\"disassembly_direction\" toName=\"disassembly_direction_label\" choice=\"single\" showInLine=\"true\">\n    <Choice value=\"Horizontal\"/>\n    <Choice value=\"Vertical\"/>\n  </Choices>\n\n  <Text name=\"disassembly_operation_label\" value=\"Disassembly Operation\"/>\n  <Choices name=\"disassembly_operation\" toName=\"disassembly_operation_label\" choice=\"multiple\" showInLine=\"true\">\n    <Choice value=\"Unplug\"/>\n    <Choice value=\"Disconnect\"/>\n    <Choice value=\"Press and Unplug\"/>\n    <Choice value=\"Unscrew\"/>\n    <Choice value=\"Remove\"/>\n    <Choice value=\"Press and Release\"/>\n    <Choice value=\"Release Locker\"/>\n    <Choice value=\"Unfold\"/>\n    <Choice value=\"Unclip\"/>\n    <Choice value=\"Pull Out\"/>\n    <Choice value=\"Tilt and Remove\"/>\n  </Choices>\n\n<Header value=\"Valuable Components\"/>\n  <Image name=\"image1\" value=\"$image\" zoom=\"true\"/>\n\n  <Rectangle name=\"rect\" toName=\"image1\" />\n  <Ellipse name=\"ellipse\" toName=\"image1\" />\n  <Polygon name=\"polygon\" toName=\"image1\" />\n  <Brush name=\"brush\" toName=\"image1\" />\n\n<Labels name=\"valuable_component_labels\" toName=\"image1\" fillOpacity=\"0.5\" strokeWidth=\"3\">\n  <Label value=\"CPU Fan Retention Bracket\"              background=\"#E6194B\"/>\n  <Label value=\"Heatsink\"                                background=\"#3CB44B\"/>\n  <Label value=\"Heatsink Screw\"                          background=\"#FFE119\"/>\n  <Label value=\"CPU Cooling Fan\"                         background=\"#0082C8\"/>\n  <Label value=\"CPU Cooling Fan Screw\"                   background=\"#F58231\"/>\n  <Label value=\"CPU Fan Connector\"                       background=\"#911EB4\"/>\n  <Label value=\"CPU Socket Retention Bracket\"            background=\"#46F0F0\"/>\n  <Label value=\"CPU Chip\"                                background=\"#F032E6\"/>\n  <Label value=\"RAM Module Retention Clip (closed)\"      background=\"#D2F53C\"/>\n  <Label value=\"RAM Module Retention Clip (open)\"        background=\"#FABEBE\"/>\n  <Label value=\"RAM Module\"                              background=\"#008080\"/>\n  <Label value=\"Hard Disk Drive (HDD)\"                   background=\"#AA6E28\"/>\n  <Label value=\"Solid State Drive (SSD)\"                 background=\"#FFFAC8\"/>\n  <Label value=\"Storage Drive Retention Bracket\"         background=\"#800000\"/>\n  <Label value=\"Storage Drive Retention Bracket Locker (closed)\" background=\"#808000\"/>\n  <Label value=\"Storage Drive Retention Bracket Locker (open)\"   background=\"#000075\"/>\n  <Label value=\"Optical Drive\"                           background=\"#9A6324\"/>\n  <Label value=\"Motherboard\"                             background=\"#4B6F44\"/>\n  <Label value=\"GPU\"                                     background=\"#808080\"/>\n  <Label value=\"Additional Card\"                         background=\"#000000\"/>\n  <Label value=\"Additional Card Upper Cover\"             background=\"#AAAAAA\"/>\n  <Label value=\"Chassis Latch Above Additional Card\"     background=\"#E6BEFF\"/>\n  <Label value=\"Power Supply Unit (PSU)\"                 background=\"#FFD8B1\"/>\n  <Label value=\"PSU Retention Bracket\"                   background=\"#0000A0\"/>\n  <Label value=\"Cable Locker\"                            background=\"#469990\"/>\n  <Label value=\"Chassis Screw Cover on Case\"             background=\"#3B3B6D\"/>\n  <Label value=\"PSU to Motherboard Connector\"            background=\"#877F8C\"/>\n  <Label value=\"Case to Motherboard Connector\"           background=\"#E08400\"/>\n  <Label value=\"SATA Connector\"                          background=\"#B34D4D\"/>\n  <Label value=\"Drive Power Connector\"                   background=\"#64E986\"/>\n  <Label value=\"Motherboard Screw\"                               background=\"#CDEB8B\"/>\n  <Label value=\"Frame Screw (NRS)\"                       background=\"#BDECB6\"/>\n  <Label value=\"Screw Locker (Big Screw)\"                background=\"#FFB347\"/>\n</Labels>\n  \n<Relations name=\"component_relations\" toName=\"valuable_component_labels\" choice=\"single\" strokeWidth=\"2\">\n  <Relation value=\"is_pre-request_of\"/>\n  <Relation value=\"partner_of\"/>\n</Relations>\n  \n</View>",
+   "tasks": [
+    {
+     "id": 222505674,
+     "agreement": 100,
+     "data": {
+      "image": "/storage-data/uploaded/?filepath=upload/195079/e5a70a47-Rs_24_35.png"
+     },
+     "predictions": [],
+     "annotations": [
+      {
+       "id": 76112933,
+       "state": null,
+       "result": [
+        {
+         "id": "8SROTV5uFv",
+         "type": "choices",
+         "value": {
+          "choices": [
+           "Unscrew Motherboard T15 Screw"
+          ]
+         },
+         "origin": "manual",
+         "to_name": "seq_name",
+         "from_name": "seq_name_value"
+        },
+        {
+         "id": "5qf6j7oErN",
+         "type": "choices",
+         "value": {
+          "choices": [
+           "4"
+          ]
+         },
+         "origin": "manual",
+         "to_name": "complexity",
+         "from_name": "complexity_value"
+        },
+        {
+         "id": "5X0nplqQ6O",
+         "type": "choices",
+         "value": {
+          "choices": [
+           "T15 Screwdriver"
+          ]
+         },
+         "origin": "manual",
+         "to_name": "tool_utility",
+         "from_name": "tool_utility_value"
+        },
+        {
+         "id": "TlF_qBL5Za",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            51.41076841118337,
+            48.84845626060278
+           ],
+           [
+            51.05494893123773,
+            49.03210502444569
+           ],
+           [
+            51.10086112219846,
+            49.58305131597441
+           ],
+           [
+            51.45668060214409,
+            49.807510916226846
+           ],
+           [
+            51.68624155694772,
+            49.25656462469813
+           ],
+           [
+            51.559983031805736,
+            48.93007793342185
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "target_image",
+         "from_name": "target_polygon",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "TlF_qBL5Za",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Target"
+          ],
+          "points": [
+           [
+            51.41076841118337,
+            48.84845626060278
+           ],
+           [
+            51.05494893123773,
+            49.03210502444569
+           ],
+           [
+            51.10086112219846,
+            49.58305131597441
+           ],
+           [
+            51.45668060214409,
+            49.807510916226846
+           ],
+           [
+            51.68624155694772,
+            49.25656462469813
+           ],
+           [
+            51.559983031805736,
+            48.93007793342185
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "target_image",
+         "from_name": "target_labels",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "0_x4Eb9jWZ",
+         "type": "choices",
+         "value": {
+          "choices": [
+           "Vertical"
+          ]
+         },
+         "origin": "manual",
+         "to_name": "disassembly_direction_label",
+         "from_name": "disassembly_direction"
+        },
+        {
+         "id": "oj51qxj1g2",
+         "type": "choices",
+         "value": {
+          "choices": [
+           "Unscrew"
+          ]
+         },
+         "origin": "manual",
+         "to_name": "disassembly_operation_label",
+         "from_name": "disassembly_operation"
+        },
+        {
+         "id": "xR4xQciaHn",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            45.95070422535212,
+            44.0460947503201
+           ],
+           [
+            65.46895006402049,
+            43.918053777208705
+           ],
+           [
+            68.06177976952625,
+            67.09346991037131
+           ],
+           [
+            59.92317541613317,
+            67.8617157490397
+           ],
+           [
+            60.211267605633815,
+            65.55697823303457
+           ],
+           [
+            44.22215108834828,
+            64.7887323943662
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "xR4xQciaHn",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Motherboard"
+          ],
+          "points": [
+           [
+            45.95070422535212,
+            44.0460947503201
+           ],
+           [
+            65.46895006402049,
+            43.918053777208705
+           ],
+           [
+            68.06177976952625,
+            67.09346991037131
+           ],
+           [
+            59.92317541613317,
+            67.8617157490397
+           ],
+           [
+            60.211267605633815,
+            65.55697823303457
+           ],
+           [
+            44.22215108834828,
+            64.7887323943662
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "nMOvYgB10Z",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            47.36346400078795,
+            73.56446385559724
+           ],
+           [
+            46.754038215305826,
+            75.53432498038795
+           ],
+           [
+            48.19449916280903,
+            76.42076248654377
+           ],
+           [
+            48.63771791588694,
+            73.26898468687865
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "nMOvYgB10Z",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Case to Motherboard Connector"
+          ],
+          "points": [
+           [
+            47.36346400078795,
+            73.56446385559724
+           ],
+           [
+            46.754038215305826,
+            75.53432498038795
+           ],
+           [
+            48.19449916280903,
+            76.42076248654377
+           ],
+           [
+            48.63771791588694,
+            73.26898468687865
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "Yvi6ctPAJs",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            58.49933517187039,
+            72.97350551816002
+           ],
+           [
+            58.443932827735644,
+            75.33733886790887
+           ],
+           [
+            59.773589086969366,
+            75.73131109286702
+           ],
+           [
+            60.272210184182015,
+            74.0569291367949
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "Yvi6ctPAJs",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Case to Motherboard Connector"
+          ],
+          "points": [
+           [
+            58.49933517187039,
+            72.97350551816002
+           ],
+           [
+            58.443932827735644,
+            75.33733886790887
+           ],
+           [
+            59.773589086969366,
+            75.73131109286702
+           ],
+           [
+            60.272210184182015,
+            74.0569291367949
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "WqCN5ulllJ",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            53.35245740175317,
+            73.40687481532552
+           ],
+           [
+            54.34969959617848,
+            75.37673594011622
+           ],
+           [
+            54.571308972717425,
+            72.91440953412784
+           ],
+           [
+            53.9618831872353,
+            72.12646508421156
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "WqCN5ulllJ",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Case to Motherboard Connector"
+          ],
+          "points": [
+           [
+            53.35245740175317,
+            73.40687481532552
+           ],
+           [
+            54.34969959617848,
+            75.37673594011622
+           ],
+           [
+            54.571308972717425,
+            72.91440953412784
+           ],
+           [
+            53.9618831872353,
+            72.12646508421156
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "fI2sq8s02f",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            65.32405162551426,
+            66.21385142015785
+           ],
+           [
+            64.94049693535068,
+            66.36537919898791
+           ],
+           [
+            64.85526255975877,
+            66.97149031430813
+           ],
+           [
+            65.1109656865345,
+            67.42607365079829
+           ],
+           [
+            65.53713756449402,
+            67.27454587196823
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "fI2sq8s02f",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Motherboard Screw"
+          ],
+          "points": [
+           [
+            65.32405162551426,
+            66.21385142015785
+           ],
+           [
+            64.94049693535068,
+            66.36537919898791
+           ],
+           [
+            64.85526255975877,
+            66.97149031430813
+           ],
+           [
+            65.1109656865345,
+            67.42607365079829
+           ],
+           [
+            65.53713756449402,
+            67.27454587196823
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "PSvQObuxN3",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            51.39974916970647,
+            48.84923686050221
+           ],
+           [
+            50.99801749880011,
+            49.298156061007084
+           ],
+           [
+            51.135754071682285,
+            49.624642752283364
+           ],
+           [
+            51.468617456147555,
+            49.72666984330721
+           ],
+           [
+            51.698178410951186,
+            49.23693980639279
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "PSvQObuxN3",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Motherboard Screw"
+          ],
+          "points": [
+           [
+            51.39974916970647,
+            48.84923686050221
+           ],
+           [
+            50.99801749880011,
+            49.298156061007084
+           ],
+           [
+            51.135754071682285,
+            49.624642752283364
+           ],
+           [
+            51.468617456147555,
+            49.72666984330721
+           ],
+           [
+            51.698178410951186,
+            49.23693980639279
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "-J2SPo_3Lz",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            46.1442534967933,
+            44.3154407090522
+           ],
+           [
+            45.70649153475118,
+            44.4756673095382
+           ],
+           [
+            45.783743645699786,
+            45.070794682771925
+           ],
+           [
+            46.2215056077419,
+            45.25391079761307
+           ],
+           [
+            46.337383774164806,
+            44.658783424379344
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "-J2SPo_3Lz",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Motherboard Screw"
+          ],
+          "points": [
+           [
+            46.1442534967933,
+            44.3154407090522
+           ],
+           [
+            45.70649153475118,
+            44.4756673095382
+           ],
+           [
+            45.783743645699786,
+            45.070794682771925
+           ],
+           [
+            46.2215056077419,
+            45.25391079761307
+           ],
+           [
+            46.337383774164806,
+            44.658783424379344
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "FB3tjbsn5I",
+         "type": "polygon",
+         "value": {
+          "closed": true,
+          "points": [
+           [
+            63.797874469974424,
+            43.00824638882374
+           ],
+           [
+            63.39539354598248,
+            43.45118835808471
+           ],
+           [
+            63.797874469974424,
+            44.2689273782588
+           ],
+           [
+            64.14285811911037,
+            44.09856508238919
+           ],
+           [
+            64.06619508596904,
+            43.383043439736866
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "polygon",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "FB3tjbsn5I",
+         "type": "labels",
+         "value": {
+          "closed": true,
+          "labels": [
+           "Motherboard Screw"
+          ],
+          "points": [
+           [
+            63.797874469974424,
+            43.00824638882374
+           ],
+           [
+            63.39539354598248,
+            43.45118835808471
+           ],
+           [
+            63.797874469974424,
+            44.2689273782588
+           ],
+           [
+            64.14285811911037,
+            44.09856508238919
+           ],
+           [
+            64.06619508596904,
+            43.383043439736866
+           ]
+          ]
+         },
+         "origin": "manual",
+         "to_name": "image1",
+         "from_name": "valuable_component_labels",
+         "image_rotation": 0,
+         "original_width": 1280,
+         "original_height": 720
+        },
+        {
+         "id": "8bWqLqW0iq",
+         "type": "textarea",
+         "value": {
+          "text": [
+           "35"
+          ]
+         },
+         "origin": "manual",
+         "to_name": "seq_number",
+         "from_name": "seq_number_value"
+        },
+        {
+         "id": "VDUg6U4XaE",
+         "type": "textarea",
+         "value": {
+          "text": [
+           "Unscrew Motherboard screw"
+          ]
+         },
+         "origin": "manual",
+         "to_name": "task_desc",
+         "from_name": "task_desc_value"
+        },
+        {
+         "id": "UuMyjaSzxY",
+         "type": "textarea",
+         "value": {
+          "text": [
+           "Motherboard Screw"
+          ]
+         },
+         "origin": "manual",
+         "to_name": "target_desc_label",
+         "from_name": "target_desc_value"
+        },
+        {
+         "id": "LGsjNOJwj9",
+         "type": "textarea",
+         "value": {
+          "text": [
+           "4"
+          ]
+         },
+         "origin": "manual",
+         "to_name": "target_desc_time",
+         "from_name": "target_ope_time"
+        },
+        {
+         "type": "relation",
+         "to_id": "-J2SPo_3Lz",
+         "labels": [
+          "partner_of"
+         ],
+         "from_id": "PSvQObuxN3",
+         "direction": "right"
+        },
+        {
+         "type": "relation",
+         "to_id": "FB3tjbsn5I",
+         "labels": [
+          "partner_of"
+         ],
+         "from_id": "-J2SPo_3Lz",
+         "direction": "right"
+        },
+        {
+         "type": "relation",
+         "to_id": "fI2sq8s02f",
+         "labels": [
+          "partner_of"
+         ],
+         "from_id": "FB3tjbsn5I",
+         "direction": "right"
+        }
+       ],
+       "created_username": "annotator",
+       "created_ago": "10 months, 3 weeks",
+       "completed_by": {
+        "id": 103665,
+        "first_name": "",
+        "last_name": "",
+        "username": "annotator",
+        "last_activity": "2025-11-21T20:11:36.232307Z",
+        "avatar": null,
+        "email": "annotator@example.org",
+        "initials": "an"
+       },
+       "updated_by": 103665,
+       "last_annotation_history": 82498692,
+       "reviews": [],
+       "was_cancelled": false,
+       "ground_truth": false,
+       "created_at": "2025-10-22T01:44:17.379946Z",
+       "updated_at": "2025-10-22T01:44:17.379957Z",
+       "draft_created_at": "2025-10-22T01:42:32.653713Z",
+       "lead_time": 114.93,
+       "import_id": null,
+       "last_action": "submitted",
+       "bulk_created": false,
+       "task": 222505674,
+       "project": 195079,
+       "parent_prediction": null,
+       "parent_annotation": null,
+       "last_created_by": 103665,
+       "comment_count": 0,
+       "unresolved_comment_count": 0
+      }
+     ],
+     "drafts": [],
+     "annotators": [
+      {
+       "user_id": 103665,
+       "annotated": true,
+       "review": null,
+       "id": 103665,
+       "first_name": "",
+       "last_name": "",
+       "username": "annotator",
+       "last_activity": "2025-11-21T20:11:36.232307Z",
+       "avatar": null,
+       "email": "annotator@example.org",
+       "initials": "an"
+      }
+     ],
+     "inner_id": 8,
+     "cancelled_annotations": 0,
+     "total_annotations": 1,
+     "total_predictions": 0,
+     "completed_at": "2025-10-22T01:44:17.379946Z",
+     "annotations_results": "[{id:8SROTV5uFv, type:choices, value:{choices:[Unscrew Motherboard T15 Screw]}, origin:manual, to_name:seq_name, from_name:seq_name_value},{id:5qf6j7oErN, type:choices, value:{choices:[4]}, origin:manual, to_name:complexity, from_name:complexity_value},{id:5X0nplqQ6O, type:choices, value:{choices:[T15 Screwdriver]}, origin:manual, to_name:tool_utility, from_name:tool_utility_value},{id:TlF_qBL5Za, type:polygon, value:{closed",
+     "predictions_results": "",
+     "predictions_score": null,
+     "file_upload": "e5a70a47-Rs_24_35.png",
+     "storage_filename": null,
+     "annotations_ids": "76112933",
+     "predictions_model_versions": "",
+     "avg_lead_time": 114.93,
+     "draft_exists": true,
+     "updated_by": [
+      {
+       "user_id": 103665,
+       "id": 103665,
+       "first_name": "",
+       "last_name": "",
+       "username": "annotator",
+       "last_activity": "2025-11-21T20:11:36.232307Z",
+       "avatar": null,
+       "email": "annotator@example.org",
+       "initials": "an"
+      }
+     ],
+     "state": null,
+     "reviewers": [],
+     "comments": "",
+     "comment_authors": [],
+     "agreement_selected": null,
+     "reviewed": false,
+     "reviews_accepted": 0,
+     "reviews_rejected": 0,
+     "reviewed_at": null,
+     "ground_truth": false,
+     "annotators_count": 1,
+     "reviewers_count": 0,
+     "comment_authors_count": 0,
+     "review_time": 0,
+     "annotation_time": 0,
+     "submission": null,
+     "meta": {},
+     "created_at": "2025-10-09T17:24:22.238340Z",
+     "updated_at": "2025-10-22T01:44:17.479226Z",
+     "is_labeled": true,
+     "allow_skip": true,
+     "overlap": 1,
+     "precomputed_agreement": 1,
+     "comment_count": 0,
+     "unresolved_comment_count": 0,
+     "last_comment_updated_at": null,
+     "project": 195079
+    }
+   ]
+  }
+ ]
+}
