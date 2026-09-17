@@ -62,9 +62,10 @@ from tda.core.ls_export import (
     ls_rect_to_mask,
     ls_result_to_mask,
     parse_task_image,
+    result_pixel_bbox,
     upload_is_native,
 )
-from tda.core.masks import bbox, encode_rle
+from tda.core.masks import encode_rle
 from tda.core.model import (
     FrameKey,
     InstanceRec,
@@ -81,7 +82,7 @@ __all__ = [
     "ASPECT_TOL", "GEOM_TYPES", "HW", "LS_LABEL_MAP_PATH", "NATIVE_HW",
     "TARGET_HINT", "TEXT_TYPES", "LabelMapping", "load_label_map",
     "ls_ellipse_to_mask", "ls_polygon_to_mask", "ls_rect_to_mask",
-    "ls_result_to_mask", "parse_task_image",
+    "ls_result_to_mask", "parse_task_image", "result_pixel_bbox",
     # this module
     "NOTES_PREFIX", "SOURCE", "import_ls_export", "ls_reference_masks", "main",
 ]
@@ -187,20 +188,32 @@ def _draft_id(result_id: Optional[str]) -> Optional[int]:
     return int(zlib.crc32(str(result_id).encode("utf-8")) & 0x7FFFFFFF)
 
 
-def _purge(db: Db) -> tuple[int, int]:
-    """Drop what a previous run of this importer wrote, making it re-runnable.
+def _purge(db: Db, desktops: Optional[Iterable[int]]) -> tuple[int, int]:
+    """Drop what a previous run wrote, making the importer re-runnable.
 
-    ``shape_part`` rows go with their keyframe (``ON DELETE CASCADE``).
-    Instances, step notes and relations are written through upserts, so only
-    the append-only keyframe table needs clearing.
+    ``desktops`` limits the delete to the desktops the current export covers,
+    so importing one desktop's export never touches another's drafts; ``None``
+    means "every desktop", the explicit full reset. The **desktop is the unit
+    of replacement**: a re-import covering only one view of a desktop still
+    clears that desktop's other views, because ``relation`` rows are
+    desktop-scoped and cannot be narrowed by view.
+
+    Both tables need a real delete, not just an upsert: ``shape_keyframe`` is
+    append-only, and a ``relation`` whose provisional key shifted between runs
+    upserts to a *different* row and would otherwise linger. Returned counts
+    are what was actually deleted. ``shape_part`` rows go with their keyframe
+    (``ON DELETE CASCADE``); instances and step notes are upserted in place.
     """
+    where, args = "source=?", [SOURCE]
+    if desktops is not None:
+        ids = sorted({int(d) for d in desktops})
+        if not ids:
+            return (0, 0)
+        where += f" AND desktop IN ({','.join('?' * len(ids))})"
+        args += ids
     with db.conn:
-        kfs = db.conn.execute(
-            "DELETE FROM shape_keyframe WHERE source=?", (SOURCE,)
-        ).rowcount
-        rels = db.conn.execute(
-            "SELECT COUNT(*) AS n FROM relation WHERE source=?", (SOURCE,)
-        ).fetchone()["n"]
+        kfs = db.conn.execute(f"DELETE FROM shape_keyframe WHERE {where}", args).rowcount
+        rels = db.conn.execute(f"DELETE FROM relation WHERE {where}", args).rowcount
     return int(kfs or 0), int(rels or 0)
 
 
@@ -262,13 +275,16 @@ def import_ls_export(
     index: dict[int, DesktopIndex],
     label_map_path: str | Path = LS_LABEL_MAP_PATH,
     progress: bool = False,
+    purge_all: bool = False,
 ) -> dict:
     """Import a Label Studio export as draft shapes; returns a count summary.
 
     Shapes land on provisional instance keys ``ls:<label>#<n>``, numbered per
     frame and per label from left to right, and are marked
     ``amodal_complete=False`` because the annotators traced visible pixels
-    only. Re-running the importer replaces what an earlier run wrote.
+    only. Re-running the importer replaces what an earlier run wrote **for the
+    desktops this export covers**; ``purge_all=True`` clears every desktop's
+    Label Studio rows first instead, for a deliberate full reset.
 
     In the summary, ``keyframes`` / ``instances`` / ``relations`` count the
     export items consumed, while ``instance_rows`` / ``relation_edges`` count
@@ -279,7 +295,10 @@ def import_ls_export(
     """
     mapping = load_label_map(label_map_path, tax)
     export = load_export(path)
-    purged_kf, purged_rel = _purge(db)
+    # the traversal is cheap (no rasterising), so the purge scope is known
+    # before a single row is written
+    covered = {frame.desktop for _p, _t, frame in iter_tasks(export)}
+    purged_kf, purged_rel = _purge(db, None if purge_all else covered)
 
     s: dict[str, Any] = {
         "export": str(path),
@@ -402,19 +421,25 @@ def _import_shape(
     if entry is None:
         s["skipped_labels"][label] = s["skipped_labels"].get(label, 0) + 1
         return None
-    mask = ls_result_to_mask(result, NATIVE_HW[frame.view])
-    if mask is None or not mask.any():
-        s["degenerate_geometry"] += 1
-        return None
+    hw = NATIVE_HW[frame.view]
 
     if entry.special == TARGET_HINT:
+        # only the bbox is stored, so the mask itself is never built -- worth
+        # skipping a 12 MP allocation per hint on the OAK views
+        box = result_pixel_bbox(result, hw)
+        if box is None:
+            s["degenerate_geometry"] += 1
+            return None
         state.hints.setdefault(frame.desktop, {}).setdefault(frame.step, []).append(
-            {"view": frame.view, "label": label,
-             "bbox": [int(v) for v in bbox(mask)]}
+            {"view": frame.view, "label": label, "bbox": list(box)}
         )
         _bump(s, frame, "target_hints")
         return None
 
+    mask = ls_result_to_mask(result, hw)
+    if mask is None or not mask.any():
+        s["degenerate_geometry"] += 1
+        return None
     counter[label] = counter.get(label, 0) + 1
     key = f"ls:{label}#{counter[label]}"
     attrs = dict(entry.attrs)

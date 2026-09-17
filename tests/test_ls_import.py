@@ -20,8 +20,9 @@ from tda.core.ls_import import (
     ls_reference_masks,
     parse_task_image,
 )
+from tda.core.ls_export import ls_result_to_mask, result_pixel_bbox
 from tda.core.masks import area, bbox, decode_rle
-from tda.core.model import FrameKey
+from tda.core.model import FrameKey, InstanceRec, ShapeKeyframe, ShapePart
 from tda.core.taxonomy import load_taxonomy
 
 FIXTURE = Path(__file__).parent / "fixtures" / "ls_small.json"
@@ -196,6 +197,49 @@ def test_rect_rotation_is_applied_about_the_corner():
     assert (bu[2] - bu[0], bu[3] - bu[1]) == pytest.approx((401, 101), abs=3)
     assert (bt[2] - bt[0], bt[3] - bt[1]) == pytest.approx((101, 401), abs=3)
     assert area(ls_rect_to_mask(turned, (1000, 1000))) == pytest.approx(400 * 100, rel=0.03)
+
+
+def test_pixel_bbox_matches_rasterising_without_building_the_mask():
+    """The target-hint shortcut must agree with the mask it avoids building."""
+    inside = [
+        {"type": "polygon", "value": {"points": [[20, 30], [30, 30], [33, 41], [20, 40]]}},
+        {"type": "polygon", "value": {"points": [[0, 0], [100, 0], [100, 100], [0, 100]]}},
+        {"type": "ellipse", "value": {"x": 50, "y": 50, "radiusX": 10, "radiusY": 5,
+                                      "rotation": 0}},
+        {"type": "rectangle", "value": {"x": 10, "y": 20, "width": 30, "height": 40,
+                                        "rotation": 0}},
+        {"type": "rectangle", "value": {"x": 60, "y": 10, "width": 30, "height": 20,
+                                        "rotation": 30}},
+    ]
+    for view in ("scan", "rs", "oak1"):
+        hw = NATIVE_HW[view]
+        for shape in inside:
+            mask = ls_result_to_mask(shape, hw)
+            assert result_pixel_bbox(shape, hw) == bbox(mask), (view, shape["type"])
+
+
+def test_pixel_bbox_is_a_superset_when_the_shape_leaves_the_frame():
+    """Documented difference: the raster loses the out-of-frame corner."""
+    outside = [
+        {"type": "ellipse", "value": {"x": 2, "y": 2, "radiusX": 6, "radiusY": 6,
+                                      "rotation": 0}},
+        {"type": "rectangle", "value": {"x": 20, "y": 20, "width": 40, "height": 10,
+                                        "rotation": 271.729}},  # a real export value
+    ]
+    hw = NATIVE_HW["scan"]
+    for shape in outside:
+        got = result_pixel_bbox(shape, hw)
+        raster = bbox(ls_result_to_mask(shape, hw))
+        assert got[0] <= raster[0] and got[1] <= raster[1], shape["type"]
+        assert got[2] >= raster[2] and got[3] >= raster[3], shape["type"]
+        assert 0 <= got[0] < got[2] <= hw[1] and 0 <= got[1] < got[3] <= hw[0]
+
+
+def test_pixel_bbox_rejects_geometry_with_no_area():
+    assert result_pixel_bbox({"type": "polygon", "value": {"points": [[1, 1], [2, 2]]}},
+                             (100, 100)) is None
+    assert result_pixel_bbox({"type": "choices", "value": {"choices": ["x"]}},
+                             (100, 100)) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -542,6 +586,99 @@ def test_one_provisional_key_spans_the_steps_it_appears_on(tmp_path):
     kfs = db.keyframes(19, "scan", "ls:Motherboard#1")
     assert sorted(kf.anchor_step for kf in kfs) == [7, 8]
     assert len({kf.draft_id for kf in kfs}) == 2, "each shape keeps its own LS result id"
+    db.close()
+
+
+def _seed_other_desktop(db: Db) -> None:
+    """A fully bootstrapped desktop 99 that no test export mentions."""
+    db.upsert_instance(InstanceRec(key="ls:Motherboard#1", desktop=99, cls="motherboard"))
+    db.add_keyframe(ShapeKeyframe(
+        id=None, instance="ls:Motherboard#1", desktop=99, view="scan", pose_segment=0,
+        anchor_step=1, source="labelstudio",
+        parts=[ShapePart("main", {"size": [4, 4], "counts": "0 4 12"})],
+    ))
+    db.add_relation(99, rel_type="partner_of", target="ls:Motherboard#1",
+                    blocker="ls:Motherboard#1", source="labelstudio", status="proposed")
+
+
+def test_purge_is_scoped_to_the_desktops_the_export_covers(tmp_db_path):
+    """Importing one desktop's export must not wipe another desktop's drafts."""
+    db = Db(tmp_db_path)
+    _seed_other_desktop(db)
+    summary = import_ls_export(str(FIXTURE), db, load_taxonomy(), {})
+    assert len(db.keyframes(99, "scan")) == 1, "desktop 99 must survive untouched"
+    assert len(db.relations(99)) == 1
+    assert summary["purged_keyframes"] == 0, "nothing of desktops 19/24 was there yet"
+    assert summary["purged_relations"] == 0
+    assert len(db.keyframes(19, "scan")) == 14
+    db.close()
+
+
+def test_purge_all_clears_every_desktop(tmp_db_path):
+    db = Db(tmp_db_path)
+    _seed_other_desktop(db)
+    summary = import_ls_export(str(FIXTURE), db, load_taxonomy(), {}, purge_all=True)
+    assert summary["purged_keyframes"] == 1
+    assert summary["purged_relations"] == 1
+    assert db.keyframes(99, "scan") == []
+    assert db.relations(99) == []
+    db.close()
+
+
+def test_purge_counts_report_what_was_actually_deleted(tmp_db_path):
+    db = Db(tmp_db_path)
+    first = import_ls_export(str(FIXTURE), db, load_taxonomy(), {})
+    second = import_ls_export(str(FIXTURE), db, load_taxonomy(), {})
+    assert (first["purged_keyframes"], first["purged_relations"]) == (0, 0)
+    assert second["purged_keyframes"] == first["keyframes"] == 22
+    assert second["purged_relations"] == first["relation_edges"] == 3
+    db.close()
+
+
+def _relation_export(to_label: str) -> dict:
+    """A one-frame export whose single relation points at `to_label`."""
+    results = []
+    for rid, label in (("r1", "Motherboard Screw"), ("r2", "Motherboard"),
+                       ("r3", "RAM Module")):
+        # keep the x-order stable so the provisional keys do not shuffle
+        x = {"r1": 10, "r2": 40, "r3": 70}[rid]
+        results += [
+            {"id": rid, "type": "polygon", "from_name": "polygon", "to_name": "image1",
+             "original_width": 1600, "original_height": 1600,
+             "value": {"points": [[x, 10], [x + 10, 10], [x + 10, 20], [x, 20]]}},
+            {"id": rid, "type": "labels", "from_name": "valuable_component_labels",
+             "to_name": "image1", "original_width": 1600, "original_height": 1600,
+             "value": {"labels": [label]}},
+        ]
+    target = {"Motherboard": "r2", "RAM Module": "r3"}[to_label]
+    results.append({"type": "relation", "from_id": "r1", "to_id": target,
+                    "labels": ["is_pre-request_of"], "direction": "right"})
+    return {
+        "exported_at": "x", "source": "test",
+        "projects": [{
+            "id": 1, "title": "Scanner_camera", "workspace": "Desktop_19",
+            "tasks": [{"id": 1, "data": {"image": "upload/1/aabbccdd-19_7.png"},
+                       "annotations": [{"id": 1, "result": results}]}],
+        }],
+    }
+
+
+def test_reimport_drops_a_relation_that_is_no_longer_in_the_export(tmp_path):
+    """A changed edge must replace the old one, not accumulate beside it."""
+    before = tmp_path / "before.json"
+    after = tmp_path / "after.json"
+    before.write_text(json.dumps(_relation_export("Motherboard")), encoding="utf-8")
+    after.write_text(json.dumps(_relation_export("RAM Module")), encoding="utf-8")
+    db = Db(str(tmp_path / "db.sqlite"))
+
+    import_ls_export(str(before), db, load_taxonomy(), {})
+    assert [r["target"] for r in db.relations(19)] == ["ls:Motherboard#1"]
+
+    summary = import_ls_export(str(after), db, load_taxonomy(), {})
+    assert summary["purged_relations"] == 1
+    assert [r["target"] for r in db.relations(19)] == ["ls:RAM Module#1"], \
+        "the stale edge must be gone, not upserted beside the new one"
+    assert len(db.relations(19)) == 1
     db.close()
 
 

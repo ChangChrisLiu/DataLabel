@@ -166,6 +166,55 @@ def ls_result_to_mask(result: dict, hw: HW) -> Optional[np.ndarray]:
     return None
 
 
+def result_pixel_bbox(result: dict, hw: HW) -> Optional[tuple[int, int, int, int]]:
+    """Exclusive pixel bbox ``(x0, y0, x1, y1)`` of a geometry result.
+
+    Computed from the percent coordinates, so nothing is allocated -- which
+    matters on the 12 MP OAK frames. It equals
+    ``masks.bbox(ls_result_to_mask(result, hw))`` for any shape that lies
+    inside the frame: both round every coordinate to its own pixel.
+
+    Two documented differences for shapes that do not:
+
+    * a shape crossing a frame edge at an angle keeps the full extent of its
+      *in-frame* columns and rows here, while the rasterised mask loses the
+      corner that fell outside -- so this is a superset, never smaller;
+    * a rotated ellipse gets its analytic extent, within a pixel of the
+      rasterised one (every ellipse in the export has ``rotation == 0``).
+
+    ``None`` means the result encloses no area (or is not geometry at all).
+    """
+    h, w = int(hw[0]), int(hw[1])
+    kind = result.get("type")
+    value = result.get("value") or {}
+    if kind in ("polygon", "polygonlabels"):
+        pts = value.get("points") or []
+        if len(pts) < 3:
+            return None
+        xs = [int(round(float(p[0]) / 100.0 * w)) for p in pts]
+        ys = [int(round(float(p[1]) / 100.0 * h)) for p in pts]
+    elif kind == "ellipse":
+        cx = int(round(float(value["x"]) / 100.0 * w))
+        cy = int(round(float(value["y"]) / 100.0 * h))
+        rx = max(1, int(round(float(value["radiusX"]) / 100.0 * w)))
+        ry = max(1, int(round(float(value["radiusY"]) / 100.0 * h)))
+        rad = math.radians(float(value.get("rotation") or 0.0))
+        ex = int(round(math.hypot(rx * math.cos(rad), ry * math.sin(rad))))
+        ey = int(round(math.hypot(rx * math.sin(rad), ry * math.cos(rad))))
+        xs, ys = [cx - ex, cx + ex], [cy - ey, cy + ey]
+    elif kind == "rectangle":
+        flat = _rect_corners(value, (h, w))
+        xs = [int(round(v)) for v in flat[0::2]]
+        ys = [int(round(v)) for v in flat[1::2]]
+    else:
+        return None
+    x0, x1 = max(0, min(xs)), min(w, max(xs) + 1)
+    y0, y1 = max(0, min(ys)), min(h, max(ys) + 1)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1, y1)
+
+
 def _pct_anchor(result: dict) -> tuple[float, float]:
     """Top-left of the result's percent-space bbox, for left-to-right ordering.
 
