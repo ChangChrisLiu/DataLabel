@@ -20,9 +20,11 @@ import numpy as np
 import pytest
 
 from tda.models import SamQueue, SamRequest, SamResult, SamService
+from tda.models import sam_service
 from tda.models.sam_service import (
     REFINE_RADIUS_PX,
     blend_local,
+    default_checkpoint,
     mask_to_low_res_logits,
     points_within_radius,
 )
@@ -102,6 +104,50 @@ def test_blend_local_keeps_prior_outside_radius():
 def test_available_is_a_bool():
     assert isinstance(SamService.available(), bool)
     assert SamService.available(checkpoint="Z:/definitely/missing.pt") is False
+
+
+@pytest.mark.parametrize(
+    "bad_yaml",
+    [
+        "weights_dir: [unclosed\n",  # YAML syntax error
+        "- just\n- a list\n",  # top-level sequence
+        "a plain string\n",  # top-level scalar
+        "weights_dir:\n  nested: 1\n",  # weights_dir is not a path
+        "weights_dir: 17\n",  # weights_dir is not a path either
+    ],
+    ids=["syntax", "list", "scalar", "mapping", "int"],
+)
+def test_malformed_paths_yaml_degrades_to_unavailable(monkeypatch, tmp_path, bad_yaml):
+    """A config typo must not turn the collection-time skip into an error."""
+    cfg = tmp_path / "paths.yaml"
+    cfg.write_text(bad_yaml, encoding="utf-8")
+    monkeypatch.setattr(sam_service, "_PATHS_YAML", cfg)
+    assert default_checkpoint() is None
+    assert SamService.available() is False
+    with pytest.raises(FileNotFoundError):
+        SamService()
+
+
+def test_missing_paths_yaml_uses_the_in_repo_fallback(monkeypatch, tmp_path):
+    monkeypatch.setattr(sam_service, "_PATHS_YAML", tmp_path / "does_not_exist.yaml")
+    fallback = default_checkpoint()
+    assert fallback is not None
+    assert fallback.name == sam_service.CHECKPOINT_NAME
+    assert isinstance(SamService.available(), bool)
+
+
+def test_empty_paths_yaml_uses_the_in_repo_fallback(monkeypatch, tmp_path):
+    cfg = tmp_path / "paths.yaml"
+    cfg.write_text("# nothing here\n", encoding="utf-8")
+    monkeypatch.setattr(sam_service, "_PATHS_YAML", cfg)
+    assert default_checkpoint() is not None
+
+
+def test_default_checkpoint_reads_weights_dir(monkeypatch, tmp_path):
+    cfg = tmp_path / "paths.yaml"
+    cfg.write_text(f'weights_dir: "{tmp_path.as_posix()}/w"\n', encoding="utf-8")
+    monkeypatch.setattr(sam_service, "_PATHS_YAML", cfg)
+    assert default_checkpoint() == tmp_path / "w" / sam_service.CHECKPOINT_NAME
 
 
 # ---------------------------------------------------------------------------

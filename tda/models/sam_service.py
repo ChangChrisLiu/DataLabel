@@ -46,21 +46,35 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PATHS_YAML = _REPO_ROOT / "configs" / "paths.yaml"
 
 
-def default_checkpoint() -> Path:
+def default_checkpoint() -> Optional[Path]:
     """Return the SAM 2.1 checkpoint path from ``configs/paths.yaml``.
 
-    Falls back to ``<repo>/models/weights/<name>`` when the config is missing or
-    does not define ``weights_dir``. The file is not required to exist.
+    Falls back to ``<repo>/models/weights/<name>`` when the config file is absent
+    or does not define ``weights_dir``. The file is not required to exist.
+
+    Returns ``None`` instead of raising when the config cannot be used at all
+    (unparsable YAML, top-level not a mapping, ``weights_dir`` not a path).
+    :meth:`SamService.available` and the test suite's collection-time skip guard
+    both depend on this never raising: a config typo must degrade to a clean
+    "unavailable", not to a collection error.
     """
-    weights_dir: Any = None
     try:
-        with open(_PATHS_YAML, "r", encoding="utf-8") as fh:
-            weights_dir = (yaml.safe_load(fh) or {}).get("weights_dir")
-    except OSError:
-        weights_dir = None
-    if not weights_dir:
-        weights_dir = _REPO_ROOT / "models" / "weights"
-    return Path(weights_dir) / CHECKPOINT_NAME
+        try:
+            with open(_PATHS_YAML, "r", encoding="utf-8") as fh:
+                cfg: Any = yaml.safe_load(fh)
+        except OSError:
+            cfg = {}  # no config shipped: use the in-repo fallback below
+        if cfg is None:
+            cfg = {}
+        if not isinstance(cfg, dict):
+            raise TypeError(f"{_PATHS_YAML} is not a mapping but {type(cfg).__name__}")
+        weights_dir: Any = cfg.get("weights_dir") or _REPO_ROOT / "models" / "weights"
+        if not isinstance(weights_dir, (str, Path)):
+            raise TypeError(f"weights_dir must be a path, got {type(weights_dir).__name__}")
+        return Path(weights_dir) / CHECKPOINT_NAME
+    except Exception:
+        log.warning("cannot resolve the SAM 2.1 checkpoint via %s", _PATHS_YAML, exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +110,9 @@ class SamResult:
 
     Attributes:
         mask: boolean ``HxW`` array in crop coordinates.
-        score: SAM's predicted IoU for the returned mask.
+        score: SAM's predicted IoU for the *proposal* it produced. After a local
+            refinement it still describes that proposal, not the blended mask
+            actually returned, so do not read it as a quality score for ``mask``.
         ms: wall-clock duration of :meth:`SamService.predict`, including the
             embedding computation when the crop was not cached yet.
     """
@@ -185,13 +201,20 @@ class SamService:
         device: str = "cuda",
     ) -> None:
         """Build the model. ``checkpoint=None`` reads ``paths.yaml: weights_dir``."""
+        # Resolve the checkpoint before importing torch/sam2: a config or path
+        # mistake should fail immediately, not after a multi-second import.
+        ckpt = Path(checkpoint) if checkpoint else default_checkpoint()
+        if ckpt is None:
+            raise FileNotFoundError(
+                f"cannot resolve the SAM 2.1 checkpoint; check weights_dir in {_PATHS_YAML}"
+            )
+        if not ckpt.is_file():
+            raise FileNotFoundError(f"SAM 2.1 checkpoint not found: {ckpt}")
+
         import torch  # local import: keeps ``import tda.models`` cheap
         from sam2.build_sam import build_sam2
         from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-        ckpt = Path(checkpoint) if checkpoint else default_checkpoint()
-        if not ckpt.is_file():
-            raise FileNotFoundError(f"SAM 2.1 checkpoint not found: {ckpt}")
         if device.startswith("cuda") and not torch.cuda.is_available():
             raise RuntimeError("device='cuda' requested but torch.cuda is unavailable")
 
@@ -216,25 +239,26 @@ class SamService:
     # -- introspection ------------------------------------------------------
     @staticmethod
     def available(checkpoint: Optional[str] = None) -> bool:
-        """True when torch+CUDA and sam2 are importable and the checkpoint exists."""
+        """True when torch+CUDA and sam2 are importable and the checkpoint exists.
+
+        Never raises. Tests gate on this at import time and the app probes it at
+        startup, so every failure mode — missing torch, broken driver, uninstalled
+        sam2, unreadable or malformed ``paths.yaml`` — must degrade to ``False``.
+        """
         try:
             import torch
-        except Exception:  # pragma: no cover - depends on the machine
-            return False
-        try:
+
             if not torch.cuda.is_available():
                 return False
-        except Exception:  # pragma: no cover - broken driver
-            return False
-        try:
             import importlib.util
 
             if importlib.util.find_spec("sam2.build_sam") is None:
                 return False
-        except Exception:  # pragma: no cover - depends on the machine
+            ckpt = Path(checkpoint) if checkpoint else default_checkpoint()
+            return ckpt is not None and ckpt.is_file()
+        except Exception:
+            log.debug("SAM 2.1 is unavailable", exc_info=True)
             return False
-        ckpt = Path(checkpoint) if checkpoint else default_checkpoint()
-        return ckpt.is_file()
 
     @property
     def image_id(self) -> Optional[str]:
@@ -248,6 +272,11 @@ class SamService:
         The embedding is only recomputed when the crop differs from the cached
         one. Identical arrays are detected by object identity first (free) and
         by shape + content hash otherwise, so an equal copy also hits the cache.
+
+        Because of that identity fast path, callers must never mutate a crop
+        array in place after handing it over — the same object with new pixels
+        looks unchanged and would silently reuse the stale embedding. Pass a new
+        array instead.
         """
         img = _as_rgb_uint8(image_crop)
         with self._lock:
