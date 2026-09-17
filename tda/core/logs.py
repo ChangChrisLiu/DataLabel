@@ -13,19 +13,21 @@ pre-fills:
   and restarts land in :attr:`LogImport.issues`;
 * zero or one :class:`~tda.core.model.ActionRec` per step (markers draft none,
   compound rows draft a flagged placeholder);
-* one :class:`~tda.core.model.InstanceRec` per distinct target plus the
-  implicit ``chassis``, with ordinals in order of first operation.
+* one :class:`~tda.core.model.InstanceRec` per operated target plus the
+  implicit ``chassis``, with ordinals in order of first operation. Every row
+  that names a target is a new instance unless the strict reuse test in
+  ``_Importer._reuse`` says otherwise, so the annotators' restarted numbering
+  never merges two physical parts.
 
 Nothing here guesses what a human must decide: unresolved targets keep a ``?``
 in the key, and every one of them is reported in ``issues`` for stage S1.
 
-CLI::
+The batch run and its report live in :mod:`tda.core.log_report`::
 
     python -m tda.core.logs --all D:/DataSet/raw_logs/drive
 """
 from __future__ import annotations
 
-import argparse
 import csv
 import re
 import sys
@@ -38,7 +40,6 @@ from .taxonomy import (
     FALLBACK_RULE,
     ParsedTarget,
     Taxonomy,
-    load_taxonomy,
     map_tool,
     parse_raw_name,
 )
@@ -91,6 +92,10 @@ _DEVICE_SOCKET_HOSTS = {
     "optical_drive": "optical_drive",
 }
 DEFAULT_SOCKET_HOST = "motherboard"
+
+#: Attributes the importer derives itself; they never take part in the
+#: instance-identity comparison.
+_DERIVED_ATTRS = frozenset({"instance_nos", "sheet_no", "captive", "captive_source"})
 
 #: Brands whose CPU-cooler screws are captive (they stay in the bracket).
 _CAPTIVE_BRANDS = ("dell", "optiplex")
@@ -223,6 +228,42 @@ def _default_verb(cls: str) -> str:
     return "open" if cls in _OPENABLE else "remove"
 
 
+def _is_chassis(parsed: ParsedTarget, step_type: str) -> bool:
+    return step_type == "reorient" or parsed.cls == CHASSIS_KEY
+
+
+def _identity(cls: str, disc: str, number: int, attrs: dict) -> tuple:
+    """What a later row must match exactly before it may reuse an instance.
+
+    Spec 3.2's class + role + number, plus the cable owner and the
+    annotator's bracketed qualifier: two "Connector 1" rows whose cables run
+    to different devices are different connectors, not one.
+    """
+    return (
+        cls,
+        disc,
+        number,
+        str(attrs.get("cable_owner") or ""),
+        str(attrs.get("qualifier") or ""),
+    )
+
+
+def _attr_conflicts(stored: dict, new: dict) -> list[tuple[str, object, object]]:
+    """Attributes the new row states differently from the stored instance."""
+    return [
+        (name, stored[name], value)
+        for name, value in new.items()
+        if name not in _DERIVED_ATTRS and name in stored and stored[name] != value
+    ]
+
+
+def _merge_attrs(stored: dict, new: dict) -> None:
+    """Add the new row's extra attributes; conflicts are handled by the caller."""
+    for name, value in new.items():
+        if name not in _DERIVED_ATTRS:
+            stored.setdefault(name, value)
+
+
 def _is_captive(cls: str, attrs: dict, meta: dict) -> Optional[bool]:
     if cls != "screw":
         return None
@@ -239,7 +280,11 @@ class _Importer:
         self.tax = taxonomy
         self.desktop = desktop
         self._ordinals: dict[tuple[str, str], int] = {}
-        self._identities: dict[tuple, str] = {}
+        # (cls, discriminator, the number the annotator wrote) -> keys, in
+        # creation order; the only place a later row may find an earlier one.
+        self._numbered: dict[tuple[str, str, int], list[str]] = {}
+        # instance key -> the (step, verb) pairs already applied to it.
+        self._ops: dict[str, list[tuple[int, str]]] = {}
         self._seen_seq: dict[int, int] = {}
         self._prev_seq: Optional[int] = None
 
@@ -254,6 +299,7 @@ class _Importer:
         for step, row in enumerate(rows, start=1):
             self._row(step, row)
         self._resolve_socket_hosts()
+        self._check_operations()
         return self.out
 
     def _chassis(self) -> None:
@@ -301,10 +347,10 @@ class _Importer:
     def _action(
         self, step: int, raw_name: str, parsed: ParsedTarget, step_type: str, row: dict
     ) -> ActionRec:
-        target = self._target(step, raw_name, parsed, step_type)
-        cls = CHASSIS_KEY if target == CHASSIS_KEY else parsed.cls
+        cls = CHASSIS_KEY if _is_chassis(parsed, step_type) else parsed.cls
         verb = parsed.verb or _default_verb(cls)
         self._check_verb(step, cls, verb)
+        target = self._target(step, raw_name, parsed, step_type, verb)
         return ActionRec(
             desktop=self.desktop,
             step=step,
@@ -317,9 +363,11 @@ class _Importer:
             failure_reason=None,  # filled in during S1 review
         )
 
-    def _target(self, step: int, raw_name: str, parsed: ParsedTarget, step_type: str) -> str:
+    def _target(
+        self, step: int, raw_name: str, parsed: ParsedTarget, step_type: str, verb: str
+    ) -> str:
         """Resolve the target key; every ``?`` that survives is reported."""
-        if step_type == "reorient" or parsed.cls == CHASSIS_KEY:
+        if _is_chassis(parsed, step_type):
             return CHASSIS_KEY
         fallback = parsed.matched_rule == FALLBACK_RULE
         if fallback:
@@ -337,7 +385,7 @@ class _Importer:
             if not fallback:
                 self.issue(step, f"{raw_name!r} names no target class - needs manual target")
             return UNRESOLVED
-        return self._instance(raw_name, parsed)
+        return self._instance(step, raw_name, parsed, verb)
 
     def _check_verb(self, step: int, cls: str, verb: str) -> None:
         spec = self.tax.verbs.get(verb)
@@ -356,23 +404,96 @@ class _Importer:
         return tool
 
     # -- instances -------------------------------------------------------- #
-    def _instance(self, raw_name: str, parsed: ParsedTarget) -> str:
+    def _instance(self, step: int, raw_name: str, parsed: ParsedTarget, verb: str) -> str:
+        """The target key for one row.
+
+        Spec 3.2: every row that names a target is a **new** instance unless
+        all three reuse conditions hold (see :meth:`_reuse`) -- the sheet's
+        numbering restarts ("CPU fan screw 1..5" then "Heatsink screw 1..4")
+        and its unnumbered repeats ("Case - motherboard connector" seven times)
+        are genuinely different parts.
+        """
         cls, attrs = parsed.cls, parsed.attrs
         disc = str(attrs.get("role") or attrs.get("kind") or "")
-        # Identity inside one desktop: the class, its discriminator and the
-        # number the annotator wrote (used only to tell instances apart, never
-        # as the ordinal).
-        identity = (cls, disc, parsed.instance_no, str(attrs.get("of") or ""))
-        key = self._identities.get(identity)
+        number = parsed.instance_no
+        key = self._reuse(step, raw_name, cls, disc, number, attrs, verb)
         if key is None:
-            group = (cls, disc)
-            ordinal = self._ordinals.get(group, 0) + 1
-            self._ordinals[group] = ordinal
-            key = instance_key(cls, attrs, ordinal)
-            self._identities[identity] = key
-            self.out.instances[key] = self._new_instance(key, cls, attrs, parsed)
+            key = self._create(cls, disc, number, parsed)
         self.out.instances[key].raw_names.append(raw_name)
+        self._ops.setdefault(key, []).append((step, verb))
         return key
+
+    def _reuse(
+        self,
+        step: int,
+        raw_name: str,
+        cls: str,
+        disc: str,
+        number: Optional[int],
+        attrs: dict,
+        verb: str,
+    ) -> Optional[str]:
+        """An existing instance this row operates again, or ``None``.
+
+        All of these must hold: the name carries an explicit instance number,
+        an earlier instance of the same ``(cls, discriminator, number)`` has
+        no conflicting attribute, and the verb was not already applied to it
+        (e.g. loosen then remove).  Reuse and attribute conflicts are both
+        reported, so nothing is merged or dropped silently.
+        """
+        if number is None:
+            return None
+        for key in self._numbered.get(_identity(cls, disc, number, attrs), []):
+            prior = [v for _, v in self._ops.get(key, [])]
+            if verb in prior:
+                continue  # the same operation again means another part
+            self.issue(
+                step,
+                f"reused instance {key} at step {step} for {raw_name!r} "
+                f"(prior verbs {', '.join(prior) or 'none'}; new verb {verb})",
+            )
+            stored = self.out.instances[key].attrs
+            for name, old, new in _attr_conflicts(stored, attrs):
+                self.issue(
+                    step,
+                    f"instance {key} attribute {name!r} conflicts with the stored value "
+                    f"({old!r} vs {new!r}) - kept {old!r}",
+                )
+            _merge_attrs(stored, attrs)
+            return key
+        return None
+
+    def _create(self, cls: str, disc: str, number: Optional[int], parsed: ParsedTarget) -> str:
+        group = (cls, disc)
+        ordinal = self._ordinals.get(group, 0) + 1
+        self._ordinals[group] = ordinal
+        key = instance_key(cls, parsed.attrs, ordinal)
+        self.out.instances[key] = self._new_instance(key, cls, parsed.attrs, parsed)
+        if number is not None:
+            identity = _identity(cls, disc, number, parsed.attrs)
+            self._numbered.setdefault(identity, []).append(key)
+        return key
+
+    def _check_operations(self) -> None:
+        """Guard the one-operation-per-instance invariant.
+
+        Multi-step instances are the reused ones and are already reported at
+        the point of reuse; the same verb twice can only mean the importer
+        merged two different parts, so it is reported loudly.  The implicit
+        chassis is exempt: ``reorient`` legitimately repeats.
+        """
+        for key, ops in self._ops.items():
+            if key == CHASSIS_KEY:
+                continue
+            seen: dict[str, int] = {}
+            for step, verb in ops:
+                if verb in seen:
+                    self.issue(
+                        None,
+                        f"INVARIANT: instance {key} received verb {verb!r} twice "
+                        f"(steps {seen[verb]} and {step})",
+                    )
+                seen[verb] = step
 
     def _new_instance(
         self, key: str, cls: str, attrs: dict, parsed: ParsedTarget
@@ -462,86 +583,9 @@ def iter_desktop_csvs(directory: str | Path) -> Iterator[tuple[int, Path]]:
         yield number, found[number]
 
 
-def _expected_steps(meta_csv: Path) -> dict[int, int]:
-    """``desktop_id -> n_logged_steps`` from the export's summary table."""
-    if not meta_csv.exists():
-        return {}
-    with open(meta_csv, newline="", encoding="utf-8-sig") as f:
-        return {
-            int(row["desktop_id"]): int(row["n_logged_steps"])
-            for row in csv.DictReader(f)
-            if (row.get("desktop_id") or "").strip() and (row.get("n_logged_steps") or "").strip()
-        }
-
-
-def _report(imports: list[LogImport], expected: dict[int, int], directory: Path) -> str:
-    lines = [
-        "# Drive log import issues",
-        "",
-        f"Generated by `python -m tda.core.logs --all {directory.as_posix()}`.",
-        "",
-        f"- desktops: {len(imports)}",
-        f"- steps: {sum(len(li.steps) for li in imports)}",
-        f"- actions: {sum(len(li.actions) for li in imports)}",
-        f"- instances: {sum(len(li.instances) for li in imports)}",
-        f"- issues: {sum(len(li.issues) for li in imports)}",
-        "",
-        "| desktop | brand | steps | n_logged_steps | match | issues |",
-        "|---|---|---|---|---|---|",
-    ]
-    for li in imports:
-        want = expected.get(li.desktop)
-        mark = "-" if want is None else ("ok" if want == len(li.steps) else "MISMATCH")
-        lines.append(
-            f"| D{li.desktop:02d} | {li.meta.get('brand_model_raw', '')} | {len(li.steps)} "
-            f"| {'' if want is None else want} | {mark} | {len(li.issues)} |"
-        )
-    lines.append("")
-    for li in imports:
-        lines.append(f"## D{li.desktop:02d} - {li.meta.get('brand_model_raw', '')}")
-        lines.append("")
-        if li.issues:
-            lines.extend(f"- {text}" for text in li.issues)
-        else:
-            lines.append("- no issues")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--all", metavar="DIR", required=True, help="directory of exported logs")
-    parser.add_argument("--out", metavar="PATH", help="issue report (default DIR/import_issues.md)")
-    args = parser.parse_args(argv)
-
-    directory = Path(args.all)
-    taxonomy = load_taxonomy()
-    expected = _expected_steps(directory / "desktop_meta.csv")
-    imports: list[LogImport] = []
-    for desktop, path in iter_desktop_csvs(directory):
-        rows, meta = read_desktop_csv(path)
-        imports.append(import_log(desktop, rows, meta, taxonomy))
-
-    out_path = Path(args.out) if args.out else directory / "import_issues.md"
-    out_path.write_text(_report(imports, expected, directory), encoding="utf-8")
-
-    mismatched = [
-        (li.desktop, len(li.steps), expected[li.desktop])
-        for li in imports
-        if li.desktop in expected and expected[li.desktop] != len(li.steps)
-    ]
-    print(
-        f"imported {len(imports)} desktops: "
-        f"{sum(len(li.steps) for li in imports)} steps, "
-        f"{sum(len(li.actions) for li in imports)} actions, "
-        f"{sum(len(li.instances) for li in imports)} instances, "
-        f"{sum(len(li.issues) for li in imports)} issues"
-    )
-    for desktop, got, want in mismatched:
-        print(f"  step-count mismatch D{desktop:02d}: {got} rows vs n_logged_steps {want}")
-    print(f"report: {out_path}")
-    return 1 if mismatched else 0
-
-
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    from .log_report import main
+
     sys.exit(main())
+
+

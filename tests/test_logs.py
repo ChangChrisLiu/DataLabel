@@ -12,11 +12,13 @@ tool-less screws, fallback names).
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from tda.core.logs import import_log, instance_key, iter_desktop_csvs, main, read_desktop_csv
+from tda.core.log_report import main, operation_counts
+from tda.core.logs import import_log, instance_key, iter_desktop_csvs, read_desktop_csv
 from tda.core.taxonomy import load_taxonomy
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "logs"
@@ -253,13 +255,99 @@ def test_notes_and_duration(tax):
 # Instances
 # --------------------------------------------------------------------------- #
 def test_instance_ordinal_follows_first_operation(tax):
+    """Ordinals count first operations; the sheet's own numbers never leak in.
+
+    The third row repeats "RAM clip 3" with the same verb, so it is a third
+    instance -- two physically different latches are never merged just because
+    the annotator reused a number.
+    """
     li = synth(["RAM clip 3", "RAM clip 1", "RAM clip 3"], tax=tax)
     assert [a.target for a in li.actions] == [
         "ram_latch.01",
         "ram_latch.02",
-        "ram_latch.01",
+        "ram_latch.03",
     ]
-    assert li.instances["ram_latch.01"].raw_names == ["RAM clip 3", "RAM clip 3"]
+    assert li.instances["ram_latch.01"].attrs["sheet_no"] == 3
+    assert li.instances["ram_latch.02"].attrs["sheet_no"] == 1
+    assert li.instances["ram_latch.03"].raw_names == ["RAM clip 3"]
+
+
+def test_unnumbered_repeats_are_separate_instances(tax):
+    """D61 style: "Case - motherboard connector" seven times = seven parts."""
+    li = synth(["Case - motherboard connector"] * 7, tax=tax)
+    targets = [a.target for a in li.actions]
+    assert targets == [f"connector.front_panel.{i:02d}" for i in range(1, 8)]
+    assert len(set(targets)) == 7
+    assert all(len(li.instances[t].raw_names) == 1 for t in targets)
+
+
+def test_restarted_numbering_series_are_separate_instances(tax):
+    """D03 style: "CPU fan screw 1..5" then "Heatsink screw 1..4" = 9 screws."""
+    names = [f"CPU fan screw {i}" for i in range(1, 6)]
+    names += [f"Heatsink screw {i}" for i in range(1, 5)]
+    li = synth(names, tax=tax)
+    screws = [k for k in li.instances if k.startswith("screw.cpu_cooler.")]
+    assert len(screws) == 9
+    assert screws[-1] == "screw.cpu_cooler.09"
+    assert [a.target for a in li.actions] == screws
+
+
+def test_same_number_different_cable_owner_is_a_new_instance(tax):
+    """D03 style: two "Connector 1" rows whose cables differ are two parts.
+
+    The cable owner is part of the reuse identity, so neither row can absorb
+    the other and no attribute value is dropped.
+    """
+    li = synth(
+        ["Connector 1 (HDD - Motherboard)", "Connector 1 (Power Module - Motherboard)"],
+        tax=tax,
+    )
+    first, second = (a.target for a in li.actions)
+    assert first != second
+    assert li.instances[first].cable == "cable:storage_drive"
+    assert li.instances[second].cable == "cable:psu"
+    assert not any("reused instance" in s for s in li.issues)
+
+
+def test_attribute_conflict_on_reuse_is_reported(tax):
+    """Reuse compares the attributes outside the identity and keeps the first."""
+    li = synth(["Open RAM cover 1", "Remove heatsink cover 1"], tax=tax)
+    assert [a.target for a in li.actions] == ["cover.01", "cover.01"]
+    assert li.instances["cover.01"].attrs["of"] == "ram"
+    assert any("reused instance cover.01" in s for s in li.issues)
+    assert any(
+        "attribute 'of' conflicts" in s and "'ram' vs 'cpu_cooler'" in s for s in li.issues
+    )
+
+
+def test_reuse_needs_number_matching_attrs_and_a_new_verb(tax):
+    """Open then remove the same numbered cover = one instance, reported."""
+    li = synth(["Open RAM cover 1", "Remove RAM cover 1"], tax=tax)
+    assert [a.target for a in li.actions] == ["cover.01", "cover.01"]
+    assert [a.verb for a in li.actions] == ["open", "remove"]
+    inst = li.instances["cover.01"]
+    assert inst.raw_names == ["Open RAM cover 1", "Remove RAM cover 1"]
+    assert any(
+        "reused instance cover.01" in s and "prior verbs open" in s for s in li.issues
+    )
+    # A third row with a verb already applied starts a new instance instead.
+    li = synth(["Open RAM cover 1", "Remove RAM cover 1", "Remove RAM cover 1"], tax=tax)
+    assert [a.target for a in li.actions] == ["cover.01", "cover.01", "cover.02"]
+
+
+def test_no_instance_is_operated_with_the_same_verb_twice(tax):
+    """The invariant guard, on all three real fixtures."""
+    imports = [fixture_import(n, tax)[0] for n in (1, 13, 63)]
+    multi, repeat = operation_counts(imports)
+    assert repeat == 0
+    assert multi == 0  # no fixture row legitimately re-operates a part
+    assert not any("INVARIANT" in s for li in imports for s in li.issues)
+
+
+def test_invariant_guard_fires_when_an_instance_repeats_a_verb(tax):
+    li = synth(["Open RAM cover 1", "Remove RAM cover 1"], tax=tax)
+    li.actions.append(replace(li.actions[0], step=9))  # simulate a merge bug
+    assert operation_counts([li]) == (1, 1)
 
 
 def test_chassis_instance_always_exists(tax):
