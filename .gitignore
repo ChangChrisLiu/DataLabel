@@ -18,3 +18,9 @@ __pycache__/
 # misc
 *.log
 thumbs.db
+
+# local
+.cache/
+.claude/worktrees/
+.superpowers/
+models/
