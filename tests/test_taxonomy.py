@@ -1,6 +1,7 @@
 """Tests for the taxonomy vocabulary layer (spec section 6)."""
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 import pytest
@@ -125,10 +126,14 @@ def test_apply_verb_returns_none_for_inapplicable_and_for_reorient():
     assert t.apply_verb("cable", {}, "release") == ("state", "released")
 
 
-def test_needs_mask_on_bench_is_true_except_chassis():
+def test_needs_mask_on_bench_is_true_except_chassis_and_virtual_nodes():
     t = load_taxonomy()
     assert t.needs_mask("screw", "removed", "on_bench") is True
     assert t.needs_mask("chassis", "present", "on_bench") is False
+    # A virtual cable node has no geometry in any placement (spec 6.2).
+    for placement in ("in_chassis", "on_bench", "elsewhere"):
+        for state in t.states_of("cable"):
+            assert t.needs_mask("cable", state, placement) is False
 
 
 # --- taxonomy_map.yaml -------------------------------------------------------
@@ -142,6 +147,42 @@ def test_map_covers_all_canon_groups():
         cfg = yaml.safe_load(f)
     groups = {r["canon_group"] for r in cfg["rules"] if r.get("canon_group")}
     assert len(groups) == 53
+
+
+@pytest.mark.parametrize(
+    "raw,nest,exp_cls",
+    [
+        # A nest group must not turn a self-describing name into a connector.
+        ("Case fan", "Case", "case_fan"),
+        ("Case cover for motherboard screws", "Case", "cover"),
+        ("Power module", "Power Supply Unit (PSU)", "psu"),
+        ("Optical drive", "Optical Drive", "optical_drive"),
+    ],
+)
+def test_nest_group_does_not_override_a_self_describing_name(raw, nest, exp_cls):
+    assert parse_raw_name(raw, nest).cls == exp_cls
+
+
+def test_nest_group_still_resolves_a_bare_connector_name():
+    p = parse_raw_name("Connector 3", "Power Supply Unit (PSU)")
+    assert p.cls == "connector"
+    assert p.attrs["cable_owner"] == "psu"
+    assert p.instance_no == 3
+    assert p.canon_group == "connector: PSU - motherboard"
+
+
+def test_canon_groups_match_the_reference_csv():
+    with open(REPO_ROOT / "configs" / "paths.yaml", "r", encoding="utf-8") as f:
+        raw_logs_dir = Path(yaml.safe_load(f)["raw_logs_dir"])
+    csv_path = raw_logs_dir / "drive" / "vocab_target_canon.csv"
+    if not csv_path.exists():
+        pytest.skip(f"reference vocabulary not available at {csv_path}")
+    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+        expected = {row["target_canon"] for row in csv.DictReader(f)}
+    with open(REPO_ROOT / "configs" / "taxonomy_map.yaml", "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    groups = {r["canon_group"] for r in cfg["rules"] if r.get("canon_group")}
+    assert groups == expected
 
 
 def test_qualifier_and_multi_instances_are_captured():

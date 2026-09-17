@@ -9,8 +9,13 @@
 #   1. the raw name is lower-cased, typo-fixed, dashes and whitespace normalised;
 #   2. bracketed text is pulled out into attrs["qualifier"];
 #   3. the instance number / multi-instance run is read off the bracket-free text;
-#   4. the match text is "<bracket-free text> <qualifier words> [nest: <group>]";
-#   5. the FIRST rule in `rules` whose `pattern` searches the match text wins.
+#   4. the match text is "<bracket-free text> <qualifier words>";
+#   5. the FIRST rule in `rules` whose `pattern` searches the match text wins;
+#   6. only if NO rule matched is the nest group consulted, by re-matching
+#      against "<match text> nest: <group>". The nest group disambiguates an
+#      under-specified name ("Connector 3" under "Power Supply Unit (PSU)"); it
+#      must never re-classify a name that already stands on its own, so every
+#      `nest: ...` alternative below is guarded by `connector.*`.
 #
 # Rule keys (all optional except pattern/name/canon_group):
 #   name            -> ParsedTarget.matched_rule
@@ -137,7 +142,7 @@ rules:
     canon_group: "connector: HDD - optical drive (shared cable)"
 
   - name: connector_case_fan
-    pattern: 'case fan.*connector|connector.*case fan|nest: case fan'
+    pattern: 'case fan.*connector|connector.*case fan|connector.*nest: case fan'
     cls: connector
     attrs: {kind: fan, cable_owner: case_fan}
     canon_group: "connector: case fan - motherboard"
@@ -149,13 +154,13 @@ rules:
     canon_group: "connector: CPU fan - motherboard"
 
   - name: connector_case_front_panel
-    pattern: 'case - motherboard connector|connector.*case - motherboard|nest: case\b'
+    pattern: 'case - motherboard connector|connector.*case - motherboard|connector.*nest: case\b'
     cls: connector
     attrs: {kind: front_panel, cable_owner: front_panel}
     canon_group: "connector: case front-panel - motherboard"
 
   - name: connector_psu_motherboard
-    pattern: 'power module ?- motherboard connector|power module connector|connector.*power module - motherboard|nest: power supply unit'
+    pattern: 'power module ?- motherboard connector|power module connector|connector.*power module - motherboard|connector.*nest: power supply unit'
     cls: connector
     attrs: {cable_owner: psu}
     canon_group: "connector: PSU - motherboard"
@@ -173,7 +178,7 @@ rules:
     canon_group: "connector: optical drive (power/SATA)"
 
   - name: connector_optical
-    pattern: 'optical.*connector|connector.*optical|^motherboard - optical drive|nest: optical drive'
+    pattern: 'optical.*connector|connector.*optical|^motherboard - optical drive|connector.*nest: optical drive'
     cls: connector
     attrs: {cable_owner: optical_drive}
     canon_group: "connector: optical drive (power/SATA)"

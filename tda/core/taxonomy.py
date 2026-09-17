@@ -62,11 +62,14 @@ class Taxonomy:
         """Does this instance need its own geometry in the given placement?
 
         ``on_bench``  -> yes for every class but ``chassis`` (which never goes
-        on the bench); ``elsewhere`` -> no (it is out of every view);
+        on the bench) and the virtual nodes (spec 6.2: no mask, ever);
+        ``elsewhere`` -> no (it is out of every view);
         ``in_chassis`` -> the per-class state table from ``taxonomy.yaml``.
         """
         if placement == "on_bench":
-            return bool(self.on_bench_needs_geom) and cls != "chassis"
+            if cls == "chassis" or cls in self.virtual_nodes:
+                return False
+            return bool(self.on_bench_needs_geom)
         if placement == "elsewhere":
             return False
         return bool(self._defn(cls)["needs_mask"].get(state, False))
@@ -232,6 +235,15 @@ def _read_instances(text: str) -> tuple[Optional[int], list[int], bool]:
     return None, [], False
 
 
+def _first_matching_rule(rules: _RuleSet, candidates: list[str]) -> Optional[dict]:
+    """First rule matching the earliest candidate text that matches at all."""
+    for text in candidates:
+        for pattern, rule in rules.rules:
+            if pattern.search(text):
+                return rule
+    return None
+
+
 def _resolve_verb(rules: _RuleSet, text: str, cls: str, rule_verb: Optional[str]) -> Optional[str]:
     if rule_verb:
         return rule_verb
@@ -254,10 +266,16 @@ def parse_raw_name(
     match_text = stripped
     if quals:
         match_text = f"{match_text} {' '.join(quals)}".strip()
+    match_text = _WS.sub(" ", match_text)
+
+    # The nest group is only a tie-breaker for a name that matches nothing on
+    # its own ("Connector 3" under "Power Supply Unit (PSU)"). Trying the bare
+    # name first also keeps anchored patterns like `^case fan$` working for rows
+    # that happen to carry a nest group.
+    candidates = [match_text]
     if nest_group.strip():
         nest, _ = _split_qualifier(_normalize(nest_group, rules.typos))
-        match_text = f"{match_text} nest: {nest}".strip()
-    match_text = _WS.sub(" ", match_text)
+        candidates.append(_WS.sub(" ", f"{match_text} nest: {nest}").strip())
 
     instance_no, instance_nos, multi = _read_instances(stripped)
     multi = multi or bool(_MULTI_WORDS.search(stripped))
@@ -271,9 +289,8 @@ def parse_raw_name(
         parsed.attrs["instance_nos"] = instance_nos
     parsed.attempt = bool(_ATTEMPT.search(match_text))
 
-    for pattern, rule in rules.rules:
-        if not pattern.search(match_text):
-            continue
+    rule = _first_matching_rule(rules, candidates)
+    if rule is not None:
         parsed.cls = rule.get("cls") or ""
         parsed.attrs.update(rule.get("attrs") or {})
         parsed.virtual = rule.get("virtual")
@@ -282,7 +299,6 @@ def parse_raw_name(
         parsed.canon_group = rule["canon_group"]
         parsed.matched_rule = rule["name"]
         parsed.verb = _resolve_verb(rules, stripped, parsed.cls, rule.get("verb"))
-        break
 
     if parsed.step_type_hint in _MARKER_HINTS:
         # A capture marker names no target, so any number in it is not an index.
