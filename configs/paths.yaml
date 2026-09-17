@@ -1,0 +1,10 @@
+# Filesystem roots used by tda. F: is read-only raw data; D: holds everything we produce.
+f_root: "F:/PHD Data Backup/Desktop Dataset"
+scanner_root: "F:/PHD Data Backup/Desktop Dataset/UGA DATA"
+oak_root: "F:/PHD Data Backup/Desktop Dataset/OAKD Capture/Desktop_Datacollection/DesktopData"
+rs_root: "F:/PHD Data Backup/Desktop Dataset/Realsense Capture/Dataset Information/Exp"
+cache_dir: "D:/DataSet/cache"
+db_path: "D:/DataSet/annotations/tda.sqlite"
+backup_dir: "F:/PHD Data Backup/Desktop Dataset/TDA_backups"
+raw_logs_dir: "D:/DataSet/raw_logs"
+weights_dir: "D:/DataSet/models/weights"

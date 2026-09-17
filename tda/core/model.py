@@ -1,0 +1,182 @@
+"""Shared dataclasses and enums for the Teardown Annotator (TDA).
+
+Everything in ``tda.core`` and ``tda.ui`` exchanges data through these types.
+Coordinates are always in the *original image* frame of the view; masks are
+COCO RLE dicts ``{"size": [h, w], "counts": str}``.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+
+VIEWS = ("scan", "oak1", "oak2", "rs")
+
+
+class Visibility(str, Enum):
+    VISIBLE = "visible"
+    OCCLUDED_PARTIAL = "occluded_partial"
+    OCCLUDED_FULL = "occluded_full"
+    OUT_OF_VIEW = "out_of_view"
+    TOO_SMALL = "too_small"
+    VISIBLE_TINY = "visible_tiny"
+    MOTION_BLUR = "motion_blur"
+
+
+class Placement(str, Enum):
+    IN_CHASSIS = "in_chassis"
+    ON_BENCH = "on_bench"
+    ELSEWHERE = "elsewhere"
+
+
+class StepType(str, Enum):
+    INITIAL = "initial"
+    NORMAL = "normal"
+    DUPLI = "dupli"
+    COMPOUND = "compound"
+    FAILED = "failed"
+    AUXILIARY = "auxiliary"
+    REORIENT = "reorient"
+    IGNORE = "ignore"
+
+
+@dataclass(frozen=True, order=True)
+class FrameKey:
+    """Identifies one image: desktop id, 1-based logical step, view name."""
+
+    desktop: int
+    step: int
+    view: str
+
+
+@dataclass
+class InstanceRec:
+    key: str  # e.g. "screw.cpu_cooler.03"
+    desktop: int
+    cls: str  # taxonomy class
+    attrs: dict = field(default_factory=dict)  # role, head, head_source, kind, captive, of, ...
+    parent: Optional[str] = None  # leaves the chassis together with this instance when attached
+    attached: bool = False
+    mounted_on: Optional[str] = None  # physical support
+    fastens: Optional[str] = None  # screws only: the part this screw fastens
+    socket_host: Optional[str] = None  # connectors only
+    cable: Optional[str] = None  # connectors only: virtual cable node id
+    slot_id: Optional[str] = None
+    group_id: Optional[str] = None
+    group_order: str = "unordered"  # unordered | sequential | opposite_pairs
+    removal_direction: Optional[str] = None
+    raw_names: list[str] = field(default_factory=list)
+
+
+@dataclass
+class StepRec:
+    desktop: int
+    step: int
+    step_type: str
+    raw_name: str
+    dupli: bool = False
+    notes: str = ""
+    duration_s: Optional[float] = None
+
+
+@dataclass
+class ActionRec:
+    desktop: int
+    step: int
+    idx: int  # order within the step
+    target: str  # instance key or virtual node id ("cable:psu_harness")
+    verb: str  # unscrew|disconnect|open|release|remove|displace|reorient
+    tool: str = "none"
+    direction: str = "none"
+    result: str = "success"  # success|failed
+    failure_reason: Optional[str] = None
+    difficulty: Optional[int] = None
+
+
+@dataclass
+class StateEvent:
+    desktop: int
+    step: int
+    target: str
+    attr: str  # "state" | "placement"
+    old: str
+    new: str
+    evidence_view: Optional[str] = None
+    auto: bool = True
+
+
+@dataclass
+class ShapePart:
+    name: str  # "main" or a named part, e.g. "floor", "wall"
+    rle: Optional[dict] = None  # COCO RLE in reference-frame coordinates
+    box: Optional[tuple[float, float, float, float]] = None  # x0, y0, x1, y1
+
+
+@dataclass
+class ShapeKeyframe:
+    id: Optional[int]
+    instance: str
+    desktop: int
+    view: str
+    pose_segment: int
+    anchor_step: int  # latest logical step this shape applies to
+    placement: str = Placement.IN_CHASSIS.value
+    geom_type: str = "mask"  # mask | box
+    parts: list[ShapePart] = field(default_factory=list)
+    amodal_complete: bool = True
+    source: str = "manual"  # manual | sam | model:<name>@<ver> | labelstudio
+    draft_id: Optional[int] = None
+    version: int = 1
+    edit_count: int = 0
+    edit_time_ms: int = 0
+
+
+@dataclass
+class ZOrderRec:
+    desktop: int
+    view: str
+    pose_segment: int
+    order: list[tuple[str, str]]  # (instance_key, part_name), bottom -> top
+    version: int = 1
+
+
+@dataclass(frozen=True)
+class PairOverride:
+    desktop: int
+    view: str
+    pose_segment: int
+    above: str
+    below: str
+
+
+@dataclass
+class OccluderMask:
+    frame: FrameKey
+    occluder_type: str  # hand | arm | body | tool | cable | other
+    rle: dict
+
+
+@dataclass
+class FrameOverride:
+    frame: FrameKey
+    instance: str
+    visible_rle: Optional[dict] = None
+    visibility: Optional[str] = None
+
+
+@dataclass
+class Similarity:
+    """2-D similarity transform: x' = s * R(theta) * x + t."""
+
+    scale: float = 1.0
+    theta: float = 0.0
+    tx: float = 0.0
+    ty: float = 0.0
+
+    def is_identity(self, eps: float = 1e-9) -> bool:
+        return (
+            abs(self.scale - 1.0) < eps
+            and abs(self.theta) < eps
+            and abs(self.tx) < eps
+            and abs(self.ty) < eps
+        )
