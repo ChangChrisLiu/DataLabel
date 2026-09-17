@@ -380,14 +380,16 @@ def build_cache(index: dict[int, DesktopIndex], cache_dir: str, views=("scan",),
 
     Returns counters plus the manifests: ``copied``, ``skipped``, ``rechosen``,
     ``relabelled``, ``steps``, ``bytes_copied``, ``failures``, ``non_p0`` (every
-    scanner step not represented by ``P_0``, whether written now or already
-    cached), ``manifests`` and ``elapsed_s``.
+    scanner step whose cached image is *not* ``P_0``), ``flagged`` (``P_0`` kept
+    although the burst failed a check - review the burst, not the choice),
+    ``manifests`` and ``elapsed_s``.  Both lists cover every step seen, whether
+    written now or already cached.
     """
     started = time.perf_counter()
     stats: dict[str, Any] = {
         "copied": 0, "skipped": 0, "rechosen": 0, "relabelled": 0, "steps": 0,
-        "bytes_copied": 0, "failures": [], "non_p0": [], "manifests": {},
-        "elapsed_s": 0.0,
+        "bytes_copied": 0, "failures": [], "non_p0": [], "flagged": [],
+        "manifests": {}, "elapsed_s": 0.0,
     }
     wanted = None if desktops is None else set(int(d) for d in desktops)
 
@@ -435,7 +437,10 @@ def build_cache(index: dict[int, DesktopIndex], cache_dir: str, views=("scan",),
                         stats["copied"] += 1
                         stats["bytes_copied"] += os.path.getsize(dest)
                     if record["metrics"] and record["reason"] != "p0":
-                        stats["non_p0"].append({
+                        where = ("non_p0"
+                                 if record["metrics"][record["chosen"]]["p_index"] != 0
+                                 else "flagged")
+                        stats[where].append({
                             "desktop": desktop, "step": key.step, "view": view,
                             "chosen": record["chosen"], "reason": record["reason"],
                             "src": record["src"],
@@ -520,11 +525,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         emit(f"[{time.strftime('%H:%M:%S')}] done steps={stats['steps']} copied={stats['copied']} "
              f"skipped={stats['skipped']} rechosen={stats['rechosen']} "
              f"relabelled={stats['relabelled']} GB={stats['bytes_copied'] / 1e9:.2f} "
-             f"non_p0={len(stats['non_p0'])} failures={len(stats['failures'])} "
-             f"elapsed={stats['elapsed_s'] / 60:.1f}min")
+             f"non_p0={len(stats['non_p0'])} flagged={len(stats['flagged'])} "
+             f"failures={len(stats['failures'])} elapsed={stats['elapsed_s'] / 60:.1f}min")
+        counts: dict[str, int] = {}
+        for item in stats["non_p0"] + stats["flagged"]:
+            counts[item["reason"]] = counts.get(item["reason"], 0) + 1
+        emit(f"  reasons {dict(sorted(counts.items()))}")
         for item in stats["non_p0"]:
             emit(f"  non_p0 D{item['desktop']:02d} s{item['step']:03d} "
                  f"chosen={item['chosen']} reason={item['reason']} src={item['src']}")
+        for item in stats["flagged"]:
+            emit(f"  flagged D{item['desktop']:02d} s{item['step']:03d} "
+                 f"reason={item['reason']} (P_0 kept)")
         for item in stats["failures"]:
             emit(f"  FAIL D{item['desktop']:02d} s{item['step']:03d} {item['view']}: {item['error']}")
     finally:

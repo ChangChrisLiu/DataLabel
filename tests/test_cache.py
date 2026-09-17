@@ -383,6 +383,27 @@ def test_build_cache_copies_the_chosen_non_p0_image(tmp_path):
     assert stats["non_p0"][0]["desktop"] == 7
 
 
+def test_build_cache_separates_a_kept_p0_from_a_real_replacement(tmp_path):
+    """A burst that is saturated throughout keeps P_0, so it belongs in
+    ``flagged`` (review the burst), not in ``non_p0`` (the cache holds another
+    shot) - that is the difference the run report is read for."""
+    index = _scan_index(tmp_path, steps=(1,))
+    burst = index[7].frames[FrameKey(7, 1, "scan")].aux["burst"]
+    for path in burst:
+        img = _texture(seed=1)
+        img[:170] = 255                                  # 66% blown out in every shot
+        assert cv2.imwrite(path, img)
+
+    stats = build_cache(index, str(tmp_path / "cache"))
+    assert stats["non_p0"] == []
+    assert len(stats["flagged"]) == 1
+    assert stats["flagged"][0]["reason"] == "p0_saturated_kept"
+    manifest = json.loads((tmp_path / "cache" / "scan" / "D07" / "manifest.json").read_text("utf-8"))
+    assert manifest["1"]["chosen"] == 0
+    dest = tmp_path / "cache" / "scan" / "D07" / "s001.png"
+    assert dest.read_bytes() == Path(burst[0]).read_bytes()
+
+
 def test_build_cache_is_idempotent(tmp_path):
     index = _scan_index(tmp_path)
     cache = str(tmp_path / "cache")
