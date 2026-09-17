@@ -172,13 +172,16 @@ def remove_small_components(mask: np.ndarray, min_px: int) -> np.ndarray:
 
 
 def tolerant_sym_diff(a: np.ndarray, b: np.ndarray, tol_px: int = 2) -> int:
-    """Symmetric difference of ``a`` and ``b``, ignoring a boundary band.
+    """Symmetric difference of ``a`` and ``b``, ignoring a band around ``a``.
 
-    The band is the dilation of ``boundary(a) | boundary(b)`` by a square
-    kernel of size ``2 * tol_px + 1``; every XOR pixel inside it is treated as
-    an irrelevant re-trace of the same silhouette.  Because the band is grown
-    around *both* boundaries, a pure translation only registers once it
-    exceeds ``2 * tol_px + 1`` pixels.
+    ``a`` is the **reference** mask (the frozen truth): the band is the
+    dilation of ``boundary(a)`` alone by a square kernel of size
+    ``2 * tol_px + 1``, and every XOR pixel inside it is treated as an
+    irrelevant re-trace of the same silhouette.  A pure translation therefore
+    registers as soon as it exceeds ``tol_px`` pixels.
+
+    The function is deliberately **not symmetric** in its arguments -- swapping
+    them measures the difference against the other silhouette's tolerance.
 
     Returns the number of XOR pixels left outside the band.
     """
@@ -189,8 +192,7 @@ def tolerant_sym_diff(a: np.ndarray, b: np.ndarray, tol_px: int = 2) -> int:
     if not xor.any():
         return 0
     tol = max(0, int(tol_px))
-    edges = cv2.bitwise_or(_boundary(am), _boundary(bm))
-    band = cv2.dilate(edges, _square_kernel(2 * tol + 1), borderValue=0)
+    band = cv2.dilate(_boundary(am), _square_kernel(2 * tol + 1), borderValue=0)
     return int(np.count_nonzero(xor.astype(bool) & ~band.astype(bool)))
 
 
@@ -203,8 +205,10 @@ def is_conflict(
 ) -> bool:
     """True when ``new`` differs from ``old`` beyond re-tracing tolerance.
 
-    The change must exceed ``max(area_frac * area(old), min_px)`` pixels of
-    tolerant symmetric difference; ``min_px`` is the floor that keeps tiny
+    ``old`` is passed as the reference mask of :func:`tolerant_sym_diff`, so
+    the tolerance band is measured around the frozen truth.  The change must
+    exceed ``max(area_frac * area(old), min_px)`` pixels of tolerant
+    symmetric difference; ``min_px`` is the floor that keeps tiny
     instances from tripping the check on a couple of pixels.
     """
     threshold = max(area_frac * area(old), float(min_px))
@@ -220,8 +224,11 @@ def mask_to_polygons(mask: np.ndarray, tol: float = 1.0) -> list[list[float]]:
     """Outer contours of a mask as COCO-style flat polygons.
 
     Each component yields one polygon simplified with ``cv2.approxPolyDP``
-    (epsilon ``tol``).  Holes are not representable: only external contours
-    are returned.  Degenerate contours (< 3 points) are dropped.
+    (epsilon ``tol``).  Degenerate contours (< 3 points) are dropped.
+
+    Only external contours are returned, so **holes are not representable**:
+    a polygon round trip fills any enclosed hole and is therefore lossy --
+    use :func:`encode_rle` / :func:`decode_rle` when fidelity matters.
     """
     m = _as_u8(mask)
     if not m.any():
@@ -296,6 +303,9 @@ def paste(dst: np.ndarray, src: np.ndarray, xy: tuple[int, int]) -> None:
     The destination region is *overwritten* (so ``crop``/``paste`` round-trip)
     and anything falling outside ``dst`` is clipped away.  ``dst`` is modified
     in place.
+
+    This is a replace, **not** a union: callers that want to composite layers
+    must OR explicitly (``dst[y:y+h, x:x+w] |= src``).
     """
     s = _as_bool(src)
     x0, y0 = int(xy[0]), int(xy[1])

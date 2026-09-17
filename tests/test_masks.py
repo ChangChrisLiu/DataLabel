@@ -163,17 +163,18 @@ def test_tolerant_sym_diff_ignores_a_one_pixel_shift():
     assert M.tolerant_sym_diff(a, _shift(a, 1, 1)) == 0
 
 
-def test_tolerant_sym_diff_reports_a_five_pixel_shift_at_tol_one():
+def test_tolerant_sym_diff_reports_a_five_pixel_shift():
     a = _square()
-    assert M.tolerant_sym_diff(a, _shift(a, 0, 5), tol_px=1) > 0
+    assert M.tolerant_sym_diff(a, _shift(a, 0, 5)) > 0
 
 
-def test_tolerant_sym_diff_band_absorbs_shifts_up_to_two_tol_plus_one():
-    """The band is grown around *both* boundaries, so a translation only shows
-    up once it exceeds 2*tol_px + 1 pixels (5 px is still absorbed at tol=2)."""
+def test_tolerant_sym_diff_band_absorbs_shifts_up_to_tol_px():
+    """The band is grown around the reference boundary only, so a translation
+    registers as soon as it exceeds tol_px pixels."""
     a = _square()
-    assert M.tolerant_sym_diff(a, _shift(a, 0, 5), tol_px=2) == 0
-    assert M.tolerant_sym_diff(a, _shift(a, 0, 6), tol_px=2) > 0
+    assert M.tolerant_sym_diff(a, _shift(a, 0, 2), tol_px=2) == 0
+    assert M.tolerant_sym_diff(a, _shift(a, 0, 3), tol_px=2) > 0
+    assert M.tolerant_sym_diff(a, _shift(a, 0, 3), tol_px=4) == 0
 
 
 def test_tolerant_sym_diff_grows_with_the_shift():
@@ -183,10 +184,14 @@ def test_tolerant_sym_diff_grows_with_the_shift():
     assert 0 < d6 < d10
 
 
-def test_tolerant_sym_diff_is_symmetric():
-    a = _square()
-    b = _shift(a, 3, 7)
-    assert M.tolerant_sym_diff(a, b) == M.tolerant_sym_diff(b, a)
+def test_tolerant_sym_diff_is_asymmetric_in_its_reference():
+    """The first argument is the reference: its boundary defines the band."""
+    big = _square((64, 64), 10, 10, 30)  # covers 10..39
+    small = _square((64, 64), 14, 14, 22)  # covers 14..35, eroded by 4
+    ref_big = M.tolerant_sym_diff(big, small)
+    ref_small = M.tolerant_sym_diff(small, big)
+    assert ref_big > 0 and ref_small > 0
+    assert ref_big != ref_small
 
 
 def test_is_conflict_false_for_a_one_pixel_shift():
@@ -195,7 +200,14 @@ def test_is_conflict_false_for_a_one_pixel_shift():
 
 
 def test_is_conflict_true_for_a_forty_percent_erosion():
-    """80x80 square eroded to 62x62 -- a 40% area loss well outside the band."""
+    """30x30 square eroded to 23x23 -- a ~41% area loss."""
+    old = _square((64, 64), 10, 10, 30)
+    new = _square((64, 64), 14, 14, 23)
+    assert abs(M.area(new) / M.area(old) - 0.6) < 0.02
+    assert M.is_conflict(old, new) is True
+
+
+def test_is_conflict_true_for_a_forty_percent_erosion_at_a_larger_scale():
     old = _square((128, 128), 20, 20, 80)
     new = _square((128, 128), 29, 29, 62)
     assert abs(M.area(new) / M.area(old) - 0.6) < 0.02
