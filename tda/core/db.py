@@ -101,14 +101,24 @@ class Db:
     # ------------------------------------------------------- desktops / frames
 
     def upsert_desktop(self, desktop: int, meta: dict) -> None:
-        """Insert or update one desktop; keys outside the columns go to meta_json."""
+        """Insert or update one desktop; keys outside the columns go to meta_json.
+
+        The write is a full replacement: a known column missing from ``meta`` is
+        set back to NULL, and the meta_json overflow is rewritten wholesale.
+        """
         rest = dict(meta or {})
         data: dict[str, Any] = {c: rest.pop(c, None) for c in R.DESKTOP_COLUMNS}
         data["meta_json"] = R.dumps(rest) if rest else None
         self._upsert("desktop", {"id": desktop}, data)
 
     def get_desktop(self, desktop: int) -> Optional[dict]:
-        """Desktop meta as a dict (columns + meta_json extras), or None."""
+        """Desktop meta as a dict (columns + meta_json extras), or None.
+
+        Deliberately asymmetric with :meth:`upsert_desktop`: columns that are
+        NULL are left out instead of coming back as ``None``, and the returned
+        dict always carries ``id``. A key stored as ``None`` therefore does not
+        reappear; overflow keys do, unwrapped from meta_json.
+        """
         row = self.conn.execute("SELECT * FROM desktop WHERE id=?", (desktop,)).fetchone()
         if row is None:
             return None
@@ -519,11 +529,16 @@ class Db:
         return str(out)
 
     def _read_lock(self) -> Optional[dict]:
-        """Parse the lock file, or None when it is missing or unreadable."""
+        """Parse the lock file, or None when it is missing, unreadable or not an object.
+
+        A lock whose content is not a JSON object carries no annotator, so it is
+        treated like a stale one and the next ``acquire_lock`` takes it over.
+        """
         try:
-            return json.loads(self._lock_path.read_text(encoding="utf-8"))
+            held = json.loads(self._lock_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+        return held if isinstance(held, dict) else None
 
     def acquire_lock(self, annotator: str) -> None:
         """Take the single-user lock; raises if another annotator holds a fresh one."""

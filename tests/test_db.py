@@ -91,6 +91,33 @@ def test_repository_is_qt_free():
 # --------------------------------------------------------------------------- frames
 
 
+def test_desktop_roundtrip_columns_and_meta_overflow(db: Db):
+    db.upsert_desktop(13, {
+        "brand": "Dell", "model_family": "OptiPlex 7010", "chassis_type": "sff",
+        "notes": "试标机", "operator": "zzh", "psu_watt": 240,
+    })
+    got = db.get_desktop(13)
+    assert got["id"] == 13
+    assert got["brand"] == "Dell" and got["model_family"] == "OptiPlex 7010"
+    assert got["chassis_type"] == "sff" and got["notes"] == "试标机"
+    assert got["operator"] == "zzh" and got["psu_watt"] == 240  # overflow -> meta_json
+    assert "split" not in got  # documented: NULL columns are omitted
+    stored = db.conn.execute("SELECT meta_json, brand FROM desktop WHERE id=13").fetchone()
+    assert json.loads(stored["meta_json"]) == {"operator": "zzh", "psu_watt": 240}
+    assert "试标机" not in (stored["meta_json"] or "")  # known key stays a column
+
+    db.upsert_desktop(13, {"brand": "Dell", "split": "train", "operator": "lab2"})
+    again = db.get_desktop(13)
+    assert again["split"] == "train" and again["operator"] == "lab2"
+    assert "model_family" not in again  # full replacement clears dropped columns
+    assert "psu_watt" not in again
+    assert db.conn.execute("SELECT count(*) FROM desktop").fetchone()[0] == 1
+
+    db.upsert_desktop(14, {})
+    assert db.get_desktop(14) == {"id": 14}
+    assert db.get_desktop(99) is None
+
+
 def test_upsert_frame_get_frame_roundtrip(db: Db):
     db.upsert_desktop(13, {"brand": "Dell", "model_family": "OptiPlex 7010", "notes": "试标"})
     key = FrameKey(13, 2, "scan")
@@ -483,6 +510,17 @@ def test_stale_lock_is_taken_over(db: Db, tmp_db_path: str):
     db.acquire_lock("zzh")
     assert json.loads(lock.read_text(encoding="utf-8"))["annotator"] == "zzh"
     db.release_lock()
+
+
+@pytest.mark.parametrize("content", ['"zzh"', "[1, 2]", "42", "null", "not json at all", ""])
+def test_malformed_lock_is_taken_over(tmp_db_path: str, content: str):
+    db = Db(tmp_db_path)
+    lock = Path(tmp_db_path + ".lock")
+    lock.write_text(content, encoding="utf-8")
+    db.acquire_lock("zzh")  # must not raise, whatever the file holds
+    assert json.loads(lock.read_text(encoding="utf-8"))["annotator"] == "zzh"
+    db.release_lock()
+    db.close()
 
 
 def test_close_is_idempotent(tmp_db_path: str):
