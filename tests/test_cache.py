@@ -168,32 +168,42 @@ def test_choose_scan_image_skips_a_dark_p0_and_takes_the_sharpest():
     assert choose_scan_image(metrics) == (7, "p0_dark")
 
 
+def test_choose_scan_image_skips_a_p0_darker_than_a_real_scan_ever_is():
+    # D01 step 7: the scanner lamp failed on P_0, which came out at mean 28
+    # while the rest of the burst sat at 156.
+    metrics = [_m(i, mean=156.0) for i in range(10)]
+    metrics[0]["mean"] = 28.0
+    metrics[8]["lap_var"] = 2500.0
+    assert choose_scan_image(metrics) == (8, "p0_dark")
+
+
 def test_choose_scan_image_skips_a_blown_out_p0():
     metrics = [_m(i) for i in range(10)]
-    metrics[0]["sat_frac"] = 0.35
+    metrics[0]["sat_frac"] = 0.7
     metrics[4]["lap_var"] = 3000.0
     assert choose_scan_image(metrics) == (4, "p0_saturated")
 
 
-def test_choose_scan_image_skips_a_p0_that_deviates_from_the_burst_median():
+def test_choose_scan_image_skips_a_p0_with_a_gross_scene_difference():
     metrics = [_m(i) for i in range(10)]
-    metrics[0]["dist_to_median"] = 20.0
+    metrics[0]["dist_to_median"] = 30.0            # e.g. an arm over the board
     metrics[6]["lap_var"] = 2000.0
     assert choose_scan_image(metrics) == (6, "p0_outlier")
 
 
-def test_choose_scan_image_tolerates_burst_noise_near_twice_the_median():
-    """A burst whose median dist is ~0 must not reject every image (synthetic
-    and near-identical real bursts); only real deviations count."""
-    metrics = [_m(i, dist=0.0) for i in range(10)]
-    metrics[0]["dist_to_median"] = 0.4
+def test_choose_scan_image_keeps_a_p0_that_only_drifts_from_the_burst_median():
+    """The scanner lamp drifts through a burst, so P_0 is routinely a couple of
+    gray levels off the median - decision C10 says that still means P_0."""
+    metrics = [_m(i, dist=0.5) for i in range(10)]
+    metrics[0]["dist_to_median"] = 2.0
+    metrics[7]["lap_var"] = 5000.0
     assert choose_scan_image(metrics) == (0, "p0")
 
 
 def test_choose_scan_image_ignores_alternatives_that_fail_the_check():
     metrics = [_m(i) for i in range(10)]
     metrics[0]["mean"] = 5.0
-    metrics[9].update(lap_var=9999.0, sat_frac=0.5)   # sharpest but blown out
+    metrics[9].update(lap_var=9999.0, sat_frac=0.8)   # sharpest but blown out
     metrics[3]["lap_var"] = 3000.0
     assert choose_scan_image(metrics) == (3, "p0_dark")
 
@@ -224,14 +234,14 @@ def test_choose_scan_image_keeps_a_single_image_burst():
     assert reason.startswith("p0_dark")
 
 
-def test_choose_scan_image_accepts_a_burst_that_is_saturated_throughout():
-    """The white reference board saturates ~30% of every real scanner frame; a
-    burst that is uniformly bright is the scene, not an exposure failure."""
-    metrics = [_m(i, sat=0.33 + 0.002 * i) for i in range(10)]
+def test_choose_scan_image_accepts_the_normal_brightness_of_the_white_board():
+    """The white reference board saturates ~30% of every real scanner frame
+    (median 0.29 measured over 396 bursts), which is not an exposure failure."""
+    metrics = [_m(i, mean=156.0, sat=0.33 + 0.002 * i, dist=0.5 + 0.1 * i) for i in range(10)]
     assert choose_scan_image(metrics) == (0, "p0")
 
 
-def test_choose_scan_image_still_skips_a_p0_blown_out_above_its_burst():
+def test_choose_scan_image_still_skips_a_p0_that_is_really_blown_out():
     metrics = [_m(i, sat=0.33) for i in range(10)]
     metrics[0]["sat_frac"] = 0.9
     metrics[5]["lap_var"] = 2600.0
@@ -259,7 +269,16 @@ def test_choose_scan_image_on_a_burst_whose_p0_is_dark(tmp_path):
     idx, reason = choose_scan_image(metrics)
     assert reason == "p0_dark"
     assert idx != 0
-    assert metrics[idx]["mean"] > 20
+    assert metrics[idx]["mean"] > 40
+
+
+def test_choose_scan_image_on_a_burst_with_an_arm_over_p0(tmp_path):
+    imgs = [_texture(seed=i) for i in range(10)]
+    imgs[0][40:220, 30:230] = 220                    # an arm reaching over the board
+    metrics = burst_metrics(_write_burst(tmp_path / "b", imgs))
+    idx, reason = choose_scan_image(metrics)
+    assert reason == "p0_outlier"
+    assert idx != 0
 
 
 def test_choose_scan_image_on_a_burst_with_no_p0(tmp_path):
@@ -397,6 +416,47 @@ def test_build_cache_resumes_after_an_interrupted_desktop(tmp_path, monkeypatch)
 
     stats = build_cache(index, cache)
     assert (stats["skipped"], stats["copied"]) == (2, 1)
+
+
+def test_build_cache_recheck_replaces_a_stale_choice(tmp_path):
+    """A re-run re-decides from the metrics already in the manifest (no source
+    reads), so a changed selection rule fixes the cached file and the record."""
+    index = _scan_index(tmp_path, steps=(1,))
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    mpath = tmp_path / "cache" / "scan" / "D07" / "manifest.json"
+    manifest = json.loads(mpath.read_text("utf-8"))
+    burst = index[7].frames[FrameKey(7, 1, "scan")].aux["burst"]
+    manifest["1"].update(chosen=4, reason="p0_outlier", src=burst[4])   # stale decision
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+    dest = tmp_path / "cache" / "scan" / "D07" / "s001.png"
+    dest.write_bytes(Path(burst[4]).read_bytes())
+
+    stats = build_cache(index, cache)
+    assert stats["rechosen"] == 1
+    assert stats["copied"] == 1
+    assert stats["skipped"] == 0
+    assert dest.read_bytes() == Path(burst[0]).read_bytes()
+    rec = json.loads(mpath.read_text("utf-8"))["1"]
+    assert (rec["chosen"], rec["reason"], rec["src"]) == (0, "p0", burst[0])
+
+
+def test_build_cache_recheck_relabels_without_recopying(tmp_path):
+    """Same image, different reason: only the manifest needs updating."""
+    index = _scan_index(tmp_path, steps=(1,))
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    mpath = tmp_path / "cache" / "scan" / "D07" / "manifest.json"
+    manifest = json.loads(mpath.read_text("utf-8"))
+    manifest["1"]["reason"] = "p0_saturated_kept"          # reason from an old rule
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+    dest = tmp_path / "cache" / "scan" / "D07" / "s001.png"
+    stamp = dest.stat().st_mtime_ns
+
+    stats = build_cache(index, cache)
+    assert (stats["copied"], stats["rechosen"], stats["relabelled"]) == (0, 0, 1)
+    assert dest.stat().st_mtime_ns == stamp
+    assert json.loads(mpath.read_text("utf-8"))["1"]["reason"] == "p0"
 
 
 def test_build_cache_recopies_a_truncated_file(tmp_path):

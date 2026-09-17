@@ -26,7 +26,6 @@ import json
 import os
 import re
 import shutil
-import statistics
 import time
 from typing import Any, Callable, Iterable, Optional
 
@@ -45,15 +44,14 @@ DOWNSCALE = 8  # metrics are computed on a 1/8 copy (1600^2 -> 200^2) for speed
 SAT_LEVEL = 250  # a pixel counts as saturated when every channel is >= this
 
 # --- burst selection (thresholds pinned by the user, see module docstring)
-MEAN_MIN = 20.0  # mean gray below this -> unexposed
-SAT_MAX = 0.2  # saturated fraction above this -> blown out ...
-SAT_MARGIN = 0.05  # ... but only when it also exceeds the burst's own level by
-#                    this much: the white reference board saturates ~30% of a
-#                    perfectly good scanner frame (measured over 66 desktops),
-#                    so the absolute threshold alone rejects normal bursts whole
-DIST_FACTOR = 2.0  # dist_to_median above this * the burst median -> outlier
-DIST_FLOOR = 1.0  # ... but never below one gray level: a near-identical burst
-#                   has a median of ~0, which would otherwise reject everything
+# Only a gross failure may override decision C10 ("use P_0"); the thresholds are
+# absolute, because within a burst the scanner lamp drifts by a gray level or
+# two and the white reference board saturates ~30% of every good frame (median
+# 0.29, up to 0.58, measured over 396 real bursts).
+MEAN_MIN = 40.0  # mean gray below this -> unexposed (a lamp failure sits at ~28)
+SAT_MAX = 0.5  # saturated fraction above this -> blown out
+DIST_MAX = 20.0  # mean abs difference to the burst median above this gray levels
+#                  -> a gross scene difference, e.g. a hand or tool in the shot
 
 # --- cache layout --------------------------------------------------------
 VIEW_EXT = {"scan": "png", "rs": "png", "oak1": "jpg", "oak2": "jpg"}
@@ -141,13 +139,13 @@ def burst_metrics(paths: list[str]) -> list[dict]:
 # ---------------------------------------------------------------------------
 # burst selection
 # ---------------------------------------------------------------------------
-def _reject_kind(rec: dict, dist_thr: float, sat_thr: float) -> Optional[str]:
+def _reject_kind(rec: dict) -> Optional[str]:
     """Why this shot is unusable (``dark``/``saturated``/``outlier``), or None."""
     if float(rec.get("mean", 0.0)) < MEAN_MIN:
         return "dark"
-    if float(rec.get("sat_frac", 0.0)) > sat_thr:
+    if float(rec.get("sat_frac", 0.0)) > SAT_MAX:
         return "saturated"
-    if float(rec.get("dist_to_median", 0.0)) > dist_thr:
+    if float(rec.get("dist_to_median", 0.0)) > DIST_MAX:
         return "outlier"
     return None
 
@@ -156,23 +154,18 @@ def choose_scan_image(metrics: list[dict]) -> tuple[int, str]:
     """Pick the shot that represents the step; return its *position* and why.
 
     ``P_0`` wins unless it fails :func:`_reject_kind`, in which case the sharpest
-    (highest ``lap_var``) shot that passes is used.  Reasons are ``"p0"``,
-    ``"p0_missing"`` (no ``P_0`` in the burst - lowest available number that
-    passes), and ``"p0_dark"``/``"p0_saturated"``/``"p0_outlier"`` when ``P_0``
-    was replaced.  When *no* shot passes the check the check carries no
-    information, so the default wins anyway and the reason gets a ``"_kept"``
+    (highest ``lap_var``) shot that passes the same checks is used.  Reasons are
+    ``"p0"``, ``"p0_missing"`` (no ``P_0`` in the burst - lowest available number
+    that passes), and ``"p0_dark"``/``"p0_saturated"``/``"p0_outlier"`` when
+    ``P_0`` was replaced.  When *no* shot passes, the checks cannot say which
+    shot is better, so the default wins anyway and the reason gets a ``"_kept"``
     suffix (``"p0_missing_fallback"`` for a burst without a ``P_0``); those are
     the steps to review.
     """
     if not metrics:
         raise ValueError("choose_scan_image() needs at least one metrics record")
 
-    dists = [float(m.get("dist_to_median", 0.0)) for m in metrics]
-    dist_thr = max(DIST_FACTOR * statistics.median(dists), DIST_FLOOR)
-    sats = [float(m.get("sat_frac", 0.0)) for m in metrics]
-    sat_thr = max(SAT_MAX, statistics.median(sats) + SAT_MARGIN)
-    passing = [i for i, m in enumerate(metrics)
-               if _reject_kind(m, dist_thr, sat_thr) is None]
+    passing = [i for i, m in enumerate(metrics) if _reject_kind(m) is None]
 
     def p_index(i: int) -> int:
         return int(metrics[i].get("p_index", i))
@@ -189,7 +182,7 @@ def choose_scan_image(metrics: list[dict]) -> tuple[int, str]:
     if p0 in passing:
         return p0, "p0"
 
-    reason = f"p0_{_reject_kind(metrics[p0], dist_thr, sat_thr)}"
+    reason = f"p0_{_reject_kind(metrics[p0])}"
     alternatives = [i for i in passing if i != p0]
     if alternatives:
         return sharpest(alternatives), reason
@@ -330,6 +323,25 @@ def _select_source(frame: FrameFile, view: str) -> dict:
     return {"chosen": 0, "reason": SINGLE_REASON, "metrics": [], "src": _norm(frame.path)}
 
 
+def _redecide(record: dict, view: str) -> Optional[dict]:
+    """Re-run the choice on the metrics already in ``record``; None if unchanged.
+
+    The metrics do not depend on the selection rule, so a cached step can be
+    re-decided without touching the source drive again - that is how a re-run
+    picks up a changed rule.
+    """
+    if view != "scan" or not record.get("metrics"):
+        return None
+    chosen, reason = choose_scan_image(record["metrics"])
+    if chosen == record.get("chosen") and reason == record.get("reason"):
+        return None
+    updated = dict(record)
+    updated["chosen"] = chosen
+    updated["reason"] = reason
+    updated["src"] = record["metrics"][chosen]["path"]
+    return updated
+
+
 def _up_to_date(src: str, dest: str) -> bool:
     """True when ``dest`` already holds a full copy of ``src`` (same byte size)."""
     try:
@@ -356,22 +368,26 @@ def build_cache(index: dict[int, DesktopIndex], cache_dir: str, views=("scan",),
     ``{step: {"chosen", "reason", "metrics", "src"}}``.
 
     Re-runs are cheap and idempotent: a step whose manifest record is present and
-    whose cached file already has the source's byte size is skipped without
-    re-reading the burst.  The manifest is flushed every
-    :data:`MANIFEST_FLUSH_EVERY` copies as well as at the end of each desktop, so
-    an interrupted run resumes instead of redoing the desktop it was in.  A step
-    that cannot be read is recorded in ``failures`` and does not stop the run.
-    ``progress(desktop, step, view)`` is called once per step, after it is
-    handled; an exception it raises is not caught.
+    whose cached file already has the source's byte size is not read again, only
+    *re-decided* from the metrics in its record - so a re-run after a change to
+    :func:`choose_scan_image` replaces the cached file (``rechosen``) or just the
+    recorded reason (``relabelled``) without touching the source drive.  The
+    manifest is flushed every :data:`MANIFEST_FLUSH_EVERY` copies as well as at
+    the end of each desktop, so an interrupted run resumes instead of redoing the
+    desktop it was in.  A step that cannot be read is recorded in ``failures``
+    and does not stop the run.  ``progress(desktop, step, view)`` is called once
+    per step, after it is handled; an exception it raises is not caught.
 
-    Returns counters plus the manifests: ``copied``, ``skipped``, ``steps``,
-    ``bytes_copied``, ``failures``, ``non_p0`` (scanner steps not represented by
-    ``P_0``), ``manifests`` and ``elapsed_s``.
+    Returns counters plus the manifests: ``copied``, ``skipped``, ``rechosen``,
+    ``relabelled``, ``steps``, ``bytes_copied``, ``failures``, ``non_p0`` (every
+    scanner step not represented by ``P_0``, whether written now or already
+    cached), ``manifests`` and ``elapsed_s``.
     """
     started = time.perf_counter()
     stats: dict[str, Any] = {
-        "copied": 0, "skipped": 0, "steps": 0, "bytes_copied": 0,
-        "failures": [], "non_p0": [], "manifests": {}, "elapsed_s": 0.0,
+        "copied": 0, "skipped": 0, "rechosen": 0, "relabelled": 0, "steps": 0,
+        "bytes_copied": 0, "failures": [], "non_p0": [], "manifests": {},
+        "elapsed_s": 0.0,
     }
     wanted = None if desktops is None else set(int(d) for d in desktops)
 
@@ -395,9 +411,22 @@ def build_cache(index: dict[int, DesktopIndex], cache_dir: str, views=("scan",),
                 dest = cache_path(cache_dir, key, ext)
                 step = str(key.step)
                 try:
-                    known = manifest.get(step)
-                    if known and _up_to_date(known.get("src", ""), dest):
-                        stats["skipped"] += 1
+                    record = manifest.get(step)
+                    if record and _up_to_date(record.get("src", ""), dest):
+                        again = _redecide(record, view)
+                        if again is None:
+                            stats["skipped"] += 1
+                        elif again["src"] != record["src"]:  # another shot wins now
+                            _copy(again["src"], dest)
+                            manifest[step] = record = again
+                            dirty = True
+                            stats["copied"] += 1
+                            stats["rechosen"] += 1
+                            stats["bytes_copied"] += os.path.getsize(dest)
+                        else:  # same image, new reason: only the record changes
+                            manifest[step] = record = again
+                            dirty = True
+                            stats["relabelled"] += 1
                     else:
                         record = _select_source(frames[key], view)
                         _copy(record["src"], dest)
@@ -405,12 +434,12 @@ def build_cache(index: dict[int, DesktopIndex], cache_dir: str, views=("scan",),
                         dirty = True
                         stats["copied"] += 1
                         stats["bytes_copied"] += os.path.getsize(dest)
-                        if record["metrics"] and record["reason"] != "p0":
-                            stats["non_p0"].append({
-                                "desktop": desktop, "step": key.step, "view": view,
-                                "chosen": record["chosen"], "reason": record["reason"],
-                                "src": record["src"],
-                            })
+                    if record["metrics"] and record["reason"] != "p0":
+                        stats["non_p0"].append({
+                            "desktop": desktop, "step": key.step, "view": view,
+                            "chosen": record["chosen"], "reason": record["reason"],
+                            "src": record["src"],
+                        })
                 except Exception as exc:  # a broken source must not stop the run
                     stats["failures"].append({
                         "desktop": desktop, "step": key.step, "view": view,
@@ -489,7 +518,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         stats = build_cache(index, cache_dir, views=views, desktops=desktops, progress=on_step)
         emit(f"[{time.strftime('%H:%M:%S')}] done steps={stats['steps']} copied={stats['copied']} "
-             f"skipped={stats['skipped']} GB={stats['bytes_copied'] / 1e9:.2f} "
+             f"skipped={stats['skipped']} rechosen={stats['rechosen']} "
+             f"relabelled={stats['relabelled']} GB={stats['bytes_copied'] / 1e9:.2f} "
              f"non_p0={len(stats['non_p0'])} failures={len(stats['failures'])} "
              f"elapsed={stats['elapsed_s'] / 60:.1f}min")
         for item in stats["non_p0"]:
