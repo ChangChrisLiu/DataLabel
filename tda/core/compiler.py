@@ -152,11 +152,22 @@ def select_keyframe(kfs: list[ShapeKeyframe], step: int) -> Optional[ShapeKeyfra
 # --------------------------------------------------------------------------- #
 # geometry
 # --------------------------------------------------------------------------- #
-def _fit(mask: np.ndarray, hw: tuple[int, int]) -> np.ndarray:
-    """A mask on the frame canvas: as-is when it already fits, else padded."""
-    if mask.shape == hw:
-        return mask
-    return masks.warp_mask(mask, Similarity(), hw)
+def _wrong_size(rle: Optional[dict], hw: tuple[int, int]) -> bool:
+    """Is this RLE's own ``size`` something other than the frame's ``hw``?
+
+    Every mask the compiler is handed -- a part, an occluder, an override --
+    lives in the coordinates of the frame it belongs to, so a different size is
+    an error in the inputs rather than something to pad or scale into place:
+    there is no way to know *where* on the frame the smaller mask was meant to
+    sit. The caller reports it and drops that mask. Read from the RLE dict, so
+    nothing has to be decoded to find out.
+    """
+    if not rle:
+        return False
+    size = rle.get("size")
+    if size is None:
+        return False
+    return (int(size[0]), int(size[1])) != hw
 
 
 def _box_corners(box, transform: Similarity) -> list[float]:
@@ -187,11 +198,15 @@ def _part_mask(
 
     An RLE is decoded and warped (identity is a fast path: no warp at all); a
     part that carries only a box is rasterised from its transformed corners.
+    An RLE whose own size is not ``hw`` yields ``None`` as well -- see
+    :func:`_wrong_size`; the mask loop reports that case before asking.
     """
     if part.rle is not None:
+        if _wrong_size(part.rle, hw):
+            return None
         mask = masks.decode_rle(part.rle)
         if transform.is_identity():
-            return _fit(mask, hw)
+            return mask
         return masks.warp_mask(mask, transform, hw)
     if part.box is not None:
         return masks.polygons_to_mask([_box_corners(part.box, transform)], hw)
@@ -263,6 +278,7 @@ def compile_frame(
     compiler_version: str = "1",
     *,
     placements: Optional[dict[str, str]] = None,
+    pose_segment: Optional[int] = None,
 ) -> CompiledFrame:
     """Compile one frame: steps 3-7 of spec 3.3.
 
@@ -279,10 +295,10 @@ def compile_frame(
         provide the default placement, because the geometry actually produced
         is the one the selected keyframe describes (``geom_type``).
     keyframes:
-        ``instance -> keyframes``, which may hold other views and both
-        placement chains; they are filtered by ``key.desktop``, ``key.view``
-        and the instance's placement before :func:`select_keyframe` runs. The
-        caller is expected to have narrowed them to one pose segment.
+        ``instance -> keyframes``, which may hold other views, both placement
+        chains and several pose segments; they are filtered by ``key.desktop``,
+        ``key.view``, the instance's placement and ``pose_segment`` before
+        :func:`select_keyframe` runs.
     zorder, overrides:
         The global order and the pairwise overrides of this
         ``(view, pose_segment)``.
@@ -305,13 +321,22 @@ def compile_frame(
         chain and the occlusion group. ``None`` (the default) means
         ``in_chassis`` for every instance except the ones ``needs`` marks as
         ``"box"``.
+    pose_segment:
+        The pose segment this frame belongs to. Shapes of two segments are
+        drawn in different reference frames and are not comparable, so when
+        this is left ``None`` and an instance's chain spans more than one
+        segment, that is reported as ``pose_segment_ambiguous:<instance>`` and
+        the highest segment is used.
 
     Notes
     -----
     Bench and chassis instances are composited separately, so they never
-    occlude each other however the z-order lists them. A ``visibility`` of
-    ``out_of_view`` -- from an override, or from a shape that is missing
-    altogether -- leaves neither a visible mask nor a box behind.
+    occlude each other however the z-order lists them -- but two bench
+    instances do occlude each other, and the frame's occluders are subtracted
+    from every instance's visible mask, bench included (spec 3.3 step 6).
+    A ``visibility`` of ``out_of_view`` -- from an override, or from a shape
+    that is missing altogether -- leaves neither a visible mask nor a box
+    behind.
     """
     canvas = (int(hw[0]), int(hw[1]))
     problems: list[str] = []
@@ -328,6 +353,14 @@ def compile_frame(
             and kf.desktop == key.desktop
             and kf.placement == placement_of[inst]
         ]
+        if pose_segment is not None:
+            chain = [kf for kf in chain if kf.pose_segment == pose_segment]
+        elif len({kf.pose_segment for kf in chain}) > 1:
+            # shapes of two pose segments are not comparable: the caller must
+            # say which one this frame is in. Newest segment, and a problem.
+            problems.append(f"pose_segment_ambiguous:{inst}")
+            newest = max(kf.pose_segment for kf in chain)
+            chain = [kf for kf in chain if kf.pose_segment == newest]
         selected[inst] = select_keyframe(chain, key.step)
 
     # --- step 4: transform the shapes into frame coordinates --------------- #
@@ -353,6 +386,9 @@ def compile_frame(
         kinds[inst] = GEOM_MASK
         amodal = np.zeros(canvas, dtype=bool)
         for part in kf.parts:
+            if _wrong_size(part.rle, canvas):
+                problems.append(f"shape_size_mismatch:{inst}/{part.name}")
+                continue
             mask = _part_mask(part, transform, canvas)
             if mask is None:
                 continue
@@ -367,9 +403,11 @@ def compile_frame(
 
     # --- step 5: paint each group top-down --------------------------------- #
     visibles = {inst: np.zeros(canvas, dtype=bool) for inst in amodals}
+    painted: dict[str, list[LayerKey]] = {}
     for group in sorted(groups):
         bottom_up, group_problems = group_order(groups[group], zorder, overrides)
         problems.extend(group_problems)
+        painted[group] = bottom_up
         claimed = np.zeros(canvas, dtype=bool)
         for layer in reversed(bottom_up):  # topmost layer claims first
             mask = layer_masks[layer]
@@ -380,7 +418,10 @@ def compile_frame(
     frame_occluders = [occ for occ in occluders if occ.frame == key]
     occluded = None
     for occ in frame_occluders:
-        mask = _fit(masks.decode_rle(occ.rle), canvas)
+        if _wrong_size(occ.rle, canvas):
+            problems.append(f"shape_size_mismatch:occluder/{occ.occluder_type}")
+            continue
+        mask = masks.decode_rle(occ.rle)
         occluded = mask if occluded is None else (occluded | mask)
     if occluded is not None:
         keep = ~occluded
@@ -397,26 +438,41 @@ def compile_frame(
         forced = override.visibility if override is not None else None
         kind = kinds[inst]
 
+        # a "just this frame" visible mask, shared by all three branches
+        patch = None
+        if override is not None and override.visible_rle is not None:
+            if _wrong_size(override.visible_rle, canvas):
+                problems.append(f"shape_size_mismatch:{inst}/override")
+            else:
+                patch = masks.decode_rle(override.visible_rle)
+
         if kind == _MISSING:
+            # no shape to composite, but an override may still say what is
+            # visible here; the missing keyframe stays reported either way
+            label = forced or (
+                OUT_OF_VIEW if patch is None else derive_visibility(patch, None, 0.0)
+            )
+            visible = None if label == OUT_OF_VIEW else patch
             compiled[inst] = CompiledInstance(
                 instance=inst,
-                visible=None,
-                box=None,
+                visible=visible,
+                box=None if visible is None else masks.bbox(visible),
                 amodal=None,
                 occlusion_ratio=0.0,
-                visibility=forced or OUT_OF_VIEW,
+                visibility=label,
                 placement=placement,
                 keyframe_id=kf_id,
             )
             continue
 
         if kind == GEOM_BOX:
-            visible = None
-            box = boxes.get(inst)
-            if override is not None and override.visible_rle is not None:
-                visible = _fit(masks.decode_rle(override.visible_rle), canvas)
-                box = masks.bbox(visible)
-            label = forced or Visibility.VISIBLE.value
+            visible = patch
+            box = boxes.get(inst) if patch is None else masks.bbox(patch)
+            label = forced or (
+                Visibility.VISIBLE.value
+                if patch is None
+                else derive_visibility(patch, None, 0.0)
+            )
             if label == OUT_OF_VIEW:
                 visible, box = None, None
             compiled[inst] = CompiledInstance(
@@ -432,9 +488,7 @@ def compile_frame(
             continue
 
         amodal = amodals[inst]
-        visible = visibles[inst]
-        if override is not None and override.visible_rle is not None:
-            visible = _fit(masks.decode_rle(override.visible_rle), canvas)
+        visible = visibles[inst] if patch is None else patch
         ratio = _occlusion_ratio(visible, amodal)
         label = forced or derive_visibility(visible, amodal, ratio)
         box = masks.bbox(visible)
@@ -464,10 +518,12 @@ def compile_frame(
             placements=placement_of,
             selected=selected,
             zorder=zorder,
+            layer_order=painted,
             overrides=overrides,
             occluders=frame_occluders,
             frame_overrides=frame_overrides,
             transform=transform,
+            pose_segment=pose_segment,
             compiler_version=compiler_version,
         ),
     )

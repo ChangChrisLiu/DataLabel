@@ -109,27 +109,33 @@ def _rle_digest(rle: Optional[dict]) -> Optional[str]:
     return None if counts is None else _sha1(counts)
 
 
-def _keyframe_token(kf: ShapeKeyframe):
-    """What identifies a keyframe's *content* in the hash.
+def _keyframe_token(kf: ShapeKeyframe) -> list:
+    """What identifies a keyframe in the hash: ``[id, version, content]``.
 
-    A saved keyframe is identified by its ``id`` (its shape cannot change
-    without a version bump). A draft that has never been written has no id, so
-    it contributes a digest of its parts instead -- otherwise two different
-    drafts of the same instance would hash the same.
+    The content digest covers the parts (name, sha1 of the RLE counts, box) and
+    the fields that decide where the shape applies, so an in-place edit that
+    forgets to bump ``version`` -- or a draft that has no ``id`` at all -- still
+    changes the hash. ``id`` and ``version`` are kept alongside it because they
+    are what the rest of the system versions a shape by.
     """
-    if kf.id is not None:
-        return int(kf.id)
     parts = [
         [part.name, _rle_digest(part.rle), None if part.box is None else list(part.box)]
         for part in kf.parts
     ]
-    return _sha1(
+    content = _sha1(
         json.dumps(
-            [kf.anchor_step, kf.geom_type, kf.placement, sorted(parts, key=str)],
+            [
+                kf.anchor_step,
+                kf.geom_type,
+                kf.placement,
+                kf.pose_segment,
+                sorted(parts, key=str),
+            ],
             sort_keys=True,
             separators=(",", ":"),
         )
     )
+    return [None if kf.id is None else int(kf.id), int(kf.version), content]
 
 
 def _round(value: float) -> float:
@@ -146,22 +152,26 @@ def input_hash(
     placements: dict[str, str],
     selected: dict[str, Optional[ShapeKeyframe]],
     zorder: ZOrderRec,
+    layer_order: dict[str, list[tuple[str, str]]],
     overrides: list[PairOverride],
     occluders: list[OccluderMask],
     frame_overrides: dict[str, FrameOverride],
     transform: Similarity,
+    pose_segment: Optional[int],
     compiler_version: str,
 ) -> str:
     """sha1 over a canonical JSON of every input the compilation depends on.
 
     Contents, all of them sorted so dict and list order cannot leak in:
 
-    * the frame key and canvas size, and the ``compiler_version``;
+    * the frame key and canvas size, the ``pose_segment`` and the
+      ``compiler_version``;
     * ``needs`` and the resolved ``placements`` as sorted items;
-    * per instance the *selected* keyframe's id (or content digest) and
-      ``version`` -- an edit elsewhere in the chain cannot disturb this frame;
-    * the z-order's ``version`` (its rows are edited through that version, like
-      the keyframes' shapes are through theirs);
+    * per instance the *selected* keyframe's ``[id, version, content digest]``
+      (see :func:`_keyframe_token`) -- an edit elsewhere in the chain cannot
+      disturb this frame, but an in-place edit of *this* shape always shows;
+    * the z-order's ``version`` **and** the layer order actually painted, per
+      group, so reordering the rows without bumping the version still shows;
     * the ``(above, below)`` pairs of the overrides, deduplicated;
     * for every occluder of *this* frame its type and the sha1 of its RLE
       counts; occluders of other frames are not inputs at all;
@@ -175,17 +185,18 @@ def input_hash(
         "compiler_version": str(compiler_version),
         "key": [int(key.desktop), int(key.step), str(key.view)],
         "hw": [int(hw[0]), int(hw[1])],
+        "pose_segment": None if pose_segment is None else int(pose_segment),
         "needs": sorted((str(k), str(v)) for k, v in needs.items()),
         "placements": sorted((str(k), str(v)) for k, v in placements.items()),
         "keyframes": sorted(
-            [
-                inst,
-                None if kf is None else _keyframe_token(kf),
-                None if kf is None else int(kf.version),
-            ]
+            [inst, None if kf is None else _keyframe_token(kf)]
             for inst, kf in selected.items()
         ),
         "zorder_version": int(zorder.version),
+        "layer_order": sorted(
+            [group, [[layer[0], layer[1]] for layer in layers]]
+            for group, layers in layer_order.items()
+        ),
         "overrides": sorted({(str(o.above), str(o.below)) for o in overrides}),
         "occluders": sorted(
             [str(o.occluder_type), _rle_digest(o.rle) or ""] for o in occluders

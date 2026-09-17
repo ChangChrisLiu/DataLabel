@@ -76,39 +76,66 @@ def above(
 
 
 def _find_cycles(inst_edges: dict[str, set[str]]) -> list[str]:
-    """``zorder_cycle:...`` problems for the cycles in the override graph.
+    """One ``zorder_cycle:<instances>`` problem per cyclic component.
 
-    Edges point from the lower instance to the higher one. Every cyclic
-    component yields at least one problem, naming the instances of one concrete
-    cycle, rotated to start at the lexicographically smallest one so the string
-    does not depend on where the walk began.
+    Edges point from the lower instance to the higher one, so a strongly
+    connected component of more than one node is a set of overrides that cannot
+    all hold at once. Each such component is reported once, its instances
+    sorted, e.g. ``zorder_cycle:A,B``; a node that merely points *into* a cycle
+    is not part of it and is not named.
+
+    This is Tarjan's algorithm, iterative (an explicit work stack rather than
+    recursion) so that neither a deep override chain nor a component reached
+    from several roots can disturb the traversal.
     """
-    found: list[str] = []
-    state: dict[str, int] = {}
-    stack: list[str] = []
+    order: dict[str, int] = {}  # discovery index
+    low: dict[str, int] = {}
+    on_stack: set[str] = set()
+    scc_stack: list[str] = []
+    problems: list[str] = []
+    counter = 0
+
+    def push(node: str, work: list) -> None:
+        nonlocal counter
+        order[node] = low[node] = counter
+        counter += 1
+        scc_stack.append(node)
+        on_stack.add(node)
+        work.append((node, iter(sorted(inst_edges.get(node, ())))))
+
     nodes = set(inst_edges) | {n for targets in inst_edges.values() for n in targets}
-
-    def walk(node: str) -> bool:
-        state[node] = 1
-        stack.append(node)
-        for nxt in sorted(inst_edges.get(node, ())):
-            if state.get(nxt, 0) == 0:
-                if walk(nxt):
-                    return True
-            elif state[nxt] == 1:
-                cycle = stack[stack.index(nxt) :]
-                start = cycle.index(min(cycle))
-                found.append("zorder_cycle:" + ",".join(cycle[start:] + cycle[:start]))
-                return True
-        stack.pop()
-        state[node] = 2
-        return False
-
-    for node in sorted(nodes):
-        if state.get(node, 0) == 0:
-            stack.clear()
-            walk(node)
-    return sorted(set(found))
+    for root in sorted(nodes):
+        if root in order:
+            continue
+        work: list = []
+        push(root, work)
+        while work:
+            node, successors = work[-1]
+            descended = False
+            for nxt in successors:
+                if nxt not in order:
+                    push(nxt, work)
+                    descended = True
+                    break
+                if nxt in on_stack:
+                    low[node] = min(low[node], order[nxt])
+            if descended:
+                continue
+            work.pop()
+            if low[node] == order[node]:  # root of a component
+                component: list[str] = []
+                while True:
+                    top = scc_stack.pop()
+                    on_stack.discard(top)
+                    component.append(top)
+                    if top == node:
+                        break
+                if len(component) > 1:
+                    problems.append("zorder_cycle:" + ",".join(sorted(component)))
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+    return sorted(problems)
 
 
 def group_order(
