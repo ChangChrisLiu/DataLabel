@@ -214,12 +214,17 @@ def test_disconnect_then_remove_connector(instances, tax):
     ]
 
 
-def test_release_of_a_virtual_cable_is_recorded_but_not_an_instance(instances, tax):
+def test_release_of_a_virtual_cable_is_recorded_and_tracked(instances, tax):
     events = events_from_actions(instances, [_act(3, 0, CABLE, "release")], tax)
     assert _tuples(events) == [(3, CABLE, "state", "routed", "released")]
     fs = state_at(instances, events, 3, tax)
-    assert CABLE not in fs
+    assert fs[CABLE] == InstState(state="released", placement="in_chassis")
     assert CABLE not in needs_geom(instances, fs, tax)
+
+
+def test_a_cable_node_enters_the_snapshot_only_once_mentioned(instances, cooler_actions, tax):
+    events = events_from_actions(instances, cooler_actions, tax)
+    assert CABLE not in state_at(instances, events, 13, tax)
 
 
 def test_unknown_or_virtual_targets_are_ignored(instances, tax):
@@ -286,6 +291,70 @@ def test_state_at_step_zero_is_the_initial_state(instances, cooler_actions, tax)
     assert state_at(instances, events, 0, tax) == initial_state(instances, tax)
 
 
+def test_state_at_cascades_a_manually_removed_parent(instances, tax):
+    """A hand-entered parent removal must still take the attached screws along."""
+    manual = [
+        _ev(13, COOLER, "state", "installed", "removed", auto=False),
+        _ev(13, COOLER, "placement", "in_chassis", "on_bench", auto=False),
+    ]
+    fs = state_at(instances, manual, 13, tax)
+    assert all(
+        fs[key] == InstState(state="removed", placement="on_bench") for key in COOLER_SCREWS
+    )
+    geom = needs_geom(instances, fs, tax)
+    assert all(geom[key] == "box" for key in COOLER_SCREWS)
+
+
+def test_state_at_cascade_closure_is_transitive_and_cycle_safe(tax):
+    parts = {
+        r.key: r
+        for r in (
+            _inst(COOLER, "cpu_cooler", attrs={"kind": "heatsink"}),
+            _inst("cooler_bracket.01", "cooler_bracket", parent=COOLER, attached=True),
+            _inst(
+                "screw.cooler_bracket.01",
+                "screw",
+                attrs={"role": "cooler_bracket", "captive": True},
+                parent="cooler_bracket.01",
+                attached=True,
+            ),
+        )
+    }
+    parts[COOLER].parent = "screw.cooler_bracket.01"  # malformed: a parent cycle
+    parts[COOLER].attached = True
+    manual = [_ev(9, COOLER, "state", "installed", "removed", auto=False)]
+    fs = state_at(parts, manual, 9, tax)
+    assert fs["cooler_bracket.01"] == InstState(state="removed", placement="on_bench")
+    assert fs["screw.cooler_bracket.01"] == InstState(state="removed", placement="on_bench")
+
+
+def test_state_at_cascade_closure_is_a_no_op_on_compiled_logs(
+    instances, cooler_actions, tax
+):
+    """The closure must not change a snapshot folded from events_from_actions."""
+    events = events_from_actions(instances, cooler_actions, tax)
+    for step in (11, 12, 13, 40):
+        folded = initial_state(instances, tax)
+        for event in (e for e in events if e.step <= step):
+            setattr(folded[event.target], event.attr, event.new)
+        assert state_at(instances, events, step, tax) == folded
+
+
+def test_state_at_cascade_leaves_unattached_and_elsewhere_children_alone(instances, tax):
+    instances["screw.psu.01"].parent = "psu.01"
+    instances["screw.psu.01"].attached = False
+    manual = [
+        _ev(20, "psu.01", "state", "installed", "removed", auto=False),
+        _ev(20, COOLER, "state", "installed", "removed", auto=False),
+        _ev(20, COOLER_SCREWS[0], "placement", "in_chassis", "elsewhere", auto=False),
+    ]
+    fs = state_at(instances, manual, 20, tax)
+    assert fs["screw.psu.01"] == InstState(state="fastened", placement="in_chassis")
+    # an attached child that is already out of every view stays there
+    assert fs[COOLER_SCREWS[0]] == InstState(state="removed", placement="elsewhere")
+    assert COOLER_SCREWS[0] not in needs_geom(instances, fs, tax)
+
+
 # --------------------------------------------------------------------------- #
 # needs_geom
 # --------------------------------------------------------------------------- #
@@ -316,6 +385,14 @@ def test_needs_geom_skips_removed_connectors_and_elsewhere(instances, tax):
     geom = needs_geom(instances, fs, tax)
     assert "connector.01" not in geom
     assert "psu.01" not in geom
+
+
+def test_needs_geom_omits_any_placement_that_is_neither_in_chassis_nor_on_bench(
+    instances, tax
+):
+    fs = initial_state(instances, tax)
+    fs["ram_module.01"] = InstState(state="installed", placement="in_the_bin")
+    assert "ram_module.01" not in needs_geom(instances, fs, tax)
 
 
 def test_needs_geom_ignores_keys_without_an_instance(instances, tax):

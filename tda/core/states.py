@@ -22,13 +22,15 @@ Whenever an instance reaches ``removed``, it also leaves the chassis
 (``placement: in_chassis -> on_bench``) and drags its attached children with it.
 A ``connector`` is the one exception: removing it means the cable was taken out
 as a whole, which is a state change only, because an unplugged/removed
-connector carries no geometry of its own (spec 6.2).
+connector carries no geometry of its own (spec 6.2). That cascade is enforced
+twice over: :func:`events_from_actions` materialises it as explicit events, and
+:func:`state_at` closes over it again, so a hand-entered (``auto=False``) parent
+removal never leaves an attached child behind asking for a mask.
 
-Virtual nodes (targets starting with ``cable:``, or anything absent from
-``instances``) are not instances: they never appear in a
-:data:`FrameState` and never carry geometry. The single exception is that verbs
-which apply to the ``cable`` node -- ``release`` -- are still recorded as
-events, because the VLM layer asks about cable routing.
+Virtual nodes are targets starting with ``cable:`` (or, for actions, anything
+absent from ``instances``). They have their own small state machine and are
+carried in a :data:`FrameState` once an event mentions them, but they never
+carry geometry, because :func:`needs_geom` only answers for real instances.
 """
 from __future__ import annotations
 
@@ -103,6 +105,16 @@ def _attached_children(instances: dict[str, InstanceRec]) -> dict[str, list[str]
     for keys in children.values():
         keys.sort()
     return children
+
+
+def _cascades_on_removal(rec: InstanceRec) -> bool:
+    """Does removing this instance take its attached children out with it?
+
+    Shared by :func:`events_from_actions` and :func:`state_at` so the event log
+    and the closure over it can never disagree. A ``connector`` does not
+    cascade: removing one means the cable went out as a whole (spec 6.3).
+    """
+    return rec.cls != CONNECTOR_CLASS
 
 
 def events_from_actions(
@@ -186,9 +198,47 @@ def events_from_actions(
             continue
         attr, new = effect
         emit(action, action.target, attr, new)
-        if attr == ATTR_STATE and new == REMOVED and rec.cls != CONNECTOR_CLASS:
+        if attr == ATTR_STATE and new == REMOVED and _cascades_on_removal(rec):
             detach(action, action.target, {action.target})
     return events
+
+
+def _close_attached_cascade(
+    instances: dict[str, InstanceRec],
+    frame: FrameState,
+) -> None:
+    """Force the spec-3.3 cascade on ``frame`` in place, idempotently.
+
+    Every ``attached`` child of an instance already in state ``removed`` is
+    removed as well, transitively; a child still ``in_chassis`` moves to the
+    bench (one already ``elsewhere`` stays there -- it is out of every view).
+    Running this on a frame that already satisfies the cascade -- anything folded
+    from an :func:`events_from_actions` log -- changes nothing.
+    """
+    children = _attached_children(instances)
+    if not children:
+        return
+
+    def walk(parent: str, seen: set[str]) -> None:
+        for child in children.get(parent, ()):
+            if child in seen:
+                continue
+            seen.add(child)
+            inst = frame.get(child)
+            if inst is None:
+                continue
+            inst.state = REMOVED
+            if inst.placement == IN_CHASSIS:
+                inst.placement = ON_BENCH
+            walk(child, seen)
+
+    for key in sorted(children):  # only instances that actually have children
+        rec = instances.get(key)
+        inst = frame.get(key)
+        if rec is None or inst is None or inst.state != REMOVED:
+            continue
+        if _cascades_on_removal(rec):
+            walk(key, {key})
 
 
 def state_at(
@@ -199,10 +249,15 @@ def state_at(
 ) -> FrameState:
     """The state of every instance at logical step ``step``.
 
-    Initial state plus every event with ``event.step <= step``. The cascade of
-    spec 3.3 needs no special handling here because
-    :func:`events_from_actions` already materialised it as explicit events.
-    Events on virtual nodes and on unknown keys are skipped.
+    Initial state, plus every event with ``event.step <= step``, plus the
+    attached-child closure of spec 3.3 step 1. :func:`events_from_actions`
+    already emits that cascade as explicit events, so the closure is a no-op on
+    a compiled log; it is what makes a hand-entered (``auto=False``) parent
+    removal drag its attached children along too.
+
+    A virtual ``cable:*`` node enters the snapshot as soon as an event mentions
+    it (placement ``in_chassis``, it is nowhere else); it carries no geometry.
+    Events on any other unknown key are skipped.
     """
     frame = initial_state(instances, tax)
     for event in sorted(events, key=lambda e: e.step):  # stable: keeps intra-step order
@@ -210,11 +265,16 @@ def state_at(
             break
         inst = frame.get(event.target)
         if inst is None:
-            continue
+            cls = _virtual_class(event.target)
+            if cls is None:
+                continue
+            inst = InstState(state=tax.default_state(cls), placement=IN_CHASSIS)
+            frame[event.target] = inst
         if event.attr == ATTR_STATE:
             inst.state = event.new
         elif event.attr == ATTR_PLACEMENT:
             inst.placement = event.new
+    _close_attached_cascade(instances, frame)
     return frame
 
 
@@ -230,17 +290,23 @@ def needs_geom(
 
     ``"mask"`` for an instance still in the chassis whose state is tracked by
     the per-class table of spec 6.2, ``"box"`` for one lying in the bench area
-    (the chassis excepted -- it never goes on the bench). Instances that need
-    nothing -- an unplugged connector, anything ``elsewhere`` -- are omitted.
+    (the chassis excepted -- it never goes on the bench). Everything else is
+    omitted: an unplugged connector, anything ``elsewhere`` or in some other
+    placement, and any key that is not a real instance (a ``cable:*`` node).
     """
     geom: dict[str, str] = {}
     for key, inst in fs.items():
         rec = instances.get(key)
         if rec is None:
             continue
-        if not tax.needs_mask(rec.cls, inst.state, inst.placement):
+        if inst.placement == IN_CHASSIS:
+            kind = "mask"
+        elif inst.placement == ON_BENCH:
+            kind = "box"
+        else:
             continue
-        geom[key] = "box" if inst.placement == ON_BENCH else "mask"
+        if tax.needs_mask(rec.cls, inst.state, inst.placement):
+            geom[key] = kind
     return geom
 
 
