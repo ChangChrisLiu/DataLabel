@@ -210,18 +210,32 @@ def test_choose_scan_image_p0_missing_skips_a_dark_first_image():
     assert choose_scan_image(metrics) == (1, "p0_missing")
 
 
-def test_choose_scan_image_falls_back_when_no_image_passes():
+def test_choose_scan_image_keeps_p0_when_no_image_passes():
+    """A check that rejects the whole burst says nothing about which shot is
+    better, so the default wins and the step is flagged instead."""
     metrics = [_m(i, mean=5.0) for i in range(10)]
     metrics[4]["lap_var"] = 5000.0
-    idx, reason = choose_scan_image(metrics)
-    assert idx == 4
-    assert reason == "p0_dark_fallback"
+    assert choose_scan_image(metrics) == (0, "p0_dark_kept")
 
 
 def test_choose_scan_image_keeps_a_single_image_burst():
     idx, reason = choose_scan_image([_m(0, mean=5.0)])
     assert idx == 0
     assert reason.startswith("p0_dark")
+
+
+def test_choose_scan_image_accepts_a_burst_that_is_saturated_throughout():
+    """The white reference board saturates ~30% of every real scanner frame; a
+    burst that is uniformly bright is the scene, not an exposure failure."""
+    metrics = [_m(i, sat=0.33 + 0.002 * i) for i in range(10)]
+    assert choose_scan_image(metrics) == (0, "p0")
+
+
+def test_choose_scan_image_still_skips_a_p0_blown_out_above_its_burst():
+    metrics = [_m(i, sat=0.33) for i in range(10)]
+    metrics[0]["sat_frac"] = 0.9
+    metrics[5]["lap_var"] = 2600.0
+    assert choose_scan_image(metrics) == (5, "p0_saturated")
 
 
 def test_choose_scan_image_rejects_empty_metrics():

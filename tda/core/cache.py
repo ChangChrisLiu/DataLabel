@@ -46,7 +46,11 @@ SAT_LEVEL = 250  # a pixel counts as saturated when every channel is >= this
 
 # --- burst selection (thresholds pinned by the user, see module docstring)
 MEAN_MIN = 20.0  # mean gray below this -> unexposed
-SAT_MAX = 0.2  # saturated fraction above this -> blown out
+SAT_MAX = 0.2  # saturated fraction above this -> blown out ...
+SAT_MARGIN = 0.05  # ... but only when it also exceeds the burst's own level by
+#                    this much: the white reference board saturates ~30% of a
+#                    perfectly good scanner frame (measured over 66 desktops),
+#                    so the absolute threshold alone rejects normal bursts whole
 DIST_FACTOR = 2.0  # dist_to_median above this * the burst median -> outlier
 DIST_FLOOR = 1.0  # ... but never below one gray level: a near-identical burst
 #                   has a median of ~0, which would otherwise reject everything
@@ -137,11 +141,11 @@ def burst_metrics(paths: list[str]) -> list[dict]:
 # ---------------------------------------------------------------------------
 # burst selection
 # ---------------------------------------------------------------------------
-def _reject_kind(rec: dict, dist_thr: float) -> Optional[str]:
+def _reject_kind(rec: dict, dist_thr: float, sat_thr: float) -> Optional[str]:
     """Why this shot is unusable (``dark``/``saturated``/``outlier``), or None."""
     if float(rec.get("mean", 0.0)) < MEAN_MIN:
         return "dark"
-    if float(rec.get("sat_frac", 0.0)) > SAT_MAX:
+    if float(rec.get("sat_frac", 0.0)) > sat_thr:
         return "saturated"
     if float(rec.get("dist_to_median", 0.0)) > dist_thr:
         return "outlier"
@@ -154,16 +158,21 @@ def choose_scan_image(metrics: list[dict]) -> tuple[int, str]:
     ``P_0`` wins unless it fails :func:`_reject_kind`, in which case the sharpest
     (highest ``lap_var``) shot that passes is used.  Reasons are ``"p0"``,
     ``"p0_missing"`` (no ``P_0`` in the burst - lowest available number that
-    passes), ``"p0_dark"``/``"p0_saturated"``/``"p0_outlier"``, and the same with
-    a ``"_fallback"`` suffix when no shot passes the check at all and the
-    sharpest of the rest is taken anyway (always review those).
+    passes), and ``"p0_dark"``/``"p0_saturated"``/``"p0_outlier"`` when ``P_0``
+    was replaced.  When *no* shot passes the check the check carries no
+    information, so the default wins anyway and the reason gets a ``"_kept"``
+    suffix (``"p0_missing_fallback"`` for a burst without a ``P_0``); those are
+    the steps to review.
     """
     if not metrics:
         raise ValueError("choose_scan_image() needs at least one metrics record")
 
     dists = [float(m.get("dist_to_median", 0.0)) for m in metrics]
     dist_thr = max(DIST_FACTOR * statistics.median(dists), DIST_FLOOR)
-    passing = [i for i, m in enumerate(metrics) if _reject_kind(m, dist_thr) is None]
+    sats = [float(m.get("sat_frac", 0.0)) for m in metrics]
+    sat_thr = max(SAT_MAX, statistics.median(sats) + SAT_MARGIN)
+    passing = [i for i, m in enumerate(metrics)
+               if _reject_kind(m, dist_thr, sat_thr) is None]
 
     def p_index(i: int) -> int:
         return int(metrics[i].get("p_index", i))
@@ -180,12 +189,11 @@ def choose_scan_image(metrics: list[dict]) -> tuple[int, str]:
     if p0 in passing:
         return p0, "p0"
 
-    reason = f"p0_{_reject_kind(metrics[p0], dist_thr)}"
+    reason = f"p0_{_reject_kind(metrics[p0], dist_thr, sat_thr)}"
     alternatives = [i for i in passing if i != p0]
     if alternatives:
         return sharpest(alternatives), reason
-    rest = [i for i in range(len(metrics)) if i != p0]
-    return (sharpest(rest) if rest else p0), f"{reason}_fallback"
+    return p0, f"{reason}_kept"  # nothing passed: the default still wins
 
 
 # ---------------------------------------------------------------------------
