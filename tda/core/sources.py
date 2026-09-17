@@ -51,20 +51,30 @@ def norm(path: str) -> str:
     return path.replace("\\", "/")
 
 
-def dirs(path: str) -> list[os.DirEntry]:
-    """``os.scandir`` one level, directories only; an unreadable path yields []."""
+def _scan(path: str, keep, errors: Optional[list[str]]) -> list[os.DirEntry]:
+    """``os.scandir`` one level, keeping the entries ``keep(entry)`` accepts.
+
+    A failed listing must never look like an empty folder: F: is a slow external
+    drive, so a transient read error would otherwise turn into a silent "missing
+    frame".  The exception text is appended to ``errors`` (when a list is given)
+    so the caller can surface it in ``DesktopIndex.issues``.
+    """
     try:
-        return [e for e in os.scandir(path) if e.is_dir()]
-    except OSError:
+        return [e for e in os.scandir(path) if keep(e)]
+    except OSError as exc:
+        if errors is not None:
+            errors.append(f"scandir failed: {norm(path)}: {type(exc).__name__}: {exc}")
         return []
 
 
-def files(path: str) -> list[os.DirEntry]:
-    """``os.scandir`` one level, files only; an unreadable path yields []."""
-    try:
-        return [e for e in os.scandir(path) if e.is_file()]
-    except OSError:
-        return []
+def dirs(path: str, errors: Optional[list[str]] = None) -> list[os.DirEntry]:
+    """``os.scandir`` one level, directories only; see :func:`_scan` for errors."""
+    return _scan(path, os.DirEntry.is_dir, errors)
+
+
+def files(path: str, errors: Optional[list[str]] = None) -> list[os.DirEntry]:
+    """``os.scandir`` one level, files only; see :func:`_scan` for errors."""
+    return _scan(path, os.DirEntry.is_file, errors)
 
 
 def first_existing(base: str, names: Iterable[str]) -> Optional[str]:
@@ -76,14 +86,16 @@ def first_existing(base: str, names: Iterable[str]) -> Optional[str]:
     return None
 
 
-def scan_oak_step_dir(path: str) -> dict[str, dict[str, str]]:
+def scan_oak_step_dir(
+    path: str, errors: Optional[list[str]] = None
+) -> dict[str, dict[str, str]]:
     """Group one OAK ``NNN`` folder's files by capture timestamp token.
 
     Returns ``{ts_token: {role: abs_path}}``; a folder holding two captures
     (D10 step 1, D60 cam2 folder 005) yields two entries.
     """
     out: dict[str, dict[str, str]] = {}
-    for entry in files(path):
+    for entry in files(path, errors):
         m = OAK_FILE_RE.match(entry.name)
         if not m:
             continue
@@ -94,16 +106,20 @@ def scan_oak_step_dir(path: str) -> dict[str, dict[str, str]]:
     return out
 
 
-def scan_oak_camera(cam_dir: str) -> dict[str, dict[str, dict[str, str]]]:
+def scan_oak_camera(
+    cam_dir: str, errors: Optional[list[str]] = None
+) -> dict[str, dict[str, dict[str, str]]]:
     """``{step_dir: {ts_token: {role: path}}}`` for one ``Camera_<n>`` folder."""
     return {
-        e.name: scan_oak_step_dir(e.path)
-        for e in dirs(cam_dir)
+        e.name: scan_oak_step_dir(e.path, errors)
+        for e in dirs(cam_dir, errors)
         if STEP_DIR_RE.match(e.name)
     }
 
 
-def scanner_desktop_dir(scanner_root: str, desktop: int) -> Optional[str]:
+def scanner_desktop_dir(
+    scanner_root: str, desktop: int, errors: Optional[list[str]] = None
+) -> Optional[str]:
     """Locate ``<group>/<subdir>/<desktop>`` for one desktop.
 
     The group folder is ``TAMU_B2.3_<a>-<b>_RGB`` whose range contains the
@@ -112,12 +128,12 @@ def scanner_desktop_dir(scanner_root: str, desktop: int) -> Optional[str]:
     folders and ``ext.py`` are ignored.
     """
     groups = []
-    for entry in dirs(scanner_root):
+    for entry in dirs(scanner_root, errors):
         m = SCAN_GROUP_RE.match(entry.name)
         if m and int(m.group(1)) <= desktop <= int(m.group(2)):
             groups.append(entry)
     for group in groups:
-        candidates = [e for e in dirs(group.path) if e.name.lower() != "new"]
+        candidates = [e for e in dirs(group.path, errors) if e.name.lower() != "new"]
         same_name = [e for e in candidates if e.name == group.name]
         for pool in (same_name, candidates):
             for cand in pool:

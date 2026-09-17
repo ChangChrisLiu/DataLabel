@@ -20,6 +20,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
+from tda.core.index_fixes import (
+    cam2_fix_step,
+    verify_cam2_fixes,
+    verify_declared_missing,
+)
 from tda.core.index_report import write_report
 from tda.core.model import VIEWS, FrameKey
 from tda.core.sources import (
@@ -41,6 +46,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 DEFAULT_FIXES_PATH = "configs/index_fixes.yaml"
 DEFAULT_PATHS_PATH = "configs/paths.yaml"
 INDEX_VERSION = 1
+#: How far a RealSense file mtime may sit from its OAK cam1 capture time.
+RS_TIME_TOLERANCE_S = 30.0
 
 __all__ = [
     "DesktopIndex", "FrameFile", "build_index", "load_fixes", "load_index",
@@ -140,7 +147,7 @@ def scan_desktop(desktop: int, roots: dict, fixes: dict) -> DesktopIndex:
         for view in VIEWS
         if FrameKey(desktop, step, view) not in frames
     ]
-    issues.extend(_verify_declared_missing(desktop, fixes, step_of_dir, missing))
+    issues.extend(verify_declared_missing(desktop, fixes, step_of_dir, missing))
     return DesktopIndex(desktop, n_steps, frames, missing, issues)
 
 
@@ -156,7 +163,7 @@ def _build_logical_steps(
     Returns ``(step_of_dir, step_of_ts, issues)``.
     """
     issues: list[str] = []
-    cam1 = scan_oak_camera(os.path.join(disassemble, "Camera_1"))
+    cam1 = scan_oak_camera(os.path.join(disassemble, "Camera_1"), issues)
     keep_rule = oak_fix.get("step1_keep")
 
     captures: list[tuple[str, str, dict[str, str]]] = []  # (src_dir, ts_token, role_paths)
@@ -244,7 +251,7 @@ def _add_oak_cam2(
 ) -> list[str]:
     """Pair Camera_2 captures onto the logical steps, applying the D24/D10 fixes."""
     issues: list[str] = []
-    cam2 = scan_oak_camera(os.path.join(disassemble, "Camera_2"))
+    cam2 = scan_oak_camera(os.path.join(disassemble, "Camera_2"), issues)
     captures: list[tuple[str, str, dict[str, str]]] = []
     for src_dir in sorted(cam2):
         by_ts = cam2[src_dir]
@@ -262,7 +269,7 @@ def _add_oak_cam2(
     extra = oak_fix.get("cam2_extra_from")
     if extra:
         extra_dir = os.path.join(oak_desktop, *extra.split("/"))
-        found = scan_oak_step_dir(extra_dir) if os.path.isdir(extra_dir) else {}
+        found = scan_oak_step_dir(extra_dir, issues) if os.path.isdir(extra_dir) else {}
         if found:
             captures.extend((extra, ts, paths) for ts, paths in sorted(found.items()))
         else:
@@ -272,7 +279,7 @@ def _add_oak_cam2(
     for src_dir, ts, role_paths in sorted(captures, key=lambda c: (c[1], c[0])):
         step = step_of_ts.get(ts)
         if step is None:
-            step = _cam2_fix_step(oak_fix, src_dir, step_of_dir)
+            step = cam2_fix_step(oak_fix, src_dir, step_of_dir)
         if step is None:
             issues.append(
                 f"oak2: capture {ts} in folder {src_dir} has no cam1 partner; skipped"
@@ -294,59 +301,7 @@ def _add_oak_cam2(
                 f"oak2: folder {src_dir} split by timestamp into logical steps "
                 f"{sorted(steps)}"
             )
-    issues.extend(_verify_cam2_fixes(desktop, oak_fix, step_of_dir, assigned))
-    return issues
-
-
-def _cam2_fix_step(
-    oak_fix: dict, src_dir: str, step_of_dir: dict[str, int]
-) -> Optional[int]:
-    """Fall back to the declared fixes when timestamp pairing found no partner."""
-    shift = oak_fix.get("cam2_shift") or {}
-    if shift.get("from_dir") == src_dir:
-        return step_of_dir.get(f"{int(shift['to_step']):03d}")
-    for pair in oak_fix.get("cam2_swap") or []:
-        if src_dir == pair[0]:
-            return step_of_dir.get(pair[1])
-        if src_dir == pair[1]:
-            return step_of_dir.get(pair[0])
-    if oak_fix.get("cam2_extra_from") == src_dir and "as_step" in oak_fix:
-        return step_of_dir.get(f"{int(oak_fix['as_step']):03d}")
-    return None
-
-
-def _verify_cam2_fixes(
-    desktop: int,
-    oak_fix: dict,
-    step_of_dir: dict[str, int],
-    assigned: dict[str, list[int]],
-) -> list[str]:
-    """Check that the pairing agrees with every declared Camera_2 fix."""
-    issues: list[str] = []
-
-    def check(label: str, src_dir: str, want_dir: str) -> None:
-        want = step_of_dir.get(want_dir)
-        got = assigned.get(src_dir, [])
-        if want is not None and want in got:
-            issues.append(
-                f"fix:oak[{desktop}] {label}: cam2 folder {src_dir} pairs with cam1 "
-                f"folder {want_dir} (logical step {want})"
-            )
-        else:
-            issues.append(
-                f"fix:oak[{desktop}] {label} MISMATCH: cam2 folder {src_dir} expected on "
-                f"cam1 folder {want_dir} (logical step {want}), got steps {got}"
-            )
-
-    shift = oak_fix.get("cam2_shift") or {}
-    if shift:
-        check("cam2_shift", shift["from_dir"], f"{int(shift['to_step']):03d}")
-    for pair in oak_fix.get("cam2_swap") or []:
-        check(f"cam2_swap {pair[0]}<->{pair[1]}", pair[0], pair[1])
-        check(f"cam2_swap {pair[0]}<->{pair[1]}", pair[1], pair[0])
-    extra = oak_fix.get("cam2_extra_from")
-    if extra and "as_step" in oak_fix:
-        check("cam2_extra_from", extra, f"{int(oak_fix['as_step']):03d}")
+    issues.extend(verify_cam2_fixes(desktop, oak_fix, step_of_dir, assigned))
     return issues
 
 
@@ -356,13 +311,19 @@ def _add_scanner(
     step_of_dir: dict[str, int],
     frames: dict[FrameKey, FrameFile],
 ) -> list[str]:
-    """Add the scanner (top-down) frames; step number = ``int(folder[3:-1])``."""
+    """Add the scanner (top-down) frames; step number = ``int(folder[3:-1])``.
+
+    No timestamp cross-check is possible here: the scanner PNGs were copied to F:
+    in one batch (all mtimes are the copy date, not the capture date), so
+    ``ts`` is informational only and must not be compared with the OAK capture
+    times the way :func:`_add_realsense` does.
+    """
     issues: list[str] = []
-    base = scanner_desktop_dir(roots["scanner_root"], desktop)
+    base = scanner_desktop_dir(roots["scanner_root"], desktop, issues)
     if base is None:
         issues.append(f"scan: no scanner folder found for desktop {desktop}")
         return issues
-    for entry in sorted(dirs(base), key=lambda e: e.name):
+    for entry in sorted(dirs(base, issues), key=lambda e: e.name):
         name = entry.name
         if not (name.startswith("RGB") and name.endswith("1") and name[3:-1].isdigit()):
             continue
@@ -372,7 +333,7 @@ def _add_scanner(
             issues.append(f"scan: {name} (nominal step {nominal}) has no cam1 folder; skipped")
             continue
         burst = []
-        for f in files(entry.path):
+        for f in files(entry.path, issues):
             m = BURST_RE.match(f.name)
             if m:
                 burst.append((int(m.group(1)), norm(f.path), f.stat().st_mtime))
@@ -403,14 +364,21 @@ def _add_realsense(
     step_of_dir: dict[str, int],
     frames: dict[FrameKey, FrameFile],
 ) -> list[str]:
-    """Add the RealSense frames; the section folder is ``Disassemble`` or ``Disassembly``."""
+    """Add the RealSense frames, aligning by folder number *and* file time.
+
+    Spec 2.2 aligns the RealSense by folder number plus file time.  Unlike the
+    scanner, these files were never re-copied, so ``original_color.png``'s mtime
+    is a real capture time and can be checked against the OAK cam1 capture time
+    of the step the folder number resolved to; a gap beyond
+    :data:`RS_TIME_TOLERANCE_S` is reported rather than silently accepted.
+    """
     issues: list[str] = []
     rs_desktop = os.path.join(roots["rs_root"], f"Desktop {desktop}")
     base = first_existing(rs_desktop, aliases)
     if base is None:
         issues.append(f"rs: no {'/'.join(aliases)} folder under {rs_desktop}")
         return issues
-    for entry in sorted(dirs(base), key=lambda e: e.name):
+    for entry in sorted(dirs(base, issues), key=lambda e: e.name):
         if not STEP_DIR_RE.match(entry.name):
             continue
         nominal = int(entry.name)
@@ -420,7 +388,7 @@ def _add_realsense(
                 f"rs: folder {entry.name} (nominal step {nominal}) has no cam1 folder; skipped"
             )
             continue
-        found = {f.name: f for f in files(entry.path)}
+        found = {f.name: f for f in files(entry.path, issues)}
         main = found.get("original_color.png")
         if main is None:
             issues.append(f"rs: folder {entry.name} has no original_color.png; skipped")
@@ -429,47 +397,35 @@ def _add_realsense(
         if "depth_raw.npy" in found:
             aux["depth_npy"] = norm(found["depth_raw.npy"].path)
         key = FrameKey(desktop, step, "rs")
+        ts = iso_from_mtime(main.stat().st_mtime)
         frames[key] = FrameFile(
-            key=key,
-            path=norm(main.path),
-            aux=aux,
-            ts=iso_from_mtime(main.stat().st_mtime),
-            src_step_dir=entry.name,
+            key=key, path=norm(main.path), aux=aux, ts=ts, src_step_dir=entry.name
         )
+        issues.extend(_check_rs_time(desktop, step, entry.name, ts, frames))
     return issues
 
 
-def _verify_declared_missing(
-    desktop: int, fixes: dict, step_of_dir: dict[str, int], missing: list[FrameKey]
+def _check_rs_time(
+    desktop: int,
+    step: int,
+    src_dir: str,
+    rs_ts: str,
+    frames: dict[FrameKey, FrameFile],
 ) -> list[str]:
-    """Confirm the ``scan``/``rs`` gaps declared in the yaml really are missing."""
-    issues: list[str] = []
-    for view in ("scan", "rs"):
-        entry = (fixes.get(view) or {}).get(desktop)
-        if not isinstance(entry, dict):
-            continue
-        declared_nominal = set(entry.get("missing_steps") or [])
-        rng = entry.get("missing_steps_range")
-        if rng:
-            declared_nominal |= set(range(int(rng[0]), int(rng[1]) + 1))
-        if not declared_nominal:
-            continue
-        declared = {
-            step_of_dir.get(f"{n:03d}") for n in declared_nominal
-        } - {None}
-        actual = {k.step for k in missing if k.view == view}
-        present = sorted(declared - actual)
-        if present:
-            issues.append(
-                f"fix:{view}[{desktop}] MISMATCH: declared-missing steps present in "
-                f"index: {present}"
-            )
-        else:
-            issues.append(
-                f"fix:{view}[{desktop}] declared missing steps {sorted(declared_nominal)} "
-                "confirmed absent"
-            )
-    return issues
+    """Report a RealSense file time that disagrees with the OAK cam1 capture time."""
+    oak1 = frames.get(FrameKey(desktop, step, "oak1"))
+    if oak1 is None or not oak1.ts:
+        return []
+    delta = abs(
+        (datetime.fromisoformat(rs_ts) - datetime.fromisoformat(oak1.ts)).total_seconds()
+    )
+    if delta <= RS_TIME_TOLERANCE_S:
+        return []
+    return [
+        f"rs time mismatch: folder {src_dir} -> logical step {step}: "
+        f"original_color.png mtime {rs_ts} is {delta:.0f}s from the oak1 capture "
+        f"time {oak1.ts} (tolerance {RS_TIME_TOLERANCE_S:.0f}s)"
+    ]
 
 
 # ---------------------------------------------------------------------------

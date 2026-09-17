@@ -14,14 +14,17 @@ oak:
   60:
     cam2_shift:
       from_dir: "004"
-      to_step: 3
-      note: "cam2 folder 003 missing; 004 holds step 3; 005 holds two captures -> split by timestamp"
+      to_cam1_dir: "003"
+      note: "cam2 folder 003 missing; cam2 004 holds the capture cam1 filed as 003; cam2 005 holds two captures -> split by timestamp"
     cam1_reorder_by_ts: true
     reason: >-
       Camera_1 folders 003/004 carry swapped capture times (003 = 10:20:48.178,
       004 = 10:19:31.616), so folder order is not time order; Camera_2 has no 003
       at all, its 004 holds the capture that Camera_1 filed as 003, and its 005
       holds two captures (Camera_1 folders 004 and 005).  Survey: cam1 47 vs cam2 46.
+      `to_cam1_dir` is a Camera_1 *folder* name, not a logical step number: because
+      cam1_reorder_by_ts makes folder 003 logical step 4, this shift resolves to
+      logical step 4, and the resulting step is stated in DesktopIndex.issues.
   42:
     cam2_swap: [["016", "017"]]
     reason: >-
