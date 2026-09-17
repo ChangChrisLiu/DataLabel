@@ -259,7 +259,13 @@ class ImageCanvas(QGraphicsView):
         return self._minimap
 
     def refresh(self, rect: Optional[Rect] = None) -> None:
-        """Recomposite the overlay, invalidating only ``rect`` when given."""
+        """Recomposite the overlay, invalidating only what actually changed.
+
+        ``rect`` is a hint; the overlay may rebuild a slightly larger region
+        (the outline halo) and reports it as ``last_rebuild_rect``, which is
+        what gets invalidated.  ``None`` there means nothing was stale, so no
+        repaint is scheduled at all.
+        """
         if self._overlay is None:
             self._overlay_item.set_image(None)
             return
@@ -269,13 +275,14 @@ class ImageCanvas(QGraphicsView):
         if self._overlay_item.image() is not image:
             # First draw, or the overlay rebuilt its buffer: repaint it all.
             self._overlay_item.set_image(image)
-        elif rect is None:
-            self._overlay_item.update()
-        else:
-            x0, y0, x1, y1 = (int(v) for v in rect)
-            self._overlay_item.update(
-                QRectF(x0, y0, max(0, x1 - x0), max(0, y1 - y0))
-            )
+            return
+        rebuilt = self._overlay.last_rebuild_rect
+        if rebuilt is None:
+            return
+        x0, y0, x1, y1 = (int(v) for v in rebuilt)
+        self._overlay_item.update(
+            QRectF(x0, y0, max(0, x1 - x0), max(0, y1 - y0))
+        )
 
     def set_rubber_band(
         self, box: Optional[tuple[float, float, float, float]]

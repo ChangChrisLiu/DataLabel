@@ -22,7 +22,13 @@ from PySide6.QtWidgets import QApplication
 
 from tda.core import masks as M
 from tda.models.sam_service import SamRequest, SamResult
-from tda.ui.canvas.overlay import EDIT_RGB, PALETTE_64, LabelOverlay, palette_color
+from tda.ui.canvas.overlay import (
+    EDIT_RGB,
+    OCCLUDER_RGB,
+    PALETTE_64,
+    LabelOverlay,
+    palette_color,
+)
 from tda.ui.canvas.tools import (
     BrushTool,
     EraserTool,
@@ -86,6 +92,19 @@ def _argb(img, x: int, y: int) -> tuple[int, int, int, int]:
     """(a, r, g, b) of one pixel of a QImage."""
     px = img.pixel(x, y)
     return ((px >> 24) & 0xFF, (px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF)
+
+
+def _pixels(img) -> np.ndarray:
+    """The whole QImage as an HxW uint32 array (a copy)."""
+    raw = np.frombuffer(bytes(img.constBits()), dtype=np.uint32)
+    return raw.reshape(img.height(), img.width()).copy()
+
+
+def _grow(rect, hw) -> tuple[int, int, int, int]:
+    """The 1-px outline halo an outlined partial repaint must cover."""
+    h, w = hw
+    x0, y0, x1, y1 = rect
+    return (max(0, x0 - 1), max(0, y0 - 1), min(w, x1 + 1), min(h, y1 + 1))
 
 
 def _spin(predicate, timeout: float = 5.0) -> bool:
@@ -238,11 +257,53 @@ def test_paint_with_add_false_erases():
     assert ov.editing[20, 31]
 
 
-def test_paint_can_target_the_occluder_layer():
+def test_paint_entirely_outside_the_image_returns_none():
     ov = LabelOverlay((40, 50))
-    ov.paint((25, 20), 4, True, layer="occluder")
-    assert ov.occluder[20, 25]
+    assert ov.paint((-40, -40), 3, True) is None
+    assert ov.paint((200, 20), 3, True) is None
     assert not ov.editing.any()
+    # nothing was marked dirty, so a later qimage() must not rebuild anything
+    ov.qimage()
+    ov.last_rebuild_rect = None
+    assert ov.paint((-40, -40), 3, True) is None
+    ov.qimage()
+    assert ov.last_rebuild_rect is None
+
+
+def test_paint_occluder_keeps_one_layer_per_type():
+    ov = LabelOverlay((40, 50))
+    assert ov.occluders == {}
+
+    hand = ov.paint_occluder((10, 10), 3, True, "hand")
+    cable = ov.paint_occluder((40, 30), 3, True, "cable")
+    assert hand is not None and cable is not None
+    assert set(ov.occluders) == {"hand", "cable"}
+    assert ov.occluders["hand"][10, 10]
+    assert not ov.occluders["hand"][30, 40], "a cable stroke leaked into hand"
+    assert ov.occluders["cable"][30, 40]
+    assert not ov.occluders["cable"][10, 10], "a hand stroke leaked into cable"
+    assert not ov.editing.any()
+    # every layer is rendered
+    img = ov.qimage()
+    assert tuple(_argb(img, 10, 10)[1:]) == OCCLUDER_RGB
+    assert tuple(_argb(img, 40, 30)[1:]) == OCCLUDER_RGB
+
+
+def test_paint_occluder_rejects_an_unknown_type():
+    ov = LabelOverlay((40, 50))
+    with pytest.raises(ValueError):
+        ov.paint_occluder((10, 10), 3, True, "banana")
+
+
+def test_set_occluder_replaces_one_type_only():
+    ov = LabelOverlay((40, 50))
+    ov.paint_occluder((10, 10), 3, True, "hand")
+    mask = np.zeros((40, 50), dtype=bool)
+    mask[30:35, 30:35] = True
+    ov.set_occluder(mask, "cable")
+    assert ov.occluders["hand"][10, 10]
+    assert ov.occluders["cable"][32, 32]
+    assert not ov.occluders["cable"][10, 10]
 
 
 def test_editing_layer_draws_on_top_of_instances(two_masks):
@@ -267,10 +328,56 @@ def test_qimage_rebuilds_only_the_dirty_rect(two_masks):
 
     rect = ov.paint((40, 30), 3, True)
     img = ov.qimage(rect)
-    assert ov.last_rebuild_rect == rect
+    # grown by 1 px so the outline of the newly exposed edge is correct
+    assert ov.last_rebuild_rect == _grow(rect, (40, 50))
     assert tuple(_argb(img, 40, 30)[1:]) == EDIT_RGB
     # the untouched part of the buffer still carries the instance colours
     assert tuple(_argb(img, 6, 6)[1:]) == palette_color("inst-a")
+
+
+def test_partial_repaint_matches_a_full_repaint_after_an_erase(two_masks):
+    """An eraser must not leave the old outline ring outside the dirty rect."""
+    masks, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks, order)
+    filled = np.zeros((40, 50), dtype=bool)
+    filled[10:30, 10:40] = True
+    ov.set_editing("inst-c", filled)
+    ov.qimage()
+
+    rect = ov.paint((25, 20), 5, False)  # erase a disc out of the middle
+    partial = _pixels(ov.qimage(rect))
+
+    ov.force_full_rebuild()
+    full = _pixels(ov.qimage())
+    assert int(np.count_nonzero(partial != full)) == 0
+
+
+def test_partial_repaint_matches_a_full_repaint_after_a_brush(two_masks):
+    masks, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks, order)
+    ov.qimage()
+
+    rect = ov.paint((25, 20), 4, True)
+    partial = _pixels(ov.qimage(rect))
+    ov.force_full_rebuild()
+    assert int(np.count_nonzero(partial != _pixels(ov.qimage()))) == 0
+
+
+def test_visible_false_renders_transparent_and_restores(two_masks):
+    masks, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks, order)
+    shown = _pixels(ov.qimage())
+    assert shown.any()
+
+    ov.visible = False
+    hidden = _pixels(ov.qimage())
+    assert not hidden.any(), "visible=False did not invalidate the cache"
+
+    ov.visible = True
+    assert int(np.count_nonzero(_pixels(ov.qimage()) != shown)) == 0
 
 
 def test_qimage_never_returns_a_stale_buffer():
@@ -444,10 +551,31 @@ def test_refresh_with_a_dirty_rect_updates_only_that_region(qapp, two_masks):
 
     rect = ov.paint((40, 30), 3, True)
     canvas.refresh(rect)
-    assert ov.last_rebuild_rect == rect
+    assert ov.last_rebuild_rect == _grow(rect, (40, 50))
     # the item draws straight from the overlay buffer: no copy, full frame size
     assert canvas.overlay_image() is ov.qimage()
     assert canvas.overlay_image().size().toTuple() == (50, 40)
+
+
+def test_refresh_ignores_an_empty_dirty_rect(qapp, two_masks):
+    """A stroke entirely outside the image must not trigger a full repaint."""
+    masks, order = two_masks
+    canvas = _shown(ImageCanvas(), 200, 200)
+    canvas.set_image(_rgb(40, 50))
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks, order)
+    canvas.set_overlay(ov)
+    canvas.refresh()
+
+    tool = BrushTool(canvas, ov, radius=3)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+    ov.last_rebuild_rect = None
+    tool.on_press(-50.0, -50.0, None)
+    tool.on_release(-60.0, -50.0, None)
+    assert strokes == []
+    assert ov.last_rebuild_rect is None
+    assert not ov.editing.any()
 
 
 def test_minimap_stays_in_the_corner_while_the_view_scrolls(qapp):
@@ -565,15 +693,33 @@ def test_eraser_removes_pixels(rig):
     assert ov.editing[0, 0]
 
 
-def test_occluder_tool_paints_the_occluder_layer(rig):
+def test_occluder_tool_paints_the_layer_of_its_type(rig):
     canvas, ov = rig
     tool = OccluderTool(canvas, ov, radius=3)
     assert tool.occluder_type == "hand"
     tool.occluder_type = "tool"
     tool.on_press(25.0, 25.0, None)
     tool.on_release(25.0, 25.0, None)
-    assert ov.occluder[25, 25]
+    assert ov.occluders["tool"][25, 25]
+    assert set(ov.occluders) == {"tool"}
     assert not ov.editing.any()
+
+
+def test_occluder_tool_switching_type_does_not_merge_strokes(rig):
+    canvas, ov = rig
+    tool = OccluderTool(canvas, ov, radius=3)
+    tool.occluder_type = "hand"
+    tool.on_press(10.0, 10.0, None)
+    tool.on_release(10.0, 10.0, None)
+    tool.occluder_type = "cable"
+    tool.on_press(40.0, 40.0, None)
+    tool.on_release(40.0, 40.0, None)
+
+    assert set(ov.occluders) == {"hand", "cable"}
+    assert ov.occluders["hand"][10, 10] and not ov.occluders["hand"][40, 40]
+    assert ov.occluders["cable"][40, 40] and not ov.occluders["cable"][10, 10]
+    # the before-snapshot follows the type too, so undo stays per layer
+    assert tool.stroke_before is not None and not tool.stroke_before.any()
 
 
 def test_occluder_tool_rejects_an_unknown_type(rig):

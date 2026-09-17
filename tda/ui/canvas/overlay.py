@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import colorsys
 import zlib
-from typing import Literal, Optional
+from typing import Optional
 
 import numpy as np
 from PySide6.QtGui import QImage
@@ -27,13 +27,17 @@ __all__ = [
     "PALETTE_64",
     "EDIT_RGB",
     "OCCLUDER_RGB",
+    "OCCLUDER_TYPES",
     "LabelOverlay",
     "palette_color",
 ]
 
 Rect = tuple[int, int, int, int]
 RGB = tuple[int, int, int]
-Layer = Literal["editing", "occluder"]
+
+#: ``OccluderMask.occluder_type`` domain (spec 3.1).  Each type is a separate
+#: layer, because the compiler stores (and subtracts) one mask per type.
+OCCLUDER_TYPES: tuple[str, ...] = ("hand", "arm", "body", "tool", "cable", "other")
 
 
 def _build_palette() -> tuple[RGB, ...]:
@@ -112,8 +116,8 @@ class LabelOverlay:
         self.id2key: dict[int, str] = {}
         self.editing_instance: Optional[str] = None
         self.editing = np.zeros((h, w), dtype=bool)
-        self.occluder = np.zeros((h, w), dtype=bool)
-        self.visible = True
+        self.occluders: dict[str, np.ndarray] = {}
+        self._visible = True
 
         # ARGB32 words; the QImage below shares this memory.
         self._buffer = np.zeros((h, w), dtype=np.uint32)
@@ -125,6 +129,26 @@ class LabelOverlay:
         self.last_rebuild_rect: Optional[Rect] = None
 
     # -- content ------------------------------------------------------------
+    @property
+    def visible(self) -> bool:
+        """Whether :meth:`qimage` draws anything at all.
+
+        A property rather than a plain attribute: toggling it has to invalidate
+        the cached buffer, or ``qimage()`` would hand back the last render.
+        """
+        return self._visible
+
+    @visible.setter
+    def visible(self, value: bool) -> None:
+        value = bool(value)
+        if value != self._visible:
+            self._visible = value
+            self._dirty = _ALL
+
+    def force_full_rebuild(self) -> None:
+        """Mark the whole buffer stale (for a palette/alpha change or a test)."""
+        self._dirty = _ALL
+
     def set_instances(self, masks: dict[str, np.ndarray], order: list[str]) -> None:
         """Rebuild the label map by painting ``masks`` bottom-to-top in ``order``."""
         self.labelmap, self.id2key = _masks.labelmap_from_masks(masks, order, self.hw)
@@ -144,9 +168,24 @@ class LabelOverlay:
         self.editing_instance = None
         self._dirty = _ALL
 
-    def set_occluder(self, mask: np.ndarray) -> None:
-        """Replace the frame occluder layer."""
-        self.occluder = self._coerce(mask, "occluder mask")
+    def occluder_layer(self, occluder_type: str) -> np.ndarray:
+        """The occluder layer of ``occluder_type``, created empty if needed."""
+        if occluder_type not in OCCLUDER_TYPES:
+            raise ValueError(
+                f"unknown occluder_type {occluder_type!r}; expected one of "
+                f"{OCCLUDER_TYPES}"
+            )
+        layer = self.occluders.get(occluder_type)
+        if layer is None:
+            layer = np.zeros(self.hw, dtype=bool)
+            self.occluders[occluder_type] = layer
+        return layer
+
+    def set_occluder(self, mask: np.ndarray, occluder_type: str) -> None:
+        """Replace the occluder layer of one type; others are untouched."""
+        if occluder_type not in OCCLUDER_TYPES:
+            raise ValueError(f"unknown occluder_type {occluder_type!r}")
+        self.occluders[occluder_type] = self._coerce(mask, "occluder mask")
         self._dirty = _ALL
 
     def _coerce(self, mask: np.ndarray, what: str) -> np.ndarray:
@@ -157,37 +196,45 @@ class LabelOverlay:
             )
         return np.array(arr, dtype=bool, copy=True)
 
-    def layer(self, name: Layer) -> np.ndarray:
-        """The boolean layer ``name`` ("editing" or "occluder")."""
-        if name == "editing":
-            return self.editing
-        if name == "occluder":
-            return self.occluder
-        raise ValueError(f"unknown layer {name!r}")
-
     # -- painting -----------------------------------------------------------
     def paint(
+        self, xy: tuple[int, int], radius: int, add: bool
+    ) -> Optional[Rect]:
+        """Stamp a filled circle into the editing layer; return the dirty rect.
+
+        ``radius`` is measured in image pixels, so the stamp spans
+        ``2 * radius + 1`` pixels.  The rect is clipped to the image; a stamp
+        that falls entirely outside it changes nothing and returns ``None``.
+        """
+        return self._stamp(self.editing, xy, radius, add)
+
+    def paint_occluder(
         self,
         xy: tuple[int, int],
         radius: int,
         add: bool,
-        layer: Layer = "editing",
-    ) -> Rect:
-        """Stamp a filled circle into a boolean layer; return the dirty rect.
+        occluder_type: str = "hand",
+    ) -> Optional[Rect]:
+        """Stamp into the occluder layer of ``occluder_type`` (spec 4.6, ``O``).
 
-        ``radius`` is measured in image pixels, so the stamp spans
-        ``2 * radius + 1`` pixels.  The returned rect is clipped to the image
-        and may be empty when the stamp falls entirely outside it.
+        One layer per type: the compiler subtracts each type separately and the
+        database keys ``occluder_mask`` on it, so strokes of two types must
+        never land in the same array.
         """
-        target = self.layer(layer)
+        return self._stamp(
+            self.occluder_layer(occluder_type), xy, radius, add
+        )
+
+    def _stamp(
+        self, target: np.ndarray, xy: tuple[int, int], radius: int, add: bool
+    ) -> Optional[Rect]:
         h, w = self.hw
         cx, cy = int(round(xy[0])), int(round(xy[1]))
         r = max(0, int(radius))
         x0, y0 = max(0, cx - r), max(0, cy - r)
         x1, y1 = min(w, cx + r + 1), min(h, cy + r + 1)
         if x1 <= x0 or y1 <= y0:
-            cx, cy = min(max(cx, 0), w), min(max(cy, 0), h)
-            return (cx, cy, cx, cy)
+            return None
 
         dy = np.arange(y0, y1, dtype=np.int32)[:, None] - cy
         dx = np.arange(x0, x1, dtype=np.int32)[None, :] - cx
@@ -209,9 +256,15 @@ class LabelOverlay:
         """Full-size ``Format_ARGB32`` image of label map + edit layers.
 
         Only the stale region is recomputed: ``rect`` (when given) unioned with
-        whatever :meth:`paint` has marked dirty since the last call.  Changing
-        ``alpha`` or ``outline`` forces a full rebuild, since they apply
-        everywhere.  The returned image always covers the whole frame and
+        whatever :meth:`paint` has marked dirty since the last call, and then
+        grown by one pixel when ``outline`` is on -- editing a pixel changes
+        whether its *neighbours* sit on a boundary, so a repaint limited to the
+        edited rect would leave the old outline standing just outside it.
+        :attr:`last_rebuild_rect` reports the region actually rendered (``None``
+        when nothing was stale), which is what a caller should invalidate.
+
+        Changing ``alpha`` or ``outline`` forces a full rebuild, since they
+        apply everywhere.  The returned image always covers the whole frame and
         shares this object's buffer, so it must not outlive the overlay.
         """
         style = (int(alpha), bool(outline))
@@ -229,10 +282,20 @@ class LabelOverlay:
         else:
             target = _union(rect, self._dirty)  # type: ignore[arg-type]
 
+        self.last_rebuild_rect = None
         if target is not None:
-            self._render(self._clip(target), style[0], style[1])
+            target = self._clip(target)
+            if outline:
+                target = self._halo(target)
+            self._render(target, style[0], style[1])
         self._dirty = None
         return self._image
+
+    def _halo(self, rect: Rect) -> Rect:
+        """Grow ``rect`` by one pixel, clipped to the image."""
+        h, w = self.hw
+        x0, y0, x1, y1 = rect
+        return (max(0, x0 - 1), max(0, y0 - 1), min(w, x1 + 1), min(h, y1 + 1))
 
     def _clip(self, rect: Rect) -> Rect:
         h, w = self.hw
@@ -245,11 +308,11 @@ class LabelOverlay:
         )
 
     def _render(self, rect: Rect, alpha: int, outline: bool) -> None:
-        self.last_rebuild_rect = rect
         x0, y0, x1, y1 = rect
         if x1 <= x0 or y1 <= y0:
             return
-        if not self.visible:
+        self.last_rebuild_rect = rect
+        if not self._visible:
             self._buffer[y0:y1, x0:x1] = 0
             return
 
@@ -260,7 +323,13 @@ class LabelOverlay:
             edges = self._edges(self.labelmap, rect) & (labels != 0)
             np.copyto(out, line_lut[labels], where=edges)
 
-        for layer, rgb in ((self.editing, EDIT_RGB), (self.occluder, OCCLUDER_RGB)):
+        layers = [(self.editing, EDIT_RGB)]
+        # Occluders sit on top of the instance being edited: they mark what the
+        # annotator cannot see, so they must not be hidden by it.
+        layers += [
+            (self.occluders[key], OCCLUDER_RGB) for key in sorted(self.occluders)
+        ]
+        for layer, rgb in layers:
             window = layer[y0:y1, x0:x1]
             if not window.any():
                 continue

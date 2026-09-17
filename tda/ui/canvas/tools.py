@@ -25,7 +25,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal
 
 from tda.models.sam_service import SamRequest, SamResult
-from tda.ui.canvas.overlay import LabelOverlay
+from tda.ui.canvas.overlay import OCCLUDER_TYPES, LabelOverlay
 
 __all__ = [
     "OCCLUDER_TYPES",
@@ -46,8 +46,6 @@ Rect = tuple[int, int, int, int]
 Point = tuple[float, float, int]
 Box = tuple[float, float, float, float]
 
-#: ``OccluderMask.occluder_type`` domain (spec 3.1).
-OCCLUDER_TYPES: tuple[str, ...] = ("hand", "arm", "body", "tool", "cable", "other")
 #: SAM 2.1 resizes its input to 1024 anyway, so a longer crop wastes work
 #: and costs boundary precision on the way back (spec 4.6).
 MAX_SAM_SIDE = 1024
@@ -131,8 +129,6 @@ class PaintTool(Tool):
     the tool depending on the undo stack.
     """
 
-    #: Overlay layer written by this tool.
-    LAYER = "editing"
     #: True adds pixels, False removes them.
     ADD = True
 
@@ -154,11 +150,22 @@ class PaintTool(Tool):
         """Set the brush radius in image pixels (``[`` / ``]`` in the UI)."""
         self.radius = max(0, int(radius))
 
+    # -- layer binding (overridden by OccluderTool) -------------------------
+    def _target(self) -> np.ndarray:
+        """The layer this tool writes, for the before-stroke snapshot."""
+        assert self.overlay is not None
+        return self.overlay.editing
+
+    def _paint(self, x: float, y: float) -> Optional[Rect]:
+        """Stamp one disc; ``None`` when it falls outside the image."""
+        assert self.overlay is not None
+        return self.overlay.paint((x, y), self.radius, self.ADD)
+
     # -- events -------------------------------------------------------------
     def on_press(self, x: float, y: float, ev: Any) -> None:
         if self.overlay is None:
             return
-        self.stroke_before = self.overlay.layer(self.LAYER).copy()
+        self.stroke_before = self._target().copy()
         self._active = True
         self._dirty = None
         self._last = None
@@ -184,12 +191,11 @@ class PaintTool(Tool):
             return
         segment: Optional[Rect] = None
         for px, py in self._path(x, y):
-            rect = self.overlay.paint(
-                (px, py), self.radius, self.ADD, layer=self.LAYER
-            )
-            segment = _union(segment, rect)
+            segment = _union(segment, self._paint(px, py))
         self._last = (float(x), float(y))
         self._dirty = _union(self._dirty, segment)
+        # A stroke entirely outside the image dirties nothing, and asking the
+        # canvas to refresh an empty rect would cost a full-item repaint.
         if segment is not None and self.canvas is not None:
             self.canvas.refresh(segment)
 
@@ -207,21 +213,23 @@ class PaintTool(Tool):
 class BrushTool(PaintTool):
     """Adds pixels to the instance being edited."""
 
-    LAYER = "editing"
     ADD = True
 
 
 class EraserTool(PaintTool):
     """Removes pixels from the instance being edited."""
 
-    LAYER = "editing"
     ADD = False
 
 
 class OccluderTool(PaintTool):
-    """Paints the frame occluder layer (``O``); carries the occluder type."""
+    """Paints the frame occluder layer of its current type (spec 4.6, ``O``).
 
-    LAYER = "occluder"
+    Switching :attr:`occluder_type` switches the layer written, so strokes of
+    two types never merge -- each ``occluder_type`` is stored and subtracted
+    separately by the compiler.
+    """
+
     ADD = True
 
     def __init__(
@@ -247,6 +255,16 @@ class OccluderTool(PaintTool):
             )
         self._occluder_type = value
 
+    def _target(self) -> np.ndarray:
+        assert self.overlay is not None
+        return self.overlay.occluder_layer(self._occluder_type)
+
+    def _paint(self, x: float, y: float) -> Optional[Rect]:
+        assert self.overlay is not None
+        return self.overlay.paint_occluder(
+            (x, y), self.radius, self.ADD, self._occluder_type
+        )
+
 
 # ---------------------------------------------------------------------------
 # SAM tools
@@ -259,6 +277,16 @@ def viewport_crop(
     ``rect`` is the crop window in image coordinates and ``scale`` the factor
     applied to fit ``max_side`` (1.0 when the viewport is already small enough,
     which is the normal case once the annotator has zoomed in).
+
+    A viewport larger than ``max_side`` is **downscaled rather than tiled**
+    (spec 4.6 mentions tiling; deferred to P2).  SAM 2 resizes whatever it gets
+    to 1024x1024 internally, so tiling would buy detail only where the
+    annotator is already expected to zoom in, and there the crop is native
+    resolution.  The one visible consequence: ``SamService`` measures its local
+    refinement radius (:data:`~tda.models.sam_service.REFINE_RADIUS_PX`, 48 px)
+    in *crop* pixels, so the region a refinement click can change spans
+    ``REFINE_RADIUS_PX / scale`` **image** pixels -- a zoomed-out view refines
+    coarsely.  Zoom in for a tight correction.
     """
     rgb = canvas.image_rgb()
     if rgb is None:
