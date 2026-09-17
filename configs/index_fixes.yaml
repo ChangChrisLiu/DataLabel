@@ -1,0 +1,56 @@
+# Known source-data anomalies and how the unified frame index repairs them.
+#
+# Source: design spec v1.3 section 2.2, cross-checked against
+#   D:\DataSet\raw_logs\oak_survey\desktop_survey.csv  (per-desktop OAK step counts)
+#   D:\DataSet\raw_logs\oak_survey\anomalies.txt       (the anomaly detail dump)
+#
+# Every desktop-scoped entry carries a `reason` so the fix list can be audited.
+# Logical steps always come from OAK Camera_1 (see `general.step_order_source`);
+# Camera_2 is paired to Camera_1 by identical filename timestamp, and the `oak`
+# entries below are *asserted* against that pairing - a disagreement shows up in
+# DesktopIndex.issues instead of being applied silently.
+
+oak:
+  60:
+    cam2_shift:
+      from_dir: "004"
+      to_step: 3
+      note: "cam2 folder 003 missing; 004 holds step 3; 005 holds two captures -> split by timestamp"
+    cam1_reorder_by_ts: true
+    reason: >-
+      Camera_1 folders 003/004 carry swapped capture times (003 = 10:20:48.178,
+      004 = 10:19:31.616), so folder order is not time order; Camera_2 has no 003
+      at all, its 004 holds the capture that Camera_1 filed as 003, and its 005
+      holds two captures (Camera_1 folders 004 and 005).  Survey: cam1 47 vs cam2 46.
+  42:
+    cam2_swap: [["016", "017"]]
+    reason: >-
+      Camera_2 folders 016 and 017 hold each other's capture
+      (016 = 20250607_110111_850, 017 = 20250607_105806_407); timestamp pairing
+      un-swaps them.  RealSense for this desktop also lacks steps 1-12 (see `rs`).
+  24:
+    cam2_extra_from: "Components/C2/043"
+    as_step: 43
+    reason: >-
+      The last Disassemble capture of Camera_2 was filed under Components/C2/043,
+      so Disassemble/Camera_2 holds only 42 of 43 steps (survey: cam1 43 vs cam2 42).
+  10:
+    step1_keep: "latest"
+    reason: >-
+      Step 1 was shot twice (09:57:15.196 and 09:58:42.144) and both captures live
+      in folder 001 of both cameras; the later one is the real initial state.
+scan:
+  1:
+    missing_steps: [2, 3, 4, 28, 29, 30, 31, 32, 34, 35]
+    reason: >-
+      Desktop 1 is the only machine whose scanner run skipped interior steps; the
+      folders RGB21/RGB31/RGB41/RGB281..RGB321/RGB341/RGB351 were never captured.
+      Declared here so the index can confirm the gap is the known one.
+rs:
+  42:
+    missing_steps_range: [1, 12]
+    reason: >-
+      The RealSense was started late for desktop 42; folders 001-012 do not exist.
+  folder_aliases: ["Disassemble", "Disassembly"]
+general:
+  step_order_source: "oak1_timestamp"
