@@ -1,0 +1,456 @@
+# Raw step-name -> taxonomy mapping (spec section 6.6).
+#
+# Ported from the scratchpad analysis rules (raw_logs/drive/canon_rules.py) and
+# raw_logs/drive/vocab_target_canon.csv. `canon_group` is the csv's
+# `target_canon` text verbatim, so a reviewer can diff a parse against the
+# original 53-group analysis. All 53 groups are reachable from these rules.
+#
+# Matching (see tda/core/taxonomy.parse_raw_name):
+#   1. the raw name is lower-cased, typo-fixed, dashes and whitespace normalised;
+#   2. bracketed text is pulled out into attrs["qualifier"];
+#   3. the instance number / multi-instance run is read off the bracket-free text;
+#   4. the match text is "<bracket-free text> <qualifier words> [nest: <group>]";
+#   5. the FIRST rule in `rules` whose `pattern` searches the match text wins.
+#
+# Rule keys (all optional except pattern/name/canon_group):
+#   name            -> ParsedTarget.matched_rule
+#   pattern         -> python re, searched case-insensitively
+#   cls             -> taxonomy class, "" when the step names no physical target
+#   attrs           -> merged into ParsedTarget.attrs
+#   virtual         -> virtual node kind, e.g. "cable"
+#   verb            -> pins the verb; otherwise verb_prefixes below applies
+#   multi           -> the step names several targets at once
+#   step_type_hint  -> initial | dupli | reorient | auxiliary | ignore
+version: 1
+
+# Applied to the lower-cased name before matching.
+typos:
+  coonn: conn
+  conenctor: connector
+  compoq: compaq
+  powermodule: power module
+
+# Leading verb words, used only when the matched rule pins no `verb`.
+verb_prefixes:
+  - {pattern: '^(open|swing)\b', verb: open}
+  - {pattern: '^release\b', verb: release}
+  - {pattern: '^(remove|take|pull)\b', verb: remove}
+  - {pattern: '^(push|moving|move)\b', verb: displace}
+
+# A prefix verb means something different on fasteners, latches and connectors.
+verb_class_overrides:
+  screw: {remove: unscrew, open: unscrew, release: unscrew}
+  connector: {remove: disconnect, open: disconnect, release: disconnect}
+  ram_latch: {remove: open, release: open, displace: open}
+  cpu_socket_lever: {remove: open, release: open, displace: open}
+  psu_latch: {remove: open, release: open, displace: open}
+  drive_latch: {remove: open, release: open, displace: open}
+  card_latch: {remove: open, release: open, displace: open}
+  cooler_latch: {remove: open, release: open, displace: open}
+  cable_clip: {remove: release, open: release, displace: release}
+
+rules:
+  # --- step-type markers ------------------------------------------------------
+  - name: marker_dupli
+    pattern: '\bdupli\b'
+    cls: ""
+    step_type_hint: dupli
+    canon_group: "DUPLI (re-capture marker)"
+
+  - name: marker_initial
+    pattern: '^initial condition'
+    cls: ""
+    step_type_hint: initial
+    canon_group: "initial condition"
+
+  - name: marker_all_components
+    pattern: '^all components\b'
+    cls: ""
+    step_type_hint: ignore
+    canon_group: "all components (final layout)"
+
+  - name: action_reorient
+    pattern: 'change a direction'
+    cls: chassis
+    verb: reorient
+    step_type_hint: reorient
+    canon_group: "action: reorient desktop"
+
+  # --- compound steps (several targets captured in one step) ------------------
+  - name: compound_ram_and_cpu_locker
+    pattern: 'all ram and open cpu locker'
+    cls: ""
+    multi: true
+    canon_group: "COMPOUND: RAM + CPU locker"
+
+  - name: compound_cpu_and_motherboard_screws
+    pattern: 'cpu and half of the screws? on the motherboard'
+    cls: ""
+    multi: true
+    canon_group: "COMPOUND: CPU + motherboard screws"
+
+  - name: compound_connectors
+    # "X and Y connector" -- NOT "power module connector 1, 2 and 3", which is
+    # one connector family with several instances (handled by the multi run).
+    pattern: ' and .*connector|^sata \d+ and sata|^all sata connectors?\b'
+    cls: connector
+    multi: true
+    canon_group: "COMPOUND: several connectors"
+
+  # --- auxiliary (move/remove an obstacle to reveal the real target) ----------
+  - name: action_auxiliary_reveal
+    pattern: '^(moving|move) cable|^move cpu fan to reveal|obstacle above screw|ethernet connector to reveal|^reveal the ssd'
+    cls: ""
+    step_type_hint: auxiliary
+    canon_group: "action: auxiliary (move/remove obstacle to reveal)"
+
+  # --- failed / partial attempts on whole parts ------------------------------
+  - name: psu_attempt
+    pattern: '^try to remove (the )?power module'
+    cls: psu
+    verb: remove
+    canon_group: "PSU (power module)"
+
+  - name: optical_drive_attempt
+    pattern: '^try to remove the optical drive'
+    cls: optical_drive
+    verb: remove
+    canon_group: "optical drive"
+
+  - name: optical_drive_push_out
+    pattern: 'push optical drive out|move optical drive outside'
+    cls: optical_drive
+    verb: displace
+    canon_group: "optical drive"
+
+  # --- connectors (most specific endpoint pair first) ------------------------
+  - name: connector_psu_drive_power
+    pattern: 'power module - (optical|ssd|hdd)|(ssd|hdd) - power module'
+    cls: connector
+    attrs: {kind: sata_power, cable_owner: psu}
+    canon_group: "connector: PSU - drive (power)"
+
+  - name: connector_hdd_optical_shared
+    pattern: 'hdd - optical drive'
+    cls: connector
+    attrs: {kind: sata_power}
+    canon_group: "connector: HDD - optical drive (shared cable)"
+
+  - name: connector_case_fan
+    pattern: 'case fan.*connector|connector.*case fan|nest: case fan'
+    cls: connector
+    attrs: {kind: fan, cable_owner: case_fan}
+    canon_group: "connector: case fan - motherboard"
+
+  - name: connector_cpu_fan
+    pattern: 'cpu fan.*connector|connector.*cpu fan'
+    cls: connector
+    attrs: {kind: fan, cable_owner: cpu_fan}
+    canon_group: "connector: CPU fan - motherboard"
+
+  - name: connector_case_front_panel
+    pattern: 'case - motherboard connector|connector.*case - motherboard|nest: case\b'
+    cls: connector
+    attrs: {kind: front_panel, cable_owner: front_panel}
+    canon_group: "connector: case front-panel - motherboard"
+
+  - name: connector_psu_motherboard
+    pattern: 'power module ?- motherboard connector|power module connector|connector.*power module - motherboard|nest: power supply unit'
+    cls: connector
+    attrs: {cable_owner: psu}
+    canon_group: "connector: PSU - motherboard"
+
+  - name: connector_optical_power
+    pattern: 'optical.*power.*connector|optical.*connector.*power'
+    cls: connector
+    attrs: {kind: sata_power, cable_owner: optical_drive}
+    canon_group: "connector: optical drive (power/SATA)"
+
+  - name: connector_optical_sata
+    pattern: 'optical.*sata.*connector|optical.*connector.*sata'
+    cls: connector
+    attrs: {kind: sata_data, cable_owner: optical_drive}
+    canon_group: "connector: optical drive (power/SATA)"
+
+  - name: connector_optical
+    pattern: 'optical.*connector|connector.*optical|^motherboard - optical drive|nest: optical drive'
+    cls: connector
+    attrs: {cable_owner: optical_drive}
+    canon_group: "connector: optical drive (power/SATA)"
+
+  - name: connector_ssd_sata
+    pattern: 'ssd.*sata.*connector|ssd.*connector.*sata|sata.*connector.*ssd|ssd - sata'
+    cls: connector
+    attrs: {kind: sata_data, cable_owner: storage_drive}
+    canon_group: "connector: SSD (power/SATA)"
+
+  - name: connector_ssd_power
+    pattern: 'ssd.*power.*connector|ssd.*connector.*power'
+    cls: connector
+    attrs: {kind: sata_power, cable_owner: storage_drive}
+    canon_group: "connector: SSD (power/SATA)"
+
+  - name: connector_ssd
+    pattern: 'ssd.*connector|connector.*ssd'
+    cls: connector
+    attrs: {cable_owner: storage_drive}
+    canon_group: "connector: SSD (power/SATA)"
+
+  - name: connector_hdd_sata
+    pattern: 'hdd.*sata.*connector|hdd.*connector.*sata|sata connector hdd'
+    cls: connector
+    attrs: {kind: sata_data, cable_owner: storage_drive}
+    canon_group: "connector: HDD (power/SATA)"
+
+  - name: connector_hdd_power
+    pattern: 'hdd.*power.*connector|hdd.*connector.*power'
+    cls: connector
+    attrs: {kind: sata_power, cable_owner: storage_drive}
+    canon_group: "connector: HDD (power/SATA)"
+
+  - name: connector_hdd
+    pattern: 'hdd.*connector|connector.*hdd'
+    cls: connector
+    attrs: {cable_owner: storage_drive}
+    canon_group: "connector: HDD (power/SATA)"
+
+  - name: connector_expansion_card
+    pattern: 'additional board'
+    cls: connector
+    attrs: {kind: other}
+    canon_group: "connector: expansion card"
+
+  - name: connector_sata_unspecified
+    pattern: '^sata( connector)?( \d+)?( - motherboard)?$'
+    cls: connector
+    attrs: {kind: sata_data}
+    canon_group: "connector: SATA (endpoint unspecified)"
+
+  # --- cable routing (before covers: "remove cable from heatsink cover") -----
+  - name: cable_routing
+    pattern: 'cable locker|cables? from|isolated cable'
+    cls: cable_clip
+    virtual: cable
+    verb: release
+    canon_group: "cable routing (cable clip/locker)"
+
+  # --- covers (before screws: "case cover for motherboard screws") ----------
+  - name: cover_motherboard_screws
+    pattern: 'case cover for motherboard screw|^screw cover|gpu/screw cover'
+    cls: cover
+    attrs: {of: motherboard_screws}
+    canon_group: "cover over motherboard screws"
+
+  - name: cover_expansion_slot
+    pattern: 'case locker above wlan|gpu cover|graphic card cover|additional card cover|additional card locker'
+    cls: cover
+    attrs: {of: expansion_slot}
+    canon_group: "expansion-slot cover/locker"
+
+  # --- CPU cooler ------------------------------------------------------------
+  - name: screw_cooler_bracket
+    pattern: 'heatsink locker base screw'
+    cls: screw
+    attrs: {role: cooler_bracket}
+    canon_group: "CPU cooler retention base (+screws)"
+
+  - name: cooler_bracket
+    pattern: 'heatsink locker base'
+    cls: cooler_bracket
+    canon_group: "CPU cooler retention base (+screws)"
+
+  - name: screw_cpu_cooler
+    pattern: '(cpu fan|cpu heatsink|heatsink|cpu)\s+screw\b|heatsink broken screw'
+    cls: screw
+    attrs: {role: cpu_cooler}
+    canon_group: "screw: CPU cooler (fan/heatsink)"
+
+  - name: cooler_latch
+    pattern: 'cpu fan locker|release cpu fan'
+    cls: cooler_latch
+    canon_group: "CPU cooler locker"
+
+  - name: cover_cpu_cooler
+    pattern: 'cover case for cpu fan|fan cover|heatsink cover'
+    cls: cover
+    attrs: {of: cpu_cooler}
+    canon_group: "CPU cooler shroud/cover"
+
+  - name: cpu_cooler_heatsink_fan
+    pattern: 'heatsink with cpu fan'
+    cls: cpu_cooler
+    attrs: {kind: heatsink_fan}
+    canon_group: "CPU cooler: heatsink+fan"
+
+  - name: cpu_cooler_heatsink
+    pattern: '^heatsink$'
+    cls: cpu_cooler
+    attrs: {kind: heatsink}
+    canon_group: "CPU cooler: heatsink"
+
+  - name: cpu_cooler_fan
+    pattern: '^cpu fan$'
+    cls: cpu_cooler
+    attrs: {kind: fan}
+    canon_group: "CPU cooler: CPU fan"
+
+  # --- CPU -------------------------------------------------------------------
+  - name: cpu_socket_lever
+    pattern: 'cpu locker'
+    cls: cpu_socket_lever
+    canon_group: "CPU socket locker"
+
+  - name: cpu
+    pattern: '^cpu$'
+    cls: cpu
+    canon_group: "CPU"
+
+  # --- RAM -------------------------------------------------------------------
+  - name: cover_ram
+    pattern: 'ram cover'
+    cls: cover
+    attrs: {of: ram}
+    canon_group: "RAM cover"
+
+  - name: ram_latch
+    pattern: 'ram clip'
+    cls: ram_latch
+    canon_group: "RAM clip (DIMM latch)"
+
+  - name: ram_module
+    pattern: '^(all )?ram( set)?\s*\d*$'
+    cls: ram_module
+    canon_group: "RAM module"
+
+  # --- motherboard -----------------------------------------------------------
+  - name: screw_motherboard
+    pattern: 'screws? on the motherboard|motherboard screw'
+    cls: screw
+    attrs: {role: motherboard}
+    canon_group: "screw: motherboard"
+
+  - name: motherboard
+    pattern: '^motherboard$'
+    cls: motherboard
+    canon_group: "motherboard"
+
+  # --- PSU -------------------------------------------------------------------
+  - name: psu_open
+    pattern: 'open power module'
+    cls: psu
+    verb: displace
+    canon_group: "action: open/swing PSU"
+
+  - name: psu_latch
+    pattern: 'power module (locker|blocker)'
+    cls: psu_latch
+    canon_group: "PSU locker"
+
+  - name: psu
+    pattern: '^power module$'
+    cls: psu
+    canon_group: "PSU (power module)"
+
+  # --- drives ----------------------------------------------------------------
+  - name: screw_optical_drive
+    pattern: 'optical drive screw'
+    cls: screw
+    attrs: {role: optical_drive}
+    canon_group: "screw: optical drive"
+
+  - name: optical_drive_bay_open
+    pattern: 'open optical drive'
+    cls: drive_cage
+    attrs: {of: optical}
+    verb: displace
+    canon_group: "action: open optical-drive bay/frame"
+
+  - name: optical_drive
+    pattern: '^optical drive\b'
+    cls: optical_drive
+    canon_group: "optical drive"
+
+  - name: drive_latch_ssd
+    pattern: 'ssd (shield )?locker|ssd locker shield'
+    cls: drive_latch
+    attrs: {of: ssd}
+    canon_group: "drive shield/cage locker"
+
+  - name: drive_latch_hdd
+    pattern: 'hdd (shield )?locker|hdd locker shield'
+    cls: drive_latch
+    attrs: {of: hdd}
+    canon_group: "drive shield/cage locker"
+
+  - name: drive_cage_ssd
+    pattern: 'ssd (shield|cover|case)\b'
+    cls: drive_cage
+    attrs: {of: ssd}
+    canon_group: "drive shield/cage/cover"
+
+  - name: drive_cage_hdd
+    pattern: 'hdd (shield|cover|case)\b'
+    cls: drive_cage
+    attrs: {of: hdd}
+    canon_group: "drive shield/cage/cover"
+
+  - name: storage_drive_hdd
+    pattern: '^hdd\b'
+    cls: storage_drive
+    attrs: {kind: hdd}
+    canon_group: "HDD"
+
+  - name: storage_drive_ssd
+    pattern: '^(take )?ssd( away| out)?$'
+    cls: storage_drive
+    attrs: {kind: ssd}
+    canon_group: "SSD"
+
+  # --- expansion cards -------------------------------------------------------
+  - name: screw_card
+    pattern: 'gpu locker screw|gpu screw'
+    cls: screw
+    attrs: {role: card}
+    canon_group: "screw: GPU"
+
+  - name: card_latch_gpu
+    pattern: 'gpu locker|gpu clip'
+    cls: card_latch
+    attrs: {of: gpu}
+    canon_group: "GPU locker/clip"
+
+  - name: expansion_card_gpu
+    pattern: '^(remove )?(gpu|graphic card)\b'
+    cls: expansion_card
+    attrs: {kind: gpu}
+    canon_group: "GPU (graphics card)"
+
+  - name: expansion_card_wlan
+    pattern: 'wlan card'
+    cls: expansion_card
+    attrs: {kind: wlan}
+    canon_group: "expansion card (non-GPU)"
+
+  - name: expansion_card_other
+    pattern: 'additional card'
+    cls: expansion_card
+    attrs: {kind: other}
+    canon_group: "expansion card (non-GPU)"
+
+  # --- case parts ------------------------------------------------------------
+  - name: case_fan
+    pattern: '^case fan$'
+    cls: case_fan
+    canon_group: "case fan"
+
+  - name: cover_front_bezel
+    pattern: 'front cover|plastic cover'
+    cls: cover
+    attrs: {of: front_bezel}
+    canon_group: "front bezel / plastic cover"
+
+  - name: misc_front_io
+    pattern: 'usb part'
+    cls: misc_part
+    attrs: {name: front_io_module}
+    canon_group: "front I/O (USB) module"
