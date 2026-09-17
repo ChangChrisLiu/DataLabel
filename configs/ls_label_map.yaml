@@ -1,0 +1,159 @@
+# Label Studio label -> TDA taxonomy mapping (spec section 6.1, 23 classes).
+#
+# Source: the 40 distinct labels used by the HumanSignal/Label Studio projects
+# in raw_logs/labelstudio/humansignal_annotated_projects_export.json
+# (671 annotated frames, 11,974 `labels` results). The count in each comment is
+# how often that label occurs in the export, so a reviewer can tell a bulk
+# mapping decision from a long-tail one.
+#
+# Consumed by tda/core/ls_import.load_label_map, which validates every entry
+# against configs/taxonomy.yaml: `cls` must be a known class, each `attrs` key
+# must be declared for that class, each value must be in the class' enumerated
+# value list (when it declares one), and `state` must be one of the class'
+# states.
+#
+# Entry keys (all optional except one of cls / special / null):
+#   cls      -> taxonomy class
+#   attrs    -> merged into InstanceRec.attrs
+#   state    -> the state the label itself asserts, e.g. "(open)"; stored as a
+#               hint in InstanceRec.attrs["state"] because the provisional
+#               per-frame instance keys are only resolved by the annotator in S1
+#   special  -> not an instance at all; the only value is `action_target_hint`
+#               (the "Target" label marks the region the step acts on, so it is
+#               recorded as a bbox in Step.notes instead of as a shape)
+#   note     -> free text, for the reviewer only
+#
+# A `null` entry means "drop this label": it carries no instance and no hint.
+version: 1
+
+labels:
+
+  # --- fasteners -----------------------------------------------------------
+  "Motherboard Screw":                      # 2227
+    cls: screw
+    attrs: {role: motherboard}
+  "Heatsink Screw":                         # 189
+    cls: screw
+    attrs: {role: cpu_cooler}
+    note: fixes the heatsink to the board; often captive, not decidable from the label
+  "CPU Cooling Fan Screw":                  # 152
+    cls: screw
+    attrs: {role: cpu_cooler}
+  "Frame Screw (NRS)":                      # 32
+    cls: screw
+    attrs: {role: other, head: unknown}
+    note: chassis frame screw; "NRS" is the annotators' shorthand, head type unrecorded
+  "Screw Locker (Big Screw)":               # 16
+    cls: screw
+    attrs: {role: other, head: unknown}
+    note: oversized thumb-screw style fastener holding a cover or bracket
+  "PH2 Screw":                              # 12
+    cls: screw
+    attrs: {role: other, head: PH2}
+  "T15 Screw":                              # 7
+    cls: screw
+    attrs: {role: other, head: T15}
+  "Screw Locker":                           # 6
+    cls: screw
+    attrs: {role: other, head: unknown}
+  "Frame Screw":                            # 3
+    cls: screw
+    attrs: {role: other, head: unknown}
+
+  # --- connectors ----------------------------------------------------------
+  "Case to Motherboard Connector":          # 2050
+    cls: connector
+    attrs: {kind: front_panel}
+    note: the case harness headers (power/reset/LED/USB/audio) landing on the board
+  "PSU to Motherboard Connector":           # 492
+    cls: connector
+    attrs: {kind: atx_24pin}
+    note: main ATX power plug; the export does not separate the 4/8-pin CPU plug
+  "SATA Connector":                         # 380
+    cls: connector
+    attrs: {kind: sata_data}
+  "Drive Power Connector":                  # 132
+    cls: connector
+    attrs: {kind: sata_power}
+  "CPU Fan Connector":                      # 123
+    cls: connector
+    attrs: {kind: fan}
+  "Connector":                              # 53
+    cls: connector
+    attrs: {kind: other}
+
+  # --- latches / levers ----------------------------------------------------
+  "RAM Module Retention Clip (open)":       # 1519
+    cls: ram_latch
+    state: open
+  "RAM Module Retention Clip (closed)":     # 1017
+    cls: ram_latch
+    state: closed
+  "CPU Socket Retention Bracket":           # 291
+    cls: cpu_socket_lever
+  "PSU Retention Bracket":                  # 263
+    cls: psu_latch
+  "Storage Drive Retention Bracket Locker (open)":    # 17
+    cls: drive_latch
+    state: open
+  "Storage Drive Retention Bracket Locker (closed)":  # 8
+    cls: drive_latch
+    state: closed
+
+  # --- covers / cages / brackets -------------------------------------------
+  "Chassis Screw Cover on Case":            # 275
+    cls: cover
+    attrs: {of: motherboard_screws}
+  "Additional Card Upper Cover":            # 224
+    cls: cover
+    attrs: {of: expansion_slot}
+  "Chassis Screw Cover":                    # 12
+    cls: cover
+    attrs: {of: motherboard_screws}
+    note: same part as "Chassis Screw Cover on Case", written without the suffix
+  "Storage Drive Retention Bracket":        # 77
+    cls: drive_cage
+    note: drive kind not decidable from the label, so `of` is left to S1
+  "HDD Retention Bracket":                  # 12
+    cls: drive_cage
+    attrs: {of: hdd}
+  "CPU Fan Retention Bracket":              # 27
+    cls: cooler_bracket
+
+  # --- major parts ---------------------------------------------------------
+  "Motherboard":                            # 528
+    cls: motherboard
+  "RAM Module":                             # 439
+    cls: ram_module
+  "Power Supply Unit (PSU)":                # 356
+    cls: psu
+  "CPU Chip":                               # 203
+    cls: cpu
+  "Optical Drive":                          # 141
+    cls: optical_drive
+  "GPU":                                    # 128
+    cls: expansion_card
+    attrs: {kind: gpu}
+  "CPU Cooling Fan":                        # 96
+    cls: cpu_cooler
+    attrs: {kind: fan}
+  "Heatsink":                               # 80
+    cls: cpu_cooler
+    attrs: {kind: heatsink}
+  "Solid State Drive (SSD)":                # 60
+    cls: storage_drive
+    attrs: {kind: ssd}
+  "Hard Disk Drive (HDD)":                  # 6
+    cls: storage_drive
+    attrs: {kind: hdd}
+
+  # --- not an instance -----------------------------------------------------
+  "Target":                                 # 359
+    special: action_target_hint
+    note: the region the step acts on; its bbox goes into Step.notes, not a shape
+
+  # --- dropped -------------------------------------------------------------
+  "RAM Module Slot":                        # 3
+    # the empty socket, not a removable instance; the RAM latches carry it
+  "Motherboard PCB":                        # 1
+    # a second outline of the board already covered by "Motherboard"
