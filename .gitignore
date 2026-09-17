@@ -1,0 +1,20 @@
+# data & caches
+cache/
+annotations/*.sqlite*
+raw_logs/
+models/weights/
+*.pt
+*.pth
+*.ply
+*.npy
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+# ide
+.idea/
+.vscode/
+# misc
+*.log
+thumbs.db
