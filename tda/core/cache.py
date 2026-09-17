@@ -47,9 +47,11 @@ SAT_LEVEL = 250  # a pixel counts as saturated when every channel is >= this
 # Only a gross failure may override decision C10 ("use P_0"); the thresholds are
 # absolute, because within a burst the scanner lamp drifts by a gray level or
 # two and the white reference board saturates ~30% of every good frame (median
-# 0.29, up to 0.58, measured over 396 real bursts).
+# 0.29, up to 0.58, measured over 2807 real bursts).
 MEAN_MIN = 40.0  # mean gray below this -> unexposed (a lamp failure sits at ~28)
-SAT_MAX = 0.5  # saturated fraction above this -> blown out
+SAT_MAX = 0.75  # saturated fraction above this -> blown out; the board alone
+#                 reaches 0.52-0.54 on the six brightest desktops, so a lower
+#                 bar swapped good P_0 shots for equally bright siblings
 DIST_MAX = 20.0  # mean abs difference to the burst median above this gray levels
 #                  -> a gross scene difference, e.g. a hand or tool in the shot
 

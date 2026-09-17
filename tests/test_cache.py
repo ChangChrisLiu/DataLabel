@@ -179,7 +179,7 @@ def test_choose_scan_image_skips_a_p0_darker_than_a_real_scan_ever_is():
 
 def test_choose_scan_image_skips_a_blown_out_p0():
     metrics = [_m(i) for i in range(10)]
-    metrics[0]["sat_frac"] = 0.7
+    metrics[0]["sat_frac"] = 0.85
     metrics[4]["lap_var"] = 3000.0
     assert choose_scan_image(metrics) == (4, "p0_saturated")
 
@@ -235,10 +235,13 @@ def test_choose_scan_image_keeps_a_single_image_burst():
 
 
 def test_choose_scan_image_accepts_the_normal_brightness_of_the_white_board():
-    """The white reference board saturates ~30% of every real scanner frame
-    (median 0.29 measured over 396 bursts), which is not an exposure failure."""
-    metrics = [_m(i, mean=156.0, sat=0.33 + 0.002 * i, dist=0.5 + 0.1 * i) for i in range(10)]
-    assert choose_scan_image(metrics) == (0, "p0")
+    """The white reference board saturates a median of 29% of every real scanner
+    frame and 52-54% on the brightest six desktops (D02, D03, D18-D21), which is
+    the scene and not an exposure failure."""
+    normal = [_m(i, mean=156.0, sat=0.33 + 0.002 * i, dist=0.5 + 0.1 * i) for i in range(10)]
+    assert choose_scan_image(normal) == (0, "p0")
+    bright = [_m(i, mean=199.0, sat=0.54 - 0.002 * i, dist=0.5) for i in range(10)]
+    assert choose_scan_image(bright) == (0, "p0")
 
 
 def test_choose_scan_image_still_skips_a_p0_that_is_really_blown_out():
@@ -391,7 +394,7 @@ def test_build_cache_separates_a_kept_p0_from_a_real_replacement(tmp_path):
     burst = index[7].frames[FrameKey(7, 1, "scan")].aux["burst"]
     for path in burst:
         img = _texture(seed=1)
-        img[:170] = 255                                  # 66% blown out in every shot
+        img[:210] = 255                                  # 82% blown out in every shot
         assert cv2.imwrite(path, img)
 
     stats = build_cache(index, str(tmp_path / "cache"))
