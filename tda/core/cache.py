@@ -54,6 +54,7 @@ DIST_FLOOR = 1.0  # ... but never below one gray level: a near-identical burst
 # --- cache layout --------------------------------------------------------
 VIEW_EXT = {"scan": "png", "rs": "png", "oak1": "jpg", "oak2": "jpg"}
 MANIFEST_NAME = "manifest.json"
+MANIFEST_FLUSH_EVERY = 25  # flush mid-desktop so an interrupted run resumes
 SINGLE_REASON = "only"  # views without a burst have nothing to choose
 
 # --- ROI suggestion ------------------------------------------------------
@@ -348,9 +349,12 @@ def build_cache(index: dict[int, DesktopIndex], cache_dir: str, views=("scan",),
 
     Re-runs are cheap and idempotent: a step whose manifest record is present and
     whose cached file already has the source's byte size is skipped without
-    re-reading the burst.  A step that cannot be read is recorded in
-    ``failures`` and does not stop the run.  ``progress(desktop, step, view)`` is
-    called once per step, after it is handled.
+    re-reading the burst.  The manifest is flushed every
+    :data:`MANIFEST_FLUSH_EVERY` copies as well as at the end of each desktop, so
+    an interrupted run resumes instead of redoing the desktop it was in.  A step
+    that cannot be read is recorded in ``failures`` and does not stop the run.
+    ``progress(desktop, step, view)`` is called once per step, after it is
+    handled; an exception it raises is not caught.
 
     Returns counters plus the manifests: ``copied``, ``skipped``, ``steps``,
     ``bytes_copied``, ``failures``, ``non_p0`` (scanner steps not represented by
@@ -404,6 +408,9 @@ def build_cache(index: dict[int, DesktopIndex], cache_dir: str, views=("scan",),
                         "desktop": desktop, "step": key.step, "view": view,
                         "error": f"{type(exc).__name__}: {exc}",
                     })
+                if dirty and stats["copied"] % MANIFEST_FLUSH_EVERY == 0:
+                    _write_manifest(manifest_path, manifest)  # resume point
+                    dirty = False
                 if progress is not None:
                     progress(desktop, key.step, view)
 

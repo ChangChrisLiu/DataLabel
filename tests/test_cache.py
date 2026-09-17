@@ -365,6 +365,26 @@ def test_build_cache_is_idempotent(tmp_path):
     assert sorted(manifest) == ["1", "2"]
 
 
+def test_build_cache_resumes_after_an_interrupted_desktop(tmp_path, monkeypatch):
+    """A run killed mid-desktop must not redo the bursts it already read."""
+    monkeypatch.setattr("tda.core.cache.MANIFEST_FLUSH_EVERY", 1)
+    index = _scan_index(tmp_path, steps=(1, 2, 3))
+    cache = str(tmp_path / "cache")
+
+    def die_on_step_2(desktop, step, view):
+        if step == 2:
+            raise KeyboardInterrupt("killed")
+
+    with pytest.raises(KeyboardInterrupt):
+        build_cache(index, cache, progress=die_on_step_2)
+
+    manifest = json.loads((tmp_path / "cache" / "scan" / "D07" / "manifest.json").read_text("utf-8"))
+    assert sorted(manifest) == ["1", "2"]
+
+    stats = build_cache(index, cache)
+    assert (stats["skipped"], stats["copied"]) == (2, 1)
+
+
 def test_build_cache_recopies_a_truncated_file(tmp_path):
     index = _scan_index(tmp_path, steps=(1,))
     cache = str(tmp_path / "cache")
