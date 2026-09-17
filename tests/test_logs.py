@@ -18,7 +18,15 @@ from pathlib import Path
 import pytest
 
 from tda.core.log_report import main, operation_counts
-from tda.core.logs import import_log, instance_key, iter_desktop_csvs, read_desktop_csv
+from tda.core.logs import (
+    _attr_conflicts,
+    _identity,
+    _merge_attrs,
+    import_log,
+    instance_key,
+    iter_desktop_csvs,
+    read_desktop_csv,
+)
 from tda.core.taxonomy import load_taxonomy
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "logs"
@@ -309,15 +317,14 @@ def test_same_number_different_cable_owner_is_a_new_instance(tax):
     assert not any("reused instance" in s for s in li.issues)
 
 
-def test_attribute_conflict_on_reuse_is_reported(tax):
-    """Reuse compares the attributes outside the identity and keeps the first."""
+def test_same_number_different_of_is_a_new_instance(tax):
+    """A RAM cover is never the heatsink cover, whatever number they share."""
     li = synth(["Open RAM cover 1", "Remove heatsink cover 1"], tax=tax)
-    assert [a.target for a in li.actions] == ["cover.01", "cover.01"]
+    assert [a.target for a in li.actions] == ["cover.01", "cover.02"]
     assert li.instances["cover.01"].attrs["of"] == "ram"
-    assert any("reused instance cover.01" in s for s in li.issues)
-    assert any(
-        "attribute 'of' conflicts" in s and "'ram' vs 'cpu_cooler'" in s for s in li.issues
-    )
+    assert li.instances["cover.02"].attrs["of"] == "cpu_cooler"
+    assert not any("reused instance" in s for s in li.issues)
+    assert not any("conflicts" in s for s in li.issues)
 
 
 def test_reuse_needs_number_matching_attrs_and_a_new_verb(tax):
@@ -327,12 +334,42 @@ def test_reuse_needs_number_matching_attrs_and_a_new_verb(tax):
     assert [a.verb for a in li.actions] == ["open", "remove"]
     inst = li.instances["cover.01"]
     assert inst.raw_names == ["Open RAM cover 1", "Remove RAM cover 1"]
+    assert inst.attrs["of"] == "ram"
     assert any(
         "reused instance cover.01" in s and "prior verbs open" in s for s in li.issues
     )
+    assert not any("conflicts" in s for s in li.issues)
     # A third row with a verb already applied starts a new instance instead.
     li = synth(["Open RAM cover 1", "Remove RAM cover 1", "Remove RAM cover 1"], tax=tax)
     assert [a.target for a in li.actions] == ["cover.01", "cover.01", "cover.02"]
+
+
+def test_identity_covers_every_attribute_that_names_the_part(tax):
+    """Role, kind, cable owner, qualifier and ``of`` all split an identity."""
+    base = {"role": "motherboard", "cable_owner": "psu", "qualifier": "left", "of": "ram"}
+    same = _identity("screw", "motherboard", 1, dict(base))
+    assert same == _identity("screw", "motherboard", 1, dict(base, kind="ignored"))
+    for attr in ("cable_owner", "qualifier", "of"):
+        assert _identity("screw", "motherboard", 1, dict(base, **{attr: "other"})) != same
+    assert _identity("screw", "cpu_cooler", 1, dict(base)) != same
+    assert _identity("screw", "motherboard", 2, dict(base)) != same
+
+
+def test_attribute_conflict_on_reuse_is_reported():
+    """The reuse-time guard for attributes the identity does not cover.
+
+    No pair of today's ``taxonomy_map`` rules can reach this (every attribute
+    that names a part is part of the identity), so the guard is tested at its
+    own seam: it exists for later rules and for S1's edits, and it must report
+    rather than drop.
+    """
+    stored = {"of": "ram", "name": "front_io_module", "sheet_no": 1, "captive": True}
+    new = {"of": "ram", "name": "rear_io_module", "captive": False, "slot": "a"}
+    assert _attr_conflicts(stored, new) == [("name", "front_io_module", "rear_io_module")]
+    _merge_attrs(stored, new)
+    assert stored["name"] == "front_io_module"  # the stored value wins
+    assert stored["captive"] is True  # derived attributes are never merged
+    assert stored["slot"] == "a"  # a genuinely new attribute is kept
 
 
 def test_no_instance_is_operated_with_the_same_verb_twice(tax):
@@ -511,6 +548,14 @@ def test_cli_writes_report(tmp_path, capsys):
     assert "# Drive log import issues" in report
     assert "| ok |" in report and "tool set to 'unknown'" in report
     assert "imported 1 desktops" in capsys.readouterr().out
+
+
+def test_cli_fails_when_the_invariant_is_broken(tmp_path, capsys, monkeypatch):
+    _tiny_log(tmp_path / "desktop_01.csv", "2,Motherboard,\n")
+    monkeypatch.setattr("tda.core.log_report.operation_counts", lambda imports: (1, 1))
+    assert main(["--all", str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    assert "1 with a repeated verb" in out and "INVARIANT" in out
 
 
 def test_cli_reports_step_count_mismatch(tmp_path, capsys):

@@ -235,9 +235,11 @@ def _is_chassis(parsed: ParsedTarget, step_type: str) -> bool:
 def _identity(cls: str, disc: str, number: int, attrs: dict) -> tuple:
     """What a later row must match exactly before it may reuse an instance.
 
-    Spec 3.2's class + role + number, plus the cable owner and the
-    annotator's bracketed qualifier: two "Connector 1" rows whose cables run
-    to different devices are different connectors, not one.
+    Spec 3.2's class + role + number, plus every attribute that names *which*
+    part the row means: the cable owner, the annotator's bracketed qualifier
+    and ``of`` (what a cover, cage or latch belongs to).  Two "Connector 1"
+    rows whose cables run to different devices are different connectors, and a
+    RAM cover is never the heatsink cover.
     """
     return (
         cls,
@@ -245,6 +247,7 @@ def _identity(cls: str, disc: str, number: int, attrs: dict) -> tuple:
         number,
         str(attrs.get("cable_owner") or ""),
         str(attrs.get("qualifier") or ""),
+        str(attrs.get("of") or ""),
     )
 
 
@@ -479,12 +482,11 @@ class _Importer:
 
         Multi-step instances are the reused ones and are already reported at
         the point of reuse; the same verb twice can only mean the importer
-        merged two different parts, so it is reported loudly.  The implicit
-        chassis is exempt: ``reorient`` legitimately repeats.
+        merged two different parts, so it is reported loudly.  ``_ops`` only
+        holds the instances ``_instance`` created, so the implicit chassis --
+        whose ``reorient`` legitimately repeats -- never reaches this check.
         """
         for key, ops in self._ops.items():
-            if key == CHASSIS_KEY:
-                continue
             seen: dict[str, int] = {}
             for step, verb in ops:
                 if verb in seen:

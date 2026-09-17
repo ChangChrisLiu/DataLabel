@@ -152,5 +152,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     for desktop, got, want in mismatched:
         print(f"  step-count mismatch D{desktop:02d}: {got} rows vs n_logged_steps {want}")
+    if repeat:
+        print(f"  INVARIANT: {repeat} instances received the same verb twice")
     print(f"report: {out_path}")
-    return 1 if mismatched else 0
+    # A step-count mismatch or a broken invariant must fail the batch run.
+    return 1 if mismatched or repeat else 0
