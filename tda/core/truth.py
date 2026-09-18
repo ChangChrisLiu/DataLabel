@@ -44,6 +44,7 @@ table, the event log and the keyframes are read once per sweep.
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Iterable, Optional
 
 import numpy as np
@@ -66,6 +67,7 @@ from tda.core.truth_conflicts import (
 )
 from tda.core.truth_inputs import (
     FrameInputs,
+    annotatable_steps,
     InputCache,
     events_of,
     frame_hw,
@@ -146,28 +148,78 @@ class TruthService:
 
     # ------------------------------------------------------------------ refresh
 
-    def refresh(self, key: FrameKey, cache: Optional[InputCache] = None) -> dict:
+    def inputs_digest(self, key: FrameKey, cache: Optional[InputCache] = None) -> str:
+        """A fingerprint of one frame's compiler inputs, computed without pixels.
+
+        :attr:`CompiledFrame.input_hash` says the same thing but only exists
+        after a compilation, which is the expensive half. This is the cheap half
+        -- identities and versions, no mask is decoded -- so a worker can take it
+        *before* the pixel work and check it again inside the write transaction:
+        if it moved, the annotator edited the frame meanwhile and the result
+        about to be written describes inputs nobody has any more (spec 3.4).
+        """
+        inputs = gather(self.db, self.tax, key, cache)
+        parts = [
+            f"{key.desktop}/{key.view}/{key.step}", str(inputs.hw),
+            str(inputs.pose_segment), str(sorted(inputs.needs.items())),
+            str(sorted(inputs.placements.items())),
+            str((inputs.transform.scale, inputs.transform.theta,
+                 inputs.transform.tx, inputs.transform.ty)),
+            str((inputs.zorder.version, inputs.zorder.order)),
+            str([(p.above, p.below) for p in inputs.overrides]),
+            str(sorted((kf.instance, kf.id, kf.version, kf.anchor_step, kf.placement,
+                        kf.pose_segment, kf.geom_type)
+                       for chain in inputs.keyframes.values() for kf in chain)),
+            str(sorted((o.occluder_type, (o.rle or {}).get("counts"))
+                       for o in inputs.occluders)),
+            str(sorted((i, (o.visible_rle or {}).get("counts"), o.visibility)
+                       for i, o in inputs.frame_overrides.items())),
+            self.compiler_version,
+        ]
+        return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+
+    def refresh(self, key: FrameKey, cache: Optional[InputCache] = None,
+                guard: Optional[str] = None) -> dict:
         """Bring one frame's truth rows up to date with the current inputs.
 
-        Returns ``{"updated", "conflicts", "skipped", "problems", "compiled"}``:
-        rows written (a deleted row counts as written), frozen rows found in
-        disagreement, rows left alone, the compiler's problem list, and the
+        Returns ``{"updated", "conflicts", "skipped", "problems", "compiled",
+        "stale"}``: rows written (a deleted row counts as written), frozen rows
+        found in disagreement, rows left alone, the compiler's problem list, the
         compilation the whole decision was made from -- handed back so that a
-        caller which also needs the frame does not compile it a second time.
+        caller which also needs the frame does not compile it a second time --
+        and whether the write was abandoned.
 
         ``cache`` is :meth:`refresh_range`'s way of reading the step-independent
         inputs once; callers outside this module leave it out.
+
+        ``guard`` is an :meth:`inputs_digest` taken before the compilation, for
+        a caller working off the GUI thread. The pixel work happens outside any
+        transaction; every write then happens inside **one**, which begins by
+        taking the digest again. If it moved, nothing is written and ``stale``
+        comes back true: the frame has to be looked at again against the inputs
+        it has now, and a conflict describing the old ones would be a conflict
+        nobody caused.
         """
-        inputs, compiled = self._compile(key, cache)
-        stored = self.db.compiled(key)
-        new_hash = compiled.input_hash
+        inputs, compiled = self._compile(key, cache)  # no transaction: pixels only
+        with self.db.transaction():
+            return self._write_refresh(key, compiled, guard)
+
+    def _write_refresh(self, key: FrameKey, compiled: CompiledFrame,
+                       guard: Optional[str]) -> dict:
+        """The write half of :meth:`refresh`; the caller holds the transaction."""
         result: dict = {
             "updated": 0,
             "conflicts": 0,
             "skipped": 0,
             "problems": list(compiled.problems),
             "compiled": compiled,
+            "stale": False,
         }
+        if guard is not None and self.inputs_digest(key) != guard:
+            result["stale"] = True  # nothing written; the block commits nothing
+            return result
+        stored = self.db.compiled(key)
+        new_hash = compiled.input_hash
         self._mark_bench(key, compiled)
 
         fresh = set(compiled.instances)
@@ -267,12 +319,47 @@ class TruthService:
         """Work the queue off synchronously; same totals as :meth:`refresh_range`.
 
         This is the batch path -- ``cli check`` and the exports -- next to the
-        background sweeper the GUI uses.
+        background sweeper the GUI uses. Each request is retired under the
+        generation it was read with, so one that arrives during the drain stays
+        queued rather than being cleared unchecked.
         """
-        steps = self.pending_rechecks(desktop, view)
-        total = self.refresh_range(desktop, view, steps)
-        for step in steps:
-            self.db.clear_recheck(desktop, view, step)
+        total: dict = {"updated": 0, "conflicts": 0, "skipped": 0, "problems": []}
+        for step, gen in self.db.recheck_items(desktop, view):
+            one = self.refresh(FrameKey(desktop, int(step), view))
+            for counter in ("updated", "conflicts", "skipped"):
+                total[counter] += one[counter]
+            total["problems"].extend(one["problems"])
+            self.db.clear_recheck(desktop, view, step, gen)
+        return total
+
+    def ensure_fresh(self, desktop: int, view: str, only_verified: bool = False) -> dict:
+        """Make a whole view's truth table complete before it is read out.
+
+        The compiled rows of an unverified frame are a cache the annotator's
+        commits deliberately leave stale (spec 3.4), so anything that reads the
+        table as a whole -- an export, a quality check -- has to fill it first,
+        or it would silently publish a frame as it was several edits ago, or
+        drop one that was never visited at all.
+
+        Frozen frames are re-checked whatever ``only_verified`` says, because
+        that is where conflicts come from; the rest of the view is recompiled
+        unless only the frozen rows are wanted. Raises ``RuntimeError`` if any
+        re-check is still outstanding afterwards: an export must not run on a
+        frozen frame nobody has compared.
+        """
+        total = self.run_pending_rechecks(desktop, view)
+        if not only_verified:
+            steps = annotatable_steps(
+                self.db, desktop, view,
+                [row["step"] for row in self.db.frames_for(desktop, view)],
+            )
+            total = self.refresh_range(desktop, view, steps)
+        left = self.pending_rechecks(desktop, view)
+        if left:
+            raise RuntimeError(
+                f"desktop {desktop} view {view}: {len(left)} frozen frame(s) still "
+                f"await a truth re-check ({left[:5]}...); run them before exporting"
+            )
         return total
 
     # ------------------------------------------------------- verify and demote

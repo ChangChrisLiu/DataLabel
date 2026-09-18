@@ -48,6 +48,7 @@ from tda.core.model import (
 from tda.core.truth import TruthService
 from tda.core.truth_inputs import InputCache, frame_hw, pose_segment_of
 from tda.ui import session_api as api
+from tda.ui.session_api import SessionRefusal
 from tda.ui.commands import Op
 from tda.ui.session_ops import (
     DIRECTIONS,
@@ -68,6 +69,7 @@ from tda.ui.session_ops import (
     default_anchor,
     is_verified,
     keyframe_state,
+    mask_steps,
     new_keyframe,
     occluder_union,
     placement_of,
@@ -95,6 +97,7 @@ __all__ = [
     "commit_pair_override",
     "default_anchor",
     "preview",
+    "preview_pair",
     "refresh_steps",
     "require_instance",
     "split_zorder_scope",
@@ -145,7 +148,7 @@ def _result(db: Db, truth: TruthService, key: FrameKey, steps: Sequence[int], op
     stats = settle(db, truth, key.desktop, key.view, affected, key.step)
     out = {"affected": affected, "compiled": stats["compiled"],
            "rechecks": stats["rechecks"], "conflicts": stats["conflicts"],
-           "problems": stats["problems"], "op": op}
+           "problems": stats["problems"], "frame": stats["frame"], "op": op}
     out.update(extra or {})
     return out
 
@@ -180,14 +183,15 @@ def commit_edit(db: Db, truth: TruthService, key: FrameKey, instance: str,
     is not in the frame's coordinates.
     """
     if direction not in DIRECTIONS:
-        raise ValueError(f"direction must be one of {DIRECTIONS}, got {direction!r}")
+        raise SessionRefusal(
+            f"direction must be one of {DIRECTIONS}, got {direction!r}")
     cache = InputCache()
     hw = frame_hw(db, key)
     edited = as_mask(mask, hw)
     if scope == api.SCOPE_FRAME_OVERRIDE:
         return _commit_frame_override(db, truth, key, instance, edited, hw, annotator)
     if scope not in (api.SCOPE_KEYFRAME, api.SCOPE_SPLIT):
-        raise ValueError(f"unknown commit scope {scope!r}")
+        raise SessionRefusal(f"unknown commit scope {scope!r}")
     parts = [ShapePart(MAIN, masks.encode_rle(edited))]
     return _commit_shape(db, truth, key, instance, parts, GEOM_MASK, scope, direction,
                          cache, annotator)
@@ -315,6 +319,27 @@ def preview(db: Db, truth: TruthService, key: FrameKey, instance: str, scope: st
         if is_verified(db, key.desktop, key.view, step)
     ]
     return {"steps": steps, "verified_steps": verified}
+
+
+def preview_pair(db: Db, truth: TruthService, key: FrameKey, instance: str,
+                 other: str) -> dict:
+    """Which frames a layering exception would reach (spec 4.3 改层级).
+
+    A ``PairOverride`` holds for a whole pose segment, but it can only change a
+    pixel where the two instances are layers of the same group: both need a
+    *mask*, in the same placement.  A part lying on the bench is tracked by a
+    rectangle and is no layer at all (spec 3.3 step 5), so those steps are not
+    reached however long either keyframe chain runs -- which is what a
+    scope-blind preview used to report.
+    """
+    cache = InputCache()
+    seg = pose_segment_of(db, key, cache)
+    mine = set(mask_steps(db, truth.tax, key, instance, seg, cache))
+    theirs = set(mask_steps(db, truth.tax, key, other, seg, cache))
+    steps = sorted(mine & theirs)
+    return {"steps": steps,
+            "verified_steps": [s for s in steps
+                               if is_verified(db, key.desktop, key.view, s)]}
 
 
 def _cannot_split(chosen: Optional[ShapeKeyframe], step: int, direction: str) -> bool:
@@ -466,7 +491,7 @@ def require_instance(known: Optional[set[str]], instance: str) -> None:
     typo, or a stale panel row, turns into a z-order nobody asked for.
     """
     if known is not None and instance not in known:
-        raise ValueError(f"no such instance in this frame: {instance!r}")
+        raise SessionRefusal(f"no such instance in this frame: {instance!r}")
 
 
 def set_zorder_move(db: Db, truth: TruthService, key: FrameKey, instance: str,
@@ -538,7 +563,8 @@ def set_visibility(db: Db, truth: TruthService, key: FrameKey, instance: str, vi
     which keeps a hand-drawn single-frame mask intact.
     """
     if vis not in api.VISIBILITY_VALUES:
-        raise ValueError(f"visibility must be one of {api.VISIBILITY_VALUES}, got {vis!r}")
+        raise SessionRefusal(
+            f"visibility must be one of {api.VISIBILITY_VALUES}, got {vis!r}")
     previous = db.frame_overrides(key).get(instance)
     common = {"desktop": key.desktop, "view": key.view, "step": key.step,
               "instance": instance, "steps": [key.step]}

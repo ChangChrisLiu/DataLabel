@@ -55,6 +55,19 @@ class Taxonomy:
     def states_of(self, cls: str) -> list[str]:
         return list(self._defn(cls)["states"])
 
+    def group_of(self, cls: str) -> str:
+        """The class's group of spec 6.1 (``structure``, ``part``, ...), or ``""``.
+
+        A rough statement of how deep in the machine a class sits, which is what
+        lets a caller order instances the way they are physically stacked; an
+        unknown class simply has no group rather than raising, since this is
+        only ever used to sort.
+        """
+        try:
+            return str(self._defn(cls).get("group") or "")
+        except KeyError:
+            return ""
+
     def default_state(self, cls: str) -> str:
         return self._defn(cls)["default_state"]
 

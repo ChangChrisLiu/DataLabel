@@ -44,6 +44,11 @@ class StubSession(QObject):
     sigFrameChanged = Signal(object)
     sigDirty = Signal(bool)
     sigProblems = Signal(list)
+    sigEditingChanged = Signal(object)
+    sigClosed = Signal()
+    sigSweepProgress = Signal(int, int, int)
+    sigSweepError = Signal(int, str)
+    sigQueuesChanged = Signal()
 
     def __init__(self, thumb_dir: Optional[Path] = None) -> None:
         super().__init__()
@@ -132,6 +137,10 @@ class StubSession(QObject):
         }
 
     # -- frames -------------------------------------------------------------
+    @property
+    def is_open(self) -> bool:
+        return True
+
     def steps(self) -> list[int]:
         return list(self._steps)
 
@@ -175,7 +184,27 @@ class StubSession(QObject):
     def task_card(self) -> list[dict]:
         return [dict(r) for r in self._card]
 
+    def task_neighbour(self) -> Optional[int]:
+        later = [s for s in self._steps if s > self._step]
+        return later[0] if later else None
+
+    def overlay_layers(self):
+        return {}, []
+
     # -- edits --------------------------------------------------------------
+    def set_editing_mask(self, mask) -> None:
+        self.calls.append(("set_editing_mask",))
+
+    def push_stroke(self, before, after) -> None:
+        self.calls.append(("push_stroke",))
+
+    def preview(self, scope: str) -> dict:
+        self.calls.append(("preview", scope))
+        return {"steps": [self._step], "verified_steps": []}
+
+    def set_unexplained(self, step: int, boxes) -> None:
+        self.calls.append(("set_unexplained", step, list(boxes)))
+
     def begin_edit(self, instance: str) -> None:
         self.calls.append(("begin_edit", instance))
 

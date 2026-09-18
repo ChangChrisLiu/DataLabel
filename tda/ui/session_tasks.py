@@ -1,22 +1,31 @@
-"""The task card: what reverse-order annotation asks for at one step (spec 4.2).
+"""The task card: what has to be annotated on the frame in front of the annotator.
 
-Annotating backwards means reading the step table backwards: the change an
-action *caused* at step ``k`` is the thing that has to be *undone* on the way to
-``k - 1``.  :func:`tda.core.states.diff_states` between the two snapshots
-therefore yields the instructions almost directly, and this module is the
-mapping from a state change to the gesture it implies -- draw the part back in,
-split its keyframe, change only the label, retire its staging-area box, or just
-confirm the frame.
+Reverse-order annotation (spec 4.2) arrives at frame ``j`` from ``j + 1``, which
+is already done.  The work that belongs to ``j`` is the difference between the
+two, read on the image the annotator is looking at: a part that is ``removed``
+at ``j + 1`` and installed at ``j`` is a part they can *see* there and have to
+draw, a latch that is ``open`` at ``j + 1`` and shut at ``j`` needs a second
+version of its shape, and a screw that was merely loosened needs no new pixels
+at all.
 
-Nothing here writes: the card is derived from the step table and from whichever
-shapes happen to exist, which is also what makes an item ``done``.
+Everything is therefore expressed in two frames: **``j``, the frame on screen**,
+and **``neighbour``, the frame it is diffed against** -- ``j + 1`` browsing
+backwards, ``j - 1`` browsing forwards for a repair, and the next one that
+actually has an image when the one next door is missing.  ``done`` is always
+evaluated at ``j``: the question is whether the geometry the item asks for
+exists *here*.
+
+The **start frame** has no neighbour.  Nothing has been annotated yet, so its
+card is one item per instance that needs geometry there and has none, ordered
+so the chassis is drawn before the things that sit on top of it, and a single
+``confirm`` once they are all drawn.
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from tda.core.db import Db
 from tda.core.compiler import select_keyframe
+from tda.core.db import Db
 from tda.core.model import FrameKey, InstanceRec
 from tda.core.states import diff_states, needs_geom
 from tda.core.taxonomy import Taxonomy
@@ -32,17 +41,30 @@ from tda.ui.session_ops import (
     placement_of,
 )
 
-__all__ = ["SPLIT_TRANSITIONS", "STATE_ONLY_TRANSITIONS", "task_card_for"]
+__all__ = ["LAYER_RANK", "SPLIT_TRANSITIONS", "STATE_ONLY_TRANSITIONS", "task_card_for"]
 
 REMOVED = "removed"
 _VERIFIED = "verified"
 
-#: State transitions that keep the shape but need a new version of it at k-1.
+#: State transitions that keep the shape but need a new version of it here.
 SPLIT_TRANSITIONS = frozenset(
     {("open", "closed"), ("unplugged", "plugged"), ("displaced", "installed")}
 )
 #: ``loosened -> fastened``: the shape carries over untouched.
 STATE_ONLY_TRANSITIONS = frozenset({("loosened", "fastened")})
+
+#: Taxonomy group -> how low it sits in a frame, so the start frame's card can
+#: be drawn from the bottom up: the chassis is behind everything, the parts
+#: bolted into it come next, and the small things that fasten or connect them
+#: are on top. Only the order matters, not the numbers.
+LAYER_RANK: dict[str, int] = {
+    "structure": 0,
+    "part": 1,
+    "interface": 2,
+    "latch": 3,
+    "fastener": 4,
+}
+_CHASSIS_CLASS = "chassis"
 
 #: Order the kinds appear in for one instance: draw first, confirm last.
 _KIND_RANK = {
@@ -78,13 +100,14 @@ def _has_bench_chain(db: Db, desktop: int, view: str, instance: str) -> bool:
 # --------------------------------------------------------------------------- #
 # one change -> one instruction
 # --------------------------------------------------------------------------- #
-def _kind_for(changes: dict, needed_now: bool, needed_before: bool) -> str:
-    """Map one instance's ``k -> k-1`` change onto a kind (spec 4.2 step 2).
+def _kind_for(changes: dict, needs_neighbour: bool, needs_here: bool) -> str:
+    """Map one instance's difference from the neighbour onto a kind (spec 4.2).
 
-    The three named transition sets come straight from the spec.  Anything else
-    falls back on where geometry is required: a shape that exists at ``k-1`` but
-    not at ``k`` has to be drawn, one that exists on both sides needs a second
-    version, and one that exists on neither is a label change.
+    ``changes`` reads ``neighbour value -> value on this frame``.  The three
+    named transition sets come straight from the spec.  Anything else falls back
+    on where geometry is required: a shape needed *here* but not next door has
+    to be drawn, one needed on both sides needs a second version, and one needed
+    on neither is a label change.
     """
     transition = changes.get("state")
     if transition is not None:
@@ -95,9 +118,14 @@ def _kind_for(changes: dict, needed_now: bool, needed_before: bool) -> str:
             return api.KIND_SPLIT_KEYFRAME
         if transition in STATE_ONLY_TRANSITIONS:
             return api.KIND_STATE_ONLY
-    if needed_before and not needed_now:
+    if changes.get("placement") is not None and needs_here:
+        # the chassis and bench chains of an instance are independent (spec 3.3),
+        # so a part that changed side carries no shape on this one yet, whichever
+        # way the annotator is walking
         return api.KIND_ADD_SHAPE
-    if needed_before and needed_now:
+    if needs_here and not needs_neighbour:
+        return api.KIND_ADD_SHAPE
+    if needs_here and needs_neighbour:
         return api.KIND_SPLIT_KEYFRAME
     return api.KIND_STATE_ONLY
 
@@ -110,7 +138,7 @@ def _text_for(kind: str, instance: str, changes: dict, rec: Optional[InstanceRec
     if kind == api.KIND_ADD_SHAPE:
         with_parent = (f", back in with {rec.parent}"
                        if rec is not None and rec.attached and rec.parent else "")
-        return f"Draw {instance}{cls} back inside the chassis{with_parent}"
+        return f"Draw {instance}{cls} on this frame{with_parent}"
     if kind == api.KIND_SPLIT_KEYFRAME:
         return f"Split the keyframe of {instance}{cls}{arrow}"
     if kind == api.KIND_REMOVE_BENCH_BOX:
@@ -137,27 +165,36 @@ def _ordered(items: list[dict], instances: dict[str, InstanceRec]) -> list[dict]
     return sorted(items, key=sort_key)
 
 
+def _bottom_up(items: list[dict], instances: dict[str, InstanceRec],
+               tax: Taxonomy) -> list[dict]:
+    """Order a start-frame card so the thing everything sits on is drawn first."""
+    def sort_key(item: dict) -> tuple:
+        rec = instances.get(item["instance"])
+        cls = "" if rec is None else rec.cls
+        return (0 if cls == _CHASSIS_CLASS else 1,
+                LAYER_RANK.get(tax.group_of(cls), len(LAYER_RANK)),
+                item["instance"])
+
+    return sorted(items, key=sort_key)
+
+
 # --------------------------------------------------------------------------- #
 # the card
 # --------------------------------------------------------------------------- #
 def task_card_for(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
-                  start_step: Optional[int] = None) -> list[dict]:
-    """What has to be annotated to go from step ``k`` back to ``k-1`` (spec 4.2).
+                  neighbour: Optional[int] = None) -> list[dict]:
+    """What has to be annotated on frame ``step`` (spec 4.2).
 
-    A part that is ``removed`` at ``k`` and installed at ``k-1`` has to be drawn
-    back into the chassis -- together with the attached children that come back
-    in with it, which is why the card groups a parent with them.  A latch that
-    is ``open`` at ``k`` needs a second version of its shape; a screw that is
-    merely ``loosened`` needs no new pixels at all.
+    ``neighbour`` is the already-annotated frame the card is diffed against --
+    ``step + 1`` in the reverse order annotation runs in, ``step - 1`` when the
+    annotator is browsing forwards to repair something, and ``None`` on the
+    start frame, which has nobody after it.
 
-    Two frames are special.  The **start frame** has nothing annotated yet, so
-    its card lists every instance that needs geometry there (spec 4.2 step 1).
-    A ``dupli`` or ``failed`` step -- and the first step of the teardown, which
-    has no predecessor -- carries a single ``confirm`` item.
-
-    ``done`` says whether the geometry the item asks for is already in the
-    database, so the panel can grey an item out without the annotator having to
-    remember what they drew.
+    A part that is ``removed`` next door and installed here has to be drawn back
+    into the chassis, together with the attached children that came back in with
+    it, which is why the card groups a parent with them. ``done`` says whether
+    the geometry the item asks for already exists **on this frame**, so the
+    panel can grey an item out without the annotator having to remember.
     """
     cache = InputCache()
     records = {rec.step: rec for rec in db.steps(desktop)}
@@ -165,56 +202,61 @@ def task_card_for(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
         return []
     rec = records[step]
     instances = instances_of(db, desktop, cache)
-    start = max(records) if start_step is None else start_step
     frame = db.get_frame(FrameKey(desktop, step, view)) or {}
     confirmed = frame.get("review_status") == _VERIFIED
 
     if rec.dupli or rec.step_type in ("dupli", "failed"):
         return [_item(rec.raw_name or f"step {step}", api.KIND_CONFIRM, {}, confirmed, None)]
-    if step >= start:
-        return _start_card(db, tax, desktop, view, step, instances, cache)
-    if step - 1 not in records:
-        return [_item(rec.raw_name or f"step {step}", api.KIND_CONFIRM, {}, confirmed, None)]
+    if neighbour is None or neighbour not in records:
+        return _start_card(db, tax, desktop, view, step, instances, cache, confirmed)
 
-    state_now = state_of(db, tax, desktop, step, cache)
-    state_before = state_of(db, tax, desktop, step - 1, cache)
-    needs_now = needs_geom(instances, state_now, tax)
-    needs_before = needs_geom(instances, state_before, tax)
+    state_here = state_of(db, tax, desktop, step, cache)
+    state_there = state_of(db, tax, desktop, neighbour, cache)
+    needs_here = needs_geom(instances, state_here, tax)
+    needs_there = needs_geom(instances, state_there, tax)
 
     changed: dict[str, dict] = {}
-    for instance, attr, old, new in diff_states(state_now, state_before):
-        changed.setdefault(instance, {})[attr] = (old, new)
+    for instance, attr, there, here in diff_states(state_there, state_here):
+        changed.setdefault(instance, {})[attr] = (there, here)
 
     items: list[dict] = []
     for instance, changes in changed.items():
         if instance not in instances:
             continue  # a virtual cable node: it never carries geometry
         rec_i = instances.get(instance)
-        kind = _kind_for(changes, instance in needs_now, instance in needs_before)
+        kind = _kind_for(changes, instance in needs_there, instance in needs_here)
         done = (True if kind == api.KIND_STATE_ONLY
-                else _has_shape(db, tax, desktop, view, instance, step - 1, cache))
+                else _has_shape(db, tax, desktop, view, instance, step, cache))
         items.append(_item(instance, kind, changes, done, rec_i))
         if (changes.get("placement") == (ON_BENCH, IN_CHASSIS)
                 and _has_bench_chain(db, desktop, view, instance)):
-            # spec 4.2: the part is back in the chassis, so its on_bench chain
-            # ends at k -- done exactly when no bench box reaches k-1 any more
-            retired = not _has_shape(db, tax, desktop, view, instance, step - 1, cache,
+            # the part is back in the chassis here, so its on_bench chain ended
+            # next door -- done exactly when no bench box reaches this frame
+            retired = not _has_shape(db, tax, desktop, view, instance, step, cache,
                                      GEOM_BOX)
             items.append(_item(instance, api.KIND_REMOVE_BENCH_BOX, changes, retired, rec_i))
     return _ordered(items, instances)
 
 
 def _start_card(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
-                instances: dict[str, InstanceRec], cache: InputCache) -> list[dict]:
-    """Spec 4.2 step 1: on the start frame everything present has to be drawn."""
+                instances: dict[str, InstanceRec], cache: InputCache,
+                confirmed: bool) -> list[dict]:
+    """Spec 4.2 step 1: on the start frame everything present has to be drawn.
+
+    Only what is still missing is listed -- an instance already drawn is not
+    work -- so the card empties as the annotator goes and ends as a single
+    confirmation.
+    """
     state = state_of(db, tax, desktop, step, cache)
     items = []
     for instance, kind in sorted(needs_geom(instances, state, tax).items()):
         geom = GEOM_BOX if kind in BENCH_KINDS else GEOM_MASK
-        item = _item(instance, api.KIND_ADD_SHAPE, {},
-                     _has_shape(db, tax, desktop, view, instance, step, cache, geom),
-                     instances.get(instance))
+        if _has_shape(db, tax, desktop, view, instance, step, cache, geom):
+            continue
+        item = _item(instance, api.KIND_ADD_SHAPE, {}, False, instances.get(instance))
         item["text"] = (f"Draw the staging-area box of {instance}" if geom == GEOM_BOX
-                        else f"Draw {instance} in the chassis")
+                        else f"Draw {instance} on this frame")
         items.append(item)
-    return _ordered(items, instances)
+    if not items:
+        return [_item(f"step {step}", api.KIND_CONFIRM, {}, confirmed, None)]
+    return _bottom_up(items, instances, tax)

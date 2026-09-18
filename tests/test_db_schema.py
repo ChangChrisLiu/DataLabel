@@ -69,7 +69,7 @@ def test_schema_v1_database_is_migrated_in_place(tmp_db_path: str):
     assert row["visible_rle"] == RLE_A  # the old data survives
     assert row["status"] == "verified"
     assert row["geom_type"] == "mask" and row["box"] is None  # the new columns default
-    assert db.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
+    assert db.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "3"
     db.close()
 
 

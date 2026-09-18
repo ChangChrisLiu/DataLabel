@@ -42,7 +42,7 @@ from tda.core.model import (
     ZOrderRec,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 LOCK_TTL = timedelta(hours=12)
 #: Suffix of the single-user lock file, next to the database (spec 3.5).
 LOCK_SUFFIX = ".lock"
