@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from tda.core import dbrows as R
+from tda.core.db_pose import PoseSegmentMixin
+from tda.core.db_status import StatusMixin
 from tda.core.dbconn import ConnectionMixin
 from tda.core.model import (
     ActionRec,
@@ -46,9 +48,10 @@ LOCK_TTL = timedelta(hours=12)
 RESOLUTIONS = ("keep_old", "accept_new", "edited", "superseded")
 
 
-class Db(ConnectionMixin):
+class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin):
     """Repository over the TDA SQLite file. Every write commits immediately --
-    unless it runs inside :meth:`~tda.core.dbconn.ConnectionMixin.transaction`."""
+    unless it runs inside :meth:`~tda.core.dbconn.ConnectionMixin.transaction`;
+    :mod:`tda.core.db_pose` and :mod:`tda.core.db_status` mix in more readers."""
 
     def __init__(self, path: str):
         self.path = str(path)
