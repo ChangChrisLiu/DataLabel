@@ -1,0 +1,350 @@
+"""Undoable operations over the annotation inputs, and the reads they share.
+
+:mod:`tda.ui.session_edit` decides *what* an edit means; this module is the
+layer underneath it: the vocabulary both it and :mod:`tda.ui.session_tasks`
+read the database with (which steps can be compiled, where an instance is, what
+its keyframe chain looks like), plus the five handlers that write one
+:class:`~tda.ui.commands.Op` back.
+
+Op payloads are *states*, not deltas
+------------------------------------
+Each handler is registered as both the ``do`` and the ``undo`` direction of its
+op kind: an op's ``payload`` and its ``inverse`` are two states of the same
+rows, so redoing and undoing are the same call with a different argument.  A
+keyframe that did not exist yet is written as ``exists: False``, which the
+handler turns into a delete.  Re-creating a deleted keyframe yields a new row
+id, so both directions share one mutable ``ref`` dict holding it -- that is what
+lets a freshly drawn shape be undone and redone any number of times.
+
+Nothing here is Qt-aware, and nothing here decides policy.
+"""
+from __future__ import annotations
+
+from typing import Iterable, Optional
+
+import numpy as np
+
+from tda.core import masks
+from tda.core.db import Db
+from tda.core.model import (
+    FrameKey,
+    FrameOverride,
+    OccluderMask,
+    PairOverride,
+    Placement,
+    ShapeKeyframe,
+    ShapePart,
+    ZOrderRec,
+)
+from tda.core.states import needs_geom
+from tda.core.taxonomy import Taxonomy
+from tda.core.truth import TruthService
+from tda.core.truth_inputs import InputCache, instances_of, pose_segment_of, state_of
+
+__all__ = [
+    "BENCH_KINDS",
+    "DIRECTIONS",
+    "FORWARD",
+    "GEOM_BOX",
+    "GEOM_MASK",
+    "IN_CHASSIS",
+    "MAIN",
+    "ON_BENCH",
+    "REVERSE",
+    "annotatable_steps",
+    "apply_frame_override",
+    "apply_keyframes",
+    "apply_occluder",
+    "apply_pair_override",
+    "apply_zorder",
+    "as_mask",
+    "chain_for",
+    "default_anchor",
+    "keyframe_state",
+    "new_keyframe",
+    "occluder_union",
+    "placement_of",
+    "refresh_steps",
+    "segment_steps",
+    "write_zorder",
+]
+
+IN_CHASSIS = Placement.IN_CHASSIS.value
+ON_BENCH = Placement.ON_BENCH.value
+GEOM_MASK = "mask"
+GEOM_BOX = "box"
+MAIN = "main"
+
+#: Browsing directions a split keyframe can be anchored in (spec 3.3).
+REVERSE = "reverse"
+FORWARD = "forward"
+DIRECTIONS = (REVERSE, FORWARD)
+
+#: Geometry kinds :func:`tda.core.states.needs_geom` reports for a bench part.
+BENCH_KINDS = ("box",)
+
+
+# --------------------------------------------------------------------------- #
+# reads
+# --------------------------------------------------------------------------- #
+def annotatable_steps(db: Db, desktop: int, view: str, steps: Iterable[int]) -> list[int]:
+    """The subset of ``steps`` that has an image to compile against.
+
+    A logical step whose frame row is absent, or flagged ``missing``, carries no
+    canvas: compiling it would fall back to the view's nominal size and produce
+    masks in the wrong coordinates.  The state machine and the shape anchors
+    still run through it (spec 4.2, 缺帧处理), only the truth table skips it.
+    """
+    out = []
+    for step in sorted({int(s) for s in steps}):
+        row = db.get_frame(FrameKey(desktop, step, view))
+        if row is not None and not row.get("missing"):
+            out.append(step)
+    return out
+
+
+def refresh_steps(db: Db, truth: TruthService, desktop: int, view: str,
+                  steps: Iterable[int]) -> dict:
+    """Recompile every step of one view, keeping each step's problems apart.
+
+    This is :meth:`~tda.core.truth.TruthService.refresh_range` unrolled: it
+    shares one :class:`~tda.core.truth_inputs.InputCache` across the sweep in
+    exactly the same way, but records ``problems`` per step instead of
+    concatenating them, which is what the session's ``missing_shape`` queue
+    needs (spec 4.4).
+    """
+    cache = InputCache()
+    total: dict = {"updated": 0, "conflicts": 0, "skipped": 0, "problems": {}}
+    for step in steps:
+        one = truth.refresh(FrameKey(desktop, int(step), view), cache)
+        for counter in ("updated", "conflicts", "skipped"):
+            total[counter] += one[counter]
+        total["problems"][int(step)] = list(one["problems"])
+    return total
+
+
+def as_mask(mask: np.ndarray, hw: tuple[int, int]) -> np.ndarray:
+    """Validate an edited mask against the frame canvas and make it boolean."""
+    arr = np.asarray(mask)
+    if arr.shape != tuple(hw):
+        raise ValueError(f"mask has shape {arr.shape!r}, expected {tuple(hw)!r}")
+    return arr.astype(bool, copy=False)
+
+
+def placement_of(db: Db, tax: Taxonomy, key: FrameKey, instance: str,
+                 cache: Optional[InputCache] = None) -> str:
+    """Where the instance is at this step; the chassis chain when it is unknown."""
+    inst = state_of(db, tax, key.desktop, key.step, cache).get(instance)
+    return IN_CHASSIS if inst is None else inst.placement
+
+
+def occluder_union(db: Db, key: FrameKey, hw: tuple[int, int]) -> np.ndarray:
+    """Every occluder layer of one frame in a single mask."""
+    out = np.zeros(hw, dtype=bool)
+    for occ in db.occluders(key):
+        if occ.rle:
+            out |= masks.decode_rle(occ.rle)
+    return out
+
+
+def chain_for(db: Db, key: FrameKey, instance: str, seg: int,
+              placement: str) -> list[ShapeKeyframe]:
+    """The instance's keyframes of one pose segment and one placement chain.
+
+    The ``in_chassis`` and ``on_bench`` chains of an instance are independent
+    (spec 3.3), which is what lets one part carry a mask before its removal step
+    and a staging-area box after it.
+    """
+    return [
+        kf
+        for kf in db.keyframes(key.desktop, key.view, instance)
+        if kf.pose_segment == seg and kf.placement == placement
+    ]
+
+
+def default_anchor(db: Db, tax: Taxonomy, key: FrameKey, instance: str, seg: int,
+                   placement: str, cache: Optional[InputCache] = None) -> int:
+    """Anchor for a shape drawn for the first time (spec 3.3, 关键帧与标注方向).
+
+    An instance's lifetime is fixed by the step table before anyone draws
+    anything, so the default anchor is the **last logical step of this pose
+    segment where the instance still needs geometry in this placement** -- which
+    makes the one shape cover the instance's whole life in that chain.  Falls
+    back to the current step when the state machine says the instance needs
+    geometry nowhere (a shape drawn against the rules is still kept).
+    """
+    instances = instances_of(db, key.desktop, cache)
+    best: Optional[int] = None
+    for rec in db.steps(key.desktop):
+        step = rec.step
+        if pose_segment_of(db, FrameKey(key.desktop, step, key.view), cache) != seg:
+            continue
+        held = state_of(db, tax, key.desktop, step, cache).get(instance)
+        if held is None or held.placement != placement:
+            continue
+        if instance in needs_geom(instances, state_of(db, tax, key.desktop, step, cache), tax):
+            best = step
+    return key.step if best is None else best
+
+
+def segment_steps(db: Db, tax: Taxonomy, key: FrameKey, instance: str, seg: int,
+                  cache: Optional[InputCache] = None) -> list[int]:
+    """Annotatable steps of this pose segment where ``instance`` carries geometry."""
+    instances = instances_of(db, key.desktop, cache)
+    out = []
+    for rec in db.steps(key.desktop):
+        step = rec.step
+        if pose_segment_of(db, FrameKey(key.desktop, step, key.view), cache) != seg:
+            continue
+        if instance in needs_geom(instances, state_of(db, tax, key.desktop, step, cache), tax):
+            out.append(step)
+    return annotatable_steps(db, key.desktop, key.view, out)
+
+
+# --------------------------------------------------------------------------- #
+# keyframe states
+# --------------------------------------------------------------------------- #
+def new_keyframe(key: FrameKey, instance: str, seg: int, anchor: int, placement: str,
+                 parts: list[ShapePart], geom_type: str) -> ShapeKeyframe:
+    """An unsaved keyframe for one instance of one chain."""
+    return ShapeKeyframe(
+        id=None, instance=instance, desktop=key.desktop, view=key.view,
+        pose_segment=seg, anchor_step=anchor, placement=placement,
+        geom_type=geom_type, parts=parts,
+    )
+
+
+def _part_state(part: ShapePart) -> dict:
+    return {"name": part.name, "rle": part.rle,
+            "box": None if part.box is None else [float(v) for v in part.box]}
+
+
+def _parts_of(state: dict) -> list[ShapePart]:
+    return [
+        ShapePart(p["name"], p.get("rle"),
+                  None if p.get("box") is None else tuple(float(v) for v in p["box"]))
+        for p in state["parts"]
+    ]
+
+
+def keyframe_state(kf: Optional[ShapeKeyframe], ref: dict,
+                   template: Optional[ShapeKeyframe] = None) -> dict:
+    """One keyframe as an undo-friendly dict; ``None`` becomes "it did not exist".
+
+    ``ref`` is the mutable holder of the row id that both directions of the op
+    share, so an undo that deletes the row and a redo that re-creates it stay in
+    step with each other.
+    """
+    if kf is None:
+        base = template
+        return {"ref": ref, "exists": False,
+                "instance": None if base is None else base.instance,
+                "desktop": None if base is None else base.desktop,
+                "view": None if base is None else base.view,
+                "pose_segment": None if base is None else base.pose_segment,
+                "anchor_step": None, "placement": None, "geom_type": None, "parts": []}
+    return {
+        "ref": ref, "exists": True, "instance": kf.instance, "desktop": kf.desktop,
+        "view": kf.view, "pose_segment": kf.pose_segment, "anchor_step": kf.anchor_step,
+        "placement": kf.placement, "geom_type": kf.geom_type,
+        "parts": [_part_state(p) for p in kf.parts],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# the five handlers -- one per op kind of tda.ui.commands.KINDS
+# --------------------------------------------------------------------------- #
+def apply_keyframes(db: Db, truth: TruthService, payload: dict) -> dict:
+    """Write back a list of keyframe states (and a layer order), then recompile."""
+    with db.transaction():
+        for state in payload.get("keyframes", ()):
+            _apply_keyframe(db, state)
+        zorder = payload.get("zorder")
+        if zorder is not None:
+            write_zorder(db, payload["desktop"], payload["view"], zorder)
+    return refresh_steps(db, truth, payload["desktop"], payload["view"], payload["steps"])
+
+
+def _apply_keyframe(db: Db, state: dict) -> None:
+    """Make one keyframe row look like ``state``; ``exists: False`` removes it."""
+    ref = state["ref"]
+    kid = ref.get("keyframe_id")
+    if not state["exists"]:
+        if kid is not None:
+            db.delete_keyframe(kid)
+            ref["keyframe_id"] = None
+        return
+    existing = None
+    if kid is not None:
+        existing = next(
+            (kf for kf in db.keyframes(state["desktop"], state["view"], state["instance"])
+             if kf.id == kid),
+            None,
+        )
+    parts = _parts_of(state)
+    if existing is not None:
+        existing.anchor_step = state["anchor_step"]
+        existing.placement = state["placement"]
+        existing.geom_type = state["geom_type"]
+        existing.parts = parts
+        db.update_keyframe(existing)
+        return
+    ref["keyframe_id"] = db.add_keyframe(
+        new_keyframe(
+            FrameKey(state["desktop"], state["anchor_step"], state["view"]),
+            state["instance"], state["pose_segment"], state["anchor_step"],
+            state["placement"], parts, state["geom_type"],
+        )
+    )
+
+
+def write_zorder(db: Db, desktop: int, view: str, state: dict) -> None:
+    """Store one ``(view, pose segment)`` layer order from an op payload."""
+    db.set_zorder(
+        ZOrderRec(desktop, view, state["pose_segment"],
+                  [tuple(entry) for entry in state["order"]], version=state["version"])
+    )
+
+
+def apply_zorder(db: Db, truth: TruthService, payload: dict) -> dict:
+    """Write one stored layer order back and recompile the frames it reaches."""
+    with db.transaction():
+        write_zorder(db, payload["desktop"], payload["view"], payload)
+    return refresh_steps(db, truth, payload["desktop"], payload["view"], payload["steps"])
+
+
+def apply_pair_override(db: Db, truth: TruthService, payload: dict) -> dict:
+    """Add or remove one "above beats below" exception, then recompile."""
+    po = PairOverride(payload["desktop"], payload["view"], payload["pose_segment"],
+                      payload["above"], payload["below"])
+    with db.transaction():
+        if payload["exists"]:
+            db.set_pair_override(po)
+        else:
+            db.delete_pair_override(po)
+    return refresh_steps(db, truth, payload["desktop"], payload["view"], payload["steps"])
+
+
+def apply_frame_override(db: Db, truth: TruthService, payload: dict) -> dict:
+    """Write, or drop, one instance's single-frame override, then recompile."""
+    key = FrameKey(payload["desktop"], payload["step"], payload["view"])
+    with db.transaction():
+        if payload["exists"]:
+            db.set_frame_override(
+                FrameOverride(key, payload["instance"], payload.get("visible_rle"),
+                              payload.get("visibility"))
+            )
+        else:
+            db.delete_frame_override(key, payload["instance"])
+    return refresh_steps(db, truth, key.desktop, key.view, payload["steps"])
+
+
+def apply_occluder(db: Db, truth: TruthService, payload: dict) -> dict:
+    """Write, or drop, one occluder layer of one frame, then recompile."""
+    key = FrameKey(payload["desktop"], payload["step"], payload["view"])
+    with db.transaction():
+        if payload["exists"]:
+            db.set_occluder(OccluderMask(key, payload["occluder_type"], payload["rle"]))
+        else:
+            db.delete_occluder(key, payload["occluder_type"])
+    return refresh_steps(db, truth, key.desktop, key.view, payload["steps"])

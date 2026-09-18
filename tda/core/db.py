@@ -23,6 +23,7 @@ from typing import Any, Iterable, Optional
 
 from tda.core import dbrows as R
 from tda.core.dbconn import MIGRATIONS, ConnectionMixin
+from tda.core.dbdelete import DeleteMixin
 from tda.core.model import (
     ActionRec,
     FrameKey,
@@ -43,9 +44,11 @@ LOCK_TTL = timedelta(hours=12)
 RESOLUTIONS = ("keep_old", "accept_new", "edited")
 
 
-class Db(ConnectionMixin):
+class Db(ConnectionMixin, DeleteMixin):
     """Repository over the TDA SQLite file. Every write commits immediately --
-    unless it runs inside :meth:`~tda.core.dbconn.ConnectionMixin.transaction`."""
+    unless it runs inside :meth:`~tda.core.dbconn.ConnectionMixin.transaction`.
+
+    The undo-side row removals are :class:`~tda.core.dbdelete.DeleteMixin`'s."""
 
     def __init__(self, path: str):
         self.path = str(path)
