@@ -1,0 +1,526 @@
+"""SAM prompt tools for the canvas (spec 4.6), split out of ``tools.py``.
+
+The pixel tools in :mod:`tda.ui.canvas.tools` are synchronous: a stroke lands in
+the editing layer while the mouse is still down.  Everything here is not -- a
+prompt travels to a worker thread and the mask comes back some tens of
+milliseconds later, by which time the annotator may have clicked again, moved to
+another frame, or picked another instance.  Most of the code below exists to
+make sure a late answer to an old question is thrown away instead of written
+into whatever is on screen now:
+
+* every submission is stamped with a monotonically increasing **token**, and
+  only the newest token may apply -- a superseded result is dropped silently;
+* it also carries a **frame identity** (:meth:`SamToolBase.set_frame_token` plus
+  the instance being edited); a result whose identity no longer matches is
+  dropped with :attr:`~SamToolBase.sigError`, because applying it would write
+  the mask of frame k into frame k-1;
+* the crop rectangle is bounds-checked against the overlay before any write, so
+  a stale rectangle can never raise out of a Qt slot.
+
+Threading: :class:`~tda.models.sam_service.SamQueue` invokes its callback on the
+worker thread.  :class:`SamResultBridge` is the only thing that touches it
+there; it re-emits the payload through a queued signal so the mask is applied
+on the GUI thread.
+"""
+from __future__ import annotations
+
+from typing import Any, Optional, Sequence
+
+import cv2
+import numpy as np
+from PySide6.QtCore import QObject, Qt, Signal
+
+from tda.models.sam_service import SamRequest, SamResult
+from tda.ui.canvas.overlay import LabelOverlay
+from tda.ui.canvas.tools import Box, Point, Rect, Tool
+
+__all__ = [
+    "MAX_SAM_SIDE",
+    "HINT_EDITED",
+    "SamResultBridge",
+    "SamToolBase",
+    "SamPointTool",
+    "SamBoxTool",
+    "viewport_crop",
+]
+
+#: SAM 2.1 resizes its input to 1024 anyway, so a longer crop wastes work
+#: and costs boundary precision on the way back (spec 4.6).
+MAX_SAM_SIDE = 1024
+
+#: Emitted on :attr:`SamToolBase.sigHint` when cycling is abandoned because the
+#: annotator painted on the proposal (their edit is never discarded).
+HINT_EDITED = "candidates discarded: the mask was edited"
+#: Emitted on :attr:`SamToolBase.sigError` for a result that arrived too late.
+ERR_FRAME_CHANGED = "SAM result dropped: the frame or instance changed"
+ERR_OUT_OF_BOUNDS = "SAM result dropped: the crop no longer fits the frame"
+
+
+def _norm_box(a: tuple[float, float], b: tuple[float, float]) -> Box:
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+
+
+def viewport_crop(
+    canvas: Any, max_side: int = MAX_SAM_SIDE
+) -> Optional[tuple[np.ndarray, Rect, float]]:
+    """``(crop, rect, scale)`` for the visible image region, or ``None``.
+
+    ``rect`` is the crop window in image coordinates and ``scale`` the factor
+    applied to fit ``max_side`` (1.0 when the viewport is already small enough,
+    which is the normal case once the annotator has zoomed in).
+
+    A viewport larger than ``max_side`` is **downscaled rather than tiled**
+    (spec 4.6 mentions tiling; deferred to P2).  SAM 2 resizes whatever it gets
+    to 1024x1024 internally, so tiling would buy detail only where the
+    annotator is already expected to zoom in, and there the crop is native
+    resolution.  The one visible consequence: ``SamService`` measures its local
+    refinement radius (:data:`~tda.models.sam_service.REFINE_RADIUS_PX`, 48 px)
+    in *crop* pixels, so the region a refinement click can change spans
+    ``REFINE_RADIUS_PX / scale`` **image** pixels -- a zoomed-out view refines
+    coarsely.  Zoom in for a tight correction.
+    """
+    rgb = canvas.image_rgb()
+    if rgb is None:
+        return None
+    rect = canvas.viewport_image_rect()
+    x0, y0, x1, y1 = rect
+    if x1 <= x0 or y1 <= y0:
+        return None
+    crop = rgb[y0:y1, x0:x1]
+    h, w = crop.shape[:2]
+    scale = 1.0
+    longest = max(h, w)
+    if longest > max_side:
+        scale = max_side / float(longest)
+        crop = cv2.resize(
+            crop,
+            (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
+    return np.ascontiguousarray(crop), rect, scale
+
+
+class SamResultBridge(QObject):
+    """Moves a SAM result from the worker thread onto the GUI thread.
+
+    ``SamQueue`` calls its callback on its own thread; touching the overlay or
+    the scene from there would be a data race.  :meth:`deliver` is the callback
+    and does nothing but emit -- the connection is queued, so the slot runs in
+    the thread that owns this object (the GUI thread).
+    """
+
+    sigResult = Signal(object)
+
+    def deliver(self, payload: object) -> None:
+        """Callback for ``SamQueue.submit`` -- runs on the worker thread."""
+        self.sigResult.emit(payload)
+
+
+class SamToolBase(Tool):
+    """Shared plumbing for the SAM prompt tools.
+
+    Attributes:
+        queue: a ``SamQueue`` (or any object with ``submit(req, cb)``); ``None``
+            disables submission so the UI still works without a checkpoint.
+        refine: when True the current editing mask is sent as ``mask_input`` and
+            only the region near the new points changes (spec 4.6).
+        instance: instance key the result belongs to; ``None`` keeps whatever
+            the overlay is already editing.
+        prompt_box: optional box sent along with the points, set via
+            :meth:`set_prompt_box` -- normally the box of a
+            :class:`~tda.core.diffmap.DiffBlob` from the frame difference map,
+            or the last box dragged with :class:`SamBoxTool`.
+        stroke_before: the editing layer as it was immediately before the last
+            application, exactly like ``PaintTool.stroke_before``, so the
+            session can build one ``edit_editing_mask`` op per applied mask --
+            including per candidate switch -- without the tool knowing about the
+            undo stack.
+
+    Signals:
+        sigStroke: dirty rect of an applied mask (inherited).
+        sigHint: a human-readable note for the status bar, e.g. :data:`HINT_EDITED`.
+        sigError: a result was dropped; the payload says why.
+    """
+
+    sigHint = Signal(str)
+    sigError = Signal(str)
+
+    def __init__(
+        self,
+        canvas: Any = None,
+        overlay: Optional[LabelOverlay] = None,
+        queue: Any = None,
+        refine: bool = False,
+        instance: Optional[str] = None,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        super().__init__(canvas, overlay, parent)
+        self.queue = queue
+        self.refine = bool(refine)
+        self.instance = instance
+        self.last_result: Optional[SamResult] = None
+        self.prompt_box: Optional[Box] = None
+        self.stroke_before: Optional[np.ndarray] = None
+        self._frame_token: Any = None
+        self._token = 0
+        self._candidates: list[np.ndarray] = []
+        self._candidate_index = 0
+        self._candidate_rect: Optional[Rect] = None
+        self._candidate_base: Optional[np.ndarray] = None
+        self._candidate_identity: Any = None
+        self._renders: Optional[list[Optional[np.ndarray]]] = None
+        self._bridge = SamResultBridge(self)
+        self._bridge.sigResult.connect(
+            self._on_result, Qt.ConnectionType.QueuedConnection
+        )
+
+    # -- frame identity -----------------------------------------------------
+    @property
+    def frame_token(self) -> Any:
+        """Identity of the frame being prompted on.
+
+        The explicit token when the session set one, otherwise a fallback built
+        from the overlay object and its size. The fallback is enough to notice
+        that the canvas moved to another frame *object*, but a session that
+        reuses one overlay across frames must call :meth:`set_frame_token`.
+        """
+        if self._frame_token is not None:
+            return self._frame_token
+        if self.overlay is None:
+            return None
+        return (id(self.overlay), self.overlay.hw)
+
+    def set_frame_token(self, token: Any) -> None:
+        """Declare which frame the tool is on; call this on every frame change.
+
+        ``token`` is any hashable identity -- a
+        :class:`~tda.core.model.FrameKey` is the obvious choice. Changing it
+        invalidates the pending prompt (a result stamped with the old identity
+        is dropped instead of applied), drops the candidates and clears the
+        prompt box, since the box came from the previous frame's difference map.
+        """
+        if token == self._frame_token:
+            return
+        self._frame_token = token
+        self._reset_candidates()
+        self.prompt_box = None
+
+    def _identity(self) -> Any:
+        """What a result must still match to be safe to apply."""
+        if self.overlay is None:
+            return None
+        return (self.frame_token, self.instance or self.overlay.editing_instance)
+
+    def _sync_identity(self) -> None:
+        """Drop state belonging to another frame or instance, once we notice.
+
+        :meth:`set_frame_token` covers the frame; the *instance* changes on the
+        overlay, which the tool cannot observe, so the drift is detected the
+        next time the tool is used instead. Both the candidates and the prompt
+        box describe a region of the previous target and must not survive.
+        """
+        if (
+            self._candidate_identity is not None
+            and self._candidate_identity != self._identity()
+        ):
+            self._reset_candidates()
+            self.prompt_box = None
+
+    def _fits(self, rect: Optional[Rect]) -> bool:
+        """True when ``rect`` is a non-empty window inside the overlay."""
+        if self.overlay is None or rect is None:
+            return False
+        h, w = self.overlay.hw
+        x0, y0, x1, y1 = rect
+        return 0 <= x0 < x1 <= w and 0 <= y0 < y1 <= h
+
+    # -- prompt box ---------------------------------------------------------
+    def set_prompt_box(self, box: Optional[Box]) -> None:
+        """Attach (or clear with ``None``) a box prompt sent with every click.
+
+        The model comparison (``experiments/sam_compare/REPORT.md``) measured a
+        lone point at IoU 0.24 on parts above 20k px but point+box at 0.76, so
+        the reverse-order flow feeds the changed region's box in here and lets
+        the annotator's click say *which* part inside it.
+        """
+        self.prompt_box = (
+            None
+            if box is None
+            else (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+        )
+
+    # -- candidates ---------------------------------------------------------
+    @property
+    def candidate_count(self) -> int:
+        """Number of masks the last result offered (0 before the first one)."""
+        return len(self._candidates)
+
+    @property
+    def candidate_index(self) -> int:
+        """Index of the candidate currently in the editing layer."""
+        return self._candidate_index
+
+    def cycle_candidate(self, step: int = 1) -> int:
+        """Replace the editing layer with the next candidate; return its index.
+
+        Meant to be bound to ``C``. A single positive point is ambiguous on a
+        large part, so SAM's three proposals are kept and the annotator flips
+        through them instead of re-clicking.
+
+        The index is *derived from the layer*, not trusted: the current editing
+        mask is compared against what each candidate would produce and the walk
+        continues from whichever one matches. That keeps cycling correct after
+        an undo or redo has moved the layer behind the tool's back. When the
+        layer matches no candidate the annotator has painted on the proposal, so
+        the candidates are dropped, :attr:`sigHint` explains why, and nothing is
+        overwritten -- a manual edit is never discarded. With fewer than two
+        candidates this is a no-op, which also keeps a pointless entry out of
+        the undo stack.
+        """
+        self._sync_identity()
+        if self.overlay is None or not self._candidates:
+            return self._candidate_index
+        if len(self._candidates) < 2:
+            return self._candidate_index
+        renders = self._ensure_renders()
+        if not renders:
+            self._reset_candidates()
+            return 0
+        current = self.overlay.editing
+        match = next(
+            (i for i, layer in enumerate(renders) if np.array_equal(current, layer)),
+            None,
+        )
+        if match is None:
+            self._reset_candidates()
+            self.sigHint.emit(HINT_EDITED)
+            return 0
+        self._candidate_index = (match + int(step)) % len(renders)
+        self._apply_candidate()
+        return self._candidate_index
+
+    def _reset_candidates(self) -> None:
+        """Forget the offered masks and their renderings (frees the cache)."""
+        self._candidates = []
+        self._candidate_index = 0
+        self._candidate_rect = None
+        self._candidate_base = None
+        self._candidate_identity = None
+        self._renders = None
+
+    # -- submission ---------------------------------------------------------
+    def _submit(self, points: Sequence[Point], box: Optional[Box] = None) -> None:
+        if self.queue is None or self.canvas is None or self.overlay is None:
+            return
+        prepared = viewport_crop(self.canvas)
+        if prepared is None:
+            return
+        crop, rect, scale = prepared
+        x0, y0, x1, y1 = rect
+
+        crop_points: list[Point] = [
+            ((px - x0) * scale, (py - y0) * scale, int(label))
+            for px, py, label in points
+            if x0 <= px < x1 and y0 <= py < y1
+        ]
+        crop_box: Optional[Box] = None
+        if box is not None:
+            bx0 = (min(max(box[0], x0), x1) - x0) * scale
+            by0 = (min(max(box[1], y0), y1) - y0) * scale
+            bx1 = (min(max(box[2], x0), x1) - x0) * scale
+            by1 = (min(max(box[3], y0), y1) - y0) * scale
+            # A box the viewport clipped away to nothing is not a prompt: SAM
+            # would return an empty mask, so fall back to the point alone.
+            if bx1 - bx0 >= 1.0 and by1 - by0 >= 1.0:
+                crop_box = (bx0, by0, bx1, by1)
+        if not crop_points and crop_box is None:
+            return
+
+        mask_input = self._mask_input(rect, crop.shape[:2])
+        req = SamRequest(
+            image_crop=crop,
+            points=crop_points,
+            box=crop_box,
+            mask_input=mask_input,
+            # One point on its own is ambiguous (part vs. whole assembly), so
+            # let SAM propose three candidates for :meth:`cycle_candidate`. A
+            # box, a second point or a prior mask has already disambiguated it.
+            multimask=(
+                len(crop_points) == 1 and crop_box is None and mask_input is None
+            ),
+        )
+        self._reset_candidates()
+        self._token += 1
+        stamp = (self._token, self._identity())
+        bridge, refine = self._bridge, self.refine
+        self.queue.submit(req, lambda res: bridge.deliver((res, rect, refine, stamp)))
+
+    def _mask_input(
+        self, rect: Rect, crop_hw: tuple[int, int]
+    ) -> Optional[np.ndarray]:
+        """The editing mask cropped to ``rect``, or ``None`` outside refine mode."""
+        if not self.refine or self.overlay is None:
+            return None
+        x0, y0, x1, y1 = rect
+        prior = self.overlay.editing[y0:y1, x0:x1]
+        if not prior.any():
+            return None
+        if prior.shape != tuple(crop_hw):
+            prior = cv2.resize(
+                prior.astype(np.uint8),
+                (crop_hw[1], crop_hw[0]),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+        return np.ascontiguousarray(prior, dtype=bool)
+
+    # -- result -------------------------------------------------------------
+    def _on_result(self, payload: object) -> None:
+        """Accept or drop a SAM result, then apply its best mask (GUI thread).
+
+        Every rejection path returns quietly instead of raising: this runs as a
+        Qt slot, where an exception would escape into the event loop.
+        """
+        result, rect, refine, stamp = payload  # type: ignore[misc]
+        token, identity = stamp
+        if token != self._token:
+            return  # superseded by a newer prompt; nothing to report
+        if self.overlay is None or identity != self._identity():
+            self.sigError.emit(ERR_FRAME_CHANGED)
+            return
+        if not self._fits(rect):
+            self.sigError.emit(ERR_OUT_OF_BOUNDS)
+            return
+
+        self.last_result = result
+        self._candidates = [
+            np.asarray(mask).astype(bool)
+            for mask in (result.candidates or [result.mask])
+        ]
+        self._candidate_index = 0
+        self._candidate_rect = rect
+        self._candidate_identity = identity
+        self._renders = None
+        # Outside the crop the prediction says nothing: in refine mode the prior
+        # mask survives there, otherwise the layer is replaced outright. The
+        # base is snapshotted once so that switching candidates re-renders from
+        # the same starting point instead of compounding onto the previous one.
+        self._candidate_base = self.overlay.editing.copy() if refine else None
+        self._apply_candidate()
+
+    def _render(self, index: int) -> Optional[np.ndarray]:
+        """The full-frame editing layer candidate ``index`` would produce."""
+        if self.overlay is None or not self._fits(self._candidate_rect):
+            return None
+        if not 0 <= index < len(self._candidates):
+            return None
+        base = self._candidate_base
+        if base is not None and base.shape != self.overlay.hw:
+            return None
+        assert self._candidate_rect is not None
+        x0, y0, x1, y1 = self._candidate_rect
+        mask = self._candidates[index]
+        if mask.shape != (y1 - y0, x1 - x0):
+            mask = cv2.resize(
+                mask.astype(np.uint8),
+                (x1 - x0, y1 - y0),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+        full = base.copy() if base is not None else np.zeros(self.overlay.hw, dtype=bool)
+        full[y0:y1, x0:x1] = mask
+        return full
+
+    def _ensure_renders(self) -> list[np.ndarray]:
+        """Render every candidate once; ``[]`` when they cannot be applied.
+
+        At most three full-frame boolean layers, held only for the latest
+        result and freed by :meth:`_reset_candidates`.
+        """
+        if self._renders is None:
+            rendered = [self._render(i) for i in range(len(self._candidates))]
+            self._renders = [] if any(r is None for r in rendered) else rendered
+        return [r for r in self._renders if r is not None]
+
+    def _apply_candidate(self) -> None:
+        """Write the selected candidate into the editing layer (GUI thread)."""
+        renders = self._ensure_renders()
+        if not renders or self.overlay is None or self._candidate_rect is None:
+            return
+        layer = renders[self._candidate_index]
+        # Same contract as PaintTool: the pre-edit layer is available when
+        # sigStroke fires, so one applied mask is one undoable op.
+        self.stroke_before = self.overlay.editing.copy()
+        instance = self.instance or self.overlay.editing_instance or "editing"
+        self.overlay.set_editing(instance, layer)
+        if self.canvas is not None:
+            self.canvas.refresh(self._candidate_rect)
+        self.sigStroke.emit(self._candidate_rect)
+
+
+class SamPointTool(SamToolBase):
+    """Point prompts: left click = positive, right click = negative.
+
+    Points accumulate so every click refines the same proposal; the session
+    calls :meth:`clear_points` when the target instance changes.
+
+    A lone first click is sent with ``multimask=True`` and the three proposals
+    are then reachable with :meth:`~SamToolBase.cycle_candidate`. When
+    :meth:`~SamToolBase.set_prompt_box` holds a box -- the changed region from
+    the difference map, or the last :class:`SamBoxTool` drag -- the click is
+    sent as point+box instead, which needs no candidates.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.points: list[Point] = []
+
+    def on_press(self, x: float, y: float, ev: Any) -> None:
+        self._sync_identity()  # the box may belong to the previous target
+        label = 1
+        button = getattr(ev, "button", None)
+        if button is not None and button() == Qt.MouseButton.RightButton:
+            label = 0
+        self.points.append((float(x), float(y), label))
+        self._submit(self.points, box=self.prompt_box)
+
+    def clear_points(self) -> None:
+        """Forget the collected prompts (e.g. after accepting the mask)."""
+        self.points = []
+
+
+class SamBoxTool(SamToolBase):
+    """Box prompt dragged over the part; shows a rubber band while dragging."""
+
+    #: Drags smaller than this (image px on either side) are treated as clicks.
+    MIN_BOX = 2.0
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.box: Optional[Box] = None
+        self._start: Optional[tuple[float, float]] = None
+        self._dragging = False
+
+    def on_press(self, x: float, y: float, ev: Any) -> None:
+        self._start = (float(x), float(y))
+        self._dragging = True
+        self.box = None
+
+    def on_move(self, x: float, y: float, ev: Any) -> None:
+        if not self._dragging or self._start is None:
+            return
+        self.box = _norm_box(self._start, (float(x), float(y)))
+        if self.canvas is not None:
+            self.canvas.set_rubber_band(self.box)
+
+    def on_release(self, x: float, y: float, ev: Any) -> None:
+        if not self._dragging or self._start is None:
+            return
+        self._dragging = False
+        box = _norm_box(self._start, (float(x), float(y)))
+        self._start = None
+        if self.canvas is not None:
+            self.canvas.set_rubber_band(None)
+        if box[2] - box[0] < self.MIN_BOX or box[3] - box[1] < self.MIN_BOX:
+            self.box = None
+            return
+        self.box = box
+        self._submit([], box=box)
