@@ -298,20 +298,31 @@ def infer_relations_into_db(
     """
     run = RelationsRun(dry_run=dry_run)
     prefix = "[infer-relations]" + (" (dry run)" if dry_run else "")
-    for desktop in _selected(db, desktops, log):
-        frozen = verified_frames(db, desktop)
+    selected = _selected(db, desktops, log)
+
+    # Pre-scan: a run that would refuse desktop 40 must not first have rewritten
+    # thirty-nine. The whole selection is checked before anything is written, so
+    # the annotator can decide once -- --force, or a narrower --desktops.
+    frozen_by_desktop = {d: verified_frames(db, d) for d in selected}
+    for desktop, frozen in frozen_by_desktop.items():
         if frozen and log:
             log(f"{prefix} D{desktop:02d} has {frozen} verified frames; their frozen "
                 f"rows will be re-checked and may raise conflicts")
-        if frozen and not (force or dry_run):
-            run.runs.append(DesktopRelations(
-                desktop=desktop, status="refused",
-                error=f"{frozen} verified frames; re-run with --force to proceed",
-            ))
-            if log:
-                log(f"{prefix} D{desktop:02d}: refused, nothing written "
-                    f"(use --force to proceed anyway)")
-            continue
+    if not (force or dry_run) and any(frozen_by_desktop.values()):
+        for desktop, frozen in frozen_by_desktop.items():
+            if frozen:
+                run.runs.append(DesktopRelations(
+                    desktop=desktop, status="refused",
+                    error=f"{frozen} verified frames; re-run with --force to proceed",
+                ))
+        if log:
+            listed = ", ".join(f"D{r.desktop:02d}" for r in run.refused)
+            log(f"{prefix} refused before touching anything: {listed} carry verified "
+                f"frames (use --force to proceed anyway)")
+        return run
+
+    for desktop in selected:
+        frozen = frozen_by_desktop[desktop]
         try:
             one = _apply_one(db, tax, desktop, dry_run, add_implied)
         except Exception as exc:  # one bad desktop must not end the run
@@ -328,6 +339,13 @@ def infer_relations_into_db(
         log(f"{prefix} {len(run.applied)} desktops, {run.implied} implied instances, "
             f"{run.fills} fills on {run.changed} instances, {run.tally()}, "
             f"{len(run.refused)} refused, {len(run.failed)} failed")
+        if run.failed:
+            # the one thing a reader wants after a stack of per-desktop lines:
+            # is the rest of the database in the state this command promises?
+            log(f"{prefix} {len(run.failed)} desktops failed; every other desktop was "
+                f"applied. Re-run for them once the cause is fixed: "
+                f"--desktops "
+                + ",".join(str(r.desktop) for r in run.failed))
     return run
 
 

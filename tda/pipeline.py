@@ -215,41 +215,64 @@ def load_index_into_db(
 
     The frames' own ``pose_segment`` column is left unset on purpose: a frame
     resolves its segment through the step range, so re-cutting the segments
-    never has to rewrite thousands of frame rows. One desktop is one
-    transaction, so a run that dies half way leaves no half-loaded desktop.
+    never has to rewrite thousands of frame rows.
+
+    One desktop is one transaction **and** one try/except: a malformed entry --
+    a frame key the index cannot decode, a step count that is not a number --
+    rolls its own desktop back and is listed in ``failed``, rather than ending a
+    66-desktop run at number 40 and leaving the caller to guess which ones
+    landed. The caller exits non-zero when ``failed`` is non-empty.
     """
-    counts = {"desktops": 0, "frames": 0, "missing": 0, "segments": 0, "skipped": 0}
+    counts: dict = {"desktops": 0, "frames": 0, "missing": 0, "segments": 0,
+                    "skipped": 0, "failed": []}
     for desktop in sorted(index):
         if not wanted(desktop, desktops):
             continue
-        di = index[desktop]
-        counts["desktops"] += 1
-        with db.transaction():
-            merge_desktop_meta(
-                db, desktop, {"index_issues": list(di.issues), "index_n_steps": di.n_steps}
+        try:
+            _load_one(db, desktop, index[desktop], counts, log)
+            counts["desktops"] += 1  # only a desktop that really landed counts
+        except Exception as exc:  # one bad entry must not end the run
+            counts["failed"].append(
+                f"D{desktop:02d}: {type(exc).__name__}: {exc}"
             )
-            for ff in di.frames.values():
-                db.upsert_frame(ff.key, ff.path, ff.aux, ff.ts, {"missing": False})
-            for key in di.missing:
-                db.upsert_frame(key, None, {}, None, {"missing": True})
-            counts["frames"] += len(di.frames)
-            counts["missing"] += len(di.missing)
-            if di.n_steps < 1:
-                counts["skipped"] += 1
-                if log:
-                    log(f"[load-index] D{desktop:02d}: no steps in the index, no pose segment")
-                continue
-            _seed_pose_segments(db, desktop, di.n_steps)
-            segments = split_pose_segments(db, desktop)
-        counts["segments"] += sum(segments.values())
-        if log:
-            extra = f", {len(di.missing)} missing" if di.missing else ""
-            cut = f", {max(segments.values())} pose segments" if segments else ""
-            log(
-                f"[load-index] D{desktop:02d}: {di.n_steps} steps, "
-                f"{len(di.frames)} frames{extra}{cut}"
-            )
+            if log:
+                log(f"[load-index] D{desktop:02d}: FAILED, {type(exc).__name__}: {exc}; "
+                    f"nothing was written for it")
     return counts
+
+
+def _load_one(
+    db: Db, desktop: int, di: DesktopIndex, counts: dict, log: Optional[Log]
+) -> None:
+    """One desktop's frames and pose segments, in one transaction."""
+    with db.transaction():
+        merge_desktop_meta(
+            db, desktop, {"index_issues": list(di.issues), "index_n_steps": di.n_steps}
+        )
+        frames = di.frames
+        for ff in frames.values():
+            db.upsert_frame(ff.key, ff.path, ff.aux, ff.ts, {"missing": False})
+        for key in di.missing:
+            db.upsert_frame(key, None, {}, None, {"missing": True})
+        if di.n_steps < 1:
+            counts["frames"] += len(frames)
+            counts["missing"] += len(di.missing)
+            counts["skipped"] += 1
+            if log:
+                log(f"[load-index] D{desktop:02d}: no steps in the index, no pose segment")
+            return
+        _seed_pose_segments(db, desktop, di.n_steps)
+        segments = split_pose_segments(db, desktop)
+    counts["frames"] += len(frames)
+    counts["missing"] += len(di.missing)
+    counts["segments"] += sum(segments.values())
+    if log:
+        extra = f", {len(di.missing)} missing" if di.missing else ""
+        cut = f", {max(segments.values())} pose segments" if segments else ""
+        log(
+            f"[load-index] D{desktop:02d}: {di.n_steps} steps, "
+            f"{len(frames)} frames{extra}{cut}"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -334,10 +357,17 @@ def split_pose_segments(db: Db, desktop: int) -> dict[str, int]:
             db.update_pose_segment(
                 desktop, view, seg, start_step=start, end_step=end, ref_step=ref
             )
-            if old["ref_step"] != ref:
+            if old["ref_step"] == ref:
+                continue
+            lost = _has_pose_geometry(old)
+            if lost:
+                db.clear_pose_geometry(desktop, view, seg)
+            # A segment that never had a reference step and carried nothing drawn
+            # against one lost nothing, so it has nothing to report: saying "the
+            # reference step moved from None to 42" only teaches the annotator to
+            # skim this list.
+            if lost or old["ref_step"] is not None:
                 issues.append(_ref_moved(view, seg, old, start, end, ref))
-                if _has_pose_geometry(old):
-                    db.clear_pose_geometry(desktop, view, seg)
         if len(existing) > len(ranges):
             db.delete_pose_segments_from(desktop, view, len(ranges) + 1)
         out[view] = len(ranges)
@@ -347,13 +377,22 @@ def split_pose_segments(db: Db, desktop: int) -> dict[str, int]:
 
 
 def _ref_moved(view: str, seg: int, old: dict, start: int, end: int, ref: int) -> str:
-    """The audit line for a pose segment whose reference frame moved."""
+    """The audit line for a pose segment whose reference frame moved.
+
+    Only ever called when something was actually lost: a reference step that
+    really moved, or geometry drawn against one that is gone either way. A
+    segment with no previous reference is worded as what it is, rather than as
+    a move "from None".
+    """
     lost = " the stored corners/homography/ROI were dropped;" if _has_pose_geometry(old) \
         else ""
+    moved = (
+        f"gave it reference step {ref}" if old["ref_step"] is None
+        else f"moved the reference step from {old['ref_step']} to {ref}"
+    )
     return (
-        f"{view} pose segment {seg}: a reorient moved the range to [{start}-{end}] and the "
-        f"reference step from {old['ref_step']} to {ref};{lost} shapes anchored to it need "
-        f"re-checking"
+        f"{view} pose segment {seg}: a reorient moved the range to [{start}-{end}] and "
+        f"{moved};{lost} shapes anchored to it need re-checking"
     )
 
 

@@ -160,8 +160,16 @@ def cmd_load_index(args: argparse.Namespace) -> int:
             print(f"[load-index] cannot read {target}: {exc}; run build-index first")
             return EXIT_ERROR
         counts = P.load_index_into_db(db, index, _desktops(args), log=print)
+        failed = counts.get("failed") or []
         print(f"[load-index] {counts['desktops']} desktops, {counts['frames']} frames, "
-              f"{counts['missing']} missing, {counts['segments']} pose segments")
+              f"{counts['missing']} missing, {counts['segments']} pose segments, "
+              f"{len(failed)} failed")
+        if failed:
+            for text in failed:
+                print(f"[load-index] FAILED {text}")
+            print(f"[load-index] {len(failed)} desktops failed; every other desktop "
+                  f"was loaded. Re-run build-index for them, then load-index again.")
+            return EXIT_ERROR
         return EXIT_OK
 
 

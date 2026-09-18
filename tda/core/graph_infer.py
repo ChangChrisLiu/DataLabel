@@ -81,15 +81,17 @@ def unique_of_class(instances: dict[str, InstanceRec], cls: str) -> Optional[str
     return found[0] if len(found) == 1 else None
 
 
-def blank(value: Optional[str]) -> bool:
+def blank(value: object) -> bool:
     """Is this relational field empty? ``None``, ``""`` and whitespace all are.
 
     Clearing a cell in the S1 table leaves an empty string behind, and a
     hand-edited sheet can leave a stray space. Both mean "not answered yet",
     so they must reach the heuristics as a blank rather than as a value that
-    resolves to nothing.
+    resolves to nothing. Takes ``object`` rather than ``str`` because it is also
+    asked about ``attrs`` entries, which come back out of JSON as whatever was
+    put in.
     """
-    return not (value or "").strip()
+    return not str(value or "").strip()
 
 
 def resolve_ref(instances: dict[str, InstanceRec], ref: Optional[str]) -> Optional[str]:
@@ -321,10 +323,16 @@ def _infer_screw(instances, rec: InstanceRec, clock, put, filled: list[str]) -> 
 
 
 def _infer_ram_latches(instances: dict[str, InstanceRec], filled: list[str]) -> None:
-    """Pair RAM latches with modules by ordinal: N latches spread over M modules."""
+    """Pair RAM latches with modules by ordinal: N latches spread over M modules.
+
+    ``attrs["of"]`` is read through :func:`blank`, exactly like the relational
+    *columns*: clearing that cell in the S1 table leaves an empty string, and a
+    hand-edited sheet can leave a stray space. Both mean "not answered yet", and
+    a latch pointing at ``" "`` is a latch rule 7.1 can never fire on.
+    """
     latches = [
         rec for key, rec in sorted(instances.items())
-        if rec.cls == "ram_latch" and not rec.attrs.get("of") and not is_provisional(key)
+        if rec.cls == "ram_latch" and blank(rec.attrs.get("of")) and not is_provisional(key)
     ]
     modules = real_instances(instances, "ram_module")
     if not latches or not modules:
