@@ -214,7 +214,8 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
         """
         if not self._shortcut_context_ok():
             return False
-        if A.blocks_shortcuts(self._focus_widget()):
+        focus = self._focus_widget()
+        if A.blocks_shortcuts(focus) or A.navigates_a_list(focus, event.key()):
             return False
         action = A.action_for(event.key(), event.modifiers(), self.mode)
         if action is None:
@@ -286,6 +287,7 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
         if mode == A.MODE_REVIEW:
             self.review_dock.raise_()
             self.review.refresh()
+        self._attach_tool()          # Review arms nothing; the others re-arm
         self._sync_mode_tab()
         self.update_status()
 
@@ -310,12 +312,16 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
     @S.guard
     def on_steps_saved(self, desktop: int) -> None:
         """Re-open the session on the same frame: instances and events changed."""
-        self._steps_dirty = False
         step = self.session.current().step if compat.is_open(self.session) else None
-        self.session.open(int(desktop), self.session.view)
-        if step is not None:
-            self.session.goto(step)
-        self.report(f"D{desktop}: step table saved, session reloaded")
+
+        def reopen() -> None:
+            self._steps_dirty = False
+            self.session.open(int(desktop), self.session.view, force=True)
+            if step is not None and step in self.session.steps():
+                self.session.goto(step, force=True)
+            self.report(f"D{desktop}: step table saved, session reloaded")
+
+        self.leave_frame(reopen)
 
     # ------------------------------------------------------- top-bar actions
     @S.guard
@@ -323,17 +329,18 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
         """Show another camera of the same machine."""
         if view == self.session.view:
             return
-        if not self.can_leave_edit():
-            self.view_buttons[self.session.view].setChecked(True)
-            return
         step = self.session.current().step if compat.is_open(self.session) else None
-        self.session.open(int(self.session.desktop), view)
-        if step is not None and step in self.session.steps():
-            self.session.goto(step)
+
+        def switch() -> None:
+            self.session.open(int(self.session.desktop), view, force=True)
+            if step is not None and step in self.session.steps():
+                self.session.goto(step, force=True)
+            self._segment = None
+            self.render_frame()
+
+        self.leave_frame(switch)
         for name, button in self.view_buttons.items():
-            button.setChecked(name == view)
-        self._segment = None
-        self.render_frame()
+            button.setChecked(name == self.session.view)
 
     @S.guard
     def _on_desktop_chosen(self, index: int) -> None:
@@ -344,34 +351,33 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
     @S.guard
     def act_set_desktop(self, desktop: int) -> None:
         """Open another machine in the current view."""
-        if not self.can_leave_edit():
+        def switch() -> None:
+            self.session.open(int(desktop), self.session.view, force=True)
+            if self._steps_panel is not None:
+                self._steps_panel.set_desktop(int(desktop))
+            self._segment = None
+            self.render_frame()
+
+        if not self.leave_frame(switch):
             index = self.desktop_combo.findData(int(self.session.desktop))
             if index >= 0:
                 blocked = self.desktop_combo.blockSignals(True)
                 self.desktop_combo.setCurrentIndex(index)
                 self.desktop_combo.blockSignals(blocked)
-            return
-        self.session.open(int(desktop), self.session.view)
-        if self._steps_panel is not None:
-            self._steps_panel.set_desktop(int(desktop))
-        self._segment = None
-        self.render_frame()
 
     # ------------------------------------------------------ navigation slots
     @S.guard
     def act_step(self, delta: int) -> None:
         """``PgDn`` goes to k-1 (the reverse-order "forward"), ``PgUp`` to k+1."""
-        if not self.can_leave_edit():
-            return
-        self.session.prev() if delta < 0 else self.session.next()
+        self.leave_frame(lambda: self.session.prev(force=True) if delta < 0
+                         else self.session.next(force=True))
 
     @S.guard
     def act_step_edge(self, which: str) -> None:
-        if not self.can_leave_edit():
-            return
         steps = self.session.steps()
         if steps:
-            self.session.goto(min(steps) if which == "first" else max(steps))
+            self.leave_frame(lambda: self.session.goto(
+                min(steps) if which == "first" else max(steps), force=True))
 
     @S.guard
     def timeline_goto(self, step: int) -> None:
@@ -381,9 +387,7 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
         past the uncommitted-edit rule, so the window takes their activation
         signals over instead of letting them through.
         """
-        if not self.can_leave_edit():
-            return
-        self.session.goto(int(step))
+        self.leave_frame(lambda: self.session.goto(int(step), force=True))
 
     @S.guard
     def act_flash_compare(self, pressed: bool, other: bool = False) -> None:
@@ -426,7 +430,15 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
 
     @property
     def active_tool(self):
-        """The tool currently receiving the canvas mouse signals."""
+        """The tool receiving the canvas mouse signals, or ``None`` in Review.
+
+        Review mode is **read-only on the canvas**: an edit begun there could
+        not be settled (``Enter`` and ``Esc`` belong to Annotate mode and the
+        mode switch is blocked by the very layer it would create), so no tool is
+        armed and ``R`` takes the frame into Annotate mode instead.
+        """
+        if self.mode == A.MODE_REVIEW:
+            return None
         return self._tool_for(self._tool_name)
 
     def _tool_for(self, name: str):
@@ -437,12 +449,17 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
         }.get(name, self.brush)
 
     def _attach_tool(self) -> None:
-        """Exactly one tool listens to the canvas; a SAM tool is re-armed after."""
-        wanted = self._tool_for("roi" if self.roi_editing else self._tool_name)
+        """Exactly one tool listens to the canvas; a SAM tool is re-armed after.
+
+        In Review mode none is: the canvas is there to look at the frame a queue
+        entry points to, not to edit it.
+        """
+        wanted = (None if self.mode == A.MODE_REVIEW
+                  else self._tool_for("roi" if self.roi_editing else self._tool_name))
         for tool in self._all_tools():
             if tool is not wanted:
                 tool.detach()
-        if self.tools_enabled:
+        if self.tools_enabled and wanted is not None:
             wanted.attach()
             if wanted in (self.sam_point, self.sam_box):
                 self.rearm_sam()
@@ -535,22 +552,22 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
         second connection to a background recompile would have put two writers
         on one database for a convenience nobody asked for.
         """
+        if not self.can_leave_edit():
+            return
         key = self.session.current()
-        retried = sorted(self.sweep_failures)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            # Draining the queue here is also the retry for the frames the
-            # background sweeper parked after three failures: the rows are still
-            # in the database, only the sweeper had stopped picking them up.
-            self.session.truth.run_pending_rechecks(self.session.desktop,
-                                                    self.session.view)
             stats = self.session.truth.refresh(key) or {}
         finally:
             QApplication.restoreOverrideCursor()
+        # Only *enqueue* the backlog: draining it here would block the window
+        # for as long as the queue is deep, and the sweeper is already the
+        # thing that drains it. The parked frames are what needs the nudge.
+        queued = compat.retry_rechecks(self.session)
         self.sweep_failures.clear()
-        self.session.goto(key.step)   # re-read the frame the recompile changed
+        self.session.goto(key.step, force=True)   # re-read what the recompile changed
         self.review.refresh()
-        retry = f", retried {len(retried)} parked re-check(s)" if retried else ""
+        retry = f", {queued} re-check(s) queued" if queued else ""
         self.report(f"step {key.step} recompiled: {stats.get('updated', 0)} rows, "
                     f"{stats.get('conflicts', 0)} conflicts{retry} — use "
                     f"'python -m tda.cli check' for the whole view")

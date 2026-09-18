@@ -15,8 +15,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -75,7 +74,6 @@ class ReviewPanel(QWidget):
             lw = QListWidget()
             lw.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
             lw.itemActivated.connect(self._on_item_activated)
-            lw.installEventFilter(self)
             self._lists[queue] = lw
             self._tabs.addTab(lw, QUEUE_TITLES[queue])
         self._tabs.currentChanged.connect(lambda _i: self._sync_buttons())
@@ -213,35 +211,12 @@ class ReviewPanel(QWidget):
             self.sigRework.emit(int(step))
 
     # -- keys ---------------------------------------------------------------
-    def handle_key(self, event: QKeyEvent) -> bool:
-        """``Enter`` confirms, ``R`` marks rework; ``True`` when consumed."""
-        if event.modifiers() not in (
-            Qt.KeyboardModifier.NoModifier,
-            Qt.KeyboardModifier.KeypadModifier,
-        ):
-            return False
-        key = event.key()
-        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.confirm()
-            return True
-        if key == Qt.Key.Key_R:
-            self.rework()
-            return True
-        return False
+    # There is exactly one key map, and it is not here: the main window's
+    # ``tda.ui.app_actions.ACTIONS`` table owns every binding, per mode, and
+    # calls the plain methods above.  A second table in the panel is how ``Ctrl+K``
+    # on this list came to raise out of ``keyPressEvent`` in Steps mode and how
+    # ``Enter`` in Review committed with keyframe scope past ``act_commit``.
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: D102 - Qt override
-        if self.handle_key(event):
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: D102
-        # Enter on a list would otherwise activate the entry instead of
-        # confirming the frame, which is what review mode binds it to.
-        if event.type() == QEvent.Type.KeyPress and obj in self._lists.values():
-            if self.handle_key(event):
-                return True
-        return super().eventFilter(obj, event)
 
     # -- slots --------------------------------------------------------------
     def _on_item_activated(self, item: QListWidgetItem) -> None:

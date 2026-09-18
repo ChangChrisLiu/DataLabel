@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QKeyEvent
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QGridLayout,
     QLabel,
@@ -66,7 +66,6 @@ class TaskCardPanel(QWidget):
         self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self._list.setAlternatingRowColors(True)
         self._list.itemActivated.connect(self._on_item_activated)
-        self._list.installEventFilter(self)
 
         self.commit_button = QPushButton("Commit edit (Enter)")
         self.override_button = QPushButton("Commit as frame override (Alt+Enter)")
@@ -197,37 +196,12 @@ class TaskCardPanel(QWidget):
         return self._problems_list.isVisibleTo(self)
 
     # -- keys ---------------------------------------------------------------
-    def handle_key(self, event: QKeyEvent) -> bool:
-        """Spec 4.3 keys; ``True`` when the event was consumed."""
-        key = event.key()
-        mods = event.modifiers()
-        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            if mods & Qt.KeyboardModifier.AltModifier:
-                self.commit(api.SCOPE_FRAME_OVERRIDE)
-            else:
-                self.commit(api.SCOPE_KEYFRAME)
-            return True
-        if key == Qt.Key.Key_K and mods & Qt.KeyboardModifier.ControlModifier:
-            self.commit(api.SCOPE_SPLIT)
-            return True
-        if key == Qt.Key.Key_Space:
-            self.confirm()
-            return True
-        return False
+    # There is exactly one key map, and it is not here: the main window's
+    # ``tda.ui.app_actions.ACTIONS`` table owns every binding, per mode, and
+    # calls the plain methods above.  A second table in the panel is how ``Ctrl+K``
+    # on this list came to raise out of ``keyPressEvent`` in Steps mode and how
+    # ``Enter`` in Review committed with keyframe scope past ``act_commit``.
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: D102 - Qt override
-        if self.handle_key(event):
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: D102
-        # The list would otherwise swallow Enter (activation) and Space
-        # (selection toggle) while it has the focus.
-        if obj is self._list and event.type() == QEvent.Type.KeyPress:
-            if self.handle_key(event):
-                return True
-        return super().eventFilter(obj, event)
 
     # -- slots --------------------------------------------------------------
     def _on_item_activated(self, item: QListWidgetItem) -> None:

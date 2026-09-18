@@ -38,7 +38,7 @@ from tda.ui.canvas.tools import BrushTool, EraserTool, OccluderTool, Tool
 _STEP_ROLE = int(Qt.ItemDataRole.UserRole)
 
 __all__ = ["BLOCK_HINT", "BoxDragTool", "EditMixin", "DESPECKLE_MIN_PX",
-           "NO_INSTANCE_HINT"]
+           "NO_INSTANCE_HINT", "REVIEW_READ_ONLY"]
 
 #: Components smaller than this are specks (``Shift+D``); spec 9.1's floor.
 DESPECKLE_MIN_PX = 16
@@ -57,6 +57,18 @@ NO_INSTANCE_HINT = ("先在任务卡或实例表里选一个实例  "
 _DRAWABLE = (api.KIND_ADD_SHAPE, api.KIND_SPLIT_KEYFRAME)
 #: A part here is boxed with ``R``, not painted.
 _ON_BENCH = "on_bench"
+#: Shown when the canvas is clicked in Review mode, which is read-only.
+REVIEW_READ_ONLY = ("按 R 返工：切到标注模式处理这一帧  "
+                    "(press R to rework: Review mode only shows the frame)")
+
+
+def _is_right(ev: Any) -> bool:
+    """Was this press the right button?  Stubs may not answer at all."""
+    button = getattr(ev, "button", None)
+    try:
+        return button is not None and button() == Qt.MouseButton.RightButton
+    except TypeError:  # pragma: no cover - a stub without a callable button
+        return False
 
 
 class BoxDragTool(Tool):
@@ -252,11 +264,35 @@ class EditMixin:
         dialog: the annotator is mid-gesture, ``Enter`` and ``Esc`` are both one
         key away, and auto-committing something they never approved is the one
         outcome that cannot be undone by reading the screen.
+
+        Blocking also **flushes the sidecar debounce**: until it is written the
+        layer exists only in this process, which is exactly the 300 ms window a
+        crash would take it in -- and the annotator has just been told to stop.
         """
         if not self.has_uncommitted_edit():
             return True
+        self.flush_sidecar()
         self.report(BLOCK_HINT)
         return False
+
+    def leave_frame(self, move) -> bool:
+        """The one gate every navigation-like gesture goes through.
+
+        ``move`` is called only when there is nothing uncommitted to lose; it
+        may move the frame, the view, the desktop, the mode or the session
+        itself.  Routing all of them through one function is the point: the
+        parametrised test in ``tests/test_app_safety.py`` walks this list, so a
+        new way out that forgets the gate fails there rather than silently
+        throwing away somebody's afternoon.
+        """
+        if not self.can_leave_edit():
+            return False
+        try:
+            move()
+        except self.refusal as refused:      # the session's own backstop
+            self.report_error(f"refused: {refused}")
+            return False
+        return True
 
     @S.guard
     def _on_canvas_press(self, x: float, y: float, ev: object) -> None:
@@ -270,6 +306,11 @@ class EditMixin:
         """
         self._paint_blocked = False
         self._blocked_layer = None
+        if self.mode == "review":
+            self.report(REVIEW_READ_ONLY)
+            return
+        if self._is_right_button(ev):
+            return          # the right button is a negative SAM point, not an edit
         if self.roi_editing or self._tool_name not in (
                 "brush", "eraser", "sam_point", "sam_box"):
             return
@@ -283,6 +324,10 @@ class EditMixin:
         self._blocked_layer = (None if self.overlay is None
                                else self.overlay.editing.copy())
         self.report(NO_INSTANCE_HINT)
+
+    @staticmethod
+    def _is_right_button(ev: Any) -> bool:
+        return _is_right(ev)
 
     def _adoptable_instance(self) -> Optional[str]:
         """The task-card item a stroke may adopt: an open ``add_shape``/split.
@@ -532,6 +577,8 @@ class EditMixin:
         analysed" rather than as "nothing unexplained", which would quietly
         claim the frame had been checked.
         """
+        if not self.can_leave_edit():
+            return False      # confirming steps the frame back: same gate
         step = self.session.current().step
         blobs = self.unexplained_at_confirm()
         ok = self.task_card.confirm()

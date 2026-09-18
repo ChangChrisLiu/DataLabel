@@ -27,6 +27,7 @@ from typing import Optional
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QAbstractSpinBox,
     QComboBox,
     QKeySequenceEdit,
@@ -50,6 +51,7 @@ __all__ = [
     "blocks_shortcuts",
     "cheat_sheet_html",
     "combos_of",
+    "navigates_a_list",
     "shortcut_markdown",
 ]
 
@@ -169,6 +171,17 @@ ACTIONS: tuple[Action, ...] = (
            "放弃当前编辑", "edit", (), _ANN),
     Action("confirm", ("Space",), "act_confirm", "Confirm the frame",
            "确认当前帧并后退一帧", "edit", (), _ANN),
+    # Review mode: the canvas is read-only, so its two keys are the queue's.
+    Action("review_accept", ("Return", "Enter", "Space"), "act_confirm",
+           "Accept the frame the queue points at", "接受队列选中的这一帧",
+           "edit", (), (MODE_REVIEW,)),
+    Action("review_rework", ("R",), "act_rework_selected",
+           "Rework: open it in Annotate mode", "返工：在标注模式下打开这一帧",
+           "edit", (), (MODE_REVIEW,)),
+    Action("review_keep_old", ("K",), "act_resolve", "Conflict: keep the frozen shape",
+           "冲突：保留已冻结的形状", "edit", (api.RESOLVE_KEEP_OLD,), (MODE_REVIEW,)),
+    Action("review_accept_new", ("N",), "act_resolve", "Conflict: take the edit",
+           "冲突：接受新的编辑", "edit", (api.RESOLVE_ACCEPT_NEW,), (MODE_REVIEW,)),
     Action("undo", ("Ctrl+Z",), "act_undo", "Undo", "撤销", "edit", (), _ANN),
     Action("redo", ("Ctrl+Y",), "act_redo", "Redo", "重做", "edit", (), _ANN),
     Action("toggle_hidden", ("H",), "act_toggle_hidden", "Hide/show instance",
@@ -300,6 +313,23 @@ def blocks_shortcuts(widget: Optional[QWidget]) -> bool:
     edited in the step table is covered by the same check.
     """
     return widget is not None and isinstance(widget, _TEXT_WIDGETS)
+
+
+#: Keys a focused list or table must keep for moving its own selection.  Page
+#: up/down are deliberately **not** here: they are frame navigation everywhere
+#: in this window, and a list that scrolled instead would be a second, silent
+#: meaning for the annotator's most used pair of keys.
+_LIST_KEYS = frozenset({
+    int(Qt.Key.Key_Up), int(Qt.Key.Key_Down),
+    int(Qt.Key.Key_Left), int(Qt.Key.Key_Right),
+})
+
+
+def navigates_a_list(widget: Optional[QWidget], key) -> bool:
+    """Is this an arrow key inside a list or table, i.e. its own navigation?"""
+    if widget is None or _as_int(key) not in _LIST_KEYS:
+        return False
+    return isinstance(widget, QAbstractItemView)
 
 
 # --------------------------------------------------------------------------- #

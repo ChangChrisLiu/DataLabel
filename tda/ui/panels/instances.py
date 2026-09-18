@@ -23,8 +23,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QKeyEvent
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -96,7 +96,6 @@ class InstanceListPanel(QWidget):
         self._apply_column_widths()
         self._table.itemChanged.connect(self._on_item_changed)
         self._table.itemDoubleClicked.connect(self._on_item_double_clicked)
-        self._table.installEventFilter(self)
 
         self.up_button = QPushButton("Move up (Ctrl+Up)")
         self.down_button = QPushButton("Move down (Ctrl+Down)")
@@ -285,47 +284,12 @@ class InstanceListPanel(QWidget):
         self.refresh()
 
     # -- keys ---------------------------------------------------------------
-    def handle_key(self, event: QKeyEvent) -> bool:
-        """``Ctrl+Up``/``Ctrl+Down``, ``H``, ``V``, ``1``-``7``; ``True`` when consumed."""
-        key = event.key()
-        mods = event.modifiers()
-        # Ctrl+arrows reorder; the bare arrows stay with the table's navigation.
-        if mods == Qt.KeyboardModifier.ControlModifier:
-            if key == Qt.Key.Key_Up:
-                self.move_up()
-                return True
-            if key == Qt.Key.Key_Down:
-                self.move_down()
-                return True
-            return False
-        if mods not in (
-            Qt.KeyboardModifier.NoModifier,
-            Qt.KeyboardModifier.KeypadModifier,
-        ):
-            return False
-        if key == Qt.Key.Key_H:
-            self.toggle_hidden()
-            return True
-        if key == Qt.Key.Key_V:
-            self.cycle_visibility()
-            return True
-        if key in _NUMBER_KEYS:
-            self.set_visibility(api.VISIBILITY_VALUES[_NUMBER_KEYS.index(key)])
-            return True
-        return False
+    # There is exactly one key map, and it is not here: the main window's
+    # ``tda.ui.app_actions.ACTIONS`` table owns every binding, per mode, and
+    # calls the plain methods above.  A second table in the panel is how ``Ctrl+K``
+    # on this list came to raise out of ``keyPressEvent`` in Steps mode and how
+    # ``Enter`` in Review committed with keyframe scope past ``act_commit``.
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: D102 - Qt override
-        if self.handle_key(event):
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: D102
-        # Without this the table's keyboard search would eat H, V and digits.
-        if obj is self._table and event.type() == QEvent.Type.KeyPress:
-            if self.handle_key(event):
-                return True
-        return super().eventFilter(obj, event)
 
     # -- slots --------------------------------------------------------------
     def _on_item_changed(self, item: QTableWidgetItem) -> None:

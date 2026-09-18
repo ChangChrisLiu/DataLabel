@@ -69,6 +69,16 @@ class EditingLayer:
             return False
         return not np.array_equal(self._mask, self._before)
 
+    def settle(self) -> None:
+        """Take the current mask as the new baseline: it has been written.
+
+        Called after a successful commit.  Without it a committed layer still
+        reads as "changed" and the navigation guard would refuse to leave a
+        frame whose work is already in the database.
+        """
+        if self._mask is not None:
+            self._before = self._mask.copy()
+
     # -- undo ---------------------------------------------------------------
     def stroke_op(self, before: np.ndarray, after: np.ndarray) -> Op:
         """The undoable record of one brush or eraser stroke (spec 4.6)."""

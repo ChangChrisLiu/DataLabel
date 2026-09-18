@@ -50,7 +50,7 @@ def session(qapp, tmp_path: Path) -> AnnotationSession:
     made.sweeper_enabled = False  # nothing may compile behind the assertions
     made.sweeper.stop()
     yield made
-    made.close()
+    made.close(force=True)
 
 
 def test_an_unvisited_frame_is_exported_with_its_mask(session, tmp_path):

@@ -110,6 +110,11 @@ class CommitMixin:
             self._refuse_mask_on_bench(key, instance)
             result = edit.commit_edit(self.db, self.truth, key, instance, self.layer.mask(),
                                       scope, direction, self.annotator)
+        # What was just written is no longer uncommitted: the layer's baseline
+        # moves to the mask that went to the database, so the guard on goto/
+        # open/close sees a settled layer rather than refusing to leave a frame
+        # whose work is already saved.
+        self.layer.settle()
         return self._after_edit(result)
 
     def _known_instances(self) -> set[str]:

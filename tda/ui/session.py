@@ -31,6 +31,7 @@ from tda.core.truth import TruthService
 from tda.core.truth_inputs import instances_of, state_of
 from tda.ui import session_edit as edit
 from tda.ui.commands import Op, UndoStack
+from tda.ui.session_api import SessionRefusal
 from tda.ui.session_commits import CommitMixin
 from tda.ui.session_images import ImageCache
 from tda.ui.session_layer import EditingLayer
@@ -165,7 +166,7 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
         ops = self.undo_stack.ops
         return (len(ops), id(ops[-1]) if ops else None)
 
-    def open(self, desktop: int, view: str) -> None:
+    def open(self, desktop: int, view: str, *, force: bool = False) -> None:
         """Open one desktop/view and stand on the frame annotation starts from.
 
         Every logical step with a frame row stays in :meth:`steps` -- the
@@ -173,7 +174,11 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
         run through it either way -- but a step flagged ``missing`` has no image
         to draw on, so the starting frame is the last step that has one
         (spec 4.2, 缺帧处理).
+
+        Raises :class:`~tda.ui.session_api.SessionRefusal` on an uncommitted
+        editing layer, unless ``force``.
         """
+        self._refuse_if_editing("opening another desktop or view", force)
         self.desktop = int(desktop)
         self.view = str(view)
         self._steps = [int(row["step"]) for row in self.db.frames_for(self.desktop, self.view)]
@@ -192,13 +197,18 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
         if self._step is not None:
             self._announce()
 
-    def close(self) -> None:
+    def close(self, *, force: bool = False) -> None:
         """Drop the working set; the database itself belongs to the caller.
 
         The sweeper is joined here and nowhere else: it is the one place the GUI
         may wait for it, and leaving a thread writing to the database behind a
         closed session is how a half-written re-check would happen.
+
+        Raises :class:`~tda.ui.session_api.SessionRefusal` on an uncommitted
+        editing layer, unless ``force`` -- which is what the window passes once
+        its close dialog has been answered.
         """
+        self._refuse_if_editing("closing the session", force)
         self.save()
         if not self.sweeper.stop():
             log.error("closing the session left the truth sweeper running on %s/%s",
@@ -250,16 +260,36 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
             raise RuntimeError("no frame is open; call open() first")
         return FrameKey(self.desktop, self._step, self.view)
 
-    def goto(self, step: int) -> None:
+    def _refuse_if_editing(self, what: str, force: bool) -> None:
+        """Stop a move that would drop an editing layer nobody committed.
+
+        The window guards every gesture it owns, but it is not the only caller
+        and a new one is one line away: this is the backstop, so that losing an
+        uncommitted layer takes an explicit ``force=True`` rather than a
+        forgotten check.  ``force`` is what the window passes once the annotator
+        has answered -- committed, discarded, or told the close dialog to.
+        """
+        if force or not self.layer.changed():
+            return
+        raise SessionRefusal(
+            f"uncommitted edit on {self.layer.instance}: commit it or clear it "
+            f"before {what}"
+        )
+
+    def goto(self, step: int, *, force: bool = False) -> None:
         """Open ``step`` of the current desktop/view.
 
         A step flagged ``missing`` can be opened deliberately -- the panels do
         it when the annotator clicks it in the timeline -- it is only skipped by
         :meth:`prev` and :meth:`next`.
+
+        Raises :class:`~tda.ui.session_api.SessionRefusal` when the editing
+        layer holds uncommitted pixels, unless ``force``.
         """
         step = int(step)
         if step not in self._steps:
             return
+        self._refuse_if_editing(f"leaving step {self._step}", force)
         self._step = step
         self.clear_edit()
         self.review.invalidate()
@@ -267,18 +297,20 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
         self._announce()
         self._prefetch_next()
 
-    def prev(self) -> None:
+    def prev(self, *, force: bool = False) -> None:
         """Go one step towards the start of the teardown (the reverse-order 前进)."""
-        self._step_to([s for s in self._available if s < (self._step or 0)], last=True)
+        self._step_to([s for s in self._available if s < (self._step or 0)],
+                      last=True, force=force)
 
-    def next(self) -> None:
+    def next(self, *, force: bool = False) -> None:
         """Go one step towards the end of the teardown."""
-        self._step_to([s for s in self._available if s > (self._step or 0)], last=False)
+        self._step_to([s for s in self._available if s > (self._step or 0)],
+                      last=False, force=force)
 
-    def _step_to(self, candidates: list[int], last: bool) -> bool:
+    def _step_to(self, candidates: list[int], last: bool, force: bool = False) -> bool:
         if not candidates:
             return False
-        self.goto(candidates[-1] if last else candidates[0])
+        self.goto(candidates[-1] if last else candidates[0], force=force)
         return True
 
     def frame_status(self, step: int) -> str:

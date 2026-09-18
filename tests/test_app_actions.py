@@ -174,4 +174,5 @@ def test_annotation_guide_embeds_the_generated_table():
     """The guide's 快捷键 section is the table, not a hand-written copy."""
     body = GUIDE.read_text(encoding="utf-8")
     assert A.shortcut_markdown() in body
-    assert len(body.splitlines()) <= 250
+    prose = [l for l in body.splitlines() if not l.startswith("| `")]
+    assert len(prose) <= 200, "the prose is the part that has to stay readable"

@@ -45,7 +45,10 @@ class ReviewMixin:
         self._invalidate()
         # exactly one frame change: the step back is the change, and a panel
         # that reloads on every emit must not reload the frame being left
-        if not self._step_to([s for s in self._available if s < key.step], last=True):
+        # force: the layer was committed or empty before verify_frame let this
+        # frame through, so there is nothing left for the gate to protect
+        if not self._step_to([s for s in self._available if s < key.step], last=True,
+                             force=True):
             self._announce()
         return True
 

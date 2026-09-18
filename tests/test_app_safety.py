@@ -118,24 +118,77 @@ def test_the_panels_only_report_the_request(window):
 # --------------------------------------------------------------------------- #
 # navigating away from an uncommitted edit
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("go", [
-    lambda w: w.act_step(-1),
-    lambda w: w.act_step(+1),
-    lambda w: w.act_step_edge("first"),
-    lambda w: w.act_step_edge("last"),
-    lambda w: w.timeline_goto(min(w.session.steps())),
-    lambda w: w.act_set_view("oak1"),
-    lambda w: w.set_mode(A.MODE_REVIEW),
-])
-def test_an_uncommitted_edit_blocks_every_way_out_of_the_frame(window, go):
-    start_edit(window)
+#: Every gesture that could take the annotator off the frame.  The parametrised
+#: test below is the audit: adding a way out without routing it through the gate
+#: fails here rather than in six months' worth of lost strokes.
+WAYS_OUT = {
+    "step_back": lambda w: w.act_step(-1),
+    "step_forward": lambda w: w.act_step(+1),
+    "first": lambda w: w.act_step_edge("first"),
+    "last": lambda w: w.act_step_edge("last"),
+    "timeline": lambda w: w.timeline_goto(min(w.session.steps())),
+    "view": lambda w: w.act_set_view("oak1"),
+    "desktop": lambda w: w.act_set_desktop(DESKTOP),
+    "mode_review": lambda w: w.set_mode(A.MODE_REVIEW),
+    "mode_steps": lambda w: w.set_mode(A.MODE_STEPS),
+    "refresh_all": lambda w: w.act_refresh_all(),
+    "rework": lambda w: w.on_rework(min(w.session.steps())),
+    "steps_saved": lambda w: w.on_steps_saved(DESKTOP),
+    "restore_sidecar": lambda w: w.restore_pending(),
+    "confirm": lambda w: w.act_confirm(),
+}
+
+
+def _offer_a_sidecar(win: MainWindow) -> None:
+    """A recovered layer waiting to be restored, for the ``restore_sidecar`` case."""
+    other = [i for i in card_instances(win) if i != win.session.editing_instance][0]
+    win.sidecar.save(win.session.current(), other, np.ones((64, 64), dtype=bool))
+    win._restore_offer = {"instance": other, "key": win.session.current(),
+                          "mask": np.ones((64, 64), dtype=bool)}
+
+
+@pytest.mark.parametrize("name", sorted(WAYS_OUT), ids=sorted(WAYS_OUT))
+def test_an_uncommitted_edit_blocks_every_way_out_of_the_frame(window, name):
+    instance = start_edit(window)
     paint(window)
+    if name == "restore_sidecar":
+        _offer_a_sidecar(window)
+    painted = window.session.editing_mask().copy()
+    overlay = window.overlay.editing.copy()
     step, view, mode = window.session.current().step, window.session.view, window.mode
-    go(window)
+
+    WAYS_OUT[name](window)
+
     assert window.session.current().step == step
     assert window.session.view == view
     assert window.mode == mode
+    assert window.session.editing_instance == instance
+    assert np.array_equal(window.session.editing_mask(), painted)
+    assert np.array_equal(window.overlay.editing, overlay)
     assert "Enter" in window.status_message()
+    # a block flushes the debounce: inside those 300 ms the layer was only in
+    # memory, which is exactly the window a crash would have taken it in
+    assert window.sidecar.pending_for(window.session.current(), instance) is not None
+
+
+def test_the_session_itself_refuses_to_move_with_an_uncommitted_layer(window):
+    """Defence in depth: the gate is in the session too, not only in the window."""
+    from tda.ui.session_api import SessionRefusal
+
+    session = window.session
+    start_edit(window)
+    paint(window)
+    with pytest.raises(SessionRefusal):
+        session.goto(min(session.steps()))
+    with pytest.raises(SessionRefusal):
+        session.prev()
+    with pytest.raises(SessionRefusal):
+        session.open(DESKTOP, "oak1")
+    with pytest.raises(SessionRefusal):
+        session.close()
+    step = session.current().step
+    session.goto(min(session.steps()), force=True)      # what the window uses
+    assert session.current().step < step
 
 
 def test_navigation_is_allowed_again_once_the_edit_is_committed(window):
@@ -477,6 +530,39 @@ def test_sequence_c_the_scope_bar_is_read_then_accepted(window, monkeypatch):
     assert "影响" not in text          # a layering statement has no frame reach
     window.act_commit()
     assert committed == ["zorder:above:other"]
+
+
+# --------------------------------------------------------------------------- #
+# review mode is read-only on the canvas
+# --------------------------------------------------------------------------- #
+def test_review_mode_arms_no_tool_and_a_press_does_nothing(window):
+    """An edit begun in Review mode could never be settled: so it cannot begin."""
+    window.set_mode(A.MODE_REVIEW)
+    assert window.active_tool is None
+    paint(window)
+    assert window.session.editing_instance is None
+    assert not window.overlay.editing.any()
+    assert "R" in window.status_message()
+
+
+def test_rework_moves_the_frame_into_annotate_mode(window):
+    window.set_mode(A.MODE_REVIEW)
+    target = min(window.session.steps())
+    window.on_rework(target)
+    assert window.mode == A.MODE_ANNOTATE
+    assert window.session.current().step == target
+    assert window.active_tool is window.brush
+
+
+def test_review_enter_goes_through_the_window_action(window, monkeypatch):
+    """The panel's own Enter bypassed the unexplained hand-over."""
+    seen: list[int] = []
+    monkeypatch.setattr(window, "act_confirm", lambda: seen.append(1) or False)
+    window.set_mode(A.MODE_REVIEW)
+    from test_app_actions import key_event
+
+    assert window.handle_key(key_event("Return")) is True
+    assert seen == [1]
 
 
 def test_the_brush_ignores_the_right_button(window):

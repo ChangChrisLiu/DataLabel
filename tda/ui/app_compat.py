@@ -24,6 +24,7 @@ from tda.ui.commands import edit_editing_mask_op
 __all__ = [
     "ADAPTED",
     "close_session",
+    "retry_rechecks",
     "editing_changed_signal",
     "flash_image",
     "is_open",
@@ -265,10 +266,39 @@ def is_open(session: Any) -> bool:
     return True
 
 
-def close_session(session: Any) -> None:
-    """``session.close()``; called before the exit backup so the sweeper joins."""
+def close_session(session: Any, force: bool = True) -> None:
+    """``session.close()``; called before the exit backup so the sweeper joins.
+
+    ``force`` by default: the window has already settled any uncommitted layer
+    through its close dialog by the time it gets here.
+    """
     closer: Optional[Callable] = getattr(session, "close", None)
-    if callable(closer):
+    if not callable(closer):
+        return
+    try:
+        closer(force=force)
+    except TypeError:
+        _note("close(force=...)", "the session's close takes no force flag")
         closer()
+
+
+def retry_rechecks(session: Any) -> int:
+    """Re-queue the frames whose background re-check failed; returns how many.
+
+    It only *enqueues*: the sweeper drains the queue on its own thread, so a
+    deep backlog must not freeze the window that asked for the retry.
+    """
+    retry = getattr(session, "retry_rechecks", None)
+    if callable(retry):
+        return int(retry() or 0)
+    _note("retry_rechecks", "queued through the sweeper from db.rechecks()")
+    sweeper = getattr(session, "sweeper", None)
+    db = getattr(session, "db", None)
+    if sweeper is None or db is None or not callable(getattr(db, "rechecks", None)):
+        return 0
+    steps = list(db.rechecks(session.desktop, session.view))
+    if steps:
+        sweeper.enqueue(steps)
+    return len(steps)
 
 

@@ -163,11 +163,33 @@ class RoiMixin:
             self.report(f"conflict {cid}: {resolution}")
 
     @S.guard
+    def act_rework_selected(self) -> None:
+        """``R`` in Review: rework whatever the open queue has selected."""
+        step = self.review.selected_step()
+        if step is None:
+            self.report("select a queue entry first")
+            return
+        self.on_rework(int(step))
+
+    @S.guard
+    def act_resolve(self, resolution: str) -> None:
+        """``K`` / ``N`` in Review: settle the selected conflict."""
+        self.resolve_selected(resolution)
+
+    @S.guard
     def on_rework(self, step: int) -> None:
-        """``R`` in review mode: send the frame back to the annotator."""
-        self.session.goto(int(step))
-        self.set_mode("annotate")
-        self.report(f"step {step} reopened for rework")
+        """``R`` in Review mode: open the frame in Annotate mode to work on it.
+
+        Review mode's canvas is read-only, so "rework" is literally the move
+        into the mode where the frame can be edited -- through the gate, like
+        every other way of leaving the frame that is open now.
+        """
+        def reopen() -> None:
+            self.session.goto(int(step), force=True)
+            self.set_mode("annotate")
+            self.report(f"step {step} reopened for rework")
+
+        self.leave_frame(reopen)
 
     # ---------------------------------------------------------- crash safety
     def pending_restore(self) -> Optional[dict]:
@@ -217,7 +239,13 @@ class RoiMixin:
 
     @S.guard
     def restore_pending(self) -> None:
-        """Put the recovered layer back into the editing layer."""
+        """Put the recovered layer back into the editing layer.
+
+        Refused while the layer already holds uncommitted strokes: restoring
+        would replace work that is newer than the file being offered.
+        """
+        if self._restore_offer is not None and not self.can_leave_edit():
+            return
         offer, self._restore_offer = self._restore_offer, None
         self.restore_bar.hide()
         if offer is None:
