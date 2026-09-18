@@ -16,9 +16,7 @@ from tda.core.model import FrameKey
 from tda.core.truth import NEEDS_REVIEW, VERIFIED
 from tda.ui import session_api as api
 
-__all__ = ["MISSING_SHAPE", "ReviewState"]
-
-MISSING_SHAPE = "missing_shape:"
+__all__ = ["ReviewState"]
 
 
 class ReviewState:
@@ -41,6 +39,12 @@ class ReviewState:
     def open(self, desktop: int, view: str, coverage: Callable[[], dict]) -> None:
         self.desktop, self.view = desktop, view
         self.coverage = coverage
+        self.clear()
+
+    def close(self) -> None:
+        """Let go of the view: nothing may be queried for a session that shut."""
+        self.desktop, self.view = None, ""
+        self.coverage = dict
         self.clear()
 
     def clear(self) -> None:
@@ -68,7 +72,8 @@ class ReviewState:
     def pending_rechecks(self) -> set[int]:
         """Frozen frames of this view still waiting for the sweeper."""
         if self._pending is None:
-            self._pending = set(self.db.rechecks(self.desktop, self.view))
+            self._pending = (set() if self.desktop is None
+                             else set(self.db.rechecks(self.desktop, self.view)))
         return self._pending
 
     # -- status -------------------------------------------------------------
@@ -83,6 +88,8 @@ class ReviewState:
         return self._conflict_steps
 
     def open_conflicts(self) -> list[dict]:
+        if self.desktop is None:
+            return []
         return self.db.conflicts(self.desktop, self.view, open_only=True)
 
     def frame_status(self, step: int) -> str:
@@ -140,7 +147,8 @@ class ReviewState:
             ],
             api.QUEUE_NEEDS_REVIEW: [
                 {"step": row["step"]}
-                for row in self.db.frames_for(self.desktop, self.view)
+                for row in (self.db.frames_for(self.desktop, self.view)
+                            if self.desktop is not None else [])
                 if row.get("review_status") == NEEDS_REVIEW
             ],
             api.QUEUE_MISSING_SHAPE: [

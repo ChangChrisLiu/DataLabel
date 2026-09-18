@@ -1,4 +1,4 @@
--- TDA SQLite schema (schema_version = 2).
+-- TDA SQLite schema (schema_version = 3).
 -- One table per entity of design spec section 3.1. Every JSON column is TEXT
 -- holding json.dumps(..., ensure_ascii=False); RLE dicts are stored as JSON.
 -- All statements are IF NOT EXISTS so that Db.__init__ stays idempotent -- which
@@ -235,13 +235,19 @@ CREATE INDEX IF NOT EXISTS ix_conflict_open ON conflict(desktop, view, status);
 -- Frozen frames whose inputs changed and that still have to be compared
 -- against their frozen rows (spec 3.4). The work is done off the GUI thread, so
 -- the request is persisted: a crash or a restart must not lose a re-check, or a
--- conflict would silently never be raised. Purely additive, hence no schema
--- version bump: an older build simply never reads it.
+-- conflict would silently never be raised -- which is also why schema_version
+-- went to 3 for this table, rather than adding it quietly: a build that does
+-- not know about the queue would skip the re-checks instead of reporting them.
+--
+-- `gen` counts how often the frame has been asked for. The sweeper reads it
+-- with the request and clears the row only if it is still the same, so a second
+-- request arriving while the first is being worked on is never cleared away.
 CREATE TABLE IF NOT EXISTS recheck_queue (
     desktop      INTEGER NOT NULL REFERENCES desktop(id) ON DELETE CASCADE,
     step         INTEGER NOT NULL,
     view         TEXT    NOT NULL,
     requested_at TEXT,
+    gen          INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (desktop, step, view)
 );
 

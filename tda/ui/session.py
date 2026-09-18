@@ -16,6 +16,7 @@ frame steps back rather than forward.
 """
 from __future__ import annotations
 
+import logging
 from typing import Callable, Optional
 
 import numpy as np
@@ -40,6 +41,8 @@ from tda.ui.session_sweep import TruthSweeper
 
 __all__ = ["COMPILED_CACHE_SIZE", "AnnotationSession"]
 
+log = logging.getLogger("tda.session")
+
 #: Compiled frames kept in memory. Four covers the Tab compare between
 #: k and k-1 plus the prefetched next frame, at a few MB of masks each.
 COMPILED_CACHE_SIZE = 4
@@ -59,8 +62,14 @@ class AnnotationSession(CommitMixin, QObject):
     sigEditingChanged = Signal(object)
     #: The session let go of its desktop/view; the panels must detach.
     sigClosed = Signal()
-    #: ``(done, total)`` of the background re-check of frozen frames (spec 3.4).
-    sigSweepProgress = Signal(int, int)
+    #: ``(done, total, failed)`` of the background re-check of frozen frames
+    #: (spec 3.4); ``done`` counts successes only. A two-argument slot still
+    #: works -- Qt drops the third.
+    sigSweepProgress = Signal(int, int, int)
+    #: ``(step, text)`` -- a background re-check failed and the frame is still
+    #: pending; also emitted on :attr:`sigProblems` for panels that only watch
+    #: that one.
+    sigSweepError = Signal(int, str)
     #: Something the review queues show has changed.
     sigQueuesChanged = Signal()
 
@@ -91,7 +100,8 @@ class AnnotationSession(CommitMixin, QObject):
         self.sweeper_enabled = True
         self.sweeper = TruthSweeper(db.path, tax, self.cache_dir,
                                     truth.compiler_version, parent=self)
-        self.sweeper.sigProgress.connect(self._on_sweep_progress)
+        self.sweeper.sigProgress.connect(self.sigSweepProgress)
+        self.sweeper.sigError.connect(self._on_sweep_error)
         self.sweeper.sigQueuesChanged.connect(self._on_queues_changed)
         self.sweeper.sigPrefetched.connect(self._on_prefetched)
         self.sweeper.sigPrefetchedImage.connect(self._on_prefetched_image)
@@ -140,7 +150,7 @@ class AnnotationSession(CommitMixin, QObject):
         def handler(payload: dict) -> None:
             stats = apply(self.db, self.truth, payload, self._step)
             self.review.problems.update(stats["problems"])
-            self._invalidate()
+            self._settled(stats.get("frame"))
             self._hand_to_sweeper(stats.get("rechecks") or [])
             self._announce()
 
@@ -190,11 +200,16 @@ class AnnotationSession(CommitMixin, QObject):
         closed session is how a half-written re-check would happen.
         """
         self.save()
-        self.sweeper.stop()
+        if not self.sweeper.stop():
+            log.error("closing the session left the truth sweeper running on %s/%s",
+                      self.desktop, self.view)
         self._steps = []
         self._available = []
         self._step = None
         self._reset_working_set()
+        self.desktop = None
+        self.view = ""
+        self.review.close()
         self.sigClosed.emit()
 
     def _reset_working_set(self) -> None:
@@ -393,11 +408,22 @@ class AnnotationSession(CommitMixin, QObject):
         if isinstance(op, Op):
             self.undo_stack.push(op, apply=False)
         self.review.problems.update(result.get("problems") or {})
-        self._invalidate()
+        self._settled(result.get("frame"))
         self._refresh_dirty()
         self._hand_to_sweeper(result.get("rechecks") or [])
         self._announce()
         return result
+
+    def _settled(self, frame) -> None:
+        """Move on to the next edit epoch, keeping the frame the write produced.
+
+        The refresh already compiled the current step; invalidating and letting
+        :meth:`compiled` build it again was a second full compilation of the
+        same frame on the GUI thread -- a third of the cost of a commit.
+        """
+        self._invalidate()
+        if isinstance(frame, CompiledFrame) and frame.key.step == self._step:
+            self._keep_compiled(frame.key.step, self._epoch, frame)
 
     def _hand_to_sweeper(self, steps) -> None:
         """Let the background worker know which frozen frames are owed a check.
@@ -465,9 +491,16 @@ class AnnotationSession(CommitMixin, QObject):
         a bulk import, or when the review panel is opened on a view nobody has
         visited in this session.
         """
-        self.truth.run_pending_rechecks(self.desktop, self.view)
-        stats = edit.refresh_steps(self.db, self.truth, self.desktop, self.view,
-                                   self._available)
+        running = self.sweeper.is_running
+        self.sweeper.stop()  # one drain, not two racing over the same rows
+        try:
+            self.truth.run_pending_rechecks(self.desktop, self.view)
+            stats = edit.refresh_steps(self.db, self.truth, self.desktop, self.view,
+                                       self._available)
+        finally:
+            if running and self.sweeper_enabled:
+                self.sweeper.open(self.desktop, self.view)
+                self.sweeper.enqueue(self.db.rechecks(self.desktop, self.view))
         self.review.problems.update(stats["problems"])
         self._invalidate()
         return stats
@@ -502,6 +535,9 @@ class AnnotationSession(CommitMixin, QObject):
 
         The reason is emitted on :attr:`sigProblems` for the last two.
         """
+        if not self.is_open:
+            self.sigProblems.emit([f"conflict {cid} not resolved: no view is open"])
+            return "refused"
         conflict = self.db.get_conflict(int(cid))
         outcome = "resolved"
         try:
@@ -528,8 +564,12 @@ class AnnotationSession(CommitMixin, QObject):
         self.review.invalidate()
 
     # -------------------------------------------------- the background worker
-    def _on_sweep_progress(self, done: int, total: int) -> None:
-        self.sigSweepProgress.emit(done, total)
+    def _on_sweep_error(self, step: int, text: str) -> None:
+        """A background re-check failed: say so, and leave the frame pending."""
+        where = "the truth sweeper" if step < 0 else f"step {step}"
+        self.review.invalidate()
+        self.sigSweepError.emit(step, text)
+        self.sigProblems.emit([f"{where}: re-check failed: {text}"])
 
     def _on_queues_changed(self) -> None:
         """A re-check finished: its verdict may have changed a status or a queue."""

@@ -45,7 +45,9 @@ def qapp():
 
 @pytest.fixture
 def session(qapp, tmp_path: Path) -> AnnotationSession:
-    return make_session(tmp_path)
+    made = make_session(tmp_path)
+    yield made
+    made.close()  # the worker thread must never outlive the object it signals
 
 
 def keyframes(session, instance=COOLER):

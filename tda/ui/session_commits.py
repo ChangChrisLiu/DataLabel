@@ -19,6 +19,7 @@ import numpy as np
 from tda.core.model import FrameKey
 from tda.core.truth_inputs import frame_hw
 from tda.ui import session_api as api
+from tda.ui.session_api import SessionRefusal
 from tda.ui import session_edit as edit
 from tda.ui.session_ops import GEOM_BOX, ON_BENCH
 
@@ -37,7 +38,7 @@ class CommitMixin:
         """
         key = self.current()
         if key.step not in self._available or self.image_path(key.step) is None:
-            raise ValueError(
+            raise SessionRefusal(
                 f"step {key.step} of {self.view} has no image: it cannot be annotated"
             )
         return key
@@ -119,7 +120,7 @@ class CommitMixin:
         """A part on the bench is tracked by a rectangle, not by a mask (spec 4.2)."""
         placement = edit.placement_of(self.db, self.tax, key, instance)
         if placement == ON_BENCH:
-            raise ValueError(
+            raise SessionRefusal(
                 f"{instance} is on the bench at step {key.step}: use the bench box tool"
             )
 

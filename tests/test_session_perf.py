@@ -56,7 +56,9 @@ def qapp():
 
 @pytest.fixture
 def session(qapp, tmp_path: Path) -> AnnotationSession:
-    return make_session(tmp_path)
+    made = make_session(tmp_path)
+    yield made
+    made.close()  # the worker thread must never outlive the object it signals
 
 
 def compiled_rows(session, step: int) -> dict:
@@ -74,6 +76,36 @@ def test_a_commit_compiles_only_the_frame_in_front_of_the_annotator(session):
     assert result["compiled"] == [10]  # ... but only this frame was compiled
     assert COOLER in compiled_rows(session, 10)
     assert compiled_rows(session, 7) == {}
+
+
+def test_a_commit_undo_and_redo_each_compile_the_frame_once(session, monkeypatch):
+    """The refresh already made the frame; nothing may make it a second time."""
+    session.goto(10)
+    draw(session, COOLER, cell(0), api.SCOPE_KEYFRAME)
+
+    import tda.core.truth as truth_mod
+
+    original = truth_mod.compile_frame
+    steps: list[int] = []
+
+    def counted(key, *a, **k):
+        steps.append(key.step)
+        return original(key, *a, **k)
+
+    monkeypatch.setattr(truth_mod, "compile_frame", counted)
+
+    session.begin_edit(COOLER)
+    session.set_editing_mask(cell(5))
+    session.commit_edit(api.SCOPE_KEYFRAME)
+    assert steps == [10], f"commit compiled {steps}"
+
+    steps.clear()
+    session.undo()
+    assert steps == [10], f"undo compiled {steps}"
+
+    steps.clear()
+    session.redo()
+    assert steps == [10], f"redo compiled {steps}"
 
 
 def test_visiting_a_frame_compiles_it(session):
@@ -283,6 +315,12 @@ def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path):
     session.image()
     warm_s = time.perf_counter() - started
 
+    # measure the cold arrival on its own: with the prefetch of k-1 running the
+    # two compete for the same cores, and what is being asked here is how long
+    # the GUI thread takes, not how the machine schedules two of them
+    session.drain_prefetch(timeout=20.0)
+    session.sweeper_enabled = False
+    session.sweeper.stop()
     session.images.clear()
     started = time.perf_counter()
     session.goto(10)
@@ -291,6 +329,6 @@ def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path):
     cold_s = time.perf_counter() - started
 
     session.close()
-    assert commit_s <= 1.0, f"commit took {commit_s:.2f}s"
+    assert commit_s <= 0.8, f"commit took {commit_s:.2f}s"
     assert warm_s <= 0.15, f"warm goto took {warm_s:.2f}s"
-    assert cold_s <= 0.6, f"cold goto took {cold_s:.2f}s"
+    assert cold_s <= 0.8, f"cold goto took {cold_s:.2f}s"

@@ -43,6 +43,7 @@ from tda.core.taxonomy import Taxonomy
 
 __all__ = [
     "DEFAULT_POSE_SEGMENT",
+    "annotatable_steps",
     "HW_INFERRED",
     "HW_MEASURED",
     "VIEW_HW",
@@ -78,6 +79,22 @@ HW_MEASURED = "measured"
 # --------------------------------------------------------------------------- #
 # image size
 # --------------------------------------------------------------------------- #
+def annotatable_steps(db: Db, desktop: int, view: str, steps) -> list[int]:
+    """The subset of ``steps`` that has an image to compile against.
+
+    A logical step whose frame row is absent, or flagged ``missing``, carries no
+    canvas: compiling it would fall back to the view's nominal size and produce
+    masks in the wrong coordinates. The state machine and the shape anchors
+    still run through it (spec 4.2, 缺帧处理), only the truth table skips it.
+    """
+    out = []
+    for step in sorted({int(s) for s in steps}):
+        row = db.get_frame(FrameKey(desktop, step, view))
+        if row is not None and not row.get("missing"):
+            out.append(step)
+    return out
+
+
 def infer_hw(view: str) -> tuple[int, int]:
     """The nominal ``(H, W)`` of a view's images; raises for an unknown view."""
     known = VIEW_HW.get(view)

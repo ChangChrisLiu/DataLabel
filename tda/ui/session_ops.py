@@ -40,7 +40,14 @@ from tda.core.compiler import select_keyframe
 from tda.core.states import needs_geom
 from tda.core.taxonomy import Taxonomy
 from tda.core.truth import VERIFIED, TruthService
-from tda.core.truth_inputs import InputCache, instances_of, pose_segment_of, state_of
+from tda.ui.session_api import SessionRefusal
+from tda.core.truth_inputs import (
+    InputCache,
+    annotatable_steps,
+    instances_of,
+    pose_segment_of,
+    state_of,
+)
 
 __all__ = [
     "BENCH_KINDS",
@@ -90,22 +97,6 @@ BENCH_KINDS = ("box",)
 # --------------------------------------------------------------------------- #
 # reads
 # --------------------------------------------------------------------------- #
-def annotatable_steps(db: Db, desktop: int, view: str, steps: Iterable[int]) -> list[int]:
-    """The subset of ``steps`` that has an image to compile against.
-
-    A logical step whose frame row is absent, or flagged ``missing``, carries no
-    canvas: compiling it would fall back to the view's nominal size and produce
-    masks in the wrong coordinates.  The state machine and the shape anchors
-    still run through it (spec 4.2, 缺帧处理), only the truth table skips it.
-    """
-    out = []
-    for step in sorted({int(s) for s in steps}):
-        row = db.get_frame(FrameKey(desktop, step, view))
-        if row is not None and not row.get("missing"):
-            out.append(step)
-    return out
-
-
 def refresh_steps(db: Db, truth: TruthService, desktop: int, view: str,
                   steps: Iterable[int]) -> dict:
     """Recompile these steps, keeping each step's problems under its own key.
@@ -134,12 +125,21 @@ def settle(db: Db, truth: TruthService, desktop: int, view: str, steps: Iterable
     queue, because a frozen row is the one thing the compiler may not overwrite
     and a disagreement nobody looks for is a conflict that never gets raised.
 
-    Returns what :func:`refresh_steps` does plus ``rechecks``, the frames
-    queued, and ``compiled``, the ones actually done now.
+    Returns what :func:`refresh_steps` does plus ``rechecks`` (the frames
+    queued), ``compiled`` (the ones actually done now) and ``frame`` -- the
+    :class:`~tda.core.compiler.CompiledFrame` of the current step, handed back
+    so the session installs it instead of compiling the same frame again.
     """
-    wanted = sorted({int(s) for s in steps})
+    wanted = annotatable_steps(db, desktop, view, steps)
     now = [int(current)] if current is not None and int(current) in wanted else wanted[:1]
-    stats = refresh_steps(db, truth, desktop, view, now)
+    stats: dict = {"updated": 0, "conflicts": 0, "skipped": 0, "problems": {},
+                   "frame": None}
+    for step in now:
+        one = truth.refresh(FrameKey(desktop, int(step), view))
+        for counter in ("updated", "conflicts", "skipped"):
+            stats[counter] += one[counter]
+        stats["problems"][int(step)] = list(one["problems"])
+        stats["frame"] = one["compiled"]  # the caller installs it: no second compile
     deferred = [s for s in wanted if s not in now and is_verified(db, desktop, view, s)]
     stats["rechecks"] = truth.queue_rechecks(desktop, view, deferred)
     stats["compiled"] = now
@@ -150,7 +150,7 @@ def as_mask(mask: np.ndarray, hw: tuple[int, int]) -> np.ndarray:
     """Validate an edited mask against the frame canvas and make it boolean."""
     arr = np.asarray(mask)
     if arr.shape != tuple(hw):
-        raise ValueError(f"mask has shape {arr.shape!r}, expected {tuple(hw)!r}")
+        raise SessionRefusal(f"mask has shape {arr.shape!r}, expected {tuple(hw)!r}")
     return arr.astype(bool, copy=False)
 
 

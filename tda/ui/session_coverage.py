@@ -22,7 +22,13 @@ from tda.core.db import Db
 from tda.core.model import FrameKey, ShapeKeyframe
 from tda.core.states import needs_geom
 from tda.core.taxonomy import Taxonomy
-from tda.core.truth_inputs import InputCache, instances_of, pose_segment_of, state_of
+from tda.core.truth_inputs import (
+    InputCache,
+    frame_hw as hw_of,
+    instances_of,
+    pose_segment_of,
+    state_of,
+)
 
 __all__ = ["FrameCoverage", "coverage"]
 
@@ -67,7 +73,8 @@ def coverage(db: Db, tax: Taxonomy, desktop: int, view: str, steps: Iterable[int
         for instance, kind in sorted(needs_geom(instances, state, tax).items()):
             placement = state[instance].placement
             found.needed += 1
-            if select_keyframe(chains.get((instance, seg, placement), []), step) is not None:
+            chosen = select_keyframe(chains.get((instance, seg, placement), []), step)
+            if chosen is not None and _usable(chosen, hw_of(db, FrameKey(desktop, step, view))):
                 found.drawn += 1
             elif kind == "box":
                 found.bench_missing.append(instance)
@@ -75,6 +82,22 @@ def coverage(db: Db, tax: Taxonomy, desktop: int, view: str, steps: Iterable[int
                 found.missing.append(instance)
         out[step] = found
     return out
+
+
+def _usable(kf: ShapeKeyframe, hw: tuple[int, int]) -> bool:
+    """Would the compiler get geometry out of this keyframe on this canvas?
+
+    A part whose RLE was traced on a different canvas is reported as
+    ``shape_size_mismatch`` and dropped (spec 3.3 step 4), so counting it as
+    "drawn" would hide a frame that in fact has nothing on it.
+    """
+    for part in kf.parts:
+        if part.box is not None:
+            return True
+        size = (part.rle or {}).get("size")
+        if size is not None and (int(size[0]), int(size[1])) == hw:
+            return True
+    return False
 
 
 def _chains(db: Db, desktop: int, view: str

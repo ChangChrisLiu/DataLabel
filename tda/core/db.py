@@ -42,7 +42,7 @@ from tda.core.model import (
     ZOrderRec,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 LOCK_TTL = timedelta(hours=12)
 #: How a conflict may be closed. The first three are a human's decision;
 #: ``superseded`` is what the truth service records when the inputs moved on

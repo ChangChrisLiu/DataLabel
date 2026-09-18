@@ -48,6 +48,7 @@ from tda.core.model import (
 )
 from tda.core.states import FrameState, state_at
 from tda.core.taxonomy import Taxonomy
+from tda.core.truth import TruthService
 from tda.core.truth_inputs import events_of, infer_hw, pose_segment_of
 
 __all__ = [
@@ -398,6 +399,7 @@ def export_coco(
     roi_crop: bool = False,
     *,
     include_boxes: bool = False,
+    truth: Optional[TruthService] = None,
 ) -> dict:
     """Write the compiled truth of ``desktops`` in ``view`` as one COCO file.
 
@@ -440,9 +442,15 @@ def export_coco(
     }
     cat_of = category_ids(tax)
     ann_id = 1
+    service = truth or TruthService(db, tax)
 
     for desktop in desktops:
         ctx = load_ctx(db, tax, desktop, view)
+        # the compiled rows of an unverified frame are a cache the
+        # annotator's commits leave stale (spec 3.4): fill it before
+        # reading the view out, or a frame nobody visited is exported
+        # as it was several edits ago -- or silently not at all
+        service.ensure_fresh(desktop, view, only_verified)
         for frame in db.frames_for(desktop, view):
             key = FrameKey(desktop, frame["step"], view)
             if not ctx.exportable(key.step):

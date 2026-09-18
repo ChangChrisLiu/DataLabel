@@ -47,7 +47,9 @@ def qapp():
 
 @pytest.fixture
 def session(qapp, tmp_path: Path) -> AnnotationSession:
-    return make_session(tmp_path)
+    made = make_session(tmp_path)
+    yield made
+    made.close()  # the worker thread must never outlive the object it signals
 
 
 @pytest.fixture
@@ -343,6 +345,32 @@ def test_is_open_and_sig_closed_let_the_window_detach(session):
     assert closed == [True]
     with pytest.raises(RuntimeError):
         session.current()
+
+
+def test_a_closed_session_answers_instead_of_raising(session):
+    session.close()
+    # the panels are detached, but a queued click may still arrive
+    assert session.resolve_conflict(1, api.RESOLVE_ACCEPT_NEW) == "refused"
+    assert session.queues()[api.QUEUE_CONFLICTS] == []
+    assert session.frame_status(3) == api.STATUS_UNLABELED
+    assert session.review.desktop is None  # nothing is queried for a shut view
+
+
+def test_a_shape_of_the_wrong_size_does_not_count_as_drawn(session):
+    """The compiler reports `shape_size_mismatch`; coverage must agree it is missing."""
+    from tda.core import masks as _masks
+    from tda.core.model import ShapeKeyframe, ShapePart
+
+    session.db.add_keyframe(ShapeKeyframe(
+        id=None, instance=CHASSIS, desktop=DESKTOP, view=VIEW, pose_segment=1,
+        anchor_step=LAST_STEP, placement="in_chassis", geom_type="mask",
+        parts=[ShapePart("main", _masks.encode_rle(np.zeros((32, 32), dtype=bool)))],
+    ))
+    session.review.invalidate()
+    found = session.review.drawn()[10]
+    assert CHASSIS in found.missing
+    assert {e["instance"] for e in session.queues()[api.QUEUE_MISSING_SHAPE]
+            if e["step"] == 10} >= {CHASSIS}
 
 
 def test_set_unexplained_feeds_the_fourth_queue(session):
