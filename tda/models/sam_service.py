@@ -106,20 +106,35 @@ class SamRequest:
 
 @dataclass
 class SamResult:
-    """A single predicted mask.
+    """A predicted mask plus the alternatives the annotator may cycle through.
 
     Attributes:
-        mask: boolean ``HxW`` array in crop coordinates.
+        mask: boolean ``HxW`` array in crop coordinates -- the best candidate.
         score: SAM's predicted IoU for the *proposal* it produced. After a local
             refinement it still describes that proposal, not the blended mask
             actually returned, so do not read it as a quality score for ``mask``.
         ms: wall-clock duration of :meth:`SamService.predict`, including the
             embedding computation when the crop was not cached yet.
+        candidates: every proposal, sorted by score descending, so
+            ``candidates[0] is mask``. ``multimask=True`` fills this with SAM's
+            three masks; everything else leaves a single entry. After a local
+            refinement it holds the *blended* mask only -- the raw proposals
+            would undo the blend if they were applied (spec 4.6).
+        scores: ``candidates``' scores, same order and length.
     """
 
     mask: np.ndarray
     score: float
     ms: float
+    candidates: list[np.ndarray] = field(default_factory=list)
+    scores: list[float] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Default the candidate list to the single mask (backward compatible)."""
+        if not self.candidates:
+            self.candidates = [self.mask]
+        if not self.scores:
+            self.scores = [self.score] * len(self.candidates)
 
 
 # ---------------------------------------------------------------------------
@@ -345,16 +360,32 @@ class SamService:
                     normalize_coords=True,
                 )
 
-            best = int(np.argmax(np.asarray(scores).reshape(-1)))
-            mask = np.asarray(masks[best]) > 0.5
-            score = float(np.asarray(scores).reshape(-1)[best])
+            flat = np.asarray(scores).reshape(-1)
+            # Stable sort so that equal scores keep SAM's own order and the
+            # candidate the annotator sees first never depends on tie breaking.
+            order = np.argsort(-flat, kind="stable")
+            candidates = [
+                np.ascontiguousarray(np.asarray(masks[i]) > 0.5, dtype=bool)
+                for i in order
+            ]
+            ranked = [float(flat[i]) for i in order]
             if prior is not None and req.points:
-                mask = blend_local(prior, mask, req.points, REFINE_RADIUS_PX)
+                # Only the blended mask is a valid edit; offering the raw
+                # proposals as alternatives would silently drop the prior.
+                candidates = [
+                    np.ascontiguousarray(
+                        blend_local(prior, candidates[0], req.points, REFINE_RADIUS_PX),
+                        dtype=bool,
+                    )
+                ]
+                ranked = ranked[:1]
 
         return SamResult(
-            mask=np.ascontiguousarray(mask, dtype=bool),
-            score=score,
+            mask=candidates[0],
+            score=ranked[0],
             ms=(time.perf_counter() - t0) * 1000.0,
+            candidates=candidates,
+            scores=ranked,
         )
 
     # -- internals ----------------------------------------------------------

@@ -158,6 +158,23 @@ def _blob_result(req: SamRequest) -> SamResult:
     return SamResult(mask=mask, score=0.9, ms=1.0)
 
 
+def _multi_result(req: SamRequest) -> SamResult:
+    """Three nested candidates (part -> sub-assembly -> assembly), best first."""
+    h, w = req.image_crop.shape[:2]
+    candidates = []
+    for divisor in (4, 3, 2):
+        mask = np.zeros((h, w), dtype=bool)
+        mask[h // 4 : h // 4 + h // divisor, w // 4 : w // 4 + w // divisor] = True
+        candidates.append(mask)
+    return SamResult(
+        mask=candidates[0],
+        score=0.9,
+        ms=1.0,
+        candidates=candidates,
+        scores=[0.9, 0.8, 0.7],
+    )
+
+
 # ---------------------------------------------------------------------------
 # LabelOverlay
 # ---------------------------------------------------------------------------
@@ -876,6 +893,124 @@ def test_sam_point_tool_clear_points(rig):
     assert tool.points == []
     tool.on_press(40.0, 40.0, None)
     assert queue.last.points == [(40.0, 40.0, 1)]
+
+
+def test_sam_point_tool_cycles_through_the_candidates(rig):
+    canvas, ov = rig
+    canvas.set_zoom(0.1)  # the whole 60x80 image is the crop: mask == image coords
+    QApplication.processEvents()
+    queue = StubQueue(_multi_result)
+    tool = SamPointTool(canvas, ov, queue)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(20.0, 30.0, None)
+    assert _spin(lambda: bool(strokes))
+    assert tool.candidate_count == 3
+    assert tool.candidate_index == 0
+    # candidate 0: rows 15..30, cols 20..40
+    assert ov.editing[20, 25] and not ov.editing[32, 25]
+
+    assert tool.cycle_candidate() == 1
+    assert tool.candidate_index == 1
+    # candidate 1: rows 15..35, cols 20..46
+    assert ov.editing[32, 25] and not ov.editing[40, 25]
+
+    tool.cycle_candidate()
+    assert tool.candidate_index == 2
+    assert ov.editing[40, 25], "candidate 2 is the largest"
+
+    tool.cycle_candidate()  # wraps around
+    assert tool.candidate_index == 0
+    assert not ov.editing[32, 25], "wrapping must restore the first candidate"
+
+    tool.cycle_candidate(-1)  # and cycles backwards
+    assert tool.candidate_index == 2
+    assert ov.editing[40, 25]
+    assert len(strokes) == 5, "every candidate swap is one undoable edit"
+
+
+def test_sam_point_tool_resets_the_candidates_on_a_new_request(rig):
+    canvas, ov = rig
+    canvas.set_zoom(0.1)
+    QApplication.processEvents()
+    queue = StubQueue(_multi_result)
+    tool = SamPointTool(canvas, ov, queue)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(20.0, 30.0, None)
+    assert _spin(lambda: bool(strokes))
+    tool.cycle_candidate()
+    assert tool.candidate_index == 1
+
+    tool.clear_points()
+    tool.on_press(30.0, 30.0, None)
+    assert tool.candidate_index == 0, "a new request resets the index"
+    assert tool.candidate_count == 0, "and forgets the stale candidates"
+    assert _spin(lambda: len(strokes) > 2)
+    assert tool.candidate_count == 3
+
+
+def test_cycle_candidate_without_a_result_is_a_no_op(rig):
+    canvas, ov = rig
+    tool = SamPointTool(canvas, ov, StubQueue())
+    assert tool.candidate_count == 0
+    assert tool.cycle_candidate() == 0
+    assert not ov.editing.any()
+
+
+def test_cycle_candidate_does_nothing_when_sam_offered_only_one_mask(rig):
+    canvas, ov = rig
+    canvas.set_zoom(0.1)
+    QApplication.processEvents()
+    queue = StubQueue(_blob_result)  # a single-candidate result
+    tool = SamPointTool(canvas, ov, queue)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(20.0, 30.0, None)
+    assert _spin(lambda: bool(strokes))
+    assert tool.candidate_count == 1
+    assert tool.cycle_candidate() == 0
+    assert len(strokes) == 1, "a pointless swap must not create an undo step"
+
+
+def test_sam_point_tool_sends_point_plus_box_when_a_prompt_box_is_set(rig):
+    """The diff map (or the box tool) supplies the box; the click supplies the point."""
+    canvas, ov = rig
+    canvas.set_zoom(0.1)
+    QApplication.processEvents()
+    queue = StubQueue()
+    tool = SamPointTool(canvas, ov, queue)
+
+    tool.set_prompt_box((10.0, 12.0, 50.0, 52.0))
+    tool.on_press(20.0, 30.0, None)
+    req = queue.last
+    assert req.points == [(20.0, 30.0, 1)]
+    assert req.box == (10.0, 12.0, 50.0, 52.0)
+    assert req.multimask is False, "point+box is unambiguous, so no candidates"
+
+    tool.set_prompt_box(None)
+    tool.clear_points()
+    tool.on_press(20.0, 30.0, None)
+    assert queue.last.box is None
+    assert queue.last.multimask is True
+
+
+def test_sam_point_tool_refine_does_not_ask_for_candidates(rig):
+    canvas, ov = rig
+    canvas.set_zoom(0.1)
+    QApplication.processEvents()
+    prior = np.zeros((60, 80), dtype=bool)
+    prior[10:20, 10:20] = True
+    ov.set_editing("inst-x", prior)
+    queue = StubQueue()
+    tool = SamPointTool(canvas, ov, queue, refine=True)
+
+    tool.on_press(15.0, 15.0, None)
+    assert queue.last.mask_input is not None
+    assert queue.last.multimask is False
 
 
 def test_sam_box_tool_submits_the_dragged_box(rig):

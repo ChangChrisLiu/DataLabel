@@ -335,6 +335,10 @@ class SamToolBase(Tool):
             only the region near the new points changes (spec 4.6).
         instance: instance key the result belongs to; ``None`` keeps whatever
             the overlay is already editing.
+        prompt_box: optional box sent along with the points, set via
+            :meth:`set_prompt_box` -- normally the box of a
+            :class:`~tda.core.diffmap.DiffBlob` from the frame difference map,
+            or the last box dragged with :class:`SamBoxTool`.
     """
 
     def __init__(
@@ -351,10 +355,65 @@ class SamToolBase(Tool):
         self.refine = bool(refine)
         self.instance = instance
         self.last_result: Optional[SamResult] = None
+        self.prompt_box: Optional[Box] = None
+        self._candidates: list[np.ndarray] = []
+        self._candidate_index = 0
+        self._candidate_rect: Optional[Rect] = None
+        self._candidate_base: Optional[np.ndarray] = None
         self._bridge = SamResultBridge(self)
         self._bridge.sigResult.connect(
             self._on_result, Qt.ConnectionType.QueuedConnection
         )
+
+    # -- prompt box ---------------------------------------------------------
+    def set_prompt_box(self, box: Optional[Box]) -> None:
+        """Attach (or clear with ``None``) a box prompt sent with every click.
+
+        The model comparison (``experiments/sam_compare/REPORT.md``) measured a
+        lone point at IoU 0.24 on parts above 20k px but point+box at 0.76, so
+        the reverse-order flow feeds the changed region's box in here and lets
+        the annotator's click say *which* part inside it.
+        """
+        self.prompt_box = (
+            None
+            if box is None
+            else (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+        )
+
+    # -- candidates ---------------------------------------------------------
+    @property
+    def candidate_count(self) -> int:
+        """Number of masks the last result offered (0 before the first one)."""
+        return len(self._candidates)
+
+    @property
+    def candidate_index(self) -> int:
+        """Index of the candidate currently in the editing layer."""
+        return self._candidate_index
+
+    def cycle_candidate(self, step: int = 1) -> int:
+        """Replace the editing layer with the next candidate; return its index.
+
+        Bound to ``C`` by the app. A single positive point is ambiguous on a
+        large part, so SAM's three proposals are kept and the annotator flips
+        through them instead of re-clicking. With fewer than two candidates
+        this is a no-op: re-applying the same mask would only add an empty
+        entry to the undo stack.
+        """
+        if len(self._candidates) < 2:
+            return self._candidate_index
+        self._candidate_index = (self._candidate_index + int(step)) % len(
+            self._candidates
+        )
+        self._apply_candidate()
+        return self._candidate_index
+
+    def _reset_candidates(self) -> None:
+        """Forget the offered masks; called whenever a new prompt is sent."""
+        self._candidates = []
+        self._candidate_index = 0
+        self._candidate_rect = None
+        self._candidate_base = None
 
     # -- submission ---------------------------------------------------------
     def _submit(self, points: Sequence[Point], box: Optional[Box] = None) -> None:
@@ -381,16 +440,20 @@ class SamToolBase(Tool):
         if not crop_points and crop_box is None:
             return
 
+        mask_input = self._mask_input(rect, crop.shape[:2])
         req = SamRequest(
             image_crop=crop,
             points=crop_points,
             box=crop_box,
-            mask_input=self._mask_input(rect, crop.shape[:2]),
-            # One point is ambiguous (part vs. whole assembly), so let SAM
-            # propose three candidates and keep its best; with more prompts the
-            # user has already disambiguated.
-            multimask=len(crop_points) == 1 and crop_box is None,
+            mask_input=mask_input,
+            # One point on its own is ambiguous (part vs. whole assembly), so
+            # let SAM propose three candidates for :meth:`cycle_candidate`. A
+            # box, a second point or a prior mask has already disambiguated it.
+            multimask=(
+                len(crop_points) == 1 and crop_box is None and mask_input is None
+            ),
         )
+        self._reset_candidates()
         bridge, refine = self._bridge, self.refine
         self.queue.submit(req, lambda res: bridge.deliver((res, rect, refine)))
 
@@ -414,24 +477,40 @@ class SamToolBase(Tool):
 
     # -- result -------------------------------------------------------------
     def _on_result(self, payload: object) -> None:
-        """Apply a SAM mask to the editing layer (GUI thread)."""
+        """Store a SAM result and apply its best mask (GUI thread)."""
         if self.overlay is None:
             return
         result, rect, refine = payload  # type: ignore[misc]
         self.last_result = result
+        self._candidates = [
+            np.asarray(mask).astype(bool)
+            for mask in (result.candidates or [result.mask])
+        ]
+        self._candidate_index = 0
+        self._candidate_rect = rect
+        # Outside the crop the prediction says nothing: in refine mode the prior
+        # mask survives there, otherwise the layer is replaced outright. The
+        # base is snapshotted once so that cycling candidates stays idempotent
+        # instead of compounding onto the previously applied one.
+        self._candidate_base = self.overlay.editing.copy() if refine else None
+        self._apply_candidate()
+
+    def _apply_candidate(self) -> None:
+        """Write the selected candidate into the editing layer (GUI thread)."""
+        if self.overlay is None or self._candidate_rect is None or not self._candidates:
+            return
+        rect = self._candidate_rect
         x0, y0, x1, y1 = rect
-        mask = np.asarray(result.mask).astype(bool)
+        mask = self._candidates[self._candidate_index]
         if mask.shape != (y1 - y0, x1 - x0):
             mask = cv2.resize(
                 mask.astype(np.uint8),
                 (x1 - x0, y1 - y0),
                 interpolation=cv2.INTER_NEAREST,
             ).astype(bool)
-        # Outside the crop the prediction says nothing: in refine mode the prior
-        # mask survives there, otherwise the layer is replaced outright.
         full = (
-            self.overlay.editing.copy()
-            if refine
+            self._candidate_base.copy()
+            if self._candidate_base is not None
             else np.zeros(self.overlay.hw, dtype=bool)
         )
         full[y0:y1, x0:x1] = mask
@@ -447,6 +526,12 @@ class SamPointTool(SamToolBase):
 
     Points accumulate so every click refines the same proposal; the session
     calls :meth:`clear_points` when the target instance changes.
+
+    A lone first click is sent with ``multimask=True`` and the three proposals
+    are then reachable with :meth:`~SamToolBase.cycle_candidate` (``C``). When
+    :meth:`~SamToolBase.set_prompt_box` holds a box -- the changed region from
+    the difference map, or the last :class:`SamBoxTool` drag -- the click is
+    sent as point+box instead, which needs no candidates.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -459,7 +544,7 @@ class SamPointTool(SamToolBase):
         if button is not None and button() == Qt.MouseButton.RightButton:
             label = 0
         self.points.append((float(x), float(y), label))
-        self._submit(self.points)
+        self._submit(self.points, box=self.prompt_box)
 
     def clear_points(self) -> None:
         """Forget the collected prompts (e.g. after accepting the mask)."""
