@@ -63,6 +63,24 @@ class PoseSegmentMixin:
                 (*fields.values(), desktop, view, seg),
             )
 
+    def set_pose_segment_roi(self, desktop: int, view: str, seg: int,
+                             roi: Optional[list]) -> None:
+        """Store (or clear with ``None``) one segment's region of interest.
+
+        The ROI is ``[x0, y0, x1, y1]`` in the reference frame's coordinates --
+        the chassis rectangle the annotator accepts on the first open of a
+        desktop/view (spec 2.4). :meth:`~tda.core.db.Db.set_pose_segment`
+        rewrites the whole row and never wrote this column, so the window needs
+        a setter that leaves the corners and the homography alone.
+        """
+        payload = None if roi is None else [int(v) for v in roi]
+        with self._tx():
+            self.conn.execute(
+                "UPDATE pose_segment SET roi_json=? "
+                "WHERE desktop=? AND view=? AND seg=?",
+                (R.dumps(payload), desktop, view, seg),
+            )
+
     def clear_pose_geometry(self, desktop: int, view: str, seg: int) -> None:
         """Drop the corners, homography and ROI of one segment (they are stale)."""
         assignments = ", ".join(f'"{c}"=NULL' for c in POSE_GEOMETRY_COLUMNS)
