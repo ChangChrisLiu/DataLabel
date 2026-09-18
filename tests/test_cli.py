@@ -1,10 +1,10 @@
-"""Tests for the command-line data pipeline (``tda.cli`` + ``tda.pipeline``).
+"""Tests for the command-line data pipeline (``tda.cli`` + ``tda.pipeline*``).
 
 Every test runs against a throw-away ``paths.yaml`` whose four roots point into
 ``tmp_path``, so no test reads F: or writes to the real database. The frame
 index is a small synthetic :class:`~tda.core.index.DesktopIndex` written with
 the real ``save_index``; the logs are the three verbatim fixtures in
-``tests/fixtures/logs`` plus one synthesised sheet for the ``reorient`` case.
+``tests/fixtures/logs`` plus two synthesised sheets for the ``reorient`` cases.
 """
 from __future__ import annotations
 
@@ -17,12 +17,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tda.cli import main
+from tda.cli import EXIT_ERROR, EXIT_LOCKED, EXIT_OK, EXIT_ORDER, main
 from tda.core.db import Db
 from tda.core.index import DesktopIndex, FrameFile, save_index
 from tda.core.logs import read_desktop_csv
 from tda.core.model import VIEWS, FrameKey, StepRec, StepType
 from tda.pipeline import parse_desktops
+from tda.pipeline_logs import LS_NOTES_PREFIX
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 LOG_FIXTURES = FIXTURES / "logs"
@@ -324,6 +325,27 @@ def test_import_logs_step_durations_from_index(env):
         db.close()
 
 
+def test_a_long_gap_between_captures_is_flagged(env, tmp_path):
+    """A 40-minute gap is recorded but reported: it is a break, not an operation."""
+    index = {77: make_index(77, env["n_steps_77"])}
+    frames = index[77].frames
+    for step in range(3, env["n_steps_77"] + 1):  # push everything from step 3 on
+        key = FrameKey(77, step, "oak1")
+        moved = datetime.fromisoformat(frames[key].ts) + timedelta(minutes=40)
+        frames[key].ts = moved.isoformat()
+    slow = tmp_path / "slow_index.json"
+    save_index(index, str(slow))
+
+    assert run(env, "import-logs", "--desktops", "77", "--index", str(slow)) == EXIT_OK
+    db = open_db(env)
+    try:
+        assert db.steps(77)[2].duration_s == pytest.approx(40 * 60 + STEP_SECONDS)
+    finally:
+        db.close()
+    report = (env["cache"] / "import_logs_issues.md").read_text(encoding="utf-8")
+    assert "a break rather than the operation time?" in report
+
+
 def test_import_logs_skips_existing_unless_forced(env, capsys):
     assert run(env, "load-index") == 0
     assert run(env, "import-logs") == 0
@@ -397,6 +419,58 @@ def test_reorient_past_the_index_is_reported_not_split(env):
         db.close()
     report = (env["cache"] / "import_logs_issues.md").read_text(encoding="utf-8")
     assert "past the index's last step" in report
+
+
+def test_a_new_cut_drops_the_geometry_of_a_segment_whose_reference_moved(tmp_db_path):
+    """Probe: segment [1,10] ref 10 with corners, then a reorient appears at step 4."""
+    from tda.pipeline import split_pose_segments
+
+    corners = [[0.0, 0.0], [99.0, 0.0], [99.0, 99.0], [0.0, 99.0]]
+    db = Db(tmp_db_path)
+    try:
+        db.set_pose_segment(5, "scan", 1, 1, 10, 10, corners, [[1, 0, 0]])
+        db.replace_steps(
+            5,
+            [StepRec(5, k, StepType.NORMAL.value, f"row {k}") for k in range(1, 4)]
+            + [StepRec(5, 4, StepType.REORIENT.value, "change a direction")]
+            + [StepRec(5, k, StepType.NORMAL.value, f"row {k}") for k in range(5, 11)],
+            [],
+        )
+        assert split_pose_segments(db, 5)["scan"] == 2
+
+        first, second = db.pose_segments(5, "scan")
+        assert (first["start_step"], first["end_step"], first["ref_step"]) == (1, 3, 3)
+        assert first["corners"] is None and first["homography"] is None
+        assert first["roi"] is None
+        assert (second["start_step"], second["end_step"], second["ref_step"]) == (4, 10, 10)
+        issues = (db.get_desktop(5) or {}).get("pose_issues") or []
+        assert any("reference step from 10 to 3" in text for text in issues)
+        assert any("corners/homography/ROI were dropped" in text for text in issues)
+
+        # running it again changes nothing and does not repeat the issue
+        assert split_pose_segments(db, 5)["scan"] == 2
+        assert (db.get_desktop(5) or {}).get("pose_issues") == issues
+    finally:
+        db.close()
+
+
+def test_a_reorient_drops_the_corners_of_the_segment_it_cuts(env):
+    corners = [[10.0, 10.0], [90.0, 10.0], [90.0, 90.0], [10.0, 90.0]]
+    assert run(env, "load-index") == EXIT_OK
+    db = open_db(env)
+    try:  # D77's sheet flips the chassis at step 3, so segment 1's ref 5 -> 2
+        db.set_pose_segment(77, "scan", 1, 1, env["n_steps_77"], env["n_steps_77"],
+                            corners, None)
+    finally:
+        db.close()
+
+    assert run(env, "import-logs") == EXIT_OK
+    db = open_db(env)
+    try:
+        assert db.pose_segments(77, "scan")[0]["corners"] is None
+        assert (db.get_desktop(77) or {}).get("pose_issues")
+    finally:
+        db.close()
 
 
 def test_split_pose_segments_is_idempotent(env):
@@ -479,6 +553,17 @@ def test_backup_writes_a_file(env):
     assert made[0].stat().st_size > 0
 
 
+def test_backup_dest_must_stay_inside_backup_dir(env, capsys, tmp_path):
+    inside = Path(env["cfg"]["backup_dir"]) / "weekly"
+    assert run(env, "backup", "--dest", str(inside)) == EXIT_OK
+    assert list(inside.glob("tda_*.sqlite"))
+
+    capsys.readouterr()
+    assert run(env, "backup", "--dest", str(tmp_path / "somewhere_else")) == EXIT_ERROR
+    assert "must be inside the configured backup_dir" in capsys.readouterr().out
+    assert not (tmp_path / "somewhere_else").exists()
+
+
 def test_status_prints_counts(env, capsys):
     assert run(env, "load-index") == 0
     assert run(env, "import-logs") == 0
@@ -498,6 +583,142 @@ def test_status_single_desktop(env, capsys):
     out = capsys.readouterr().out
     assert "Desktop 77" in out
     assert "D13" not in out
+
+
+# --------------------------------------------------------------------------- #
+# protecting work: backups, warnings, the Label Studio notes, the lock
+# --------------------------------------------------------------------------- #
+def _ls_note(db: Db, desktop: int, step: int, text: str = "LS: step_name=Remove PSU") -> None:
+    """Write a Label Studio note line onto one stored step, as import-ls does."""
+    steps = db.steps(desktop)
+    steps[step - 1].notes = text
+    db.replace_steps(desktop, steps, db.actions(desktop))
+
+
+def test_ls_note_prefix_matches_the_label_studio_importer():
+    from tda.core.ls_import import NOTES_PREFIX
+
+    assert LS_NOTES_PREFIX == NOTES_PREFIX
+
+
+def test_force_backs_the_database_up_first(env, capsys):
+    assert run(env, "load-index") == EXIT_OK
+    assert run(env, "import-logs") == EXIT_OK
+    backups = Path(env["cfg"]["backup_dir"])
+    assert not backups.exists()
+
+    capsys.readouterr()
+    assert run(env, "import-logs", "--force") == EXIT_OK
+    out = capsys.readouterr().out
+    made = list(backups.glob("tda_*.sqlite"))
+    assert len(made) == 1 and made[0].stat().st_size > 0
+    assert "backed the database up first" in out and made[0].name in out
+
+
+def test_force_says_per_desktop_what_it_replaces(env, capsys):
+    assert run(env, "load-index") == EXIT_OK
+    assert run(env, "import-logs") == EXIT_OK
+    db = open_db(env)
+    try:
+        _ls_note(db, 13, 2)
+        _ls_note(db, 13, 5)
+    finally:
+        db.close()
+
+    capsys.readouterr()
+    assert run(env, "import-logs", "--desktops", "13", "--force") == EXIT_OK
+    out = capsys.readouterr().out
+    assert f"D13: --force, replacing {env['n_steps_13']} steps" in out
+    assert "2 steps carry Label Studio notes (carried over)" in out
+    assert "every other manual edit to the step table is lost" in out
+    assert "run 'python -m tda.cli import-ls'" in out
+
+
+def test_force_carries_the_label_studio_notes_over(env):
+    assert run(env, "load-index") == EXIT_OK
+    assert run(env, "import-logs") == EXIT_OK
+    db = open_db(env)
+    try:
+        steps = db.steps(13)
+        steps[1].notes = "hand written\nLS: step_name=Remove PSU; complexity=3"
+        db.replace_steps(13, steps, db.actions(13))
+    finally:
+        db.close()
+
+    assert run(env, "import-logs", "--desktops", "13", "--force") == EXIT_OK
+    db = open_db(env)
+    try:
+        notes = db.steps(13)[1].notes
+        assert "LS: step_name=Remove PSU; complexity=3" in notes  # kept
+        assert "hand written" not in notes  # a forced re-import does drop the rest
+    finally:
+        db.close()
+
+
+def test_purge_all_backs_the_database_up_first(env, capsys):
+    assert run(env, "load-index") == EXIT_OK
+    capsys.readouterr()
+    assert run(env, "import-ls", "--export", str(LS_EXPORT), "--allow-missing-steps",
+               "--purge-all") == EXIT_OK
+    assert "backed the database up first" in capsys.readouterr().out
+    assert list(Path(env["cfg"]["backup_dir"]).glob("tda_*.sqlite"))
+
+
+@pytest.mark.parametrize("command", [
+    ("load-index",),
+    ("import-logs",),
+    ("import-ls", "--export", str(LS_EXPORT), "--allow-missing-steps"),
+])
+def test_writing_commands_refuse_while_another_annotator_holds_the_lock(
+    env, capsys, command
+):
+    db = open_db(env)
+    try:
+        db.acquire_lock("chang")
+    finally:
+        db.close()
+
+    capsys.readouterr()
+    assert run(env, *command) == EXIT_LOCKED
+    assert "chang" in capsys.readouterr().out
+    # the refused run must not have taken the lock away from its holder
+    assert "chang" in Path(env["db_path"] + ".lock").read_text(encoding="utf-8")
+
+
+def test_a_finished_command_releases_the_lock(env):
+    assert run(env, "load-index") == EXIT_OK
+    assert not Path(env["db_path"] + ".lock").exists()
+
+
+def test_status_does_not_take_the_lock(env):
+    assert run(env, "load-index") == EXIT_OK
+    db = open_db(env)
+    try:
+        db.acquire_lock("chang")
+    finally:
+        db.close()
+    assert run(env, "status") == EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
+# one bad sheet does not end the run
+# --------------------------------------------------------------------------- #
+def test_an_unreadable_sheet_is_reported_and_the_rest_still_import(env, capsys):
+    (env["drive"] / "desktop_80.csv").write_text("not,a,step,table\n", encoding="utf-8")
+    assert run(env, "load-index") == EXIT_OK
+    capsys.readouterr()
+    assert run(env, "import-logs") == EXIT_ERROR
+    out = capsys.readouterr().out
+    assert "D80: FAILED" in out
+    db = open_db(env)
+    try:
+        assert len(db.steps(13)) == env["n_steps_13"]  # the good sheets still landed
+        assert db.steps(80) == []
+    finally:
+        db.close()
+    report = (env["cache"] / "import_logs_issues.md").read_text(encoding="utf-8")
+    assert "desktops that failed to import: 1" in report
+    assert "D80 - FAILED" in report
 
 
 def test_status_names_a_desktop_the_database_does_not_have(env, capsys):
