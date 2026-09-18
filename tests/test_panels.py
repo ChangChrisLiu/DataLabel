@@ -30,7 +30,7 @@ from tda.core.model import FrameKey, Visibility
 from tda.ui import session_api as api
 from tda.ui.canvas.overlay import palette_color
 from tda.ui.panels.instances import InstanceListPanel
-from tda.ui.panels.review import ReviewPanel
+from tda.ui.panels.review import STEP_ROLE, ReviewPanel
 from tda.ui.panels.taskcard import KIND_ICONS, TaskCardPanel
 from tda.ui.panels.timeline import TimelinePanel, status_brush
 
@@ -380,11 +380,20 @@ def test_timeline_colours_follow_the_status(session: StubSession) -> None:
     assert status_brush(api.STATUS_MISSING).style() == Qt.BrushStyle.BDiagPattern
 
 
-def test_timeline_click_goes_to_that_step(session: StubSession) -> None:
+def test_timeline_click_asks_for_that_step(session: StubSession) -> None:
+    """It called an un-forced ``session.goto``, which raises on a dirty layer.
+
+    Unreachable while the window re-wires ``itemClicked``, but a panel that can
+    raise ``SessionRefusal`` out of a Qt slot the moment somebody forgets the
+    re-wire is not a panel anybody should have to remember.
+    """
     panel = show(TimelinePanel(session))
+    seen: list[int] = []
+    panel.sigOpenStep.connect(seen.append)
     lw = panel.list_widget()
     click_item(lw, lw.item(panel.item_steps().index(11)))
-    assert ("goto", 11) in session.calls
+    assert seen == [11]
+    assert session.calls == []
     assert panel.current_step() == 11
 
 
@@ -782,3 +791,24 @@ def test_review_refreshes_on_frame_change(session: StubSession) -> None:
     session._queues[api.QUEUE_UNEXPLAINED] = [{"step": 10}, {"step": 11}]
     session.sigFrameChanged.emit(session.current())
     assert texts(panel.list_for(api.QUEUE_UNEXPLAINED)) == ["Step 10", "Step 11"]
+
+
+def test_review_snap_back_only_touches_the_list_that_was_clicked(session) -> None:
+    """A refused click in one tab cleared a conflict selected in another.
+
+    The panel restored the open frame in all four queues, so the annotator lost
+    the conflict they had picked -- the `Keep old` / `Take new` keys then had
+    nothing to act on.
+    """
+    panel = ReviewPanel(session)
+    conflicts = panel.list_for(api.QUEUE_CONFLICTS)
+    conflicts.setCurrentRow(1)
+    unexplained = panel.list_for(api.QUEUE_UNEXPLAINED)
+    unexplained.setCurrentRow(0)
+    unexplained.itemActivated.emit(unexplained.item(0))     # the click that is refused
+
+    panel.select_current_step()
+
+    assert conflicts.currentRow() == 1, "another tab's selection was cleared"
+    assert unexplained.currentRow() != 0 or int(
+        unexplained.item(0).data(STEP_ROLE)) == session.current().step

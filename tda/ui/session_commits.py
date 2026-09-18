@@ -113,8 +113,8 @@ class CommitMixin:
             edit.require_instance(self._known_instances(), other)
             self._refuse_mask_on_bench(key, instance)
             result = edit.commit_edit(self.db, self.truth, key, instance,
-                                      self.layer.mask(), api.SCOPE_KEYFRAME, direction,
-                                      self.annotator, pair=other)
+                                      self.layer.mask(), self._shape_scope(scope),
+                                      direction, self.annotator, pair=other)
             self.layer.settle()   # the pixels went to the database with the pair
         elif pair is not None:
             other, above = pair
@@ -140,6 +140,17 @@ class CommitMixin:
             # as written.
             self.layer.settle()
         return self._after_edit(result)
+
+    @staticmethod
+    def _shape_scope(scope: str) -> str:
+        """Which pixel scope the shape half of a layering commit is written with.
+
+        ``Enter`` re-traces the keyframe in force; ``Ctrl+K`` on the same
+        suggestion (``split+zorder:above:<B>``) cuts a new version from here and
+        records the pair with it -- a split that dropped the pair wrote the
+        pixels and left them hidden under ``B``, so nothing on screen moved.
+        """
+        return api.SCOPE_SPLIT if edit.splits_the_shape(scope) else api.SCOPE_KEYFRAME
 
     def _added_pixels(self, pair: tuple[str, bool]) -> bool:
         """Does this layering gesture carry pixels the shape does not have yet?
@@ -203,7 +214,8 @@ class CommitMixin:
             if not self._added_pixels(pair):
                 return reach
             shape = edit.preview(self.db, self.truth, self.current(),
-                                 self.editing_instance, api.SCOPE_KEYFRAME, direction)
+                                 self.editing_instance, self._shape_scope(scope),
+                                 direction)
             return {"steps": sorted(set(reach["steps"]) | set(shape["steps"])),
                     "verified_steps": sorted(set(reach["verified_steps"])
                                              | set(shape["verified_steps"]))}

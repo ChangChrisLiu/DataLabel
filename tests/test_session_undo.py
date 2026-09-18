@@ -246,3 +246,66 @@ def test_dirty_clears_again_when_undo_returns_to_the_saved_point(session):
     assert session.dirty is False
     assert session.undo() is True
     assert session.dirty is True  # now it differs from the saved point again
+
+
+# --------------------------------------------------------------------------- #
+# a history move that fails leaves neither half of the database, nor the stacks
+# --------------------------------------------------------------------------- #
+BIG = rect(0, 0, 40, 40)
+SMALL = rect(44, 44, 56, 56)
+
+
+def _layering_commit(session) -> np.ndarray:
+    """Paint the cooler into the chassis and accept the layering suggestion.
+
+    The one op that writes twice: the keyframe re-trace *and* the pair override
+    (see ``session_commits.commit_edit``), which is where a half-applied history
+    move can be seen at all.
+    """
+    session.goto(10)
+    draw(session, COOLER, SMALL, api.SCOPE_KEYFRAME)
+    draw(session, CHASSIS, BIG, api.SCOPE_KEYFRAME)
+    session.begin_edit(COOLER)
+    session.set_editing_mask(SMALL | rect(4, 4, 16, 16))
+    session.commit_edit(f"zorder:above:{CHASSIS}")
+    return masks.decode_rle(keyframes(session)[-1].parts[0].rle)
+
+
+def _state(session) -> tuple:
+    return (
+        sorted((p.above, p.below) for p in session.db.pair_overrides(DESKTOP, VIEW, 1)),
+        masks.encode_rle(masks.decode_rle(keyframes(session)[-1].parts[0].rle))["counts"],
+    )
+
+
+@pytest.mark.parametrize("move", ["undo", "redo"])
+def test_a_failed_history_move_leaves_the_database_and_the_stacks_alone(
+    session, monkeypatch, move
+):
+    """Two writes, one op: a failure between them must take back the first.
+
+    The pair override went to the database in its own transaction and the
+    keyframe rows in a second one, so a failure in between left the shape
+    carrying pixels that nothing was any longer painting on top -- and because
+    the stack popped the op *before* applying it, the op was gone from both
+    stacks: not redo-able, not undo-able, with no message.
+    """
+    from tda.ui import session_edit as edit
+
+    _layering_commit(session)
+    if move == "redo":
+        assert session.undo() is True
+    before, depth = _state(session), len(session.undo_stack)
+
+    def explode(*_a, **_k):
+        raise RuntimeError("the disk went away")
+
+    monkeypatch.setattr(edit, "_apply_keyframe_rows", explode)
+    with pytest.raises(RuntimeError):
+        getattr(session, move)()
+    monkeypatch.undo()
+
+    assert _state(session) == before, "half of the op was left in the database"
+    assert len(session.undo_stack) == depth
+    assert getattr(session, move)() is True      # the key works the second time
+    assert _state(session) != before

@@ -183,6 +183,7 @@ def test_a_non_keyframe_suggestion_opens_the_scope_bar_instead_of_a_dialog(windo
 
 
 def test_the_scope_bar_alternatives_are_frame_override_and_split(window, monkeypatch):
+    """The two keys beside ``Enter``; the split keeps the suggestion it answers."""
     session = window.session
     instance = first_task_instance(window)
     window.task_card.sigRequestEdit.emit(instance)
@@ -201,6 +202,12 @@ def test_the_scope_bar_alternatives_are_frame_override_and_split(window, monkeyp
     paint(window)
     window.act_commit()
     window.act_commit_split()
+    assert committed == ["split+zorder:above:other"]
+
+    committed.clear()
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    window.act_commit_split()          # no suggestion on the bar: a plain split
     assert committed == [api.SCOPE_SPLIT]
 
 
@@ -413,6 +420,47 @@ def test_the_scope_bar_says_whether_the_shape_is_written_too(window, monkeypatch
     monkeypatch.setattr(session, "suggest_scope", lambda *a, **k: "zorder:below:other")
     window.act_commit()
     assert "仅层级" in window.scope_bar_text()
+
+
+def test_the_scope_bar_says_what_each_of_the_three_keys_writes(window, monkeypatch):
+    """Three buttons, three different writes: the bar names all three."""
+    session = window.session
+    window.task_card.sigRequestEdit.emit(first_task_instance(window))
+    paint(window)
+    monkeypatch.setattr(session, "suggest_scope", lambda *a, **k: "zorder:above:other")
+    window.act_commit()
+
+    text = window.scope_bar_text()
+    assert "Enter" in text and "Alt+Enter" in text and "Ctrl+K" in text
+    assert "层级 + 形状" in text and "仅本帧" in text and "拆分" in text
+
+
+@pytest.mark.parametrize("key,expected", [
+    ("act_commit", "zorder:above:other"),
+    ("act_commit_split", "split+zorder:above:other"),
+    ("act_commit_override", api.SCOPE_FRAME_OVERRIDE),
+])
+def test_the_three_answers_to_a_layering_suggestion(window, monkeypatch, key, expected):
+    """``Ctrl+K`` wrote the split pixels and no pair, so the screen did not change.
+
+    The pixels were saved and stayed hidden under ``B``.  A split accepts the
+    suggestion as much as ``Enter`` does -- it only asks for a new version of the
+    shape rather than a re-trace -- so it carries the pair too.  ``Alt+Enter``
+    stays a pure frame override: it makes A visible here by itself.
+    """
+    session = window.session
+    window.task_card.sigRequestEdit.emit(first_task_instance(window))
+    paint(window)
+    monkeypatch.setattr(session, "suggest_scope", lambda *a, **k: "zorder:above:other")
+    window.act_commit()                     # the bar is up with the suggestion
+    committed: list[str] = []
+    monkeypatch.setattr(session, "commit_edit",
+                        lambda scope, *a, **k: committed.append(scope) or {})
+
+    getattr(window, key)()
+
+    assert committed == [expected]
+    assert not window.scope_bar.isVisibleTo(window)
 
 
 # --------------------------------------------------------------------------- #

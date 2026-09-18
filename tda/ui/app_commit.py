@@ -14,6 +14,12 @@ from tda.ui import session_api as api
 
 __all__ = ["CommitMixin"]
 
+#: The two halves of the layering vocabulary the bar has to reason about; the
+#: session owns their meaning (:mod:`tda.ui.session_scope`), the window only
+#: needs to know which suggestion is on the bar.
+A_ZORDER_ABOVE = "zorder:above:"
+SPLIT_PREFIX = "split+"
+
 
 class CommitMixin:
     """``Enter`` / ``Esc`` / ``Space``, the scope bar, undo-redo, visibility."""
@@ -62,7 +68,19 @@ class CommitMixin:
 
     @S.guard
     def act_commit_split(self) -> None:
-        """``Ctrl+K``: a new shape version from this step on."""
+        """``Ctrl+K``: a new shape version from this step on.
+
+        On an open layering suggestion it is still an *answer to that
+        suggestion*, so the pair goes with it (``split+zorder:above:<B>``): a
+        split that dropped the pair saved the pixels and left them hidden under
+        ``B``, and the screen did not change -- which is the one outcome the
+        annotator can neither see nor explain.  ``Alt+Enter`` is different on
+        purpose: a frame override makes this instance visible here by itself.
+        """
+        pending = self._pending_scope or ""
+        if pending.startswith(A_ZORDER_ABOVE):
+            self._commit(SPLIT_PREFIX + pending)
+            return
         self._commit(api.SCOPE_SPLIT)
 
     def scope_bar_text(self) -> str:
@@ -83,16 +101,23 @@ class CommitMixin:
         self.scope_bar.show_text(f"建议范围 {scope}{self._writes(scope)}{detail}")
         self.report(f"suggested scope: {scope}")
 
-    def _writes(self, scope: str) -> str:
-        """What a layering suggestion is actually going to write.
+    @staticmethod
+    def _writes(scope: str) -> str:
+        """What each of the bar's three keys will write, for this suggestion.
 
         "Above B" with pixels painted into B re-traces the shape as well -- they
-        are not in it yet -- while the eraser direction only reverses the pair.
-        Two very different things behind one word, so the bar says which.
+        are not in it yet -- while the eraser direction only reverses the pair;
+        and the two alternatives beside ``Enter`` write different things again.
+        Three buttons that all read "commit" and do three different things is
+        how ``Ctrl+K`` came to save pixels nobody could see.
         """
         if not str(scope).startswith("zorder:"):
             return ""
-        return "（层级 + 形状）" if scope.startswith("zorder:above:") else "（仅层级）"
+        if scope.startswith(A_ZORDER_ABOVE):
+            return ("（Enter：层级 + 形状 / Alt+Enter：仅本帧覆盖 / "
+                    "Ctrl+K：层级 + 拆分新形状）")
+        return ("（Enter：仅层级 / Alt+Enter：仅本帧覆盖 / "
+                "Ctrl+K：仅拆分新形状）")
 
     def _commit(self, scope: str) -> None:
         """Write the edit, or show why the session will not take it.

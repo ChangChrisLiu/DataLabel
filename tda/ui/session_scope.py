@@ -15,8 +15,9 @@ import numpy as np
 from tda.core.compiler import CompiledFrame
 from tda.ui import session_api as api
 
-__all__ = ["SCOPE_ZORDER_ABOVE", "SCOPE_ZORDER_BELOW", "ZORDER_HINT_FRAC",
-           "split_zorder_scope", "suggest_scope"]
+__all__ = ["SCOPE_SPLIT_PREFIX", "SCOPE_ZORDER_ABOVE", "SCOPE_ZORDER_BELOW",
+           "ZORDER_HINT_FRAC", "split_zorder_scope", "splits_the_shape",
+           "suggest_scope"]
 
 #: How much of the *changed* pixels has to land inside another instance before
 #: the default scope becomes "change the layering" (spec 4.3).
@@ -27,9 +28,23 @@ ZORDER_HINT_FRAC = 0.6
 SCOPE_ZORDER_ABOVE = "zorder:above:"
 SCOPE_ZORDER_BELOW = "zorder:below:"
 
+#: ``split+zorder:above:<B>`` -- the same layering answer, but cutting a new
+#: version of the shape instead of re-tracing the keyframe in force.  ``Ctrl+K``
+#: on an open suggestion means this: without the pair it wrote the pixels and
+#: left them hidden under ``B``, so the screen did not change at all.
+SCOPE_SPLIT_PREFIX = "split+"
+
+
+def splits_the_shape(scope: str) -> bool:
+    """Does this layering scope ask for a new shape version rather than a re-trace?"""
+    return str(scope).startswith(SCOPE_SPLIT_PREFIX)
+
 
 def split_zorder_scope(scope: str) -> Optional[tuple[str, bool]]:
     """``(other instance, this one goes above)`` for a layering scope, else ``None``."""
+    scope = str(scope)
+    if splits_the_shape(scope):
+        scope = scope[len(SCOPE_SPLIT_PREFIX):]
     for prefix, above in ((SCOPE_ZORDER_ABOVE, True), (SCOPE_ZORDER_BELOW, False)):
         if scope.startswith(prefix):
             return scope[len(prefix):], above

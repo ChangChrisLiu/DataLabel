@@ -10,14 +10,15 @@ hatched bar for a step this view has no image for.  Thumbnails are read from
 the cache only when their row is actually on screen and are kept as ``QPixmap``
 afterwards, so opening a 120-step machine costs no disk I/O.
 
-The panel never decides anything: a click is ``session.goto(step)``, and the
-highlight follows ``sigFrameChanged`` no matter who moved the frame.
+The panel never decides anything: a click only reports
+(:attr:`TimelinePanel.sigOpenStep`) and the highlight follows ``sigFrameChanged``
+no matter who moved the frame -- including when the window refuses the move.
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -85,6 +86,12 @@ class _StatusBarDelegate(QStyledItemDelegate):
 
 class TimelinePanel(QWidget):
     """Vertical step timeline with thumbnails, status bars and an order toggle."""
+
+    #: A row was clicked: the window should open that step -- through the gate.
+    #: The panel used to call ``session.goto`` itself, un-forced, so an
+    #: uncommitted layer made it raise ``SessionRefusal`` out of a Qt slot the
+    #: moment anybody forgot to intercept the connection.
+    sigOpenStep = Signal(int)
 
     #: Long edge of a thumbnail, in pixels (task 12 brief).
     THUMB_SIZE = 96
@@ -354,7 +361,7 @@ class TimelinePanel(QWidget):
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         if self._session is None or self._syncing:
             return
-        self._session.goto(int(item.data(STEP_ROLE)))
+        self.sigOpenStep.emit(int(item.data(STEP_ROLE)))
 
     def _on_frame_changed(self, _key: object) -> None:
         if self._current_context() != self._context:

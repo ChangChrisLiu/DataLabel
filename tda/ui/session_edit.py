@@ -81,10 +81,12 @@ from tda.ui.session_ops import (
 # re-exported: the session and the tests reach the scope vocabulary through
 # this module, which is the one import site for everything an edit needs
 from tda.ui.session_scope import (  # noqa: F401
+    SCOPE_SPLIT_PREFIX,
     SCOPE_ZORDER_ABOVE,
     SCOPE_ZORDER_BELOW,
     ZORDER_HINT_FRAC,
     split_zorder_scope,
+    splits_the_shape,
     suggest_scope,
 )
 from tda.ui.session_tasks import item_text, task_card_for
@@ -110,6 +112,7 @@ __all__ = [
     "refresh_steps",
     "require_instance",
     "split_zorder_scope",
+    "splits_the_shape",
     "set_visibility",
     "set_zorder_move",
     "suggest_scope",
@@ -308,17 +311,24 @@ def apply_keyframes(db: Db, truth: TruthService, payload: dict,
     A layering commit that also re-traced the shape is one op with two writes
     (see :func:`_commit_shape`), so undo and redo have to move both; the shared
     ``steps`` cover the union, so one settle brings the frames up to date.
+
+    **One transaction covers both halves.**  With the pair in a block of its own
+    a failure in between left the shape carrying pixels that nothing painted
+    over any more -- a state no point of the history describes.  The block below
+    is the outermost one (:meth:`tda.core.dbconn.ConnectionMixin.transaction` is
+    re-entrant), so the inner writes commit with it or not at all.
     """
     pair = payload.get("pair")
-    if pair is not None:
-        po = PairOverride(payload["desktop"], payload["view"], pair["pose_segment"],
-                          pair["above"], pair["below"])
-        with db.transaction():
-            if pair["exists"]:
-                db.set_pair_override(po)
-            else:
-                db.delete_pair_override(po)
-    return _apply_keyframe_rows(db, truth, payload, current)
+    if pair is None:
+        return _apply_keyframe_rows(db, truth, payload, current)
+    po = PairOverride(payload["desktop"], payload["view"], pair["pose_segment"],
+                      pair["above"], pair["below"])
+    with db.transaction():
+        if pair["exists"]:
+            db.set_pair_override(po)
+        else:
+            db.delete_pair_override(po)
+        return _apply_keyframe_rows(db, truth, payload, current)
 
 
 def preview(db: Db, truth: TruthService, key: FrameKey, instance: str, scope: str,
