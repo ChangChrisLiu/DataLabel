@@ -2,8 +2,11 @@
 
 Every fixture is synthetic and lives under ``tmp_path``: a miniature cache
 (``<cache>/<view>/D<nn>/s<kkk>.<ext>`` plus its ``manifest.json``) and, where a
-ROI is needed, a throw-away annotation database built straight from
+ROI is needed, a throw-away WAL annotation database built straight from
 ``schema.sql``.  No test reads the real cache, the real database or F:.
+
+Images are written and read through ``imencode``/``imdecode`` here too, so the
+fixtures work under the non-ASCII path one of the tests uses.
 """
 from __future__ import annotations
 
@@ -16,8 +19,9 @@ import cv2
 import numpy as np
 import pytest
 
+import tda.core.cache as cache_module
 import tda.core.cache_thumbs as ct
-from tda.core.cache import main
+from tda.core.cache import main, suggest_roi
 from tda.core.cache_thumbs import DbRoiLookup, build_thumbs, thumb_path
 from tda.core.index import DesktopIndex, FrameFile, save_index
 from tda.core.model import FrameKey
@@ -25,11 +29,24 @@ from tda.core.model import FrameKey
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = REPO_ROOT / "tda" / "core" / "schema.sql"
 RED_BOX = (600, 100, 800, 300)  # the "chassis" of the synthetic 1000x1000 frame
+CHASSIS = (300, 250, 700, 800)  # a dark chassis suggest_roi() really finds
 
 
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
+def _imwrite(path, img: np.ndarray) -> None:
+    """Write an image without cv2 touching the path (non-ASCII safe)."""
+    ok, buf = cv2.imencode(Path(path).suffix, img)
+    assert ok
+    buf.tofile(str(path))
+
+
+def _imread(path) -> np.ndarray:
+    """Read an image without cv2 touching the path (non-ASCII safe)."""
+    return cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
+
+
 def _frame(width: int = 1000, height: int = 1000, box=None) -> np.ndarray:
     """A flat gray BGR frame with an optional red rectangle at ``box``."""
     img = np.full((height, width, 3), 120, np.uint8)
@@ -39,27 +56,73 @@ def _frame(width: int = 1000, height: int = 1000, box=None) -> np.ndarray:
     return img
 
 
+def _scan_frame(chassis, size: int = 1000, tape=(120, 880), band: int = 30) -> np.ndarray:
+    """A scanner-like frame: white board, yellow tape square, dark chassis.
+
+    This is the shape :func:`tda.core.cache.suggest_roi` was written for, so the
+    automatic ROI really is measured here rather than faked.
+    """
+    img = np.full((size, size, 3), 240, np.uint8)
+    lo, hi = tape
+    img[lo:hi, lo:hi] = (255, 255, 255)
+    for band_slice in ((slice(lo, lo + band), slice(lo, hi)),
+                       (slice(hi - band, hi), slice(lo, hi)),
+                       (slice(lo, hi), slice(lo, lo + band)),
+                       (slice(lo, hi), slice(hi - band, hi))):
+        img[band_slice] = (0, 200, 255)  # BGR: the yellow/orange tape
+    x0, y0, x1, y1 = chassis
+    img[y0:y1, x0:x1] = (45, 45, 45)
+    return img
+
+
 def _red_fraction(img: np.ndarray) -> float:
     """Fraction of pixels that survived JPEG as clearly red."""
     return float(((img[:, :, 2] > 150) & (img[:, :, 0] < 100)).mean())
 
 
-def _make_cache(tmp_path: Path, view: str = "scan", desktop: int = 7, steps=(1, 2),
+def _dark_fraction(img: np.ndarray) -> float:
+    """Fraction of pixels that survived JPEG as clearly dark (the chassis)."""
+    return float((img.max(axis=2) < 90).mean())
+
+
+def _reference_thumb(img: np.ndarray, box, max_side: int = 192) -> np.ndarray:
+    """What the module should produce for ``img`` cropped to ``box``."""
+    height, width = img.shape[:2]
+    x0, y0, x1, y1 = box
+    px, py = int(round((x1 - x0) * 0.04)), int(round((y1 - y0) * 0.04))
+    crop = img[max(0, y0 - py):min(height, y1 + py), max(0, x0 - px):min(width, x1 + px)]
+    h, w = crop.shape[:2]
+    scale = min(1.0, max_side / max(h, w))
+    return cv2.resize(crop, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
+
+
+def _close(got: np.ndarray, want: np.ndarray) -> bool:
+    """Same picture, allowing for JPEG."""
+    return (got.shape == want.shape
+            and float(np.abs(got.astype(int) - want.astype(int)).mean()) < 6.0)
+
+
+def _make_cache(root: Path, view: str = "scan", desktop: int = 7, steps=(1, 2),
                 images: dict | None = None) -> str:
     """A cache dir holding full-size frames for ``steps`` plus their manifest."""
-    cache = tmp_path / "cache"
+    cache = root / "cache"
     ddir = cache / view / f"D{desktop:02d}"
     ddir.mkdir(parents=True, exist_ok=True)
     ext = "jpg" if view.startswith("oak") else "png"
     manifest = {}
     for step in steps:
         img = (images or {}).get(step)
-        assert cv2.imwrite(str(ddir / f"s{step:03d}.{ext}"),
-                           _frame() if img is None else img)
+        _imwrite(ddir / f"s{step:03d}.{ext}", _frame() if img is None else img)
         manifest[str(step)] = {"chosen": 0, "reason": "p0", "metrics": [],
                                "src": f"F:/fake/D{desktop}/s{step}.{ext}"}
     (ddir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return str(cache)
+
+
+def _sidecar(cache: str, view: str = "scan", desktop: int = 7) -> dict:
+    """The recorded ROI plan of one desktop+view."""
+    path = Path(cache) / "thumbs" / view / f"D{desktop:02d}" / "thumbs.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _age(path, seconds: float) -> int:
@@ -71,8 +134,9 @@ def _age(path, seconds: float) -> int:
 
 def _make_db(path: str, *, version: int = 2, desktop: int = 7, view: str = "scan",
              roi=RED_BOX, start: int = 1, end: int = 50) -> None:
-    """A database with one pose segment carrying a ROI, stamped ``version``."""
+    """A WAL database (like the real one) with one pose segment carrying a ROI."""
     conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     conn.execute("INSERT INTO desktop(id) VALUES(?)", (desktop,))
     conn.execute(
@@ -85,11 +149,29 @@ def _make_db(path: str, *, version: int = 2, desktop: int = 7, view: str = "scan
     conn.close()
 
 
+def _tables(path: Path) -> list[str]:
+    conn = sqlite3.connect(str(path))
+    try:
+        rows = conn.execute("SELECT name FROM sqlite_master ORDER BY name").fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows]
+
+
+def _schema_version(path: Path) -> str | None:
+    conn = sqlite3.connect(str(path))
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    finally:
+        conn.close()
+    return None if row is None else row[0]
+
+
 def _oak_index(tmp_path: Path) -> str:
     """A one-frame index of a single OAK-style image, saved to disk."""
     src = tmp_path / "src" / "frame.jpg"
     src.parent.mkdir(parents=True, exist_ok=True)
-    assert cv2.imwrite(str(src), _frame(400, 300))
+    _imwrite(src, _frame(400, 300))
     key = FrameKey(7, 1, "oak1")
     index = {7: DesktopIndex(desktop=7, n_steps=1,
                              frames={key: FrameFile(key=key, path=str(src))})}
@@ -108,21 +190,31 @@ def test_thumb_path_is_the_layout_the_ui_hard_codes():
     assert thumb_path(Path("D:/c"), FrameKey(66, 123, "rs")) == "D:/c/thumbs/rs/D66/s123.jpg"
 
 
+def test_the_tier_is_reachable_through_the_cache_module():
+    from tda.core.cache import DbRoiLookup as ReDb
+    from tda.core.cache import build_thumbs as ReBuild
+    from tda.core.cache import thumb_path as ReThumb
+
+    assert (ReThumb, ReBuild, ReDb) == (thumb_path, build_thumbs, DbRoiLookup)
+    names = {"DbRoiLookup", "build_thumbs", "thumb_path"}
+    assert names <= set(cache_module.__all__)
+    assert names <= set(dir(cache_module))
+
+
 # --------------------------------------------------------------------------
 # build_thumbs: size, aspect, format
 # --------------------------------------------------------------------------
 def test_build_thumbs_scales_every_step_to_the_max_side_keeping_the_aspect(tmp_path):
-    cache = _make_cache(tmp_path, steps=(1, 2),
-                        images={1: _frame(800, 400), 2: _frame(300, 900)})
+    # one desktop per frame shape: within a desktop every cached frame is the same size
+    cache = _make_cache(tmp_path, desktop=7, steps=(1,), images={1: _frame(800, 400)})
+    _make_cache(tmp_path, desktop=8, steps=(1,), images={1: _frame(300, 900)})
 
     stats = build_thumbs(cache, max_side=192)
 
     assert stats["written"] == 2
     assert (stats["skipped"], stats["missing_source"], stats["failed"]) == (0, 0, 0)
-    wide = cv2.imread(thumb_path(cache, FrameKey(7, 1, "scan")))
-    tall = cv2.imread(thumb_path(cache, FrameKey(7, 2, "scan")))
-    assert wide.shape[:2] == (96, 192)
-    assert tall.shape[:2] == (192, 64)
+    assert _imread(thumb_path(cache, FrameKey(7, 1, "scan"))).shape[:2] == (96, 192)
+    assert _imread(thumb_path(cache, FrameKey(8, 1, "scan"))).shape[:2] == (192, 64)
 
 
 def test_build_thumbs_writes_real_jpegs_under_the_thumbs_dir_only(tmp_path):
@@ -137,7 +229,7 @@ def test_build_thumbs_writes_real_jpegs_under_the_thumbs_dir_only(tmp_path):
     assert dest.stat().st_size < full.stat().st_size
     assert full.stat().st_mtime_ns == before
     assert sorted(p.name for p in Path(cache).iterdir()) == ["scan", "thumbs"]
-    assert sorted(p.name for p in dest.parent.iterdir()) == ["s001.jpg"]
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["s001.jpg", "thumbs.json"]
 
 
 def test_build_thumbs_honours_the_view_and_desktop_filters(tmp_path):
@@ -153,35 +245,104 @@ def test_build_thumbs_honours_the_view_and_desktop_filters(tmp_path):
     assert not (Path(cache) / "thumbs" / "oak1").exists()
 
 
+def test_build_thumbs_works_under_a_non_ascii_path(tmp_path):
+    cache = _make_cache(tmp_path / "测试_桌面拆解", steps=(1,), images={1: _frame(800, 400)})
+
+    stats = build_thumbs(cache, auto_roi=False)
+
+    assert (stats["written"], stats["failed"]) == (1, 0)
+    assert _imread(thumb_path(cache, FrameKey(7, 1, "scan"))).shape[:2] == (96, 192)
+
+
 # --------------------------------------------------------------------------
-# build_thumbs: ROI crop
+# build_thumbs: the ROI
 # --------------------------------------------------------------------------
 def test_build_thumbs_crops_to_the_roi_so_the_chassis_fills_the_thumbnail(tmp_path):
     cache = _make_cache(tmp_path, steps=(1,), images={1: _frame(1000, 1000, box=RED_BOX)})
     key = FrameKey(7, 1, "scan")
 
-    build_thumbs(cache)
-    whole = cv2.imread(thumb_path(cache, key))
+    build_thumbs(cache, auto_roi=False)
+    whole = _imread(thumb_path(cache, key))
     build_thumbs(cache, force=True, roi_lookup=lambda k: RED_BOX)
-    cropped = cv2.imread(thumb_path(cache, key))
+    cropped = _imread(thumb_path(cache, key))
 
     assert _red_fraction(whole) < 0.10  # 200x200 of 1000x1000
     assert _red_fraction(cropped) > 0.70  # the ROI, padded by 4%
     assert cropped.shape[:2] == (192, 192)
 
 
-def test_build_thumbs_falls_back_to_the_whole_frame_when_the_lookup_has_no_roi(tmp_path):
-    cache = _make_cache(tmp_path, steps=(1,), images={1: _frame(1000, 1000, box=RED_BOX)})
+def test_build_thumbs_uses_one_stable_auto_roi_for_every_step_of_a_desktop(tmp_path):
+    first, later = _scan_frame(CHASSIS), _scan_frame((250, 300, 650, 700))
+    cache = _make_cache(tmp_path, steps=(1, 2), images={1: first, 2: later})
+    box = suggest_roi(first, "scan")
+    assert suggest_roi(later, "scan") != box  # per-frame suggestions really do differ
 
-    stats = build_thumbs(cache, roi_lookup=lambda k: None)
+    stats = build_thumbs(cache)
+
+    assert stats["rois"] == [{"view": "scan", "desktop": 7, "source": "auto", "box": list(box)}]
+    for step, img in ((1, first), (2, later)):
+        got = _imread(thumb_path(cache, FrameKey(7, step, "scan")))
+        assert _close(got, _reference_thumb(img, box))  # the reference box, not their own
+    assert _dark_fraction(_imread(thumb_path(cache, FrameKey(7, 1, "scan")))) > 0.60
+
+
+def test_build_thumbs_prefers_the_looked_up_roi_over_the_automatic_one(tmp_path):
+    cache = _make_cache(tmp_path, steps=(1,), images={1: _scan_frame(CHASSIS)})
+
+    stats = build_thumbs(cache, roi_lookup=lambda k: RED_BOX)
+
+    assert stats["rois"] == [{"view": "scan", "desktop": 7, "source": "db", "box": list(RED_BOX)}]
+    assert _sidecar(cache)["source"] == "db"
+
+
+def test_build_thumbs_without_auto_roi_keeps_the_whole_frame(tmp_path):
+    cache = _make_cache(tmp_path, steps=(1,), images={1: _scan_frame(CHASSIS)})
+
+    stats = build_thumbs(cache, auto_roi=False, roi_lookup=lambda k: None)
+
+    assert stats["rois"] == [{"view": "scan", "desktop": 7, "source": "none", "box": None}]
+    assert _close(_imread(thumb_path(cache, FrameKey(7, 1, "scan"))),
+                  _reference_thumb(_scan_frame(CHASSIS), (0, 0, 1000, 1000)))
+
+
+def test_build_thumbs_falls_back_to_the_whole_frame_when_no_roi_can_be_measured(tmp_path):
+    # a frame suggest_roi() cannot read at all: the plan has to degrade, not raise
+    cache = _make_cache(tmp_path, steps=(1,))
+    (Path(cache) / "scan" / "D07" / "s001.png").write_bytes(b"not a PNG")
+
+    stats = build_thumbs(cache)
+
+    assert stats["rois"] == [{"view": "scan", "desktop": 7, "source": "none", "box": None}]
+    assert (stats["written"], stats["failed"]) == (0, 1)
+
+
+@pytest.mark.parametrize("bad", [(300, 300, 300, 400),  # zero width
+                                 (700, 300, 200, 400),  # inverted
+                                 (2000, 2000, 2400, 2400)])  # entirely outside
+def test_build_thumbs_ignores_a_degenerate_roi(tmp_path, bad):
+    cache = _make_cache(tmp_path, steps=(1,), images={1: _frame(800, 400)})
+
+    stats = build_thumbs(cache, auto_roi=False, roi_lookup=lambda k: bad)
 
     assert stats["written"] == 1
-    assert _red_fraction(cv2.imread(thumb_path(cache, FrameKey(7, 1, "scan")))) < 0.10
+    assert _imread(thumb_path(cache, FrameKey(7, 1, "scan"))).shape[:2] == (96, 192)
 
 
 # --------------------------------------------------------------------------
-# build_thumbs: up-to-date check
+# build_thumbs: the recorded plan and the up-to-date check
 # --------------------------------------------------------------------------
+def test_build_thumbs_records_the_plan_it_used(tmp_path):
+    cache = _make_cache(tmp_path, steps=(1, 2), images={1: _scan_frame(CHASSIS)})
+
+    build_thumbs(cache, max_side=64, quality=70)
+
+    record = _sidecar(cache)
+    assert record["source"] == "auto"
+    assert record["box"] == list(suggest_roi(_scan_frame(CHASSIS), "scan"))
+    assert (record["max_side"], record["quality"]) == (64, 70)
+    assert record["built_at"]
+
+
 def test_build_thumbs_skips_an_up_to_date_thumb_rebuilds_a_stale_one_and_obeys_force(tmp_path):
     cache = _make_cache(tmp_path, steps=(1,))
     key = FrameKey(7, 1, "scan")
@@ -203,19 +364,46 @@ def test_build_thumbs_skips_an_up_to_date_thumb_rebuilds_a_stale_one_and_obeys_f
     assert build_thumbs(cache)["written"] == 1
 
 
+def test_build_thumbs_rebuilds_a_desktop_whose_recorded_roi_changed(tmp_path):
+    cache = _make_cache(tmp_path, steps=(1, 2), images={1: _scan_frame(CHASSIS)})
+    assert build_thumbs(cache)["written"] == 2
+    for step in (1, 2):
+        _age(Path(thumb_path(cache, FrameKey(7, step, "scan"))), +60)
+    assert build_thumbs(cache)["skipped"] == 2  # same plan, nothing to do
+
+    changed = build_thumbs(cache, roi_lookup=lambda k: RED_BOX)  # a --db run arrives
+
+    assert (changed["written"], changed["skipped"]) == (2, 0)
+    assert _sidecar(cache)["box"] == list(RED_BOX)
+
+
+def test_build_thumbs_rebuilds_when_the_thumbnail_size_changed(tmp_path):
+    cache = _make_cache(tmp_path, steps=(1,))
+    build_thumbs(cache)
+    _age(Path(thumb_path(cache, FrameKey(7, 1, "scan"))), +60)
+
+    assert build_thumbs(cache, max_side=64)["written"] == 1
+    assert max(_imread(thumb_path(cache, FrameKey(7, 1, "scan"))).shape[:2]) == 64
+
+
 # --------------------------------------------------------------------------
 # build_thumbs: failures
 # --------------------------------------------------------------------------
+def _no_files_under(cache: str) -> bool:
+    """Nothing at all was left in the thumbnail tier - not even a temp file."""
+    return not any(p.is_file() for p in (Path(cache) / "thumbs").rglob("*"))
+
+
 def test_build_thumbs_leaves_no_partial_file_when_the_encoder_fails(tmp_path, monkeypatch):
     cache = _make_cache(tmp_path, steps=(1,))
-    monkeypatch.setattr(ct.cv2, "imwrite", lambda *a, **k: False)
+    monkeypatch.setattr(ct.cv2, "imencode", lambda *a, **k: (False, None))
 
-    stats = build_thumbs(cache)
+    stats = build_thumbs(cache, auto_roi=False)
 
     assert (stats["written"], stats["failed"]) == (0, 1)
     assert stats["failures"][0]["path"].endswith("s001.png")
     assert stats["failures"][0]["error"]
-    assert list((Path(cache) / "thumbs" / "scan" / "D07").iterdir()) == []
+    assert _no_files_under(cache)
 
 
 def test_build_thumbs_leaves_no_partial_file_when_the_encoder_raises(tmp_path, monkeypatch):
@@ -224,11 +412,24 @@ def test_build_thumbs_leaves_no_partial_file_when_the_encoder_raises(tmp_path, m
     def boom(*args, **kwargs):
         raise cv2.error("simulated encoder crash")
 
-    monkeypatch.setattr(ct.cv2, "imwrite", boom)
-    stats = build_thumbs(cache)
+    monkeypatch.setattr(ct.cv2, "imencode", boom)
+    stats = build_thumbs(cache, auto_roi=False)
 
     assert (stats["written"], stats["failed"]) == (0, 1)
-    assert list((Path(cache) / "thumbs" / "scan" / "D07").iterdir()) == []
+    assert _no_files_under(cache)
+
+
+def test_build_thumbs_removes_its_temp_file_when_the_replace_fails(tmp_path, monkeypatch):
+    cache = _make_cache(tmp_path, steps=(1,))
+
+    def boom(*args, **kwargs):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(ct.os, "replace", boom)
+    stats = build_thumbs(cache, auto_roi=False)
+
+    assert (stats["written"], stats["failed"]) == (0, 1)
+    assert _no_files_under(cache)
 
 
 def test_build_thumbs_counts_a_corrupt_source_and_still_writes_the_others(tmp_path):
@@ -255,7 +456,7 @@ def test_build_thumbs_reports_a_step_whose_cached_frame_is_missing(tmp_path):
 
 def test_build_thumbs_on_an_empty_cache_does_nothing(tmp_path):
     stats = build_thumbs(str(tmp_path / "nope"))
-    assert stats["written"] == 0 and stats["failed"] == 0
+    assert stats["written"] == 0 and stats["failed"] == 0 and stats["rois"] == []
 
 
 # --------------------------------------------------------------------------
@@ -274,22 +475,56 @@ def test_db_roi_lookup_reads_the_segment_that_contains_the_step(tmp_path):
         assert lookup(FrameKey(8, 4, "scan")) is None   # another desktop
 
 
-def test_db_roi_lookup_never_writes_to_the_database_or_migrates_a_newer_schema(tmp_path):
+def test_db_roi_lookup_honours_the_frame_pose_segment_override(tmp_path):
+    db = tmp_path / "tda.sqlite"
+    _make_db(str(db))  # segment 0 covers steps 1-50 with RED_BOX
+    other = (10, 20, 110, 220)
+    conn = sqlite3.connect(str(db))
+    conn.execute("INSERT INTO pose_segment(desktop, view, seg, start_step, end_step, ref_step,"
+                 " roi_json) VALUES(7, 'scan', 2, 60, 90, 60, ?)", (json.dumps(list(other)),))
+    conn.execute("INSERT INTO frame(desktop, step, view, pose_segment) VALUES(7, 5, 'scan', 2)")
+    conn.execute("INSERT INTO frame(desktop, step, view, pose_segment) VALUES(7, 6, 'scan', NULL)")
+    conn.commit()
+    conn.close()
+
+    with DbRoiLookup(str(db)) as lookup:
+        assert lookup(FrameKey(7, 5, "scan")) == other     # the frame's own segment wins
+        assert lookup(FrameKey(7, 6, "scan")) == RED_BOX   # NULL: the step range decides
+        assert lookup(FrameKey(7, 7, "scan")) == RED_BOX   # no frame row at all
+
+
+def test_db_roi_lookup_leaves_the_database_alone_and_never_migrates_it(tmp_path):
     db = tmp_path / "tda.sqlite"
     _make_db(str(db), version=99)  # written by a build this code does not know
     before, stamp = db.read_bytes(), db.stat().st_mtime_ns
+    tables = _tables(db)
     cache = _make_cache(tmp_path, steps=(1,), images={1: _frame(1000, 1000, box=RED_BOX)})
 
     with DbRoiLookup(str(db)) as lookup:
         stats = build_thumbs(cache, roi_lookup=lookup)
 
+    # Opening a WAL database read-only may create -wal/-shm side files; what must
+    # not change is the database itself, its version and its set of tables.
     assert stats["written"] == 1
-    assert _red_fraction(cv2.imread(thumb_path(cache, FrameKey(7, 1, "scan")))) > 0.70
+    assert _red_fraction(_imread(thumb_path(cache, FrameKey(7, 1, "scan")))) > 0.70
     assert db.read_bytes() == before
     assert db.stat().st_mtime_ns == stamp
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["cache", "tda.sqlite"]
+    assert _schema_version(db) == "99"
+    assert _tables(db) == tables
     with pytest.raises(sqlite3.OperationalError):
         DbRoiLookup(str(db)).conn.execute("INSERT INTO meta(key, value) VALUES('x', 'y')")
+
+
+def test_db_roi_lookup_notes_a_lock_file_and_reads_anyway(tmp_path):
+    db = tmp_path / "tda.sqlite"
+    _make_db(str(db))
+    (tmp_path / "tda.sqlite.lock").write_text("annotator", encoding="utf-8")
+    said: list[str] = []
+
+    with DbRoiLookup(str(db), notify=said.append) as lookup:
+        assert lookup(FrameKey(7, 1, "scan")) == RED_BOX
+
+    assert len(said) == 1 and ".lock" in said[0]
 
 
 def test_db_roi_lookup_ignores_a_segment_without_a_roi(tmp_path):
@@ -315,7 +550,7 @@ def test_main_thumbs_only_builds_the_tier_and_prints_the_counts(tmp_path, capsys
 
     assert code == 0
     assert "written=2" in capsys.readouterr().out
-    assert max(cv2.imread(thumb_path(cache, FrameKey(7, 1, "scan"))).shape[:2]) == 64
+    assert max(_imread(thumb_path(cache, FrameKey(7, 1, "scan"))).shape[:2]) == 64
     assert not (Path(cache) / "index.json").exists()  # no index was needed
 
 
@@ -331,6 +566,18 @@ def test_main_thumbs_only_skips_then_rebuilds_with_force_thumbs(tmp_path, capsys
     assert "written=1" in capsys.readouterr().out
 
 
+def test_main_no_auto_roi_switches_the_automatic_crop_off(tmp_path, capsys):
+    cache = _make_cache(tmp_path, steps=(1,), images={1: _scan_frame(CHASSIS)})
+    argv = ["--cache", cache, "--thumbs-only", "--first", "7", "--last", "7"]
+
+    assert main(argv + ["--no-auto-roi"]) == 0
+    assert "roi=none" in capsys.readouterr().out
+    assert _sidecar(cache)["source"] == "none"
+    assert main(argv) == 0  # the plan changed, so the tier is rebuilt
+    assert "written=1" in capsys.readouterr().out
+    assert _sidecar(cache)["source"] == "auto"
+
+
 def test_main_builds_the_cache_and_then_the_thumbnails(tmp_path, capsys):
     index_path = _oak_index(tmp_path)
     cache = str(tmp_path / "cache")
@@ -343,6 +590,17 @@ def test_main_builds_the_cache_and_then_the_thumbnails(tmp_path, capsys):
     assert Path(thumb_path(cache, FrameKey(7, 1, "oak1"))).is_file()
     out = capsys.readouterr().out
     assert "copied=1" in out and "written=1" in out
+
+
+def test_main_without_the_thumb_flags_builds_no_thumbnails(tmp_path, capsys):
+    index_path = _oak_index(tmp_path)
+    cache = str(tmp_path / "cache")
+
+    assert main(["--index", index_path, "--cache", cache, "--views", "oak1",
+                 "--first", "7", "--last", "7"]) == 0
+
+    assert not (Path(cache) / "thumbs").exists()
+    assert "thumbs written" not in capsys.readouterr().out
 
 
 def test_main_thumbs_only_returns_non_zero_when_a_thumbnail_fails(tmp_path, capsys):
