@@ -24,6 +24,8 @@ from typing import Optional
 
 from tda.core.db import Db
 from tda.core.graph_rules import infer_relational_fields, unresolved_relations
+from tda.core.implied import OP_KIND as IMPLIED_OP_KIND
+from tda.core.implied import implied_instances
 from tda.core.index import DesktopIndex
 from tda.core.log_report import _expected_steps
 from tda.core.logs import LogImport, import_log, iter_desktop_csvs, read_desktop_csv
@@ -42,10 +44,17 @@ MAX_STEP_SECONDS = 1800.0
 #: Heading of the import report's per-desktop list of inferred relational
 #: fields. They are guesses, and every one of them is an S1 question.
 INFERRED_HEADING = "inferred relational fields (heuristic - confirm in S1)"
+#: ``op_log`` is scoped per ``(desktop, view)``; an identity row belongs to no
+#: view, so the implied-instance rows get this placeholder (same as
+#: :data:`tda.cli_relations.OP_VIEW`).
+OP_VIEW = "-"
+#: ``op_log.annotator`` of an implied instance -- this is machinery, not a person.
+IMPLIED_ANNOTATOR = "cli:import-logs"
 
 __all__ = [
-    "DesktopRun", "INFERRED_HEADING", "LogsRun", "brand_model", "chassis_type",
-    "desktop_fields", "expected_steps", "import_logs_into_db", "inferred_section",
+    "DesktopRun", "INFERRED_HEADING", "LogsRun", "add_implied_instances", "brand_model",
+    "chassis_type", "desktop_fields", "expected_steps", "import_logs_into_db",
+    "inferred_section",
 ]
 
 
@@ -140,6 +149,8 @@ class DesktopRun:
     fills: list[str] = field(default_factory=list)
     #: ``"unresolved: ..."`` per reference it deliberately did not guess at.
     unresolved: list[str] = field(default_factory=list)
+    #: One line per instance :mod:`tda.core.implied` created for this desktop.
+    implied: list[str] = field(default_factory=list)
 
 
 def inferred_section(run: DesktopRun) -> list[str]:
@@ -149,9 +160,10 @@ def inferred_section(run: DesktopRun) -> list[str]:
     everything adds no noise. Kept here rather than in :mod:`tda.cli` so the
     heading and the bullet format live next to the run record that carries them.
     """
-    if not (run.fills or run.unresolved):
+    if not (run.fills or run.unresolved or run.implied):
         return []
     lines = [f"**{INFERRED_HEADING}**", ""]
+    lines.extend(f"- {text}" for text in run.implied)
     lines.extend(f"- {text}" for text in run.fills)
     lines.extend(f"- {text}" for text in run.unresolved)
     lines.append("")
@@ -281,12 +293,33 @@ def carry_ls_notes(steps: list[StepRec], previous: list[StepRec]) -> int:
     return kept
 
 
+def add_implied_instances(db: Db, li: LogImport, tax: Taxonomy) -> list[str]:
+    """Create the instances the sheet implies but never operates on.
+
+    Runs *before* the relational heuristic and inside the caller's transaction:
+    the point of an implied ``motherboard.01`` is that the 33 references the
+    four never-lifted boards leave behind then resolve onto it. Each one gets
+    an ``op_log`` row of kind :data:`~tda.core.implied.OP_KIND`, so the run is
+    auditable and a single record can be undone. Returns one report line each.
+    """
+    lines = []
+    for rec in implied_instances(li.instances, li.actions, tax):
+        li.instances[rec.key] = rec
+        db.log_op(
+            li.desktop, OP_VIEW, IMPLIED_OP_KIND,
+            {"instance": rec.key, "cls": rec.cls, "attrs": dict(rec.attrs)},
+            {"instance": rec.key}, IMPLIED_ANNOTATOR,
+        )
+        lines.append(f"implied instance {rec.key}: {rec.attrs.get('note', '')}")
+    return lines
+
+
 def _write_import(
     db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec]
-) -> tuple[int, int, list[str], list[str]]:
+) -> tuple[int, int, list[str], list[str], list[str]]:
     """Write one desktop's import atomically.
 
-    Returns ``(events, steps with LS notes, fills, unresolved)``.
+    Returns ``(events, steps with LS notes, fills, unresolved, implied)``.
 
     The relational heuristic of spec 7.3 runs here, *before* the instances are
     written and inside the same transaction: ``logs.py`` leaves ``fastens``,
@@ -304,13 +337,15 @@ def _write_import(
         kept = carry_ls_notes(li.steps, previous)
         merge_desktop_meta(db, li.desktop, desktop_fields(li.meta))
         db.replace_steps(li.desktop, li.steps, li.actions)
+        implied = add_implied_instances(db, li, tax)
         fills = infer_relational_fields(li.instances, tax, li.actions)
         for inst in li.instances.values():
             db.upsert_instance(inst)
         events = events_from_actions(li.instances, li.actions, tax)
         db.replace_events(li.desktop, events, auto_only=True)
         split_pose_segments(db, li.desktop)
-    return len(events), kept, fills, unresolved_relations(li.instances, tax, li.actions)
+    return (len(events), kept, fills,
+            unresolved_relations(li.instances, tax, li.actions), implied)
 
 
 def _force_warning(db: Db, desktop: int, previous: list[StepRec]) -> str:
@@ -387,18 +422,22 @@ def _import_one(
             f"D{desktop:02d}: the sheet's own Desktop ID is {sheet_id}; "
             f"kept the file's number"
         )
-    events, kept, fills, unresolved = _write_import(db, li, tax, previous)
+    events, kept, fills, unresolved, implied = _write_import(db, li, tax, previous)
     if log:
+        extra = f", {len(implied)} implied instance(s)" if implied else ""
         log(f"[import-logs] D{desktop:02d}: {len(li.steps)} steps, {len(li.actions)} "
             f"actions, {len(li.instances)} instances, {events} events, "
             f"{filled} durations, {len(fills)} inferred relational fields, "
-            f"{len(li.issues) + len(issues)} issues")
+            f"{len(li.issues) + len(issues)} issues{extra}")
+        for text in implied:
+            log(f"[import-logs]   {text}")
     return DesktopRun(
         desktop=desktop, source=str(path), status="imported", steps=len(li.steps),
         actions=len(li.actions), instances=len(li.instances), events=events,
         durations=filled, ls_notes=kept,
         brand=str(li.meta.get("brand_model_raw") or ""),
         issues=list(li.issues) + issues, fills=fills, unresolved=unresolved,
+        implied=implied,
     )
 
 

@@ -40,6 +40,11 @@ class Taxonomy:
     virtual_nodes: dict[str, dict] = field(default_factory=dict)
     on_bench_needs_geom: bool = True
     directions: list[str] = field(default_factory=list)
+    #: Classes :mod:`tda.core.implied` may create an instance of when the
+    #: desktop references one but its log never operates on it. Empty unless
+    #: ``taxonomy.yaml`` says otherwise: implying a part is a decision about the
+    #: dataset, so nothing is ever implied by default.
+    implied_when_referenced: list[str] = field(default_factory=list)
 
     # -- class queries ------------------------------------------------------
     def _defn(self, cls: str) -> dict:
@@ -122,6 +127,9 @@ def _load_taxonomy_cached(path: str) -> Taxonomy:
         virtual_nodes=cfg.get("virtual_nodes", {}),
         on_bench_needs_geom=bool(cfg.get("on_bench_needs_geom", True)),
         directions=list(cfg.get("directions", [])),
+        implied_when_referenced=[
+            str(c) for c in (cfg.get("implied_when_referenced") or [])
+        ],
     )
 
 

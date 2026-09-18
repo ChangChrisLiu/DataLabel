@@ -45,6 +45,8 @@ from tda.core.graph_infer import (
     unresolved_kind,
     unresolved_relations,
 )
+from tda.core.implied import OP_KIND as IMPLIED_OP_KIND
+from tda.core.implied import implied_instances
 from tda.core.model import InstanceRec
 from tda.core.states import events_from_actions
 from tda.core.taxonomy import Taxonomy, load_taxonomy
@@ -79,6 +81,8 @@ class DesktopRelations:
     fills: list[str] = field(default_factory=list)
     unresolved: list[str] = field(default_factory=list)
     changed: int = 0  # instances whose stored row was rewritten
+    #: One line per instance ``--add-implied`` created for this desktop.
+    implied: list[str] = field(default_factory=list)
     error: str = ""
 
     def unresolved_of(self, kind: str) -> int:
@@ -121,6 +125,10 @@ class RelationsRun:
     def changed(self) -> int:
         return sum(r.changed for r in self.runs)
 
+    @property
+    def implied(self) -> int:
+        return sum(len(r.implied) for r in self.runs)
+
     def tally(self) -> str:
         """``N unresolved (A ambiguous, C no candidate)`` for a summary line.
 
@@ -155,34 +163,54 @@ def _diff(before: dict[str, Any], after: dict[str, Any]) -> tuple[dict, dict]:
 # --------------------------------------------------------------------------- #
 # one desktop
 # --------------------------------------------------------------------------- #
-def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool) -> DesktopRelations:
+def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
+               add_implied: bool = False) -> DesktopRelations:
     """Infer, and (unless ``dry_run``) write, one desktop's relational fields.
 
-    The whole desktop lands in one transaction: the changed instance rows, an
-    ``op_log`` row per changed instance, and -- only when something actually
-    changed -- the stored automatic state events, which are recompiled because
-    the cascade of spec 3.3 reads ``attached``/``parent`` off the instance
-    table. (:func:`tda.core.truth_inputs.events_of` re-derives that log on every
-    read and ignores the stored ``auto=True`` rows, so this is about the copy
+    The whole desktop lands in one transaction: the implied instances, the
+    changed instance rows, an ``op_log`` row per new or changed instance, and --
+    only when something actually changed -- the stored automatic state events,
+    which are recompiled because the cascade of spec 3.3 reads
+    ``attached``/``parent`` off the instance table.
+    (:func:`tda.core.truth_inputs.events_of` re-derives that log on every read
+    and ignores the stored ``auto=True`` rows, so this is about the copy
     :mod:`tda.ui.steps_model` and the status report read directly.)
+
+    ``add_implied`` runs :func:`tda.core.implied.implied_instances` **before**
+    the heuristic, exactly as ``import-logs`` does, so the references the four
+    never-lifted motherboards leave behind resolve onto the new instance in the
+    same pass.
     """
     instances = db.instances(desktop)
     actions = db.actions(desktop)
+    new_instances = implied_instances(instances, actions, tax) if add_implied else []
+    for rec in new_instances:
+        instances[rec.key] = rec
     before = {key: _snapshot(rec) for key, rec in instances.items()}
     fills = infer_relational_fields(instances, tax, actions)
+    made = {rec.key for rec in new_instances}
     changes = []
     for key, rec in sorted(instances.items()):
         new, old = _diff(before[key], _snapshot(rec))
-        if new:
+        if new and key not in made:
             changes.append((key, new, old))
     out = DesktopRelations(
         desktop=desktop, status="applied", fills=fills,
         unresolved=unresolved_relations(instances, tax, actions),
         changed=len(changes),
+        implied=[f"implied instance {rec.key}: {rec.attrs.get('note', '')}"
+                 for rec in new_instances],
     )
-    if dry_run or not changes:
+    if dry_run or not (changes or new_instances):
         return out
     with db.transaction():
+        for rec in new_instances:
+            db.upsert_instance(instances[rec.key])
+            db.log_op(
+                desktop, OP_VIEW, IMPLIED_OP_KIND,
+                {"instance": rec.key, "cls": rec.cls, "attrs": dict(instances[rec.key].attrs)},
+                {"instance": rec.key}, ANNOTATOR,
+            )
         for key, new, old in changes:
             db.upsert_instance(instances[key])
             db.log_op(
@@ -252,6 +280,7 @@ def infer_relations_into_db(
     dry_run: bool = False,
     force: bool = False,
     log=None,
+    add_implied: bool = False,
 ) -> RelationsRun:
     """Run the heuristic over every desktop in the database, one transaction each.
 
@@ -280,7 +309,7 @@ def infer_relations_into_db(
                     f"(use --force to proceed anyway)")
             continue
         try:
-            one = _apply_one(db, tax, desktop, dry_run)
+            one = _apply_one(db, tax, desktop, dry_run, add_implied)
         except Exception as exc:  # one bad desktop must not end the run
             one = DesktopRelations(
                 desktop=desktop, status="failed",
@@ -292,9 +321,9 @@ def infer_relations_into_db(
         if frozen and one.changed and not dry_run:
             _queue_rechecks(db, desktop, log)
     if log:
-        log(f"{prefix} {len(run.applied)} desktops, {run.fills} fills on {run.changed} "
-            f"instances, {run.tally()}, {len(run.refused)} refused, "
-            f"{len(run.failed)} failed")
+        log(f"{prefix} {len(run.applied)} desktops, {run.implied} implied instances, "
+            f"{run.fills} fills on {run.changed} instances, {run.tally()}, "
+            f"{len(run.refused)} refused, {len(run.failed)} failed")
     return run
 
 
@@ -303,10 +332,12 @@ def _log_desktop(log, prefix: str, one: DesktopRelations) -> None:
     if one.status == "failed":
         log(f"{prefix} D{one.desktop:02d}: FAILED, {one.error}")
         return
-    log(f"{prefix} D{one.desktop:02d}: {len(one.fills)} fills on {one.changed} "
-        f"instances, {len(one.unresolved)} unresolved "
+    log(f"{prefix} D{one.desktop:02d}: {len(one.implied)} implied, {len(one.fills)} "
+        f"fills on {one.changed} instances, {len(one.unresolved)} unresolved "
         f"({one.unresolved_of(AMBIGUOUS)} {AMBIGUOUS}, "
         f"{one.unresolved_of(NO_CANDIDATE)} {NO_CANDIDATE})")
+    for text in one.implied:
+        log(f"{prefix}   {text}")
     for text in one.fills:
         log(f"{prefix}   {text}")
     for text in one.unresolved:
@@ -330,7 +361,8 @@ def cmd_infer_relations(args: argparse.Namespace) -> int:
                 print(f"[infer-relations] backup failed: {exc}; nothing was written")
                 return EXIT_ERROR
         run = infer_relations_into_db(
-            db, load_taxonomy(), _desktops(args), args.dry_run, args.force, log=print
+            db, load_taxonomy(), _desktops(args), args.dry_run, args.force, log=print,
+            add_implied=args.add_implied,
         )
         if run.refused:
             listed = ", ".join(f"D{r.desktop:02d}" for r in run.refused)
@@ -356,4 +388,10 @@ def _add_infer_relations(sub) -> None:
     p.add_argument("--force", action="store_true",
                    help="also fill desktops that already carry verified frames, whose "
                         "frozen rows are then re-checked and may raise conflicts")
+    p.add_argument("--add-implied", action="store_true",
+                   help="first create the instances configs/taxonomy.yaml's "
+                        "implied_when_referenced allows: a part the desktop clearly "
+                        "has (the motherboard of D49/D62/D63/D64) that its log never "
+                        "operates on. OFF here because this command exists to repair "
+                        "a database in place; import-logs always does it")
     p.set_defaults(func=cmd_infer_relations)
