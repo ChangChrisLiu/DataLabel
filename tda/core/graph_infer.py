@@ -81,6 +81,17 @@ def unique_of_class(instances: dict[str, InstanceRec], cls: str) -> Optional[str
     return found[0] if len(found) == 1 else None
 
 
+def blank(value: Optional[str]) -> bool:
+    """Is this relational field empty? ``None``, ``""`` and whitespace all are.
+
+    Clearing a cell in the S1 table leaves an empty string behind, and a
+    hand-edited sheet can leave a stray space. Both mean "not answered yet",
+    so they must reach the heuristics as a blank rather than as a value that
+    resolves to nothing.
+    """
+    return not (value or "").strip()
+
+
 def resolve_ref(instances: dict[str, InstanceRec], ref: Optional[str]) -> Optional[str]:
     """An instance key from a field that may hold a key or a bare class name.
 
@@ -88,8 +99,9 @@ def resolve_ref(instances: dict[str, InstanceRec], ref: Optional[str]) -> Option
     raw step name says so, which is a class, not a key; the same happens for a
     hand-edited ``fastens`` or ``of``. A class resolves only when it is unique.
     """
-    if not ref:
+    if blank(ref):
         return None
+    ref = str(ref).strip()
     if ref in instances:
         return ref
     return unique_of_class(instances, ref)
@@ -129,7 +141,10 @@ class _Clock:
     only counts a *successful* ``remove`` -- a failed attempt took nothing out
     -- while ``worked_at`` counts every ``unscrew``/``remove`` aimed at a screw,
     successful or not: the question it answers is when the operator was at that
-    screw, not what came of it.
+    screw, not what came of it. A *later failed retry* therefore pushes
+    ``worked_at`` forward, which can only shrink the set of candidates removed
+    at or after it: the heuristic then gives up rather than guessing, which is
+    the direction to fail in.
     """
 
     def __init__(self, actions: Iterable[ActionRec]):
@@ -167,20 +182,24 @@ def _by_the_clock(
     """Physical necessity: the candidate removed soonest after this screw.
 
     You undo a fastener in order to take something out, so of the parts that
-    could carry this screw the right one is the first to leave *after* the last
-    time anybody touched the screw. Two candidates leaving on the same step, or
-    none leaving afterwards at all, is not a tie-break and stays unresolved.
+    could carry this screw the right one is the first to leave *at or after* the
+    last time anybody touched the screw. The "at" matters: a compound row that
+    reads "unscrew the last screw and lift the fan off" puts both on one step,
+    and a strict ``>`` would skip the fan and write the *next* part in -- the
+    one wrong answer that would never look wrong. Two candidates leaving on that
+    same step, or none leaving at all, is not a tie-break and stays unresolved.
     """
     since = clock.worked_at.get(rec.key)
     if since is None:
         return None, "no action ever names this screw, so there is nothing to time it by"
     after = sorted(
-        (clock.removed_at[key], key) for key in candidates
-        if clock.removed_at.get(key, -1) > since
+        (step, key) for step, key in
+        ((clock.removed_at.get(key), key) for key in candidates)
+        if step is not None and step >= since
     )
     if not after:
         return None, (
-            f"none of {', '.join(candidates)} is removed after the screw's own "
+            f"none of {', '.join(candidates)} is removed at or after the screw's own "
             f"last action at step {since}"
         )
     if len(after) > 1 and after[0][0] == after[1][0]:
@@ -280,15 +299,22 @@ def infer_relational_fields(
 
 
 def _infer_screw(instances, rec: InstanceRec, clock, put, filled: list[str]) -> None:
-    """``fastens`` from the role, then ``parent``/``attached`` when captive."""
-    if rec.fastens is None:
+    """``fastens`` from the role, then ``parent``/``attached`` when captive.
+
+    ``attached`` is set **only** in the same pass that fills ``parent``. It is a
+    bool, so a stored ``False`` cannot say whether it is the dataclass default
+    or an annotator who deliberately unticked it in S1; an instance that already
+    carries a ``parent`` has been looked at, and re-ticking the flag under the
+    annotator on the next run would be exactly the overwrite this heuristic
+    promises never to do.
+    """
+    if blank(rec.fastens):
         target, _why = screw_target(instances, rec, clock)
         if target:
             put(rec, "fastens", target)
     target = resolve_ref(instances, rec.fastens)
-    if target and rec.attrs.get("captive"):
-        if rec.parent is None:
-            put(rec, "parent", target)
+    if target and rec.attrs.get("captive") and blank(rec.parent):
+        put(rec, "parent", target)
         if not rec.attached:
             rec.attached = True
             filled.append(f"{rec.key}.attached = True")
@@ -369,17 +395,17 @@ def unresolved_relations(
         if is_provisional(key):
             continue
         for name in RELATION_FIELDS:
-            value = getattr(rec, name)
+            value = (getattr(rec, name) or "").strip()
             if value and value in tax.classes and resolve_ref(instances, value) is None:
                 out.append(_class_line(instances, key, name, value))
         if rec.cls != "screw":
             continue
         kind = AMBIGUOUS
-        if not rec.fastens:
+        if blank(rec.fastens):
             target, why = screw_target(instances, rec, clock)
             kind = NO_CANDIDATE if target is None and "names no part" in why else AMBIGUOUS
             out.append(_line(kind, f"{key}.fastens is empty - {why}"))
-        if rec.attrs.get("captive") and not rec.parent:
+        if rec.attrs.get("captive") and blank(rec.parent):
             out.append(_line(kind, (
                 f"{key} is captive but has no parent - it will not leave the chassis "
                 f"with the part it is screwed into"

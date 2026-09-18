@@ -209,9 +209,74 @@ def test_a_screw_undone_after_both_removals_stays_unresolved(tax):
     assert late.fastens is None
     assert late.parent is None
     lines = unresolved_relations(instances, tax, actions)
-    assert any("screw.cpu_cooler.05" in line and "is removed after" in line
+    assert any("screw.cpu_cooler.05" in line and "is removed at or after" in line
                for line in lines)
     assert all(unresolved_kind(line) == AMBIGUOUS for line in lines)
+
+
+def test_a_screw_undone_on_the_very_step_its_part_leaves_counts(tax):
+    """The compound row "unscrew the last screw and lift the fan off" is normal.
+
+    Both land on one step, so a strict ``>`` would skip the fan and silently
+    write the *heatsink* into ``fastens`` -- the one wrong answer that would
+    never look wrong.
+    """
+    instances = _two_cooler_desktop()
+    instances["screw.cpu_cooler.02"].attrs["unscrewed_at"] = FAN_STEP  # same step
+    actions = _two_cooler_actions(instances)
+    infer_relational_fields(instances, tax, actions)
+    assert instances["screw.cpu_cooler.02"].fastens == FAN
+    assert unresolved_relations(instances, tax, actions) == [] or all(
+        "screw.cpu_cooler.02" not in line
+        for line in unresolved_relations(instances, tax, actions)
+    )
+
+
+def test_two_parts_leaving_on_the_screws_own_step_is_a_tie(tax):
+    instances = _two_cooler_desktop()
+    instances["screw.cpu_cooler.01"].attrs["unscrewed_at"] = FAN_STEP
+    actions = [a for a in _two_cooler_actions(instances) if a.verb != "remove"]
+    actions.append(ActionRec(900, FAN_STEP, 0, FAN, "remove"))
+    actions.append(ActionRec(900, FAN_STEP, 1, HEATSINK, "remove"))
+    infer_relational_fields(instances, tax, actions)
+    assert instances["screw.cpu_cooler.01"].fastens is None
+    assert any("are both removed at step" in line
+               for line in unresolved_relations(instances, tax, actions))
+
+
+def test_a_blank_fastens_is_treated_as_empty_not_as_a_value(tax):
+    instances = _two_cooler_desktop()
+    rec = instances["screw.cpu_cooler.01"]
+    rec.fastens = "   "  # what a cleared cell in the S1 table leaves behind
+    actions = _two_cooler_actions(instances)
+    infer_relational_fields(instances, tax, actions)
+    assert rec.fastens == FAN
+    assert not any("is empty - " in line and "''" in line
+                   for line in unresolved_relations(instances, tax, actions))
+
+
+def test_attached_is_only_set_in_the_same_pass_that_fills_the_parent(tax):
+    """An annotator who unticked "attached" in S1 must not have it re-ticked.
+
+    ``attached`` is a bool, so a stored ``False`` cannot say whether it is the
+    dataclass default or a human's decision. An instance that already has a
+    ``parent`` has been looked at, so the flag is left exactly as it is.
+    """
+    instances = _two_cooler_desktop()
+    actions = _two_cooler_actions(instances)
+    cleared = instances["screw.cpu_cooler.01"]
+    cleared.fastens = FAN
+    cleared.parent = FAN
+    cleared.attached = False  # deliberately unticked
+
+    filled = infer_relational_fields(instances, tax, actions)
+
+    assert cleared.attached is False
+    assert not any(line.startswith("screw.cpu_cooler.01.attached") for line in filled)
+    # a screw the same pass fills the parent of does get the flag
+    fresh = instances["screw.cpu_cooler.02"]
+    assert (fresh.parent, fresh.attached) == (FAN, True)
+    assert "screw.cpu_cooler.02.attached = True" in filled
 
 
 def test_the_clock_and_the_sheet_name_disagreeing_is_left_to_the_human(tax):
@@ -407,11 +472,23 @@ def test_infer_relations_is_idempotent(env, capsys):
         db.close()
 
 
+def _rows(db: Db, sql: str) -> list[tuple]:
+    return [tuple(r) for r in db.conn.execute(sql).fetchall()]
+
+
+OP_ROWS = "SELECT desktop, kind, payload_json, inverse_json FROM op_log ORDER BY id"
+EVENT_ROWS = (
+    'SELECT desktop, step, target, attr, "old", "new", auto FROM state_event '
+    "ORDER BY desktop, step, id"
+)
+
+
 def test_infer_relations_dry_run_writes_nothing(env, capsys):
     imported(env)
     db = open_db(env)
     try:
         strip_relations(db, 13)
+        ops_before, events_before = _rows(db, OP_ROWS), _rows(db, EVENT_ROWS)
     finally:
         db.close()
     before = Path(env["db_path"]).read_bytes()
@@ -423,6 +500,136 @@ def test_infer_relations_dry_run_writes_nothing(env, capsys):
     assert "dry run" in out.lower()
     assert Path(env["db_path"]).read_bytes() == before
     assert not list(Path(env["cfg"]["backup_dir"]).glob("tda_*.sqlite"))
+    db = open_db(env)
+    try:  # the bytes may be stable for other reasons; the rows must be identical
+        assert _rows(db, OP_ROWS) == ops_before
+        assert _rows(db, EVENT_ROWS) == events_before
+    finally:
+        db.close()
+
+
+def test_a_hand_written_event_survives_a_real_run(env):
+    from tda.core.model import StateEvent
+
+    imported(env)
+    manual = StateEvent(13, 4, COOLER, "state", "installed", "displaced", auto=False)
+    db = open_db(env)
+    try:
+        strip_relations(db, 13)
+        db.replace_events(13, list(db.events(13)) + [manual], auto_only=False)
+    finally:
+        db.close()
+
+    assert run(env, "infer-relations", "--desktops", "13") == EXIT_OK
+    db = open_db(env)
+    try:
+        kept = [e for e in db.events(13) if not e.auto]
+        assert len(kept) == 1
+        assert (kept[0].target, kept[0].step, kept[0].new) == (COOLER, 4, "displaced")
+    finally:
+        db.close()
+
+
+def test_infer_relations_warns_about_a_desktop_the_database_does_not_have(env, capsys):
+    imported(env)
+    capsys.readouterr()
+    assert run(env, "infer-relations", "--desktops", "13,44") == EXIT_OK
+    out = capsys.readouterr().out
+    assert "D44" in out and "not in the database" in out
+
+
+def test_a_failed_backup_stops_the_run_without_a_traceback(env, capsys, monkeypatch):
+    imported(env)
+
+    def boom(self, dest_dir):
+        raise OSError("the backup volume is full")
+
+    monkeypatch.setattr(Db, "backup", boom)
+    db = open_db(env)
+    try:
+        strip_relations(db, 13)
+    finally:
+        db.close()
+
+    capsys.readouterr()
+    assert run(env, "infer-relations", "--desktops", "13") == EXIT_ERROR
+    out = capsys.readouterr().out
+    assert "backup failed" in out and "the backup volume is full" in out
+    assert "Traceback" not in out
+    db = open_db(env)
+    try:
+        assert db.instances(13)[COOLER_SCREWS[0]].parent is None  # nothing was written
+    finally:
+        db.close()
+    assert not Path(env["db_path"] + ".lock").exists()  # and the lock was released
+
+
+# --------------------------------------------------------------------------- #
+# 3b. desktops that already carry verified work
+# --------------------------------------------------------------------------- #
+def _verify_a_frame(db: Db, desktop: int = 13, step: int = 20) -> None:
+    """Freeze one compiled row, as the annotator's Confirm button does."""
+    db.put_compiled(
+        FrameKey(desktop, step, "scan"), COOLER, None, 0.0, "visible", "in_chassis",
+        "verified", "hash", verified_by="chang", geom_type="box", box=(0, 0, 4, 4),
+    )
+
+
+def test_a_desktop_with_verified_frames_is_refused_without_force(env, capsys):
+    imported(env)
+    db = open_db(env)
+    try:
+        strip_relations(db, 13)
+        _verify_a_frame(db)
+    finally:
+        db.close()
+
+    capsys.readouterr()
+    assert run(env, "infer-relations", "--desktops", "13") == EXIT_ERROR
+    out = capsys.readouterr().out
+    assert "D13 has 1 verified frames" in out
+    assert "may raise conflicts" in out and "--force" in out
+    db = open_db(env)
+    try:
+        assert db.instances(13)[COOLER_SCREWS[0]].parent is None  # nothing written
+        assert not db.ops(13, OP_VIEW)
+    finally:
+        db.close()
+
+
+def test_force_runs_a_desktop_with_verified_frames_and_says_what_to_do_next(env, capsys):
+    imported(env)
+    db = open_db(env)
+    try:
+        strip_relations(db, 13)
+        _verify_a_frame(db)
+    finally:
+        db.close()
+
+    capsys.readouterr()
+    assert run(env, "infer-relations", "--desktops", "13", "--force") == EXIT_OK
+    out = capsys.readouterr().out
+    assert "D13 has 1 verified frames" in out
+    assert "tda.cli check --desktop 13" in out or "queued" in out
+    db = open_db(env)
+    try:
+        assert db.instances(13)[COOLER_SCREWS[0]].parent == COOLER
+    finally:
+        db.close()
+
+
+def test_a_dry_run_reports_verified_frames_without_refusing(env, capsys):
+    imported(env)
+    db = open_db(env)
+    try:
+        strip_relations(db, 13)
+        _verify_a_frame(db)
+    finally:
+        db.close()
+
+    capsys.readouterr()
+    assert run(env, "infer-relations", "--desktops", "13", "--dry-run") == EXIT_OK
+    assert "D13 has 1 verified frames" in capsys.readouterr().out
 
 
 def test_infer_relations_backs_the_database_up_first(env, capsys):

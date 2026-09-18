@@ -36,7 +36,8 @@ carry geometry, because :func:`needs_geom` only answers for real instances.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 
 from tda.core.model import ActionRec, InstanceRec, Placement, StateEvent
 from tda.core.taxonomy import Taxonomy
@@ -68,10 +69,19 @@ _SUCCESS = "success"
 
 @dataclass
 class InstState:
-    """One instance's state and placement at one logical step."""
+    """One instance's state and placement at one logical step.
+
+    ``left_with`` is provenance rather than state: the key of the parent whose
+    removal dragged this instance out (:func:`_close_attached_cascade`), and
+    ``None`` for everything that got where it is on its own -- including a
+    child that was removed by its own action *before* its parent followed. It
+    is what :func:`gone_with_parent` reads, and it is deliberately excluded
+    from equality, so two snapshots still compare on what they *are*.
+    """
 
     state: str
     placement: str
+    left_with: Optional[str] = field(default=None, compare=False)
 
 
 #: instance key -> its state at one logical step
@@ -209,6 +219,7 @@ def events_from_actions(
 def _close_attached_cascade(
     instances: dict[str, InstanceRec],
     frame: FrameState,
+    removed_at: Optional[dict[str, int]] = None,
 ) -> None:
     """Force the spec-3.3 cascade on ``frame`` in place, idempotently.
 
@@ -216,11 +227,33 @@ def _close_attached_cascade(
     removed as well, transitively; a child still ``in_chassis`` moves to the
     bench (one already ``elsewhere`` stays there -- it is out of every view).
     Running this on a frame that already satisfies the cascade -- anything folded
-    from an :func:`events_from_actions` log -- changes nothing.
+    from an :func:`events_from_actions` log -- changes nothing about its state,
+    but it does record on each claimed child *which* parent took it out
+    (``InstState.left_with``), which no event can carry.
+
+    ``removed_at`` maps an instance to the step it reached ``removed`` at, and
+    is what keeps the claim honest: a child that left **before** its parent did
+    -- its own ``remove`` action at step 5, the parent following at step 9 --
+    is lying in the staging area in its own right and is not claimed. Without
+    it every already-removed child is claimed, which is the right answer for a
+    frame with no history to consult.
+
+    This is the only place ``left_with`` is ever set, and it is gated on
+    :func:`_cascades_on_removal`, so the cascade and everything that reads it
+    (:func:`gone_with_parent`) cannot drift apart: a ``connector`` parent takes
+    nothing with it here and therefore claims nothing there either.
     """
     children = _attached_children(instances)
     if not children:
         return
+    steps = removed_at or {}
+
+    def claims(parent: str, child: str) -> bool:
+        """Did ``parent`` take ``child`` out, or had the child already gone?"""
+        child_step, parent_step = steps.get(child), steps.get(parent)
+        if child_step is None or parent_step is None:
+            return True
+        return child_step >= parent_step
 
     def walk(parent: str, seen: set[str]) -> None:
         for child in children.get(parent, ()):
@@ -228,11 +261,12 @@ def _close_attached_cascade(
                 continue
             seen.add(child)
             inst = frame.get(child)
-            if inst is None:
+            if inst is None or not claims(parent, child):
                 continue
             inst.state = REMOVED
             if inst.placement == IN_CHASSIS:
                 inst.placement = ON_BENCH
+            inst.left_with = parent
             walk(child, seen)
 
     for key in sorted(children):  # only instances that actually have children
@@ -261,8 +295,14 @@ def state_at(
     A virtual ``cable:*`` node enters the snapshot as soon as an event mentions
     it (placement ``in_chassis``, it is nowhere else); it carries no geometry.
     Events on any other unknown key are skipped.
+
+    The step each instance reached ``removed`` at is kept while folding and
+    handed to the closure, which is how a child that came out on its own keeps
+    its own identity instead of being counted as part of a parent that followed
+    it later.
     """
     frame = initial_state(instances, tax)
+    removed_at: dict[str, int] = {}
     for event in sorted(events, key=lambda e: e.step):  # stable: keeps intra-step order
         if event.step > step:
             break
@@ -274,42 +314,38 @@ def state_at(
             inst = InstState(state=tax.default_state(cls), placement=IN_CHASSIS)
             frame[event.target] = inst
         if event.attr == ATTR_STATE:
+            if event.new == REMOVED and inst.state != REMOVED:
+                removed_at[event.target] = event.step
             inst.state = event.new
         elif event.attr == ATTR_PLACEMENT:
             inst.placement = event.new
-    _close_attached_cascade(instances, frame)
+    _close_attached_cascade(instances, frame, removed_at)
     return frame
 
 
 # --------------------------------------------------------------------------- #
 # 2. geometry policy
 # --------------------------------------------------------------------------- #
-def gone_with_parent(
-    instances: dict[str, InstanceRec],
-    fs: FrameState,
-    key: str,
-) -> bool:
-    """Has this instance left the chassis inside its parent rather than on its own?
+def gone_with_parent(fs: FrameState, key: str) -> bool:
+    """Did this instance leave the chassis *inside* its parent?
 
     A captive cooler screw is ``attached`` to the cooler: once the cooler is
     out, the screw is *in* it, not lying beside it, so it is neither visible in
     the chassis nor a separate thing in the staging area (user decision C7,
-    "子零件随父零件一起消失"). The test is the parent's placement rather than
-    its state, which makes the rule transitive for free: a child of a child is
-    suppressed too, because its own parent was moved out of the chassis by the
-    same cascade (:func:`_close_attached_cascade`).
+    "子零件随父零件一起消失").
 
-    ``False`` for anything not ``attached``, with no ``parent``, or whose parent
-    is not in this snapshot -- and for a child whose parent is still in the
-    chassis, which is the normal case while the assembly is intact.
+    The answer is read off the snapshot rather than recomputed: only
+    :func:`_close_attached_cascade` ever sets ``left_with``, and it does so
+    exactly for the children it took out -- transitively, never for a child of
+    a ``connector`` (:func:`_cascades_on_removal`), and never for one that had
+    already left on its own. The parent's own state is re-checked so a frame
+    assembled by hand cannot claim a child of a part that is still in place.
     """
-    rec = instances.get(key)
-    if rec is None or not rec.attached or not rec.parent:
+    inst = fs.get(key)
+    if inst is None or not inst.left_with:
         return False
-    parent = fs.get(rec.parent)
-    return parent is not None and (
-        parent.placement != IN_CHASSIS or parent.state == REMOVED
-    )
+    parent = fs.get(inst.left_with)
+    return parent is None or parent.state == REMOVED or parent.placement != IN_CHASSIS
 
 
 def needs_geom(
@@ -330,7 +366,7 @@ def needs_geom(
     geom: dict[str, str] = {}
     for key, inst in fs.items():
         rec = instances.get(key)
-        if rec is None or gone_with_parent(instances, fs, key):
+        if rec is None or gone_with_parent(fs, key):
             continue
         if inst.placement == IN_CHASSIS:
             kind = "mask"

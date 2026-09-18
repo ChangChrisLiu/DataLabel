@@ -103,6 +103,7 @@ def test_delete_instance_clears_the_reference_in_the_database_too(db, orphaned, 
         if getattr(inst, field) == ORPHAN
     ]
     # the only question left is the parent this test itself overwrote
+    assert reloaded.issues  # an empty list would satisfy the `all` below for free
     assert not any("is not an instance" in text for text in reloaded.issues)
     assert all("captive screw without parent" in text for text in reloaded.issues)
 

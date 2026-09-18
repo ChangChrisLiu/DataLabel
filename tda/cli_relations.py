@@ -2,7 +2,7 @@
 
 ::
 
-    python -m tda.cli infer-relations [--desktops 1-66] [--dry-run]
+    python -m tda.cli infer-relations [--desktops 1-66] [--dry-run] [--force]
 
 ``import-logs`` runs :func:`~tda.core.graph_rules.infer_relational_fields` as
 part of each desktop's transaction, so every freshly imported machine already
@@ -15,8 +15,11 @@ a step table is touched.
 What makes it safe to run on live work:
 
 * it takes the single-user lock and backs the database up first, exactly like
-  ``import-logs --force`` (``--dry-run`` does neither, because it writes
-  nothing);
+  ``import-logs --force`` (``--dry-run`` does neither, because it writes no
+  data -- the database is still opened and schema-checked under the lock);
+* a desktop that already carries **verified** frames is reported and refused
+  unless ``--force``, because filling a captive screw's ``parent`` changes what
+  later frames need geometry for;
 * it never overwrites a field that already holds a value, so every human
   correction survives -- which also makes a second run report zero fills;
 * one desktop is one transaction, and a desktop that raises is reported and
@@ -72,7 +75,7 @@ class DesktopRelations:
     """What ``infer-relations`` did for one desktop."""
 
     desktop: int
-    status: str  # applied | failed
+    status: str  # applied | refused | failed
     fills: list[str] = field(default_factory=list)
     unresolved: list[str] = field(default_factory=list)
     changed: int = 0  # instances whose stored row was rewritten
@@ -97,6 +100,11 @@ class RelationsRun:
     @property
     def failed(self) -> list[DesktopRelations]:
         return [r for r in self.runs if r.status == "failed"]
+
+    @property
+    def refused(self) -> list[DesktopRelations]:
+        """Desktops skipped because they carry verified work and ``--force`` was not given."""
+        return [r for r in self.runs if r.status == "refused"]
 
     @property
     def fills(self) -> int:
@@ -191,18 +199,78 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool) -> DesktopRel
 # --------------------------------------------------------------------------- #
 # the run
 # --------------------------------------------------------------------------- #
+def verified_frames(db: Db, desktop: int) -> int:
+    """How many compiled rows of this desktop a human has frozen (spec 3.4)."""
+    return int(db.conn.execute(
+        "SELECT COUNT(*) FROM compiled_mask WHERE desktop=? AND status='verified'",
+        (desktop,),
+    ).fetchone()[0])
+
+
+def _queue_rechecks(db: Db, desktop: int, log) -> None:
+    """Ask the truth service to re-check this desktop's verified frames.
+
+    ``Db.add_rechecks`` arrives with the session branch; until it is there this
+    says what to run by hand instead of pretending the work was queued. Either
+    way the frozen rows are not lost: the truth service raises a conflict when a
+    verified row disappears from a recompiled frame, so the worst case is that
+    the annotator meets it later rather than now.
+    """
+    if not log:
+        return
+    if hasattr(db, "add_rechecks"):
+        db.add_rechecks(desktop)  # type: ignore[attr-defined]
+        log(f"[infer-relations] D{desktop:02d}: queued its verified frames for re-check")
+        return
+    log(f"[infer-relations] D{desktop:02d}: run `python -m tda.cli check --desktop "
+        f"{desktop}` afterwards to re-check its verified frames")
+
+
+def _selected(db: Db, desktops: Optional[set[int]], log) -> list[int]:
+    """The desktops to work on, warning about any ``--desktops`` id the DB lacks."""
+    known = db.desktop_ids()
+    if desktops is None:
+        return known
+    missing = sorted(desktops - set(known))
+    if missing and log:
+        for desktop in missing:
+            log(f"[infer-relations] D{desktop:02d} is not in the database; skipped")
+    return [desktop for desktop in known if desktop in desktops]
+
+
 def infer_relations_into_db(
     db: Db,
     tax: Taxonomy,
     desktops: Optional[set[int]] = None,
     dry_run: bool = False,
+    force: bool = False,
     log=None,
 ) -> RelationsRun:
-    """Run the heuristic over every desktop in the database, one transaction each."""
+    """Run the heuristic over every desktop in the database, one transaction each.
+
+    A desktop that already carries **verified** compiled rows is reported and
+    then refused unless ``force``: filling a captive screw's ``parent`` changes
+    what :func:`tda.core.states.needs_geom` answers on every later frame, so a
+    row a human froze can stop being produced. That is not silent -- the truth
+    service turns a vanished verified row into a conflict on the next refresh --
+    but it is not something to spring on an annotator either. ``dry_run``
+    reports the count and carries on, because it writes nothing.
+    """
     run = RelationsRun(dry_run=dry_run)
     prefix = "[infer-relations]" + (" (dry run)" if dry_run else "")
-    for desktop in db.desktop_ids():
-        if desktops is not None and desktop not in desktops:
+    for desktop in _selected(db, desktops, log):
+        frozen = verified_frames(db, desktop)
+        if frozen and log:
+            log(f"{prefix} D{desktop:02d} has {frozen} verified frames; their frozen "
+                f"rows will be re-checked and may raise conflicts")
+        if frozen and not (force or dry_run):
+            run.runs.append(DesktopRelations(
+                desktop=desktop, status="refused",
+                error=f"{frozen} verified frames; re-run with --force to proceed",
+            ))
+            if log:
+                log(f"{prefix} D{desktop:02d}: refused, nothing written "
+                    f"(use --force to proceed anyway)")
             continue
         try:
             one = _apply_one(db, tax, desktop, dry_run)
@@ -214,9 +282,12 @@ def infer_relations_into_db(
         run.runs.append(one)
         if log:
             _log_desktop(log, prefix, one)
+        if frozen and one.changed and not dry_run:
+            _queue_rechecks(db, desktop, log)
     if log:
         log(f"{prefix} {len(run.applied)} desktops, {run.fills} fills on {run.changed} "
-            f"instances, {run.tally()}, {len(run.failed)} failed")
+            f"instances, {run.tally()}, {len(run.refused)} refused, "
+            f"{len(run.failed)} failed")
     return run
 
 
@@ -245,14 +316,21 @@ def cmd_infer_relations(args: argparse.Namespace) -> int:
 
     with _session(args, lock=True) as (paths, db):
         if not args.dry_run:
-            _safety_backup(paths, db, "infer-relations",
-                           "it rewrites the relational fields of every desktop")
+            try:
+                _safety_backup(paths, db, "infer-relations",
+                               "it rewrites the relational fields of every desktop")
+            except OSError as exc:  # a full or unwritable backup_dir, no traceback
+                print(f"[infer-relations] backup failed: {exc}; nothing was written")
+                return EXIT_ERROR
         run = infer_relations_into_db(
-            db, load_taxonomy(), _desktops(args), args.dry_run, log=print
+            db, load_taxonomy(), _desktops(args), args.dry_run, args.force, log=print
         )
-        if run.failed:
-            listed = ", ".join(f"D{r.desktop:02d}" for r in run.failed)
-            print(f"[infer-relations] {listed} failed; every other desktop was applied")
+        if run.refused:
+            listed = ", ".join(f"D{r.desktop:02d}" for r in run.refused)
+            print(f"[infer-relations] refused: {listed} carry verified frames. Re-run "
+                  f"with --force to fill them anyway (their frozen rows are then "
+                  f"re-checked), or select the other desktops with --desktops.")
+        if run.failed or run.refused:
             return EXIT_ERROR
         return EXIT_OK
 
@@ -264,6 +342,11 @@ def _add_infer_relations(sub) -> None:
     )
     p.add_argument("--desktops", default=None, help="e.g. 13 or 1-66")
     p.add_argument("--dry-run", action="store_true",
-                   help="print what would be filled without writing anything "
-                        "(and without taking a backup)")
+                   help="print what would be filled but write no data (the database "
+                        "is still opened and schema-checked under the lock); no "
+                        "backup is taken and a desktop with verified frames is "
+                        "reported rather than refused")
+    p.add_argument("--force", action="store_true",
+                   help="also fill desktops that already carry verified frames, whose "
+                        "frozen rows are then re-checked and may raise conflicts")
     p.set_defaults(func=cmd_infer_relations)
