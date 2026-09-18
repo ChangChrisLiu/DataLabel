@@ -1,0 +1,98 @@
+"""Removing an instance identity row in stage S1.
+
+This is the one step-table command that cannot wait for ``Apply``:
+:meth:`~tda.ui.steps_model.StepTableData.save` only upserts, so a deletion has
+to be written through. That makes it the one place where "written through" has
+to mean *completely* written through, which is what this module is for.
+
+Two halves:
+
+* :func:`check_deletable` -- refuse while anything still depends on the key: a
+  step targeting it, a shape keyframe in any of the four views, a constraint
+  edge (spec 7.1), a frame override, a layering exception, a compiled-truth
+  row, an open conflict, or a hand-written state event. Only the derived
+  (``auto=True``) events are allowed to go, and they go with it.
+* :func:`delete_instance` -- do it in one transaction: drop the derived events,
+  drop the identity row, and rewrite every neighbour that pointed at the key
+  with just that pointer cleared. The neighbours are read back from the
+  database rather than taken from memory, so an unsaved edit elsewhere in one
+  of those rows is not flushed along with the repair. Nothing in memory changes
+  until the transaction has committed.
+"""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from tda.core.db import Db
+from tda.core.logs import CHASSIS_KEY
+from tda.core.model import VIEWS, InstanceRec
+from tda.ui.steps_values import RELATION_FIELDS, EditError
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, fine for typing
+    from tda.ui.steps_model import StepTableData
+
+__all__ = ["check_deletable", "delete_instance", "stored_neighbours"]
+
+
+def check_deletable(data: "StepTableData", db: Db, key: str) -> None:
+    """Raise :class:`EditError` unless nothing depends on ``key`` any more."""
+    if key not in data.instances:
+        raise EditError(f"D{data.desktop:02d} has no instance {key!r}")
+    if key == CHASSIS_KEY:
+        raise EditError("the chassis is implicit and cannot be deleted")
+    steps = sorted({a.step for a in data.actions if a.target == key})
+    if steps:
+        raise EditError(f"{key!r} is still the target of step(s) {', '.join(map(str, steps))}")
+    for view in VIEWS:
+        if db.keyframes(data.desktop, view, key):
+            raise EditError(f"{key!r} still has shape keyframes in view {view!r}")
+    for rel in db.relations(data.desktop):
+        if key in (rel.get("target"), rel.get("blocker")):
+            raise EditError(f"{key!r} is still used by a {rel.get('type')!r} constraint edge")
+    counts = db.instance_reference_counts(data.desktop, key)
+    if counts:
+        named = ", ".join(f"{n} row(s) in {table}" for table, n in sorted(counts.items()))
+        raise EditError(f"{key!r} is still referenced by {named}")
+
+
+def stored_neighbours(db: Db, desktop: int, key: str) -> list[InstanceRec]:
+    """The **stored** instances pointing at ``key``, with that pointer cleared.
+
+    Read back from the database on purpose: writing the in-memory copies would
+    flush whatever else the annotator has changed on those rows but not applied
+    yet.
+    """
+    cleaned: list[InstanceRec] = []
+    for other_key, stored in db.instances(desktop).items():
+        if other_key == key or not any(getattr(stored, n) == key for n in RELATION_FIELDS):
+            continue
+        for name in RELATION_FIELDS:
+            if getattr(stored, name) == key:
+                setattr(stored, name, None)
+        cleaned.append(stored)
+    return cleaned
+
+
+def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
+    """Delete one instance and every pointer to it, atomically.
+
+    On any failure the transaction rolls back, the in-memory session is left
+    exactly as it was, and the reason comes back as an :class:`EditError`.
+    """
+    check_deletable(data, db, key)
+    neighbours = stored_neighbours(db, data.desktop, key)
+    try:
+        with db.transaction():
+            db.delete_auto_events(data.desktop, key)
+            db.delete_instance(data.desktop, key)
+            for rec in neighbours:
+                db.upsert_instance(rec)
+    except Exception as error:  # the database rolled back; so must memory
+        raise EditError(f"could not delete {key!r}: {error}") from error
+
+    del data.instances[key]
+    for other in data.instances.values():
+        for name in RELATION_FIELDS:
+            if getattr(other, name) == key:
+                setattr(other, name, None)
+    data.refresh_issues()
