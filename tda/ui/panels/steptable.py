@@ -2,36 +2,38 @@
 
 Two tables behind a :class:`QTabWidget` (spec 4.1):
 
-* **Steps** -- one row per logical step with the scanner thumbnails of frame
-  k-1 and k, the parsed target, verb, tool, direction, result, failure reason,
-  difficulty and the operator's notes;
+* **Steps** -- one row per action, grouped under its logical step, with the
+  scanner thumbnails of frames k-1 and k, the parsed target, verb, tool,
+  direction, result, failure reason, difficulty and the operator's notes;
 * **Instances** -- the desktop's instance table with the relational attributes
   of spec 7.1 (parent/attached, mounted_on, fastens, socket_host, cable, screw
   head and captive flag, group order, removal direction).
 
-Below them sits the list of open questions, re-derived from the drafts on every
-edit. ``Apply`` writes everything back and recompiles the automatic state-event
-log (emitting :attr:`StepTablePanel.sigSaved`); ``Revert`` reloads from the
-database. All editing logic and validation lives in :mod:`tda.ui.steps_model`;
-this module only maps it onto Qt models, delegates and widgets.
+Below them sits the list of open questions, re-derived after every edit. The
+context menus resolve them in place: split a compound row into N actions, add
+or remove an action, retarget a step at a new instance, delete an instance
+nothing points at any more. ``Apply`` writes everything back in one transaction
+and recompiles the automatic state-event log (emitting
+:attr:`StepTablePanel.sigSaved`); ``Revert`` reloads from the database.
+
+The models and delegates live in :mod:`tda.ui.panels.steptable_models` and all
+editing logic in :mod:`tda.ui.steps_model`; this module is layout and commands.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Optional, Sequence
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QListWidget,
+    QMenu,
     QPushButton,
-    QSpinBox,
     QStyledItemDelegate,
     QTableView,
     QTabWidget,
@@ -41,329 +43,39 @@ from PySide6.QtWidgets import (
 
 from tda.core.db import Db
 from tda.core.taxonomy import Taxonomy, load_taxonomy
-from tda.ui.steps_model import (
-    DIFFICULTY_MAX,
-    FAILURE_REASONS,
-    GROUP_ORDERS,
-    RESULTS,
-    SCREW_HEADS,
-    STEP_TYPES,
-    EditError,
-    StepTableData,
-    thumb_path,
+from tda.ui.panels.steptable_models import (
+    BLANK,
+    INSTANCE_COLUMNS,
+    STEP_COLUMNS,
+    THUMB_PX,
+    THUMB_VIEW,
+    Column,
+    ComboDelegate,
+    DifficultyDelegate,
+    InstanceTableModel,
+    StepTableModel,
 )
+from tda.ui.steps_model import EditError, StepTableData, thumb_path
 
-#: Edge length of a step thumbnail, in device-independent pixels (spec 4.1).
-THUMB_PX = 96
-#: The view whose frames the step table shows.
-THUMB_VIEW = "scan"
-BLANK = ""
+__all__ = [
+    "BLANK",
+    "INSTANCE_COLUMNS",
+    "STEP_COLUMNS",
+    "THUMB_PX",
+    "THUMB_VIEW",
+    "Column",
+    "ComboDelegate",
+    "DifficultyDelegate",
+    "InstanceTableModel",
+    "StepTableModel",
+    "StepTablePanel",
+    "thumb_path",
+]
 
-Choices = Callable[[Taxonomy], Sequence[str]]
-
-
-@dataclass(frozen=True)
-class Column:
-    """One table column: its header, the view-model field and its editor."""
-
-    title: str
-    field: str
-    #: ``label`` (read-only), ``text``, ``combo``, ``spin``, ``check``, ``thumb``.
-    kind: str = "text"
-    choices: Optional[Choices] = None
-    #: ``thumb`` columns only: the step offset of the frame to show.
-    offset: int = 0
+#: How many targets a compound row is split into unless the annotator says else.
+DEFAULT_SPLIT = 2
 
 
-def _optional(values: Sequence[str]) -> Choices:
-    """A combo whose first entry clears the field."""
-    return lambda tax: [BLANK, *values]
-
-
-STEP_COLUMNS: tuple[Column, ...] = (
-    Column("Step", "number", "label"),
-    Column("Type", "step_type", "combo", lambda tax: STEP_TYPES),
-    Column("Raw name", "raw_name", "label"),
-    Column("Before (k-1)", BLANK, "thumb", offset=-1),
-    Column("After (k)", BLANK, "thumb", offset=0),
-    Column("Target", "target", "text"),
-    Column("Verb", "verb", "combo", lambda tax: sorted(tax.verbs)),
-    Column("Tool", "tool", "combo", lambda tax: list(tax.tools)),
-    Column("Direction", "direction", "combo", lambda tax: list(tax.directions)),
-    Column("Result", "result", "combo", lambda tax: list(RESULTS)),
-    Column("Failure reason", "failure_reason", "combo", _optional(FAILURE_REASONS)),
-    Column("Difficulty", "difficulty", "spin"),
-    Column("Notes", "notes", "text"),
-    Column("Issues", BLANK, "label"),
-)
-
-INSTANCE_COLUMNS: tuple[Column, ...] = (
-    Column("Key", "key", "label"),
-    Column("Class", "cls", "label"),
-    Column("Parent", "parent", "text"),
-    Column("Attached", "attached", "check"),
-    Column("Mounted on", "mounted_on", "text"),
-    Column("Fastens", "fastens", "text"),
-    Column("Socket host", "socket_host", "text"),
-    Column("Cable", "cable", "text"),
-    Column("Head", "head", "combo", _optional(SCREW_HEADS)),
-    Column("Captive", "captive", "check"),
-    Column("Group order", "group_order", "combo", lambda tax: list(GROUP_ORDERS)),
-    Column("Removal direction", "removal_direction", "combo",
-           lambda tax: [BLANK, *tax.directions]),
-    Column("Raw names", "raw_names", "label"),
-)
-
-_EDITABLE = frozenset({"text", "combo", "spin"})
-
-
-# --------------------------------------------------------------------------- #
-# delegates
-# --------------------------------------------------------------------------- #
-class ComboDelegate(QStyledItemDelegate):
-    """Drop-down editor over a fixed vocabulary (verbs, tools, directions...)."""
-
-    def __init__(self, values: Sequence[str], parent: QObject | None = None) -> None:
-        super().__init__(parent)
-        self.values = list(values)
-
-    def createEditor(self, parent, option, index) -> QComboBox:  # noqa: N802 - Qt API
-        editor = QComboBox(parent)
-        editor.addItems(self.values)
-        return editor
-
-    def setEditorData(self, editor: QComboBox, index) -> None:  # noqa: N802 - Qt API
-        text = str(index.data(Qt.EditRole) or BLANK)
-        position = editor.findText(text)
-        editor.setCurrentIndex(position if position >= 0 else 0)
-
-    def setModelData(self, editor: QComboBox, model, index) -> None:  # noqa: N802 - Qt API
-        model.setData(index, editor.currentText(), Qt.EditRole)
-
-
-class DifficultyDelegate(QStyledItemDelegate):
-    """Spin box for ``Action.difficulty``; ``0`` means "not recorded"."""
-
-    def createEditor(self, parent, option, index) -> QSpinBox:  # noqa: N802 - Qt API
-        editor = QSpinBox(parent)
-        editor.setRange(0, DIFFICULTY_MAX)
-        editor.setSpecialValueText(BLANK)
-        return editor
-
-    def setEditorData(self, editor: QSpinBox, index) -> None:  # noqa: N802 - Qt API
-        editor.setValue(int(index.data(Qt.EditRole) or 0))
-
-    def setModelData(self, editor: QSpinBox, model, index) -> None:  # noqa: N802 - Qt API
-        value = editor.value()
-        model.setData(index, value if value else None, Qt.EditRole)
-
-
-# --------------------------------------------------------------------------- #
-# models
-# --------------------------------------------------------------------------- #
-class _TableModel(QAbstractTableModel):
-    """Shared plumbing: columns, headers, header data and the error channel."""
-
-    #: Emitted with the message of an edit :class:`EditError` refused.
-    sigError = Signal(str)
-
-    columns: tuple[Column, ...] = ()
-
-    def __init__(self, data: StepTableData, parent: QObject | None = None) -> None:
-        super().__init__(parent)
-        self.data_model = data
-
-    def set_data(self, data: StepTableData) -> None:
-        """Swap in a freshly loaded session (reload / desktop change)."""
-        self.beginResetModel()
-        self.data_model = data
-        self.endResetModel()
-
-    def columnCount(self, parent=QModelIndex()) -> int:  # noqa: N802 - Qt API
-        return 0 if parent.isValid() else len(self.columns)
-
-    def headerData(self, section, orientation, role=Qt.DisplayRole):  # noqa: N802 - Qt API
-        if role != Qt.DisplayRole or orientation != Qt.Horizontal:
-            return None
-        return self.columns[section].title
-
-    def _refuse(self, error: EditError) -> bool:
-        self.sigError.emit(str(error))
-        return False
-
-    def _changed(self, index: QModelIndex) -> bool:
-        """Repaint the edited row (its issues column moves with it)."""
-        row = index.row()
-        self.dataChanged.emit(self.index(row, 0), self.index(row, self.columnCount() - 1))
-        return True
-
-
-class StepTableModel(_TableModel):
-    """One row per logical step; edits go through :class:`StepTableData`."""
-
-    columns = STEP_COLUMNS
-
-    def __init__(
-        self,
-        data: StepTableData,
-        cache_dir: str | Path,
-        parent: QObject | None = None,
-    ) -> None:
-        super().__init__(data, parent)
-        self.cache_dir = Path(cache_dir)
-        self._thumbs: dict[tuple[int, int], Optional[QPixmap]] = {}
-
-    def set_data(self, data: StepTableData) -> None:
-        self._thumbs.clear()
-        super().set_data(data)
-
-    def rowCount(self, parent=QModelIndex()) -> int:  # noqa: N802 - Qt API
-        return 0 if parent.isValid() else len(self.data_model.rows)
-
-    def flags(self, index: QModelIndex) -> Qt.ItemFlags:
-        base = Qt.ItemIsEnabled | Qt.ItemIsSelectable
-        if not index.isValid():
-            return Qt.NoItemFlags
-        if self.columns[index.column()].kind in _EDITABLE:
-            return base | Qt.ItemIsEditable
-        return base
-
-    def data(self, index: QModelIndex, role=Qt.DisplayRole):
-        if not index.isValid():
-            return None
-        row = self.data_model.rows[index.row()]
-        column = self.columns[index.column()]
-        if role == Qt.DecorationRole:
-            return self._thumb(row.number + column.offset) if column.kind == "thumb" else None
-        if role == Qt.ToolTipRole:
-            return "\n".join(row.issues) or None
-        if role in (Qt.DisplayRole, Qt.EditRole):
-            return self._value(row, column, decorate=role == Qt.DisplayRole)
-        return None
-
-    def setData(self, index: QModelIndex, value, role=Qt.EditRole) -> bool:  # noqa: N802
-        if not index.isValid() or role != Qt.EditRole:
-            return False
-        column = self.columns[index.column()]
-        if column.kind not in _EDITABLE:
-            return False
-        try:
-            self.data_model.apply_edit(
-                self.data_model.rows[index.row()].number, column.field, value
-            )
-        except EditError as error:
-            return self._refuse(error)
-        return self._changed(index)
-
-    # -- rendering --------------------------------------------------------- #
-    @staticmethod
-    def _value(row, column: Column, decorate: bool = False) -> Any:
-        """The cell's value; the table edits the row's *first* action.
-
-        A row that holds several actions (a split compound row) shows how many
-        more there are behind the first one, but only in the display text --
-        the editor must still see the plain stored value.
-        """
-        if column.title == "Issues":
-            return "; ".join(row.issues)
-        if column.kind == "thumb":
-            return None
-        if column.field in ("number", "step_type", "raw_name", "notes"):
-            return getattr(row, column.field)
-        action = row.action(0)
-        if action is None:
-            return None
-        value = getattr(action, column.field)
-        if decorate and column.field == "target" and len(row.actions) > 1:
-            return f"{value} (+{len(row.actions) - 1})"
-        return BLANK if value is None else value
-
-    def _thumb(self, step: int) -> Optional[QPixmap]:
-        """The cached scanner frame of ``step``, scaled and remembered."""
-        key = (self.data_model.desktop, step)
-        if key not in self._thumbs:
-            path = thumb_path(self.cache_dir, self.data_model.desktop, step, THUMB_VIEW)
-            pixmap = QPixmap(str(path)) if path is not None else QPixmap()
-            self._thumbs[key] = (
-                None
-                if pixmap.isNull()
-                else pixmap.scaled(
-                    THUMB_PX, THUMB_PX, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
-            )
-        return self._thumbs[key]
-
-
-class InstanceTableModel(_TableModel):
-    """One row per instance, with the relational attributes of spec 7.1."""
-
-    columns = INSTANCE_COLUMNS
-
-    def __init__(self, data: StepTableData, parent: QObject | None = None) -> None:
-        super().__init__(data, parent)
-        self.keys: list[str] = data.instance_keys()
-
-    def set_data(self, data: StepTableData) -> None:
-        self.beginResetModel()
-        self.data_model = data
-        self.keys = data.instance_keys()
-        self.endResetModel()
-
-    def rowCount(self, parent=QModelIndex()) -> int:  # noqa: N802 - Qt API
-        return 0 if parent.isValid() else len(self.keys)
-
-    def flags(self, index: QModelIndex) -> Qt.ItemFlags:
-        base = Qt.ItemIsEnabled | Qt.ItemIsSelectable
-        if not index.isValid():
-            return Qt.NoItemFlags
-        kind = self.columns[index.column()].kind
-        if kind == "check":
-            return base | Qt.ItemIsUserCheckable
-        if kind in _EDITABLE:
-            return base | Qt.ItemIsEditable
-        return base
-
-    def data(self, index: QModelIndex, role=Qt.DisplayRole):
-        if not index.isValid():
-            return None
-        inst = self.data_model.instances[self.keys[index.row()]]
-        column = self.columns[index.column()]
-        if role == Qt.CheckStateRole:
-            if column.kind != "check":
-                return None
-            return Qt.Checked if self._value(inst, column) else Qt.Unchecked
-        if role in (Qt.DisplayRole, Qt.EditRole):
-            return None if column.kind == "check" else self._value(inst, column)
-        return None
-
-    def setData(self, index: QModelIndex, value, role=Qt.EditRole) -> bool:  # noqa: N802
-        if not index.isValid():
-            return False
-        column = self.columns[index.column()]
-        checking = role == Qt.CheckStateRole and column.kind == "check"
-        if not checking and (role != Qt.EditRole or column.kind not in _EDITABLE):
-            return False
-        if checking:
-            value = Qt.CheckState(value) == Qt.Checked
-        try:
-            self.data_model.apply_instance_edit(self.keys[index.row()], column.field, value)
-        except EditError as error:
-            return self._refuse(error)
-        return self._changed(index)
-
-    @staticmethod
-    def _value(inst, column: Column) -> Any:
-        if column.field in ("head", "captive"):
-            return inst.attrs.get(column.field, BLANK if column.field == "head" else False)
-        value = getattr(inst, column.field)
-        if column.field == "raw_names":
-            return " | ".join(value or [])
-        return BLANK if value is None else value
-
-
-# --------------------------------------------------------------------------- #
-# panel
-# --------------------------------------------------------------------------- #
 class StepTablePanel(QWidget):
     """Stage S1: review one desktop's step table and instance table."""
 
@@ -392,8 +104,7 @@ class StepTablePanel(QWidget):
         self.issues = QListWidget(self)
         self.tabs = QTabWidget(self)
         self._build()
-        for model in (self.steps_model, self.instances_model):
-            model.sigError.connect(self._show_error)
+        self._connect()
         self._refresh_issues()
 
     # -- construction ------------------------------------------------------ #
@@ -402,8 +113,6 @@ class StepTablePanel(QWidget):
         self.tabs.addTab(self.instances_view, "Instances")
         self.apply_button = QPushButton("Apply", self)
         self.revert_button = QPushButton("Revert", self)
-        self.apply_button.clicked.connect(self.apply)
-        self.revert_button.clicked.connect(self.revert)
         self.status = QLabel(BLANK, self)
         self.status.setWordWrap(True)
 
@@ -418,8 +127,23 @@ class StepTablePanel(QWidget):
         layout.addWidget(self.issues, 1)
         layout.addLayout(buttons)
 
+    def _connect(self) -> None:
+        self.apply_button.clicked.connect(self.apply)
+        self.revert_button.clicked.connect(self.revert)
+        for model in (self.steps_model, self.instances_model):
+            model.sigError.connect(self._show_error)
+            # Any accepted edit can create or settle an open question.
+            model.dataChanged.connect(self._on_data_changed)
+            model.modelReset.connect(self._refresh_issues)
+        for view, handler in (
+            (self.steps_view, self._steps_context_menu),
+            (self.instances_view, self._instances_context_menu),
+        ):
+            view.setContextMenuPolicy(Qt.CustomContextMenu)
+            view.customContextMenuRequested.connect(handler)
+
     def _table(
-        self, model: _TableModel, columns: Sequence[Column], row_height: int = 0
+        self, model, columns: Sequence[Column], row_height: int = 0
     ) -> QTableView:
         view = QTableView(self)
         view.setModel(model)
@@ -442,7 +166,7 @@ class StepTablePanel(QWidget):
             return DifficultyDelegate(parent)
         return None
 
-    # -- actions ----------------------------------------------------------- #
+    # -- loading ----------------------------------------------------------- #
     def set_desktop(self, desktop: int) -> None:
         """Load another desktop (or reload this one), dropping unsaved edits."""
         self.desktop = desktop
@@ -457,8 +181,16 @@ class StepTablePanel(QWidget):
         self.status.setText("Reverted to the stored step table.")
 
     def apply(self) -> None:
-        """Write the session back, recompile the auto events and report."""
-        messages = self.data.save(self.db)
+        """Write the session back, recompile the auto events and report.
+
+        The save is one transaction, so a failure leaves the database as it
+        was; the reason lands in the status line instead of escaping into Qt.
+        """
+        try:
+            messages = self.data.save(self.db)
+        except Exception as error:  # a failed save must not take the panel down
+            self._show_error(f"could not save D{self.desktop:02d}: {error}")
+            return
         self._refresh_issues()
         self.status.setText(
             f"Saved D{self.desktop:02d}: {len(self.data.issues)} open question(s), "
@@ -466,18 +198,116 @@ class StepTablePanel(QWidget):
         )
         self.sigSaved.emit(self.desktop)
 
+    # -- commands ---------------------------------------------------------- #
     def split_step(self, step: int, n: int) -> None:
         """Split a compound row into ``n`` actions/instances (spec 2.3)."""
+        self._command(lambda: self.data.split_compound(step, n),
+                      f"Split step {step} into {n} actions.")
+
+    def add_action(self, step: int) -> None:
+        """Append one more action to a step."""
+        self._command(lambda: self.data.add_action(step), f"Added an action to step {step}.")
+
+    def remove_action(self, step: int, action_idx: int) -> None:
+        """Drop one action of a step."""
+        self._command(lambda: self.data.remove_action(step, action_idx),
+                      f"Removed action {action_idx + 1} of step {step}.")
+
+    def retarget_new(self, step: int, cls: str, disc: str = BLANK, action_idx: int = 0) -> None:
+        """Point a step at a brand-new instance of ``cls``.
+
+        ``disc`` is the class's discriminator -- ``role`` for a screw, ``kind``
+        for everything else that has one -- and decides which ordinal run the
+        new key continues.
+        """
+        attrs = {}
+        if disc:
+            attrs["role" if cls == "screw" else "kind"] = disc
+        self._command(
+            lambda: self.data.change_target(step, action_idx=action_idx, cls=cls, attrs=attrs),
+            f"Retargeted step {step}.",
+        )
+
+    def delete_instance(self, key: str) -> None:
+        """Delete an instance nothing references any more."""
+        self._command(lambda: self.data.delete_instance(self.db, key), f"Deleted {key}.")
+
+    def _command(self, run, done: str) -> None:
+        """Run one structural command, then rebuild both tables and the issues."""
         try:
-            self.data.split_compound(step, n)
+            run()
         except EditError as error:
             self._show_error(str(error))
             return
-        self.steps_model.set_data(self.data)
-        self.instances_model.set_data(self.data)
+        self.steps_model.refresh_structure()
+        self.instances_model.refresh_structure()
         self._refresh_issues()
+        self.status.setText(done)
+
+    # -- context menus ----------------------------------------------------- #
+    def steps_menu(self, view_row: int) -> QMenu:
+        """The steps-table context menu for one view row (not shown yet)."""
+        menu = QMenu(self.steps_view)
+        step = self.steps_model.step_at(view_row)
+        if step is None:
+            return menu
+        action_idx = self.steps_model.action_at(view_row)
+        row = self.data.row(step)
+
+        menu.addAction("Add action", lambda: self.add_action(step))
+        remove = menu.addAction(
+            "Remove action", lambda: self.remove_action(step, action_idx)
+        )
+        remove.setEnabled(bool(row.actions))
+        split = menu.addAction("Split compound into N...", lambda: self._prompt_split(step))
+        split.setEnabled(len(row.actions) == 1)
+        menu.addAction(
+            "Retarget to new instance...", lambda: self._prompt_retarget(step, action_idx)
+        )
+        return menu
+
+    def instances_menu(self, view_row: int) -> QMenu:
+        """The instances-table context menu for one view row (not shown yet)."""
+        menu = QMenu(self.instances_view)
+        key = self.instances_model.key_at(view_row)
+        if key is not None:
+            menu.addAction(f"Delete {key}", lambda: self.delete_instance(key))
+        return menu
+
+    def _steps_context_menu(self, pos) -> None:
+        menu = self.steps_menu(self.steps_view.indexAt(pos).row())
+        if not menu.isEmpty():
+            menu.exec(self.steps_view.viewport().mapToGlobal(pos))
+
+    def _instances_context_menu(self, pos) -> None:
+        menu = self.instances_menu(self.instances_view.indexAt(pos).row())
+        if not menu.isEmpty():
+            menu.exec(self.instances_view.viewport().mapToGlobal(pos))
+
+    def _prompt_split(self, step: int) -> None:
+        count, ok = QInputDialog.getInt(
+            self, "Split compound row", f"How many targets does step {step} name?",
+            DEFAULT_SPLIT, 2, 99,
+        )
+        if ok:
+            self.split_step(step, count)
+
+    def _prompt_retarget(self, step: int, action_idx: int) -> None:
+        cls, ok = QInputDialog.getItem(
+            self, "New instance", "Taxonomy class:", sorted(self.tax.classes), 0, False
+        )
+        if not ok or not cls:
+            return
+        disc, ok = QInputDialog.getText(
+            self, "New instance", "Role / kind (optional):"
+        )
+        if ok:
+            self.retarget_new(step, cls, disc.strip(), action_idx)
 
     # -- feedback ---------------------------------------------------------- #
+    def _on_data_changed(self, *_args) -> None:
+        self._refresh_issues()
+
     def _refresh_issues(self) -> None:
         self.issues.clear()
         self.issues.addItems(self.data.issues)

@@ -213,6 +213,18 @@ class Db(ConnectionMixin):
         self._upsert("instance", {"desktop": inst.desktop, "key": inst.key},
                      R.instance_data(inst), desktop=inst.desktop)
 
+    def delete_instance(self, desktop: int, key: str) -> None:
+        """Drop one instance identity row; unknown keys are a no-op.
+
+        Only the identity row goes: the caller decides what to do with the
+        geometry, events and relations that may still name the key (stage S1
+        refuses the deletion outright while any of them do).
+        """
+        with self._tx():
+            self.conn.execute(
+                'DELETE FROM instance WHERE desktop=? AND "key"=?', (desktop, key)
+            )
+
     def instances(self, desktop: int) -> dict[str, InstanceRec]:
         """All instances of one desktop keyed by ``instance_key``."""
         rows = self.conn.execute(

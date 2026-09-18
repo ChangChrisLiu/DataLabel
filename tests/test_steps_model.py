@@ -14,7 +14,7 @@ from tda.core.db import Db
 from tda.core.logs import import_log, read_desktop_csv
 from tda.core.states import events_from_actions
 from tda.core.taxonomy import load_taxonomy
-from tda.ui.steps_model import EditError, StepTableData, thumb_path
+from tda.ui.steps_model import LS_NOTE_PREFIX, EditError, StepTableData, thumb_path
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "logs"
 
@@ -285,6 +285,28 @@ def test_split_compound_rejects_a_non_compound_row(data):
         data.split_compound(3, 2)
 
 
+def test_split_compound_leaves_the_row_untouched_when_it_fails(compound, monkeypatch):
+    """A split refused half-way must not leave the row headless."""
+    before_actions = list(compound.row(5).actions)
+    before_keys = set(compound.instances)
+    calls = {"n": 0}
+    real = compound._build_instance
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise EditError("boom")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(compound, "_build_instance", flaky)
+    with pytest.raises(EditError):
+        compound.split_compound(5, 3)
+
+    assert compound.row(5).actions == before_actions
+    assert compound.row(5).step_type == "compound"
+    assert set(compound.instances) == before_keys
+
+
 def test_split_compound_rejects_fewer_than_two(compound):
     with pytest.raises(EditError):
         compound.split_compound(5, 1)
@@ -389,6 +411,98 @@ def test_issues_flag_a_failed_step_without_a_reason(data):
     assert any("failure_reason" in i for i in data.row(3).issues)
 
 
+def test_issues_flag_an_instance_no_action_targets_any_more(data):
+    data.change_target(4, target="screw.cpu_cooler.01")  # step 4 leaves .02 behind
+    assert data.orphans == ["no action references screw.cpu_cooler.02 - "
+                            "delete it or retarget a step at it"]
+    assert data.issues[-1] == data.orphans[0]
+
+
+def test_the_implicit_chassis_is_never_reported_as_an_orphan(data):
+    assert "chassis" in data.instances
+    assert not any("chassis" in text for text in data.orphans)
+
+
+# --------------------------------------------------------------------------- #
+# delete_instance
+# --------------------------------------------------------------------------- #
+def test_delete_instance_drops_an_orphan_and_clears_the_references_to_it(db, data, tax):
+    data.apply_instance_edit("screw.cpu_cooler.01", "parent", "screw.cpu_cooler.02")
+    data.change_target(4, target="screw.cpu_cooler.01")
+    data.delete_instance(db, "screw.cpu_cooler.02")
+
+    assert "screw.cpu_cooler.02" not in data.instances
+    assert data.instances["screw.cpu_cooler.01"].parent is None
+    assert data.orphans == []
+    assert "screw.cpu_cooler.02" not in db.instances(13)
+
+
+def test_delete_instance_refuses_while_a_step_still_targets_it(db, data):
+    with pytest.raises(EditError) as err:
+        data.delete_instance(db, "screw.cpu_cooler.02")
+    assert "step(s) 4" in str(err.value)
+    assert "screw.cpu_cooler.02" in data.instances
+
+
+def test_delete_instance_refuses_while_a_keyframe_references_it(db, data):
+    from tda.core.model import ShapeKeyframe, ShapePart
+
+    data.change_target(4, target="screw.cpu_cooler.01")
+    db.add_keyframe(ShapeKeyframe(None, "screw.cpu_cooler.02", 13, "oak1", 0, 9,
+                                  parts=[ShapePart("main")]))
+    with pytest.raises(EditError) as err:
+        data.delete_instance(db, "screw.cpu_cooler.02")
+    assert "oak1" in str(err.value)
+    assert "screw.cpu_cooler.02" in data.instances
+
+
+def test_delete_instance_refuses_while_a_relation_references_it(db, data):
+    data.change_target(4, target="screw.cpu_cooler.01")
+    db.add_relation(13, "fastened_by", "cpu_cooler.fan.01", "screw.cpu_cooler.02")
+    with pytest.raises(EditError) as err:
+        data.delete_instance(db, "screw.cpu_cooler.02")
+    assert "fastened_by" in str(err.value)
+
+
+def test_delete_instance_refuses_the_chassis_and_unknown_keys(db, data):
+    with pytest.raises(EditError):
+        data.delete_instance(db, "chassis")
+    with pytest.raises(EditError):
+        data.delete_instance(db, "nope.01")
+
+
+# --------------------------------------------------------------------------- #
+# notes: the imported Label Studio lines are preserved
+# --------------------------------------------------------------------------- #
+def test_ls_note_prefix_matches_the_label_studio_importer():
+    from tda.core import ls_import
+
+    assert LS_NOTE_PREFIX == ls_import.NOTES_PREFIX
+
+
+def test_notes_hide_the_imported_ls_line_from_the_editor(db, data, tax):
+    data.row(3).step.notes = "tight\nLS: difficulty=hard; target=[1]"
+    assert data.row(3).notes == "tight"
+    assert data.row(3).ls_notes == ["LS: difficulty=hard; target=[1]"]
+
+
+def test_editing_notes_preserves_the_imported_ls_line(db, data, tax):
+    data.row(3).step.notes = "tight\nLS: difficulty=hard"
+    data.apply_edit(3, "notes", "stripped head")
+    assert data.row(3).notes == "stripped head"
+    assert data.row(3).step.notes == "stripped head\nLS: difficulty=hard"
+
+    data.save(db)
+    assert StepTableData.load(db, 13, tax).row(3).ls_notes == ["LS: difficulty=hard"]
+
+
+def test_clearing_notes_keeps_the_imported_ls_line(data):
+    data.row(3).step.notes = "tight\nLS: difficulty=hard"
+    data.apply_edit(3, "notes", "")
+    assert data.row(3).notes == ""
+    assert data.row(3).step.notes == "LS: difficulty=hard"
+
+
 # --------------------------------------------------------------------------- #
 # save / reload
 # --------------------------------------------------------------------------- #
@@ -451,6 +565,31 @@ def test_save_after_split_compound_persists_the_new_instances(db, compound, tax)
     back = StepTableData.load(db, 63, tax)
     assert [a.target for a in back.row(5).actions] == keys
     assert all(k in back.instances for k in keys)
+
+
+def test_save_is_atomic(db, data, tax, monkeypatch):
+    """A failure part-way through save() must leave the database untouched."""
+    data.apply_edit(3, "tool", "PH1")
+    data.apply_edit(11, "step_type", "auxiliary")
+
+    calls = {"n": 0}
+    real = db.upsert_instance
+
+    def flaky(inst):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("disk full")
+        return real(inst)
+
+    monkeypatch.setattr(db, "upsert_instance", flaky)
+    with pytest.raises(RuntimeError):
+        data.save(db)
+
+    back = StepTableData.load(db, 13, tax)
+    assert back.row(3).actions[0].tool == "PH2"
+    assert back.row(11).step_type == "normal"
+    assert len(back.instances) == len(data.instances)
+    assert db.events(13)  # the auto log was not wiped either
 
 
 def test_reload_discards_unsaved_edits(db, data, tax):
