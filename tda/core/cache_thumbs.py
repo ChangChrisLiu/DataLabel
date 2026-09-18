@@ -19,15 +19,23 @@ thumbnail is a derivative of the *cached* frame, so building it never touches F:
 
 **Cropping matters more than scaling.**  The chassis is about a third of a
 scanner frame and less of an OAK one, and a 192 px picture of the whole bench
-tells a human nothing.  So every desktop+view gets *one* ROI, and every step of
-it is cut to that same box: a per-step crop would make the timeline jitter and
-stop the frames being comparable.  The box comes from ``roi_lookup`` (the
-annotation database, via :class:`DbRoiLookup`) when it has one, else from
-:func:`tda.core.cache.suggest_roi` measured on the desktop's reference frame -
-its first step, the fully assembled chassis and so the largest silhouette - with
-a median over a few sampled steps as the fallback.  The plan that was used is
-recorded in ``thumbs.json`` so a later run with a different ROI source rebuilds
-the tier instead of leaving half of it cut the old way.
+tells a human nothing.  The box a frame is cut with comes from ``roi_lookup``
+(the annotation database, via :class:`tda.core.cache_roi.DbRoiLookup`, which
+this module re-exports), and that lookup is asked *per frame*:
+a chassis that was re-oriented has one pose segment per orientation and each
+segment's own ``roi_json`` is the right crop for its steps.  Where the lookup
+has nothing, :func:`tda.core.cache.suggest_roi` measures **one** box for the
+whole desktop+view - on the reference frame, its first step, the assembled
+chassis and so the largest silhouette, falling back to a median over a few
+sampled steps and then to the frame's central box.  A measured box is
+deliberately *not* per frame: it would wobble from step to step and make the
+timeline jitter.  A frame the lookup has no box for falls back to that measured
+box, never to a neighbouring segment's.
+
+The steps are therefore grouped by the box they share, and ``thumbs.json``
+records those groups.  Staleness is decided per group, so adjusting one
+segment's ROI rebuilds that segment's thumbnails and leaves the rest alone,
+while a changed size or quality rebuilds the desktop.
 
 Images are read and written through ``imdecode``/``imencode`` and plain Python
 file IO, because ``cv2.imread``/``cv2.imwrite`` cannot open a non-ASCII path on
@@ -41,15 +49,14 @@ from __future__ import annotations
 import json
 import os
 import re
-import sqlite3
 import tempfile
 import time
-from typing import Any, Callable, Iterator, Optional
-from urllib.parse import quote
+from typing import Any, Iterator, Optional
 
 import cv2
 import numpy as np
 
+from tda.core.cache_roi import DbRoiLookup, RoiLookup  # re-exported: the ROI source
 from tda.core.model import FrameKey
 
 __all__ = [
@@ -63,14 +70,19 @@ DEFAULT_MAX_SIDE = 192  # a timeline row is ~120 px tall on a HiDPI screen
 DEFAULT_QUALITY = 85  # JPEG quality; 85 is visually lossless at this size
 ROI_PAD_FRAC = 0.04  # grow a chassis box by 4% of its own size before cropping
 ROI_SAMPLES = 5  # how many steps the fallback ROI is measured over
-ROI_MIN_AREA_FRAC = 0.10  # a box smaller than this is not a chassis - distrust it
+#: A measured box outside these bounds is not a chassis and is thrown away.  The
+#: floor is a **stopgap**: on a light-coloured chassis (D64) the dark-object
+#: stage of :func:`~tda.core.cache.suggest_roi` latches onto the motherboard and
+#: returns 13% of the frame with every sampled step agreeing, so the median
+#: cannot catch it.  Over the 66 real scanner desktops the next smallest box is
+#: 30% and the median 42%, so 20% rejects exactly that one failure and degrades
+#: it to the central-70% crop.  The real fix is teaching ``suggest_roi`` about
+#: light chassis; until then a wrong crop is worse than none.
+ROI_MIN_AREA_FRAC = 0.20
 ROI_MAX_AREA_FRAC = 0.95  # ... and one this big is not a crop worth making
 
 _DESKTOP_RE = re.compile(r"^D(\d+)$")
-
-#: What a ``roi_lookup`` is: a frame in, its chassis box ``(x0, y0, x1, y1)``
-#: in *original image pixels* out, or ``None`` for "nothing recorded".
-RoiLookup = Callable[[FrameKey], Optional[tuple[int, int, int, int]]]
+_UNSET = object()  # "the automatic box has not been measured yet", which None is not
 
 
 def _norm(path) -> str:
@@ -206,12 +218,15 @@ def _auto_box(cache_dir, keys: list[FrameKey], view: str) -> Optional[list[int]]
     """One ROI for the whole desktop+view, measured on its own frames.
 
     The reference frame is the first step - the chassis still assembled, so the
-    largest silhouette of the run.  If that frame cannot be read, or its box is
-    implausible (a detector that latched onto a cable or onto the whole bed), the
-    component-wise median over the sampled steps is used instead; if that is
-    implausible too, there is no trustworthy crop and the whole frame wins.
+    largest silhouette of the run.  If that frame's box is implausible (a
+    detector that latched onto the motherboard of a light-coloured chassis, or
+    onto the whole bed), the component-wise median over the sampled steps is
+    tried, and then the frame's central box - which is what ``suggest_roi``
+    itself falls back to when it finds no chassis at all, and still a better
+    timeline picture than the whole bench.  ``None`` only when not one sampled
+    frame could be read.
     """
-    from tda.core.cache import VIEW_EXT, cache_path  # late: see the module docstring
+    from tda.core.cache import VIEW_EXT, _central_box, cache_path  # late: see the docstring
 
     ext = VIEW_EXT.get(view, "png")
     sampled = _sample(keys)
@@ -224,28 +239,59 @@ def _auto_box(cache_dir, keys: list[FrameKey], view: str) -> Optional[list[int]]
         return [int(v) for v in box]
     median = np.median(np.array([m[0] for m in measured], dtype=float), axis=0)
     box = tuple(int(round(v)) for v in median)
-    return [int(v) for v in box] if _plausible(box, width, height) else None
+    if not _plausible(box, width, height):
+        box = _central_box(width, height)
+    return [int(v) for v in box]
 
 
-def _plan_roi(cache_dir, keys: list[FrameKey], view: str,
-              roi_lookup: Optional[RoiLookup], auto_roi: bool) -> dict:
-    """Decide the one box this desktop+view is cut with, and where it came from.
+def _plan_groups(cache_dir, keys: list[FrameKey], view: str,
+                 roi_lookup: Optional[RoiLookup], auto_roi: bool) -> list[dict]:
+    """Group the steps of one desktop+view by the ROI each is cut with.
 
-    ``roi_lookup`` wins wherever it has an answer: it is a human's ROI, and it is
-    consulted on the sampled steps rather than per frame so that the whole run
-    keeps one box.  Otherwise :func:`_auto_box` measures one, and if even that
-    fails the thumbnails are whole frames (``source="none"``).
+    ``roi_lookup`` is asked per frame, because a re-oriented chassis has one pose
+    segment - and one ROI - per orientation; a lookup that can name the segment
+    (:meth:`DbRoiLookup.segment_of`) makes the group survive a later adjustment
+    of that segment's box, and a plain callable groups by the box itself.  Every
+    frame it has nothing for shares the *one* box :func:`_auto_box` measures for
+    the whole desktop+view, which is computed only if some frame needs it.
+
+    Each group is ``{"source", "segment", "steps": [first, last], "box"}`` with
+    ``_steps`` carrying the actual step numbers for the caller.
     """
-    if roi_lookup is not None:
-        for key in _sample(keys):
-            box = roi_lookup(key)
-            if box:
-                return {"source": "db", "box": [int(v) for v in box]}
-    if auto_roi:
-        box = _auto_box(cache_dir, keys, view)
-        if box:
-            return {"source": "auto", "box": box}
-    return {"source": "none", "box": None}
+    segment_of = getattr(roi_lookup, "segment_of", None)
+    groups: dict[tuple, dict] = {}
+    auto: Any = _UNSET
+
+    for key in keys:
+        box = roi_lookup(key) if roi_lookup is not None else None
+        segment = None
+        if box is not None:
+            source, box = "db", [int(v) for v in box]
+            segment = segment_of(key) if segment_of is not None else None
+        else:
+            if auto is _UNSET:
+                auto = _auto_box(cache_dir, keys, view) if auto_roi else None
+            source, box = ("auto" if auto else "none"), auto
+        identity = segment if segment is not None else (tuple(box) if box else None)
+        group = groups.setdefault((source, identity), {"source": source, "segment": segment,
+                                                       "box": box, "_steps": []})
+        group["_steps"].append(key.step)
+
+    for group in groups.values():
+        group["steps"] = [group["_steps"][0], group["_steps"][-1]]
+    return list(groups.values())
+
+
+def _group_key(group: dict) -> tuple:
+    """What identifies a group across runs: its source and its segment or box."""
+    box = group.get("box")
+    segment = group.get("segment")
+    return (group.get("source"), segment if segment is not None else (tuple(box) if box else None))
+
+
+def _recorded(group: dict) -> dict:
+    """The part of a group that goes into ``thumbs.json``."""
+    return {k: group[k] for k in ("source", "segment", "steps", "box")}
 
 
 def _load_sidecar(path: str) -> dict:
@@ -258,12 +304,28 @@ def _load_sidecar(path: str) -> dict:
         return {}
 
 
+def _recorded_boxes(record: dict) -> dict[tuple, Any]:
+    """``{group key: box}`` of a recorded plan; empty for the older one-box format.
+
+    An unreadable, missing or older-format record yields nothing, so every group
+    counts as changed and the desktop is rebuilt rather than half-trusted.
+    """
+    groups = record.get("groups")
+    if not isinstance(groups, list):
+        return {}
+    return {_group_key(g): g.get("box") for g in groups if isinstance(g, dict)}
+
+
 def _write_sidecar(path: str, record: dict) -> None:
     """Record the plan next to the thumbnails it produced (atomically)."""
     tmp = f"{path}.part"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(record, fh, indent=1, ensure_ascii=False)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=1, ensure_ascii=False)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 # ---------------------------------------------------------------------------
@@ -298,23 +360,22 @@ def build_thumbs(cache_dir, views=("scan",), desktops=None, max_side: int = DEFA
 
     For every desktop of ``views`` (all of them unless ``desktops`` names some)
     the steps listed in ``<cache>/<view>/D<nn>/manifest.json`` are read from the
-    cache, cropped to the desktop's single ROI (see :func:`_plan_roi`; switch the
-    measured one off with ``auto_roi=False``), scaled so the longest side is
-    ``max_side`` (``INTER_AREA``, never upscaled) and written to
-    :func:`thumb_path`.
+    cache, cropped to the box :func:`_plan_groups` gives them (``roi_lookup`` per
+    frame, else one measured box per desktop+view, which ``auto_roi=False``
+    switches off), scaled so the longest side is ``max_side`` (``INTER_AREA``,
+    never upscaled) and written to :func:`thumb_path`.
 
     Re-runs are cheap: a thumbnail at least as new as its source is skipped
-    unless ``force`` is set *or* the desktop's recorded plan no longer matches
-    the one this run computed - a changed ROI, ROI source, size or quality
-    rebuilds that desktop, which is how a later ``--db`` run replaces thumbnails
-    cut with the automatic box.  Nothing outside ``<cache_dir>/thumbs`` is ever
-    written, and one unreadable frame cannot stop the run: it is counted and
-    described instead.
+    unless ``force`` is set, the desktop's ``max_side``/``quality`` changed, or
+    *its own group's* box changed.  Adjusting one pose segment's ROI therefore
+    rebuilds that segment's steps and leaves the rest of the desktop alone.
+    Nothing outside ``<cache_dir>/thumbs`` is ever written, and one unreadable
+    frame cannot stop the run: it is counted and described instead.
 
     Returns ``written``, ``skipped``, ``missing_source`` (a step in the manifest
     whose cached frame is not on disk), ``failed``, the matching ``failures``
-    list of ``{"path", "error"}``, the ``rois`` that were used (one record per
-    desktop+view), ``bytes`` written and ``elapsed_s``.
+    list of ``{"path", "error"}``, the ``rois`` that were used (``{"view",
+    "desktop", "groups"}`` per desktop+view), ``bytes`` written and ``elapsed_s``.
     """
     from tda.core.cache import VIEW_EXT, cache_path  # late: see the module docstring
 
@@ -327,146 +388,46 @@ def build_thumbs(cache_dir, views=("scan",), desktops=None, max_side: int = DEFA
     for view in views:
         ext = VIEW_EXT.get(view, "png")
         for desktop, keys in _cached_desktops(f"{root}/{view}", view, wanted):
-            plan = _plan_roi(cache_dir, keys, view, roi_lookup, auto_roi)
-            stats["rois"].append({"view": view, "desktop": desktop, **plan})
-            record = {**plan, "max_side": int(max_side), "quality": int(quality)}
+            groups = _plan_groups(cache_dir, keys, view, roi_lookup, auto_roi)
+            stats["rois"].append({"view": view, "desktop": desktop,
+                                  "groups": [_recorded(g) for g in groups]})
             sidecar = f"{root}/{THUMBS_DIRNAME}/{view}/D{desktop:02d}/{SIDECAR_NAME}"
-            stale = {k: _load_sidecar(sidecar).get(k) for k in record} != record
+            stored = _load_sidecar(sidecar)
+            params = (int(max_side), int(quality))
+            rebuild_all = force or (stored.get("max_side"), stored.get("quality")) != params
+            boxes = _recorded_boxes(stored)
             written_here = 0
 
-            for key in keys:
-                src, dest = cache_path(cache_dir, key, ext), thumb_path(cache_dir, key)
-                try:
-                    if not os.path.isfile(src):
-                        stats["missing_source"] += 1
-                        continue
-                    if not (force or stale) and _up_to_date(src, dest):
-                        stats["skipped"] += 1
-                        continue
-                    _write_jpeg(_thumbnail(_read_image(src), max_side, plan["box"]), dest, quality)
-                    written_here += 1
-                    stats["bytes"] += os.path.getsize(dest)
-                except Exception as exc:  # one bad frame must not stop the batch
-                    stats["failed"] += 1
-                    stats["failures"].append(
-                        {"path": src, "error": f"{type(exc).__name__}: {exc}"})
+            for group in groups:
+                # _UNSET, not None: "nothing recorded" is not "recorded as uncropped"
+                stale = rebuild_all or boxes.get(_group_key(group), _UNSET) != group["box"]
+                for step in group["_steps"]:
+                    key = FrameKey(desktop, step, view)
+                    src, dest = cache_path(cache_dir, key, ext), thumb_path(cache_dir, key)
+                    try:
+                        if not os.path.isfile(src):
+                            stats["missing_source"] += 1
+                            continue
+                        if not stale and _up_to_date(src, dest):
+                            stats["skipped"] += 1
+                            continue
+                        img = _thumbnail(_read_image(src), max_side, group["box"])
+                        _write_jpeg(img, dest, quality)
+                        written_here += 1
+                        stats["bytes"] += os.path.getsize(dest)
+                    except Exception as exc:  # one bad frame must not stop the batch
+                        stats["failed"] += 1
+                        stats["failures"].append(
+                            {"path": src, "error": f"{type(exc).__name__}: {exc}"})
 
             stats["written"] += written_here
             if written_here:  # only a tier that exists gets a plan recorded
-                _write_sidecar(sidecar, {**record, "built_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                _write_sidecar(sidecar, {"groups": [_recorded(g) for g in groups],
+                                         "max_side": params[0], "quality": params[1],
+                                         "built_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
 
     stats["elapsed_s"] = round(time.perf_counter() - started, 2)
     return stats
-
-
-# ---------------------------------------------------------------------------
-# ROI from the annotation database
-# ---------------------------------------------------------------------------
-def _as_box(raw) -> Optional[tuple[int, int, int, int]]:
-    """Parse a stored ROI into ``(x0, y0, x1, y1)``; ``None`` when it is not one.
-
-    Accepts the shapes :func:`tda.core.export.coco.roi_of` accepts:
-    ``[x0, y0, x1, y1]`` and a mapping with ``x0/y0/x1/y1`` or ``x/y/w/h``.
-    """
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except ValueError:
-            return None
-    if isinstance(raw, (list, tuple)) and len(raw) == 4:
-        x0, y0, x1, y1 = (int(round(float(v))) for v in raw)
-    elif isinstance(raw, dict) and {"x0", "y0", "x1", "y1"} <= set(raw):
-        x0, y0, x1, y1 = (int(raw[n]) for n in ("x0", "y0", "x1", "y1"))
-    elif isinstance(raw, dict) and {"x", "y", "w", "h"} <= set(raw):
-        x0, y0 = int(raw["x"]), int(raw["y"])
-        x1, y1 = x0 + int(raw["w"]), y0 + int(raw["h"])
-    else:
-        return None
-    return (x0, y0, x1, y1) if x1 > x0 and y1 > y0 else None
-
-
-class DbRoiLookup:
-    """``roi_lookup`` reading ``pose_segment.roi_json`` from a read-only database.
-
-    Which segment a frame is in is decided exactly as
-    :meth:`tda.core.db.Db.pose_segment_for` decides it: the frame's own
-    ``frame.pose_segment`` wins, and only when that is NULL (or names a segment
-    that no longer exists) does the ``[start_step, end_step]`` range decide.  A
-    frame outside every segment, or in one without a ROI, gets ``None`` and
-    therefore an uncropped thumbnail.
-
-    The file is opened through a ``file:...?mode=ro`` URI and *not* through
-    :class:`~tda.core.db.Db`: the schema bootstrap would create, migrate and
-    re-stamp it, and a database written by a newer build would be refused
-    outright - none of which a thumbnail batch may do to the annotator's working
-    copy.  Read-only here means the database itself is untouched (same bytes,
-    same ``schema_version``, same tables); sqlite may still create the ``-wal``
-    and ``-shm`` side files of a WAL database, which is harmless.  A
-    ``<db>.lock`` left by a running annotator is reported through ``notify`` and
-    otherwise ignored - reading alongside it is safe.
-
-    Segments are read once per ``(desktop, view)``, so a whole desktop costs two
-    queries.  Use it as a context manager, or call :meth:`close` when done.
-    """
-
-    def __init__(self, db_path, notify: Callable[[str], None] = print) -> None:
-        self.path = _norm(db_path)
-        if os.path.exists(f"{self.path}.lock"):
-            notify(f"note: {self.path}.lock exists (the annotator may be open); reading anyway")
-        self.conn = sqlite3.connect(self._read_only_uri(db_path), uri=True)
-        self.conn.row_factory = sqlite3.Row
-        self._segments: dict[tuple[int, str], dict[int, tuple[int, int, Any]]] = {}
-        self._overrides: dict[tuple[int, str], dict[int, int]] = {}
-
-    @staticmethod
-    def _read_only_uri(db_path) -> str:
-        """``file:`` URI of ``db_path`` that sqlite may only read."""
-        absolute = _norm(os.path.abspath(str(db_path)))
-        return f"file:{quote(absolute, safe='/:')}?mode=ro"
-
-    def __call__(self, key: FrameKey) -> Optional[tuple[int, int, int, int]]:
-        segments = self._segments_of(key.desktop, key.view)
-        seg = self._overrides_of(key.desktop, key.view).get(key.step)
-        chosen = segments.get(seg) if seg is not None else None
-        if chosen is None:
-            chosen = next((s for s in segments.values() if s[0] <= key.step <= s[1]), None)
-        return _as_box(chosen[2]) if chosen is not None else None
-
-    def _segments_of(self, desktop: int, view: str) -> dict[int, tuple[int, int, Any]]:
-        """``{seg: (start, end, roi_json)}`` of one view, read at most once."""
-        cached = self._segments.get((desktop, view))
-        if cached is None:
-            rows = self.conn.execute(
-                "SELECT seg, start_step, end_step, roi_json FROM pose_segment "
-                "WHERE desktop=? AND view=? AND start_step IS NOT NULL "
-                "AND end_step IS NOT NULL ORDER BY seg", (desktop, view)).fetchall()
-            cached = {int(r["seg"]): (int(r["start_step"]), int(r["end_step"]), r["roi_json"])
-                      for r in rows}
-            self._segments[(desktop, view)] = cached
-        return cached
-
-    def _overrides_of(self, desktop: int, view: str) -> dict[int, int]:
-        """``{step: seg}`` for the frames that name a segment themselves."""
-        cached = self._overrides.get((desktop, view))
-        if cached is None:
-            try:
-                rows = self.conn.execute(
-                    "SELECT step, pose_segment FROM frame WHERE desktop=? AND view=? "
-                    "AND pose_segment IS NOT NULL", (desktop, view)).fetchall()
-            except sqlite3.Error:  # a database without a frame table: ranges only
-                rows = []
-            cached = {int(r["step"]): int(r["pose_segment"]) for r in rows}
-            self._overrides[(desktop, view)] = cached
-        return cached
-
-    def close(self) -> None:
-        self.conn.close()
-
-    def __enter__(self) -> "DbRoiLookup":
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
 
 
 # ---------------------------------------------------------------------------
@@ -515,9 +476,10 @@ def run_thumb_cli(args, cache_dir, views, desktops, emit=None) -> int:
                              max_side=args.thumb_side, quality=args.thumb_quality,
                              force=args.force_thumbs, roi_lookup=lookup,
                              auto_roi=args.auto_roi)
-        sources: dict[str, int] = {}
+        sources: dict[str, int] = {}  # how many desktop step-ranges each source cut
         for roi in stats["rois"]:
-            sources[roi["source"]] = sources.get(roi["source"], 0) + 1
+            for group in roi["groups"]:
+                sources[group["source"]] = sources.get(group["source"], 0) + 1
         say(f"[{time.strftime('%H:%M:%S')}] thumbs written={stats['written']} "
             f"skipped={stats['skipped']} missing_source={stats['missing_source']} "
             f"failed={stats['failed']} MB={stats['bytes'] / 1e6:.1f} side={args.thumb_side} "

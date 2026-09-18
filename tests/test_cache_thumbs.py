@@ -29,6 +29,7 @@ from tda.core.model import FrameKey
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = REPO_ROOT / "tda" / "core" / "schema.sql"
 RED_BOX = (600, 100, 800, 300)  # the "chassis" of the synthetic 1000x1000 frame
+GREEN_BOX = (100, 600, 300, 800)  # ... and where it sits after a reorient
 CHASSIS = (300, 250, 700, 800)  # a dark chassis suggest_roi() really finds
 
 
@@ -75,9 +76,27 @@ def _scan_frame(chassis, size: int = 1000, tape=(120, 880), band: int = 30) -> n
     return img
 
 
+def _two_box_frame(size: int = 1000) -> np.ndarray:
+    """A frame with a red patch and a green one, to tell two ROIs apart."""
+    img = np.full((size, size, 3), 120, np.uint8)
+    img[RED_BOX[1]:RED_BOX[3], RED_BOX[0]:RED_BOX[2]] = (0, 0, 220)
+    img[GREEN_BOX[1]:GREEN_BOX[3], GREEN_BOX[0]:GREEN_BOX[2]] = (0, 200, 0)
+    return img
+
+
 def _red_fraction(img: np.ndarray) -> float:
     """Fraction of pixels that survived JPEG as clearly red."""
     return float(((img[:, :, 2] > 150) & (img[:, :, 0] < 100)).mean())
+
+
+def _green_fraction(img: np.ndarray) -> float:
+    """Fraction of pixels that survived JPEG as clearly green."""
+    return float(((img[:, :, 1] > 130) & (img[:, :, 2] < 110)).mean())
+
+
+def _groups(stats: dict, index: int = 0) -> list[dict]:
+    """The ROI groups one desktop+view was cut with."""
+    return stats["rois"][index]["groups"]
 
 
 def _dark_fraction(img: np.ndarray) -> float:
@@ -133,18 +152,34 @@ def _age(path, seconds: float) -> int:
 
 
 def _make_db(path: str, *, version: int = 2, desktop: int = 7, view: str = "scan",
-             roi=RED_BOX, start: int = 1, end: int = 50) -> None:
-    """A WAL database (like the real one) with one pose segment carrying a ROI."""
+             roi=RED_BOX, start: int = 1, end: int = 50, segments=None) -> None:
+    """A WAL database (like the real one) with pose segments carrying ROIs.
+
+    ``segments`` is ``[(seg, start_step, end_step, roi or None), ...]``; without
+    it one segment 0 covering ``start..end`` with ``roi`` is written.
+    """
+    rows = segments if segments is not None else [(0, start, end, roi)]
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     conn.execute("INSERT INTO desktop(id) VALUES(?)", (desktop,))
-    conn.execute(
-        "INSERT INTO pose_segment(desktop, view, seg, start_step, end_step, ref_step, roi_json)"
-        " VALUES(?,?,?,?,?,?,?)",
-        (desktop, view, 0, start, end, start, json.dumps(list(roi))),
-    )
+    for seg, first, last, box in rows:
+        conn.execute(
+            "INSERT INTO pose_segment(desktop, view, seg, start_step, end_step, ref_step,"
+            " roi_json) VALUES(?,?,?,?,?,?,?)",
+            (desktop, view, seg, first, last, first,
+             None if box is None else json.dumps(list(box))),
+        )
     conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (str(version),))
+    conn.commit()
+    conn.close()
+
+
+def _set_roi(path: str, seg: int, roi, desktop: int = 7, view: str = "scan") -> None:
+    """Change one segment's ROI, the way the annotator would."""
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE pose_segment SET roi_json=? WHERE desktop=? AND view=? AND seg=?",
+                 (None if roi is None else json.dumps(list(roi)), desktop, view, seg))
     conn.commit()
     conn.close()
 
@@ -279,7 +314,8 @@ def test_build_thumbs_uses_one_stable_auto_roi_for_every_step_of_a_desktop(tmp_p
 
     stats = build_thumbs(cache)
 
-    assert stats["rois"] == [{"view": "scan", "desktop": 7, "source": "auto", "box": list(box)}]
+    assert _groups(stats) == [{"source": "auto", "segment": None, "steps": [1, 2],
+                               "box": list(box)}]
     for step, img in ((1, first), (2, later)):
         got = _imread(thumb_path(cache, FrameKey(7, step, "scan")))
         assert _close(got, _reference_thumb(img, box))  # the reference box, not their own
@@ -291,8 +327,9 @@ def test_build_thumbs_prefers_the_looked_up_roi_over_the_automatic_one(tmp_path)
 
     stats = build_thumbs(cache, roi_lookup=lambda k: RED_BOX)
 
-    assert stats["rois"] == [{"view": "scan", "desktop": 7, "source": "db", "box": list(RED_BOX)}]
-    assert _sidecar(cache)["source"] == "db"
+    assert _groups(stats) == [{"source": "db", "segment": None, "steps": [1, 1],
+                               "box": list(RED_BOX)}]
+    assert _sidecar(cache)["groups"] == _groups(stats)
 
 
 def test_build_thumbs_without_auto_roi_keeps_the_whole_frame(tmp_path):
@@ -300,7 +337,7 @@ def test_build_thumbs_without_auto_roi_keeps_the_whole_frame(tmp_path):
 
     stats = build_thumbs(cache, auto_roi=False, roi_lookup=lambda k: None)
 
-    assert stats["rois"] == [{"view": "scan", "desktop": 7, "source": "none", "box": None}]
+    assert _groups(stats) == [{"source": "none", "segment": None, "steps": [1, 1], "box": None}]
     assert _close(_imread(thumb_path(cache, FrameKey(7, 1, "scan"))),
                   _reference_thumb(_scan_frame(CHASSIS), (0, 0, 1000, 1000)))
 
@@ -312,8 +349,22 @@ def test_build_thumbs_falls_back_to_the_whole_frame_when_no_roi_can_be_measured(
 
     stats = build_thumbs(cache)
 
-    assert stats["rois"] == [{"view": "scan", "desktop": 7, "source": "none", "box": None}]
+    assert _groups(stats) == [{"source": "none", "segment": None, "steps": [1, 1], "box": None}]
     assert (stats["written"], stats["failed"]) == (0, 1)
+
+
+def test_build_thumbs_degrades_a_chassis_box_that_is_too_small_to_the_central_crop(tmp_path):
+    # a light-coloured chassis leaves suggest_roi() on the motherboard (~13% of
+    # the frame, the real D64): below ROI_MIN_AREA_FRAC, so the central box wins
+    tiny, real = _scan_frame((450, 450, 800, 800)), _scan_frame((350, 350, 850, 850))
+    cache = _make_cache(tmp_path, desktop=7, steps=(1,), images={1: tiny})
+    _make_cache(tmp_path, desktop=8, steps=(1,), images={1: real})
+
+    stats = build_thumbs(cache)
+
+    assert _groups(stats, 0) == [{"source": "auto", "segment": None, "steps": [1, 1],
+                                  "box": [150, 150, 850, 850]}]  # the central 70%
+    assert _groups(stats, 1)[0]["box"] == list(suggest_roi(real, "scan"))  # its own chassis
 
 
 @pytest.mark.parametrize("bad", [(300, 300, 300, 400),  # zero width
@@ -337,10 +388,39 @@ def test_build_thumbs_records_the_plan_it_used(tmp_path):
     build_thumbs(cache, max_side=64, quality=70)
 
     record = _sidecar(cache)
-    assert record["source"] == "auto"
-    assert record["box"] == list(suggest_roi(_scan_frame(CHASSIS), "scan"))
+    assert record["groups"] == [{"source": "auto", "segment": None, "steps": [1, 2],
+                                 "box": list(suggest_roi(_scan_frame(CHASSIS), "scan"))}]
     assert (record["max_side"], record["quality"]) == (64, 70)
     assert record["built_at"]
+
+
+def test_build_thumbs_treats_a_sidecar_from_the_old_single_box_format_as_stale(tmp_path):
+    cache = _make_cache(tmp_path, steps=(1,))
+    assert build_thumbs(cache)["written"] == 1
+    sidecar = Path(cache) / "thumbs" / "scan" / "D07" / "thumbs.json"
+    box = _sidecar(cache)["groups"][0]["box"]
+    sidecar.write_text(json.dumps({"source": "auto", "box": box, "max_side": 192,
+                                   "quality": 85, "built_at": "old"}), encoding="utf-8")
+    _age(Path(thumb_path(cache, FrameKey(7, 1, "scan"))), +60)
+
+    stats = build_thumbs(cache)  # unreadable plan: rebuild rather than trust it
+
+    assert stats["written"] == 1
+    assert "groups" in _sidecar(cache)
+
+
+def test_build_thumbs_rebuilds_an_uncropped_group_that_was_never_recorded(tmp_path):
+    # "no box recorded" must not read as "the recorded box was None, so unchanged":
+    # that is how a desktop whose crop was withdrawn kept its old, cropped thumbs
+    cache = _make_cache(tmp_path, steps=(1,), images={1: _scan_frame(CHASSIS)})
+    assert build_thumbs(cache)["written"] == 1  # cropped to the measured chassis
+    _age(Path(thumb_path(cache, FrameKey(7, 1, "scan"))), +60)
+    old = {"source": "auto", "box": list(suggest_roi(_scan_frame(CHASSIS), "scan")),
+           "max_side": 192, "quality": 85, "built_at": "old"}  # same size, no groups
+    (Path(cache) / "thumbs" / "scan" / "D07" / ct.SIDECAR_NAME).write_text(
+        json.dumps(old), encoding="utf-8")
+
+    assert build_thumbs(cache, auto_roi=False)["written"] == 1  # the crop was withdrawn
 
 
 def test_build_thumbs_skips_an_up_to_date_thumb_rebuilds_a_stale_one_and_obeys_force(tmp_path):
@@ -374,7 +454,82 @@ def test_build_thumbs_rebuilds_a_desktop_whose_recorded_roi_changed(tmp_path):
     changed = build_thumbs(cache, roi_lookup=lambda k: RED_BOX)  # a --db run arrives
 
     assert (changed["written"], changed["skipped"]) == (2, 0)
-    assert _sidecar(cache)["box"] == list(RED_BOX)
+    assert _sidecar(cache)["groups"][0]["box"] == list(RED_BOX)
+
+
+# --------------------------------------------------------------------------
+# build_thumbs: per-pose-segment ROIs
+# --------------------------------------------------------------------------
+def _reoriented(tmp_path: Path, steps=(1, 2, 3, 4)) -> tuple[str, str]:
+    """A cache of identical two-patch frames plus a DB cut into two segments."""
+    cache = _make_cache(tmp_path, steps=steps, images={s: _two_box_frame() for s in steps})
+    db = str(tmp_path / "tda.sqlite")
+    _make_db(db, segments=[(0, 1, 2, RED_BOX), (1, 3, 4, GREEN_BOX)])
+    return cache, db
+
+
+def test_build_thumbs_cuts_every_pose_segment_with_its_own_roi(tmp_path):
+    cache, db = _reoriented(tmp_path)
+
+    with DbRoiLookup(db) as lookup:
+        stats = build_thumbs(cache, roi_lookup=lookup)
+
+    assert stats["written"] == 4
+    assert _groups(stats) == [
+        {"source": "db", "segment": 0, "steps": [1, 2], "box": list(RED_BOX)},
+        {"source": "db", "segment": 1, "steps": [3, 4], "box": list(GREEN_BOX)},
+    ]
+    for step in (1, 2):
+        assert _red_fraction(_imread(thumb_path(cache, FrameKey(7, step, "scan")))) > 0.70
+    for step in (3, 4):
+        assert _green_fraction(_imread(thumb_path(cache, FrameKey(7, step, "scan")))) > 0.70
+
+
+def test_build_thumbs_follows_a_frames_pose_segment_override(tmp_path):
+    cache, db = _reoriented(tmp_path)
+    conn = sqlite3.connect(db)  # step 2 was reassigned to the second segment
+    conn.execute("INSERT INTO frame(desktop, step, view, pose_segment) VALUES(7, 2, 'scan', 1)")
+    conn.commit()
+    conn.close()
+
+    with DbRoiLookup(db) as lookup:
+        stats = build_thumbs(cache, roi_lookup=lookup)
+
+    assert [(g["segment"], g["steps"]) for g in _groups(stats)] == [(0, [1, 1]), (1, [2, 4])]
+    assert _green_fraction(_imread(thumb_path(cache, FrameKey(7, 2, "scan")))) > 0.70
+
+
+def test_build_thumbs_rebuilds_only_the_segment_whose_roi_was_adjusted(tmp_path):
+    cache, db = _reoriented(tmp_path)
+    with DbRoiLookup(db) as lookup:
+        assert build_thumbs(cache, roi_lookup=lookup)["written"] == 4
+    stamps = {s: _age(Path(thumb_path(cache, FrameKey(7, s, "scan"))), +60) for s in (1, 2, 3, 4)}
+    _set_roi(db, 1, (120, 620, 320, 820))  # the operator nudges segment 1 only
+
+    with DbRoiLookup(db) as lookup:
+        stats = build_thumbs(cache, roi_lookup=lookup)
+
+    def stamp(step: int) -> int:
+        return Path(thumb_path(cache, FrameKey(7, step, "scan"))).stat().st_mtime_ns
+
+    assert (stats["written"], stats["skipped"]) == (2, 2)
+    assert [stamp(s) for s in (1, 2)] == [stamps[1], stamps[2]]  # untouched segment
+    assert all(stamp(s) != stamps[s] for s in (3, 4))  # the adjusted one
+
+
+def test_build_thumbs_gives_a_segment_without_a_roi_the_automatic_box(tmp_path):
+    cache, db = _reoriented(tmp_path)
+    _set_roi(db, 1, None)  # the second segment has no ROI yet
+
+    with DbRoiLookup(db) as lookup:
+        stats = build_thumbs(cache, roi_lookup=lookup)
+
+    groups = _groups(stats)
+    assert [(g["source"], g["steps"]) for g in groups] == [("db", [1, 2]), ("auto", [3, 4])]
+    assert groups[1]["box"] == list(suggest_roi(_two_box_frame(), "scan"))  # not the red box
+    for step in (3, 4):
+        thumb = _imread(thumb_path(cache, FrameKey(7, step, "scan")))
+        assert _red_fraction(thumb) < 0.10 and _green_fraction(thumb) < 0.30
 
 
 def test_build_thumbs_rebuilds_when_the_thumbnail_size_changed(tmp_path):
@@ -430,6 +585,22 @@ def test_build_thumbs_removes_its_temp_file_when_the_replace_fails(tmp_path, mon
 
     assert (stats["written"], stats["failed"]) == (0, 1)
     assert _no_files_under(cache)
+
+
+def test_build_thumbs_leaves_no_partial_sidecar_when_its_replace_fails(tmp_path, monkeypatch):
+    cache = _make_cache(tmp_path, steps=(1,))
+    real = os.replace
+
+    def picky(src, dst, *args, **kwargs):
+        if str(dst).endswith(ct.SIDECAR_NAME):
+            raise OSError("simulated replace failure")
+        return real(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(ct.os, "replace", picky)
+    with pytest.raises(OSError):
+        build_thumbs(cache, auto_roi=False)
+
+    assert [p.name for p in (Path(cache) / "thumbs" / "scan" / "D07").iterdir()] == ["s001.jpg"]
 
 
 def test_build_thumbs_counts_a_corrupt_source_and_still_writes_the_others(tmp_path):
@@ -527,6 +698,55 @@ def test_db_roi_lookup_notes_a_lock_file_and_reads_anyway(tmp_path):
     assert len(said) == 1 and ".lock" in said[0]
 
 
+class _PickyConn:
+    """A connection whose ``frame`` query fails; everything else works."""
+
+    def __init__(self, conn, message: str) -> None:
+        self._conn, self._message = conn, message
+
+    def execute(self, sql, *args):
+        if "FROM frame" in sql:
+            raise sqlite3.OperationalError(self._message)
+        return self._conn.execute(sql, *args)
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+def _break_frame_query(lookup: DbRoiLookup, message: str) -> None:
+    """Make only the per-frame override query fail, with ``message``."""
+    lookup.conn = _PickyConn(lookup.conn, message)
+
+
+def test_db_roi_lookup_survives_a_database_without_a_frame_table(tmp_path):
+    db = tmp_path / "tda.sqlite"
+    _make_db(str(db))
+
+    with DbRoiLookup(str(db)) as lookup:
+        _break_frame_query(lookup, "no such table: frame")
+        assert lookup(FrameKey(7, 1, "scan")) == RED_BOX  # the step ranges still decide
+
+
+def test_db_roi_lookup_re_raises_an_error_that_is_not_a_missing_table(tmp_path):
+    db = tmp_path / "tda.sqlite"
+    _make_db(str(db))
+
+    with DbRoiLookup(str(db)) as lookup:
+        _break_frame_query(lookup, "database is locked")
+        with pytest.raises(sqlite3.OperationalError):
+            lookup(FrameKey(7, 1, "scan"))
+
+
+def test_db_roi_lookup_reports_the_segment_a_frame_belongs_to(tmp_path):
+    db = tmp_path / "tda.sqlite"
+    _make_db(str(db), segments=[(0, 1, 2, RED_BOX), (1, 3, 4, GREEN_BOX)])
+
+    with DbRoiLookup(str(db)) as lookup:
+        assert lookup.segment_of(FrameKey(7, 1, "scan")) == 0
+        assert lookup.segment_of(FrameKey(7, 4, "scan")) == 1
+        assert lookup.segment_of(FrameKey(7, 9, "scan")) is None
+
+
 def test_db_roi_lookup_ignores_a_segment_without_a_roi(tmp_path):
     db = tmp_path / "tda.sqlite"
     _make_db(str(db))
@@ -572,10 +792,10 @@ def test_main_no_auto_roi_switches_the_automatic_crop_off(tmp_path, capsys):
 
     assert main(argv + ["--no-auto-roi"]) == 0
     assert "roi=none" in capsys.readouterr().out
-    assert _sidecar(cache)["source"] == "none"
+    assert [g["source"] for g in _sidecar(cache)["groups"]] == ["none"]
     assert main(argv) == 0  # the plan changed, so the tier is rebuilt
     assert "written=1" in capsys.readouterr().out
-    assert _sidecar(cache)["source"] == "auto"
+    assert [g["source"] for g in _sidecar(cache)["groups"]] == ["auto"]
 
 
 def test_main_builds_the_cache_and_then_the_thumbnails(tmp_path, capsys):
