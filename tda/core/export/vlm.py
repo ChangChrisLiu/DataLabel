@@ -1,0 +1,332 @@
+"""Minimal VLM question/answer export -- tasks V1, V2 and V3 of spec 8.2.
+
+One JSON object per line::
+
+    {"id", "task", "desktop", "step", "view", "images", "question",
+     "answer", "evidence", "rationale", "graph_version"}
+
+* **V1** (perception): one record per frame -- every component the view can be
+  pointed at, with its box.
+* **V2** (state / counting): per-instance state questions for the classes whose
+  state is multi-valued, plus one "how many <role> screws are still fastened?"
+  per screw role present in the frame.
+* **V3** (change): one record per consecutive frame pair whose later step
+  carries at least one successful action -- verb, target and tool.
+
+Answers come from the truth table and the state machine, never from the image,
+so every record is reproducible from the database: templates are chosen by a
+checksum of the record id rather than at random, and the file is written in a
+fixed frame/task order.
+
+Grounding (spec 8.2, principle 1 and the rationale format): a record is only
+emitted for instances whose compiled row carries a visible mask *and* an
+answerable visibility, so every ``observe`` step of the ``rationale`` chain can
+name the box it read the value off. Bench parts whose geometry is a box rather
+than a mask are therefore still missing from V1 -- the truth table stores no
+box column yet.
+
+``graph_version`` is ``None`` until the constraint graph exists (it is a Plan-B
+module); the field is written now so the JSONL schema does not change later.
+"""
+from __future__ import annotations
+
+import json
+import zlib
+from pathlib import Path
+from typing import Any, Iterable, Optional, Sequence
+
+from tda.core.db import Db
+from tda.core.export.coco import (
+    ANSWERABLE,
+    DesktopCtx,
+    frame_file_name,
+    load_ctx,
+    mask_bbox_xywh,
+)
+from tda.core.model import ActionRec, FrameKey, InstanceRec
+from tda.core.taxonomy import Taxonomy
+
+__all__ = ["TASKS", "export_vlm", "instance_label"]
+
+TASKS = ("V1", "V2", "V3")
+
+V1_QUESTIONS = (
+    "List every component visible in this image with its bounding box.",
+    "Which components can you see in this image? Give each one a bounding box.",
+    "Name the parts visible in this photo of the desktop PC and localise them.",
+    "Enumerate the visible components and their boxes.",
+)
+V2_STATE_QUESTIONS = (
+    "What is the state of {label}?",
+    "In this image, what state is {label} in?",
+    "Report the current state of {label}.",
+)
+V2_COUNT_QUESTION = "How many {role} screws are still fastened?"
+V3_QUESTIONS = (
+    "What action was just performed between these two images?",
+    "Compare the two images: which action was carried out?",
+    "What did the operator just do between the first and the second image?",
+)
+
+CABLE_PREFIX = "cable:"
+CABLE_CLASS = "cable"
+
+
+# --------------------------------------------------------------------------- #
+# wording
+# --------------------------------------------------------------------------- #
+def instance_label(instance: str, rec: Optional[InstanceRec]) -> str:
+    """Human wording of an instance key: ``screw.motherboard.03`` -> "motherboard screw 3"."""
+    if rec is None:
+        return instance
+    disc = rec.attrs.get("role") or rec.attrs.get("kind") or ""
+    words = [str(disc).replace("_", " ")] if disc else []
+    words.append(str(rec.cls).replace("_", " "))
+    ordinal = instance.rsplit(".", 1)[-1]
+    if ordinal.isdigit():
+        words.append(str(int(ordinal)))
+    return " ".join(w for w in words if w)
+
+
+def _pick(templates: Sequence[str], seed: str) -> str:
+    """Deterministically choose one template: same record id, same wording."""
+    return templates[zlib.crc32(seed.encode("utf-8")) % len(templates)]
+
+
+# --------------------------------------------------------------------------- #
+# record assembly
+# --------------------------------------------------------------------------- #
+def _evidence(bboxes: dict[str, list], **extra) -> dict:
+    """The instance keys and boxes an answer was read off."""
+    return {"instances": sorted(bboxes), "bboxes": bboxes, **extra}
+
+
+def _observe(instance: str, value: Any, view: str, bbox: Optional[list],
+             visibility: Optional[str], step: Optional[int] = None) -> dict:
+    """One ``observe`` step of a rationale chain (spec 8.2 closed op set)."""
+    evidence: dict[str, Any] = {"view": view, "bbox": bbox, "visibility": visibility}
+    if step is not None:
+        evidence["step"] = step
+    return {"op": "observe", "target": instance, "value": value, "evidence": evidence}
+
+
+def _rationale(steps: list[dict]) -> dict:
+    """Close a rationale chain with ``conclude`` and record its depth."""
+    chain = [*steps, {"op": "conclude"}]
+    return {"depth": len(chain), "steps": chain}
+
+
+def _record(rec_id: str, task: str, key: FrameKey, images: list[str], question: str,
+            answer: dict, evidence: dict, rationale: dict) -> dict:
+    return {
+        "id": rec_id, "task": task, "desktop": key.desktop, "step": key.step,
+        "view": key.view, "images": images, "question": question, "answer": answer,
+        "evidence": evidence, "rationale": rationale, "graph_version": None,
+    }
+
+
+def _frame_id(key: FrameKey) -> str:
+    return f"D{key.desktop:02d}-{key.view}-s{key.step:03d}"
+
+
+def _pointable(rows: dict[str, dict]) -> dict[str, tuple[dict, list]]:
+    """``instance -> (row, bbox)`` for the rows this view can be asked about."""
+    out: dict[str, tuple[dict, list]] = {}
+    for instance in sorted(rows):
+        row = rows[instance]
+        if row.get("visibility") not in ANSWERABLE:
+            continue
+        box = mask_bbox_xywh(row.get("visible_rle"))
+        if box is not None:
+            out[instance] = (row, box)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# V1 -- what is visible, and where
+# --------------------------------------------------------------------------- #
+def _v1(ctx: DesktopCtx, key: FrameKey, image: str,
+        pointable: dict[str, tuple[dict, list]]) -> Optional[dict]:
+    components, bboxes, steps = [], {}, []
+    for instance, (row, box) in pointable.items():
+        cls = ctx.cls_of(instance)
+        if cls is None:
+            continue
+        components.append({"class": cls, "instance": instance, "bbox": box})
+        bboxes[instance] = box
+        steps.append(_observe(instance, cls, key.view, box, row.get("visibility")))
+    if not components:
+        return None
+    rec_id = f"V1-{_frame_id(key)}"
+    return _record(rec_id, "V1", key, [image], _pick(V1_QUESTIONS, rec_id),
+                   {"components": components}, _evidence(bboxes), _rationale(steps))
+
+
+# --------------------------------------------------------------------------- #
+# V2 -- per-instance state and fastener counts
+# --------------------------------------------------------------------------- #
+def _v2_states(ctx: DesktopCtx, key: FrameKey, image: str,
+               pointable: dict[str, tuple[dict, list]]) -> list[dict]:
+    """One state question per instance whose class has more than one state."""
+    frame_state = ctx.state_at(key.step)
+    records = []
+    for instance, (row, box) in pointable.items():
+        cls = ctx.cls_of(instance)
+        inst_state = frame_state.get(instance)
+        if cls is None or inst_state is None or len(ctx.tax.states_of(cls)) < 2:
+            continue
+        label = instance_label(instance, ctx.instances.get(instance))
+        rec_id = f"V2-{_frame_id(key)}-state-{instance}"
+        question = _pick(V2_STATE_QUESTIONS, rec_id).format(label=label)
+        records.append(_record(
+            rec_id, "V2", key, [image], question, {"state": inst_state.state},
+            _evidence({instance: box}),
+            _rationale([_observe(instance, inst_state.state, key.view, box,
+                                 row.get("visibility"))]),
+        ))
+    return records
+
+
+def _screw_roles(ctx: DesktopCtx, pointable: dict[str, tuple[dict, list]]) -> list[str]:
+    """Screw roles this frame can be asked to count, in a stable order."""
+    roles = set()
+    for instance in pointable:
+        rec = ctx.instances.get(instance)
+        if rec is not None and rec.cls == "screw":
+            roles.add(str(rec.attrs.get("role") or "other"))
+    return sorted(roles)
+
+
+def _v2_counts(ctx: DesktopCtx, key: FrameKey, image: str,
+               pointable: dict[str, tuple[dict, list]]) -> list[dict]:
+    """"How many <role> screws are still fastened?" -- counted on the state machine.
+
+    The count covers every screw of that role on the machine, not only the ones
+    this view can see, because that is what the question asks; the evidence
+    lists the boxes of those that are visible here.
+    """
+    frame_state = ctx.state_at(key.step)
+    records = []
+    for role in _screw_roles(ctx, pointable):
+        fastened = [
+            inst for inst, rec in sorted(ctx.instances.items())
+            if rec.cls == "screw" and str(rec.attrs.get("role") or "other") == role
+            and (frame_state.get(inst).state if frame_state.get(inst) else None) == "fastened"
+        ]
+        bboxes = {i: pointable[i][1] for i in fastened if i in pointable}
+        rec_id = f"V2-{_frame_id(key)}-count-{role}"
+        steps = [
+            _observe(i, "fastened", key.view, bboxes.get(i),
+                     pointable[i][0].get("visibility") if i in pointable else None)
+            for i in fastened
+        ]
+        records.append(_record(
+            rec_id, "V2", key, [image],
+            V2_COUNT_QUESTION.format(role=role.replace("_", " ")),
+            {"count": len(fastened)}, _evidence(bboxes), _rationale(steps),
+        ))
+    return records
+
+
+# --------------------------------------------------------------------------- #
+# V3 -- what happened between two frames
+# --------------------------------------------------------------------------- #
+def _target_class(ctx: DesktopCtx, target: str) -> Optional[str]:
+    if target.startswith(CABLE_PREFIX):
+        return CABLE_CLASS
+    return ctx.cls_of(target)
+
+
+def _slots(ctx: DesktopCtx, action: ActionRec) -> dict:
+    return {
+        "verb": action.verb,
+        "target_class": _target_class(ctx, action.target),
+        "target_instance": action.target,
+        "tool": action.tool,
+    }
+
+
+def _v3(ctx: DesktopCtx, key: FrameKey, images: list[str], actions: list[ActionRec],
+        before: dict[str, tuple[dict, list]],
+        after: dict[str, tuple[dict, list]]) -> Optional[dict]:
+    if not actions:
+        return None
+    answer = _slots(ctx, actions[0])
+    if len(actions) > 1:  # a compound step: keep every slot set, first one on top
+        answer["actions"] = [_slots(ctx, a) for a in actions]
+
+    target = actions[0].target
+    source_step, source = key.step - 1, before
+    if target not in before and target in after:
+        source_step, source = key.step, after
+    bboxes, visibility = {}, None
+    if target in source:
+        bboxes[target] = source[target][1]
+        visibility = source[target][0].get("visibility")
+
+    rec_id = f"V3-{_frame_id(key)}"
+    steps = [
+        {"op": "compare_frames", "frames": [key.step - 1, key.step], "view": key.view},
+        _observe(target, answer["verb"], key.view, bboxes.get(target), visibility,
+                 step=source_step),
+    ]
+    return _record(rec_id, "V3", key, images, _pick(V3_QUESTIONS, rec_id), answer,
+                   _evidence(bboxes, from_step=source_step), _rationale(steps))
+
+
+# --------------------------------------------------------------------------- #
+# export
+# --------------------------------------------------------------------------- #
+def export_vlm(
+    db: Db,
+    tax: Taxonomy,
+    desktops: list[int],
+    view: str,
+    out_jsonl: str,
+    tasks: Iterable[str] = TASKS,
+) -> dict:
+    """Write the V1/V2/V3 question set of ``desktops`` in ``view`` as JSONL.
+
+    Records are grouped by frame in step order and, inside a frame, by task, so
+    two exports of the same database are byte-identical.
+
+    Returns ``{"path", "records", "by_task", "desktops", "view"}``.
+    """
+    wanted = [t for t in TASKS if t in set(tasks)]
+    records: list[dict] = []
+
+    for desktop in desktops:
+        ctx = load_ctx(db, tax, desktop, view)
+        previous: Optional[tuple[int, dict[str, tuple[dict, list]], str]] = None
+        for frame in db.frames_for(desktop, view):
+            key = FrameKey(desktop, frame["step"], view)
+            image = frame_file_name(frame, key)
+            pointable = _pointable(db.compiled(key))
+
+            if "V1" in wanted:
+                first = _v1(ctx, key, image, pointable)
+                if first is not None:
+                    records.append(first)
+            if "V2" in wanted:
+                records.extend(_v2_states(ctx, key, image, pointable))
+                records.extend(_v2_counts(ctx, key, image, pointable))
+            if "V3" in wanted and previous is not None and previous[0] == key.step - 1:
+                pair = _v3(ctx, key, [previous[2], image], ctx.actions_at(key.step),
+                           previous[1], pointable)
+                if pair is not None:
+                    records.append(pair)
+            previous = (key.step, pointable, image)
+
+    out = Path(out_jsonl)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8", newline="\n") as fh:
+        for record in records:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    by_task: dict[str, int] = {}
+    for record in records:
+        by_task[record["task"]] = by_task.get(record["task"], 0) + 1
+    return {
+        "path": str(out), "records": len(records), "by_task": by_task,
+        "desktops": [int(d) for d in desktops], "view": view,
+    }
