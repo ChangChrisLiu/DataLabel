@@ -23,8 +23,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QKeyEvent
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -44,6 +44,16 @@ __all__ = ["InstanceListPanel"]
 
 KEY_ROLE = int(Qt.ItemDataRole.UserRole)
 
+#: Visibility values are long (``occluded_partial``); the column shows the
+#: initials and the row's tooltip spells the value out.
+_SHORT_VIS = {"visible": "vis", "occluded_partial": "occ-p", "occluded_full": "occ-f",
+              "out_of_view": "out", "too_small": "tiny", "visible_tiny": "v-tiny",
+              "motion_blur": "blur"}
+
+
+def _short(value: str) -> str:
+    return _SHORT_VIS.get(value, value[:5])
+
 #: Number keys ``1``-``7`` (spec 6.2 order, see :data:`api.VISIBILITY_VALUES`).
 _NUMBER_KEYS = (
     Qt.Key.Key_1,
@@ -61,16 +71,16 @@ class InstanceListPanel(QWidget):
 
     #: An instance was double-clicked: the canvas should start editing it.
     sigRequestEdit = Signal(str)
+    #: A move button was pressed; ``-1`` is up, ``+1`` is down.
+    sigReorder = Signal(int)
+    #: The hidden checkbox of one instance was toggled: ``(key, hidden)``.
+    sigHiddenToggled = Signal(str, bool)
 
-    COLUMNS: tuple[str, ...] = (
-        "Color",
-        "Instance",
-        "Class",
-        "State",
-        "Placement",
-        "Visibility",
-        "Hidden",
-    )
+    #: Four columns, not seven.  Class and placement are in every row's tooltip
+    #: instead: the instance key already names the class (``screw.cpu_cooler.01``)
+    #: and a 90-part machine needs the dock narrow far more than it needs them
+    #: spelled out -- with all seven the table demanded 495 px of dock width.
+    COLUMNS: tuple[str, ...] = ("Color", "Instance", "State", "Vis", "Hidden")
 
     def __init__(self, session: Optional[api.SessionLike] = None,
                  parent: Optional[QWidget] = None) -> None:
@@ -88,19 +98,29 @@ class InstanceListPanel(QWidget):
         )
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setStretchLastSection(False)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self._table.setMinimumWidth(180)
+        self._table.setWordWrap(False)
+        # ElideMiddle, not ElideLeft: a Label Studio key such as
+        # "RAM Module Retention Clip (open)#8" elided from the left reads
+        # "...n Clip (open)#8", which names neither the part nor the ordinal.
+        self._table.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self._apply_column_widths()
         self._table.itemChanged.connect(self._on_item_changed)
         self._table.itemDoubleClicked.connect(self._on_item_double_clicked)
-        self._table.installEventFilter(self)
 
-        self.up_button = QPushButton("Move up (Ctrl+Up)")
-        self.down_button = QPushButton("Move down (Ctrl+Down)")
-        self.up_button.setToolTip("Put the selected instance above the one over it")
-        self.down_button.setToolTip("Put the selected instance below the one under it")
-        self.up_button.clicked.connect(self.move_up)
-        self.down_button.clicked.connect(self.move_down)
+        self.up_button = QPushButton("▲ Ctrl+↑")
+        self.down_button = QPushButton("▼ Ctrl+↓")
+        self.up_button.setToolTip("Move up: put the selected instance above the one over it")
+        self.down_button.setToolTip("Move down: put it below the one under it")
+        for button in (self.up_button, self.down_button):
+            button.setMinimumWidth(1)
+        # Report, do not act: the window owns every gesture that mutates.
+        self.up_button.clicked.connect(lambda: self.sigReorder.emit(-1))
+        self.down_button.clicked.connect(lambda: self.sigReorder.emit(+1))
 
         buttons = QHBoxLayout()
         buttons.setContentsMargins(4, 0, 4, 4)
@@ -111,7 +131,10 @@ class InstanceListPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(3)
-        layout.addWidget(QLabel("Instances (top layer first)"))
+        heading = QLabel("Instances — top layer first")
+        heading.setToolTip("The frame's instances, top-most layer at the top")
+        heading.setMinimumWidth(1)   # a caption must not set the dock's width
+        layout.addWidget(heading)
         layout.addWidget(self._table, 1)
         layout.addLayout(buttons)
 
@@ -135,25 +158,35 @@ class InstanceListPanel(QWidget):
 
     # -- content ------------------------------------------------------------
     def refresh(self) -> None:
-        """Rebuild the table from ``session.instance_rows()``, keeping the selection."""
+        """Rebuild the table from ``session.instance_rows()``, keeping the selection.
+
+        The two columns that size themselves to their contents are switched off
+        while the rows are written and switched back on once: with them live,
+        ``setItem`` re-measures every section on every cell, which on a 90-part
+        machine cost ~380 ms per frame change -- more than decoding the 12 MP
+        frame itself.
+        """
         keep = self.selected_instance()
         self._rows = self._session.instance_rows() if self._session is not None else []
         self._loading = True
+        header = self._table.horizontalHeader()
+        self._table.setUpdatesEnabled(False)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         try:
             self._table.clearContents()
             self._table.setRowCount(len(self._rows))
             for row, data in enumerate(self._rows):
                 key = str(data.get("key", ""))
+                tooltip = (f"{key}\nclass: {data.get('cls', '')}\n"
+                           f"placement: {data.get('placement', '')}\n"
+                           f"visibility: {data.get('visibility', '')}\nz {data.get('z', '')}")
                 swatch = QTableWidgetItem("")
                 swatch.setBackground(QBrush(QColor(*palette_color(key))))
-                swatch.setToolTip(f"z {data.get('z', '')}")
                 cells = [
                     swatch,
                     QTableWidgetItem(key),
-                    QTableWidgetItem(str(data.get("cls", ""))),
                     QTableWidgetItem(str(data.get("state", ""))),
-                    QTableWidgetItem(str(data.get("placement", ""))),
-                    QTableWidgetItem(str(data.get("visibility", ""))),
+                    QTableWidgetItem(_short(str(data.get("visibility", "")))),
                 ]
                 hidden = QTableWidgetItem("")
                 hidden.setFlags(
@@ -169,11 +202,36 @@ class InstanceListPanel(QWidget):
                 cells.append(hidden)
                 for col, item in enumerate(cells):
                     item.setData(KEY_ROLE, key)
+                    item.setToolTip(tooltip)
                     self._table.setItem(row, col, item)
         finally:
             self._loading = False
-        if keep is not None:
-            self.select_instance(keep)
+            self._apply_column_widths()
+            self._table.setUpdatesEnabled(True)
+        # A removed part has no compiled row any more, so the table shrinks as
+        # the teardown proceeds: a selection that is gone must clear rather than
+        # leave H / V / 1-7 acting on a key this frame no longer has.
+        if keep is None or not self.select_instance(keep):
+            self._table.setCurrentCell(-1, -1)
+
+    #: Column widths in pixels; ``None`` means "take what is left" (the key).
+    WIDTHS: tuple[Optional[int], ...] = (22, None, 78, 46, 46)
+
+    def _apply_column_widths(self) -> None:
+        """Fixed widths, not "resize to contents".
+
+        An instance key is long, and a table that sizes itself to its contents
+        reports that length as the dock's preferred width -- which is how the
+        canvas ended up with less than half the window.  The key column takes
+        whatever is left instead, and the table scrolls when the dock is narrow.
+        """
+        header = self._table.horizontalHeader()
+        for column, width in enumerate(self.WIDTHS):
+            if width is None:
+                header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+                continue
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+            self._table.setColumnWidth(column, width)
 
     def rows(self) -> list[dict]:
         """The row dicts currently displayed, top layer first."""
@@ -251,47 +309,12 @@ class InstanceListPanel(QWidget):
         self.refresh()
 
     # -- keys ---------------------------------------------------------------
-    def handle_key(self, event: QKeyEvent) -> bool:
-        """``Ctrl+Up``/``Ctrl+Down``, ``H``, ``V``, ``1``-``7``; ``True`` when consumed."""
-        key = event.key()
-        mods = event.modifiers()
-        # Ctrl+arrows reorder; the bare arrows stay with the table's navigation.
-        if mods == Qt.KeyboardModifier.ControlModifier:
-            if key == Qt.Key.Key_Up:
-                self.move_up()
-                return True
-            if key == Qt.Key.Key_Down:
-                self.move_down()
-                return True
-            return False
-        if mods not in (
-            Qt.KeyboardModifier.NoModifier,
-            Qt.KeyboardModifier.KeypadModifier,
-        ):
-            return False
-        if key == Qt.Key.Key_H:
-            self.toggle_hidden()
-            return True
-        if key == Qt.Key.Key_V:
-            self.cycle_visibility()
-            return True
-        if key in _NUMBER_KEYS:
-            self.set_visibility(api.VISIBILITY_VALUES[_NUMBER_KEYS.index(key)])
-            return True
-        return False
+    # There is exactly one key map, and it is not here: the main window's
+    # ``tda.ui.app_actions.ACTIONS`` table owns every binding, per mode, and
+    # calls the plain methods above.  A second table in the panel is how ``Ctrl+K``
+    # on this list came to raise out of ``keyPressEvent`` in Steps mode and how
+    # ``Enter`` in Review committed with keyframe scope past ``act_commit``.
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: D102 - Qt override
-        if self.handle_key(event):
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: D102
-        # Without this the table's keyboard search would eat H, V and digits.
-        if obj is self._table and event.type() == QEvent.Type.KeyPress:
-            if self.handle_key(event):
-                return True
-        return super().eventFilter(obj, event)
 
     # -- slots --------------------------------------------------------------
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
@@ -299,19 +322,21 @@ class InstanceListPanel(QWidget):
             return
         if item.column() != self.COLUMNS.index("Hidden"):
             return
-        # Read the item *before* refreshing: the rebuild below deletes it.
+        # Read the item *before* anything refreshes: a rebuild deletes it.  The
+        # window applies it, so that the canvas overlay is repainted with it.
         key = str(item.data(KEY_ROLE))
-        hidden = item.checkState() == Qt.CheckState.Checked
-        self._session.set_hidden(key, hidden)
-        self.refresh()
+        self.sigHiddenToggled.emit(key, item.checkState() == Qt.CheckState.Checked)
 
     def _on_item_double_clicked(self, item: QTableWidgetItem) -> None:
+        """Report the request only; ``begin_edit`` belongs to the main window.
+
+        Starting the edit here made switching instance unrefusable -- the
+        previous instance's uncommitted pixels were dropped before anybody could
+        ask about them.
+        """
         instance = str(item.data(KEY_ROLE))
-        if not instance:
-            return
-        if self._session is not None:
-            self._session.begin_edit(instance)
-        self.sigRequestEdit.emit(instance)
+        if instance:
+            self.sigRequestEdit.emit(instance)
 
     def _on_frame_changed(self, _key: object) -> None:
         self.refresh()

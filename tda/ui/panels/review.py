@@ -15,14 +15,14 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -75,15 +75,22 @@ class ReviewPanel(QWidget):
             lw = QListWidget()
             lw.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
             lw.itemActivated.connect(self._on_item_activated)
-            lw.installEventFilter(self)
             self._lists[queue] = lw
             self._tabs.addTab(lw, QUEUE_TITLES[queue])
         self._tabs.currentChanged.connect(lambda _i: self._sync_buttons())
 
-        self.keep_old_button = QPushButton("Keep old")
-        self.accept_new_button = QPushButton("Accept new")
-        self.keep_old_button.setToolTip("Discard the conflicting edit")
-        self.accept_new_button.setToolTip("Take the edit and re-freeze the frames")
+        # Short captions and a tooltip, like the task card's: the row of long
+        # labels below used to make this panel ask for 642 px of dock, and one
+        # trip through Review mode took a third of the canvas away for good.
+        self.keep_old_button = QPushButton("Keep old  K")
+        self.accept_new_button = QPushButton("Take new  N")
+        self.keep_old_button.setToolTip("Keep the frozen shape, discard the "
+                                        "conflicting edit (K)")
+        self.accept_new_button.setToolTip("Take the edit and re-freeze the "
+                                          "affected frames (N)")
+        for button in (self.keep_old_button, self.accept_new_button):
+            button.setMinimumWidth(1)
+            button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.keep_old_button.clicked.connect(
             lambda: self.resolve_selected(api.RESOLVE_KEEP_OLD)
         )
@@ -101,8 +108,10 @@ class ReviewPanel(QWidget):
         buttons.setContentsMargins(4, 0, 4, 4)
         buttons.addWidget(self.keep_old_button)
         buttons.addWidget(self.accept_new_button)
-        buttons.addStretch(1)
-        buttons.addWidget(QLabel("Enter: confirm frame   R: rework"))
+        # The two other keys live in the tooltip and in the cheat sheet, not in
+        # a 384 px label that decides how wide the dock has to be.
+        self.setToolTip("Enter: accept the frame    R: rework it in Annotate mode\n"
+                        "K: keep the frozen shape    N: take the edit")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -213,35 +222,12 @@ class ReviewPanel(QWidget):
             self.sigRework.emit(int(step))
 
     # -- keys ---------------------------------------------------------------
-    def handle_key(self, event: QKeyEvent) -> bool:
-        """``Enter`` confirms, ``R`` marks rework; ``True`` when consumed."""
-        if event.modifiers() not in (
-            Qt.KeyboardModifier.NoModifier,
-            Qt.KeyboardModifier.KeypadModifier,
-        ):
-            return False
-        key = event.key()
-        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.confirm()
-            return True
-        if key == Qt.Key.Key_R:
-            self.rework()
-            return True
-        return False
+    # There is exactly one key map, and it is not here: the main window's
+    # ``tda.ui.app_actions.ACTIONS`` table owns every binding, per mode, and
+    # calls the plain methods above.  A second table in the panel is how ``Ctrl+K``
+    # on this list came to raise out of ``keyPressEvent`` in Steps mode and how
+    # ``Enter`` in Review committed with keyframe scope past ``act_commit``.
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: D102 - Qt override
-        if self.handle_key(event):
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: D102
-        # Enter on a list would otherwise activate the entry instead of
-        # confirming the frame, which is what review mode binds it to.
-        if event.type() == QEvent.Type.KeyPress and obj in self._lists.values():
-            if self.handle_key(event):
-                return True
-        return super().eventFilter(obj, event)
 
     # -- slots --------------------------------------------------------------
     def _on_item_activated(self, item: QListWidgetItem) -> None:

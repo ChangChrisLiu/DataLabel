@@ -49,7 +49,7 @@ def qapp():
 def session(qapp, tmp_path: Path) -> AnnotationSession:
     made = make_session(tmp_path)
     yield made
-    made.close()  # the worker thread must never outlive the object it signals
+    made.close(force=True)  # the worker thread must never outlive the object it signals
 
 
 # --------------------------------------------------------------------------- #

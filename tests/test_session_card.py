@@ -52,7 +52,7 @@ def qapp():
 def session(qapp, tmp_path: Path) -> AnnotationSession:
     made = make_session(tmp_path)
     yield made
-    made.close()
+    made.close(force=True)
 
 
 def card(session) -> dict[str, dict]:

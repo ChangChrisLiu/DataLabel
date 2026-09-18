@@ -45,6 +45,8 @@ from tda.core.model import (
 
 SCHEMA_VERSION = 3
 LOCK_TTL = timedelta(hours=12)
+#: Suffix of the single-user lock file, next to the database (spec 3.5).
+LOCK_SUFFIX = ".lock"
 #: How a conflict may be closed. The first three are a human's decision;
 #: ``superseded`` is what the truth service records when the inputs moved on
 #: before anybody got to the conflict (spec 3.4).
@@ -639,7 +641,12 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
         return held if isinstance(held, dict) else None
 
     def acquire_lock(self, annotator: str) -> None:
-        """Take the single-user lock; raises if another annotator holds a fresh one."""
+        """Take the single-user lock; raises if another annotator holds a fresh one.
+
+        :func:`acquire_lock_file` does the same thing *without* a ``Db``, which
+        is what the application uses: opening the database replays the schema
+        and the migrations, so the lock has to be taken before that, not after.
+        """
         held = self._read_lock()
         if held and held.get("annotator") != annotator:
             try:
@@ -663,3 +670,59 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
         """Remove the lock file if present; safe to call more than once."""
         self._lock_path.unlink(missing_ok=True)
         self._lock_annotator = None
+
+
+# --------------------------------------------------------------------------- #
+# the single-user lock, without a Db
+# --------------------------------------------------------------------------- #
+def lock_path_for(db_path: str) -> Path:
+    """The lock file that belongs to a database path."""
+    return Path(str(db_path) + LOCK_SUFFIX)
+
+
+def read_lock_file(db_path: str) -> Optional[dict]:
+    """The holder recorded in a lock file, or ``None`` when there is none."""
+    try:
+        held = json.loads(lock_path_for(db_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return held if isinstance(held, dict) else None
+
+
+def acquire_lock_file(db_path: str, annotator: str) -> None:
+    """Take the single-user lock **without opening the database**.
+
+    :meth:`Db.__init__` creates the file when it is missing and replays the
+    schema and the migrations on an existing one, so by the time a ``Db`` exists
+    the database has already been written to.  The application therefore has to
+    take the lock first: a refused launch must leave the file exactly as it was,
+    down to its modification time.
+
+    Raises ``RuntimeError`` when a *fresh* lock is held by somebody else; a lock
+    older than :data:`LOCK_TTL`, or one whose timestamp cannot be read, counts as
+    abandoned and is taken over -- the same rule as :meth:`Db.acquire_lock`.
+    """
+    held = read_lock_file(db_path)
+    if held and held.get("annotator") != annotator:
+        try:
+            ts = datetime.fromisoformat(str(held.get("ts")))
+        except ValueError:
+            ts = None  # unreadable timestamp: treat the lock as stale
+        if ts is not None:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - ts < LOCK_TTL:
+                raise RuntimeError(
+                    f"database locked by {held.get('annotator')!r} since {held.get('ts')}"
+                )
+    path = lock_path_for(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"annotator": annotator, "ts": R.now_iso()}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def release_lock_file(db_path: str) -> None:
+    """Drop the lock file; safe to call more than once."""
+    lock_path_for(db_path).unlink(missing_ok=True)

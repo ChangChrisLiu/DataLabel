@@ -453,64 +453,76 @@ def test_taskcard_lists_items_with_icons_and_highlights_the_first_open_one(
     assert panel.list_widget().item(1).font().bold() is True
 
 
-def test_taskcard_buttons_call_the_session(session: StubSession) -> None:
+def test_taskcard_buttons_only_report(session: StubSession) -> None:
+    """The buttons emit; the window acts.  Calling the session from here let
+    "Confirm" step the frame back over an uncommitted layer."""
+    from tda.ui.panels.taskcard import SUGGESTED
+
     panel = TaskCardPanel(session)
-    assert "Enter" in panel.commit_button.text()
-    assert "Alt+Enter" in panel.override_button.text()
-    assert "Ctrl+K" in panel.split_button.text()
-    assert "Space" in panel.confirm_button.text()
+    # Short captions keep the dock narrow; the full sentence is the tooltip.
+    for button, key in ((panel.commit_button, "Enter"),
+                        (panel.override_button, "Alt+Enter"),
+                        (panel.split_button, "Ctrl+K"),
+                        (panel.confirm_button, "Space")):
+        assert key in button.toolTip()
+        assert len(button.text()) <= 20
+
+    scopes: list[str] = []
+    confirms: list[int] = []
+    panel.sigCommit.connect(scopes.append)
+    panel.sigConfirm.connect(lambda: confirms.append(1))
     panel.commit_button.click()
     panel.override_button.click()
     panel.split_button.click()
     panel.confirm_button.click()
-    assert session.calls == [
-        ("commit_edit", api.SCOPE_KEYFRAME),
-        ("commit_edit", api.SCOPE_FRAME_OVERRIDE),
-        ("commit_edit", api.SCOPE_SPLIT),
-        ("confirm_frame",),
-    ]
+    assert scopes == [SUGGESTED, api.SCOPE_FRAME_OVERRIDE, api.SCOPE_SPLIT]
+    assert confirms == [1]
+    assert session.calls == []
 
 
-def test_taskcard_keys_match_the_buttons(session: StubSession) -> None:
+def test_taskcard_methods_are_what_the_keys_call(session: StubSession) -> None:
+    """The panel has no key table of its own; the window's ACTIONS calls these."""
     panel = TaskCardPanel(session)
-    send_key(panel, Qt.Key.Key_Return)
-    send_key(panel, Qt.Key.Key_Return, Qt.KeyboardModifier.AltModifier)
-    send_key(panel, Qt.Key.Key_K, Qt.KeyboardModifier.ControlModifier)
-    send_key(panel.list_widget(), Qt.Key.Key_Space)  # also from the focused list
+    panel.commit(api.SCOPE_KEYFRAME)
+    panel.commit(api.SCOPE_FRAME_OVERRIDE)
+    panel.commit(api.SCOPE_SPLIT)
+    panel.confirm()
     assert session.calls == [
         ("commit_edit", api.SCOPE_KEYFRAME),
         ("commit_edit", api.SCOPE_FRAME_OVERRIDE),
         ("commit_edit", api.SCOPE_SPLIT),
         ("confirm_frame",),
     ]
+    assert not hasattr(panel, "handle_key")
 
 
 def test_taskcard_shows_problems_when_confirm_fails(session: StubSession) -> None:
     panel = TaskCardPanel(session)
     assert panel.problems_visible() is False
     session.confirm_result = False
-    panel.confirm_button.click()
+    panel.confirm()          # what the window's act_confirm calls
     assert panel.problems_visible() is True
     assert panel.problems() == ["missing_shape:screw.cpu_cooler.03"]
     session.confirm_result = True
-    panel.confirm_button.click()
+    panel.confirm()
     assert panel.problems_visible() is False
 
 
-def test_taskcard_activation_begins_an_edit_and_emits(session: StubSession) -> None:
+def test_taskcard_activation_only_reports_the_request(session: StubSession) -> None:
+    """The window owns ``begin_edit``: it is the one that can refuse it."""
     panel = show(TaskCardPanel(session), 320, 320)
     seen: list[str] = []
     panel.sigRequestEdit.connect(seen.append)
     lw = panel.list_widget()
     click_item(lw, lw.item(1), double=True)
-    assert session.calls == [("begin_edit", "screw.cpu_cooler.03")]
+    assert session.calls == []
     assert seen == ["screw.cpu_cooler.03"]
 
 
 def test_taskcard_problems_do_not_survive_a_frame_change(session: StubSession) -> None:
     panel = TaskCardPanel(session)
     session.confirm_result = False
-    panel.confirm_button.click()
+    panel.confirm()
     assert panel.problems_visible() is True
 
     session.sigFrameChanged.emit(session.current())  # next frame
@@ -537,7 +549,9 @@ def test_taskcard_refreshes_on_frame_change(session: StubSession) -> None:
 # --------------------------------------------------------------------------- #
 # InstanceListPanel
 # --------------------------------------------------------------------------- #
-def test_instances_table_shows_every_column(session: StubSession) -> None:
+def test_instances_table_shows_its_four_columns_and_tells_the_rest(
+        session: StubSession) -> None:
+    """Class and placement moved into the tooltip so the dock can be narrow."""
     panel = InstanceListPanel(session)
     table = panel.table()
     assert table.rowCount() == 3
@@ -545,108 +559,124 @@ def test_instances_table_shows_every_column(session: StubSession) -> None:
     swatch = table.item(0, 0)
     assert swatch.background().color() == QColor(*palette_color("cpu_cooler.01"))
     assert table.item(0, 1).text() == "cpu_cooler.01"
-    assert table.item(0, 2).text() == "cooler"
-    assert table.item(0, 3).text() == "installed"
-    assert table.item(0, 4).text() == "in_chassis"
-    assert table.item(0, 5).text() == Visibility.VISIBLE.value
+    assert table.item(0, 2).text() == "installed"
+    tooltip = table.item(0, 1).toolTip()
+    assert "cooler" in tooltip and "in_chassis" in tooltip
+    assert Visibility.VISIBLE.value in tooltip
     hidden_col = InstanceListPanel.COLUMNS.index("Hidden")
     assert table.item(0, hidden_col).checkState() == Qt.CheckState.Unchecked
     assert table.item(1, hidden_col).checkState() == Qt.CheckState.Checked
 
 
-def test_instances_checkbox_writes_hidden(session: StubSession) -> None:
+def test_instances_checkbox_reports_hidden(session: StubSession) -> None:
+    """The window applies it, so that the canvas overlay is repainted with it."""
     panel = InstanceListPanel(session)
+    seen: list[tuple] = []
+    panel.sigHiddenToggled.connect(lambda key, hidden: seen.append((key, hidden)))
     table = panel.table()
     hidden_col = InstanceListPanel.COLUMNS.index("Hidden")
     table.item(0, hidden_col).setCheckState(Qt.CheckState.Checked)
-    assert session.calls == [("set_hidden", "cpu_cooler.01", True)]
+    assert seen == [("cpu_cooler.01", True)]
+    assert session.calls == []
 
 
-def test_instances_h_after_a_checkbox_click_sends_the_opposite_value(
-    session: StubSession,
-) -> None:
+def test_instances_h_sends_the_value_the_session_holds(session: StubSession) -> None:
+    """``H`` reads the session's row, not the checkbox somebody just clicked."""
     panel = InstanceListPanel(session)
     panel.select_instance("cpu_cooler.01")
     hidden_col = InstanceListPanel.COLUMNS.index("Hidden")
     panel.table().item(0, hidden_col).setCheckState(Qt.CheckState.Checked)
-    send_key(panel.table(), Qt.Key.Key_H, text="h")
-    assert session.calls == [
-        ("set_hidden", "cpu_cooler.01", True),
-        ("set_hidden", "cpu_cooler.01", False),
-    ]
-    assert panel.table().item(0, hidden_col).checkState() == Qt.CheckState.Unchecked
+    session._rows[0]["hidden"] = True     # what the window's slot would produce
+    panel.refresh()
+    panel.toggle_hidden()
+    assert session.calls == [("set_hidden", "cpu_cooler.01", False)]
+    # and the table is re-read from the session afterwards, never patched locally
+    assert panel.rows()[0]["hidden"] == session.instance_rows()[0]["hidden"]
 
 
-def test_instances_h_toggles_hidden_on_the_selected_row(session: StubSession) -> None:
+def test_instances_toggle_hidden_flips_the_selected_row(session: StubSession) -> None:
     panel = InstanceListPanel(session)
     panel.select_instance("screw.cpu_cooler.03")
-    send_key(panel.table(), Qt.Key.Key_H, text="h")
+    panel.toggle_hidden()
     assert session.calls == [("set_hidden", "screw.cpu_cooler.03", False)]
 
 
 def test_instances_v_cycles_visibility(session: StubSession) -> None:
     panel = InstanceListPanel(session)
     panel.select_instance("cpu_cooler.01")  # currently "visible"
-    send_key(panel.table(), Qt.Key.Key_V, text="v")
+    panel.cycle_visibility()
     assert session.calls == [
         ("set_visibility", "cpu_cooler.01", Visibility.OCCLUDED_PARTIAL.value)
     ]
-    send_key(panel.table(), Qt.Key.Key_V, text="v")  # again: it must advance
+    panel.cycle_visibility()  # again: it must advance
     assert session.calls == [
         ("set_visibility", "cpu_cooler.01", Visibility.OCCLUDED_PARTIAL.value),
         ("set_visibility", "cpu_cooler.01", Visibility.OCCLUDED_FULL.value),
     ]
     session.calls.clear()
     panel.select_instance("screw.cpu_cooler.03")  # "occluded_partial"
-    send_key(panel.table(), Qt.Key.Key_V, text="v")
+    panel.cycle_visibility()
     assert session.calls == [
         ("set_visibility", "screw.cpu_cooler.03", Visibility.OCCLUDED_FULL.value)
     ]
 
 
-def test_instances_number_keys_set_the_seven_visibilities(session: StubSession) -> None:
+def test_instances_forget_a_selection_that_left_the_frame(session: StubSession) -> None:
+    """Removed parts drop out of the table; H / V / 1-7 must not chase them."""
+    panel = InstanceListPanel(session)
+    panel.select_instance("screw.cpu_cooler.03")
+    assert panel.selected_instance() == "screw.cpu_cooler.03"
+    session._rows = [r for r in session._rows if r["key"] != "screw.cpu_cooler.03"]
+    panel.refresh()
+    assert panel.selected_instance() is None
+    session.calls.clear()
+    panel.toggle_hidden()
+    panel.cycle_visibility()
+    panel.set_visibility(api.VISIBILITY_VALUES[0])
+    assert session.calls == []   # nothing acted on the key that is gone
+
+
+def test_instances_set_visibility_covers_the_seven_values(session: StubSession) -> None:
+    """``1``-``7`` are bound by the window's table; the panel takes a value."""
     panel = InstanceListPanel(session)
     panel.select_instance("cpu_cooler.01")
-    keys = [
-        Qt.Key.Key_1,
-        Qt.Key.Key_2,
-        Qt.Key.Key_3,
-        Qt.Key.Key_4,
-        Qt.Key.Key_5,
-        Qt.Key.Key_6,
-        Qt.Key.Key_7,
-    ]
-    for i, key in enumerate(keys):
-        send_key(panel.table(), key, text=str(i + 1))
+    for value in api.VISIBILITY_VALUES:
+        panel.set_visibility(value)
     assert session.calls == [
         ("set_visibility", "cpu_cooler.01", v) for v in api.VISIBILITY_VALUES
     ]
-    send_key(panel.table(), Qt.Key.Key_8, text="8")
-    assert len(session.calls) == 7  # 8 is not a visibility
+    assert not hasattr(panel, "handle_key")
 
 
 def test_instances_up_and_down_move_the_z_order(session: StubSession) -> None:
     panel = InstanceListPanel(session)
-    panel.select_instance("screw.cpu_cooler.03")  # middle row
+    seen: list[int] = []
+    panel.sigReorder.connect(seen.append)
     panel.up_button.click()
+    panel.down_button.click()
+    assert seen == [-1, +1]          # the buttons report; the window acts
+    assert session.calls == []
+
+    panel.select_instance("screw.cpu_cooler.03")  # middle row
+    panel.move_up()
     assert session.calls == [("set_zorder_move", "screw.cpu_cooler.03", "cpu_cooler.01")]
     session.calls.clear()
-    panel.down_button.click()
+    panel.move_down()
     # moving a row down = the row below it goes above the selected one
     assert session.calls == [("set_zorder_move", "chassis.01", "screw.cpu_cooler.03")]
     session.calls.clear()
     panel.select_instance("cpu_cooler.01")  # top row: up does nothing
-    panel.up_button.click()
+    panel.move_up()
     assert session.calls == []
 
 
 def test_instances_ctrl_arrows_reorder(session: StubSession) -> None:
     panel = InstanceListPanel(session)
     panel.select_instance("screw.cpu_cooler.03")  # middle row
-    send_key(panel.table(), Qt.Key.Key_Up, Qt.KeyboardModifier.ControlModifier)
+    panel.move_up()
     assert session.calls == [("set_zorder_move", "screw.cpu_cooler.03", "cpu_cooler.01")]
     session.calls.clear()
-    send_key(panel.table(), Qt.Key.Key_Down, Qt.KeyboardModifier.ControlModifier)
+    panel.move_down()
     assert session.calls == [("set_zorder_move", "chassis.01", "screw.cpu_cooler.03")]
     session.calls.clear()
     # the bare arrows stay with the table's own row navigation
@@ -654,13 +684,14 @@ def test_instances_ctrl_arrows_reorder(session: StubSession) -> None:
     assert session.calls == []
 
 
-def test_instances_double_click_begins_an_edit(session: StubSession) -> None:
+def test_instances_double_click_only_reports_the_request(session: StubSession) -> None:
+    """The window owns ``begin_edit``: it is the one that can refuse it."""
     panel = show(InstanceListPanel(session), 520, 320)
     seen: list[str] = []
     panel.sigRequestEdit.connect(seen.append)
     table = panel.table()
     click_item(table, table.item(2, 1), double=True)
-    assert session.calls == [("begin_edit", "chassis.01")]
+    assert session.calls == []
     assert seen == ["chassis.01"]
 
 
@@ -719,29 +750,31 @@ def test_review_resolves_conflicts(session: StubSession) -> None:
     assert ("resolve_conflict", 8, api.RESOLVE_ACCEPT_NEW) in session.calls
 
 
-def test_review_enter_confirms_and_shows_problems(session: StubSession) -> None:
+def test_review_confirm_reports_the_problems_it_was_given(session: StubSession) -> None:
+    """``Enter`` is the window's binding; it calls this method, nothing else."""
     panel = ReviewPanel(session)
-    send_key(panel.list_for(api.QUEUE_NEEDS_REVIEW), Qt.Key.Key_Return)
+    panel.confirm()
     assert ("confirm_frame",) in session.calls
     assert panel.problems() == []
     session.calls.clear()
     session.confirm_result = False
-    send_key(panel, Qt.Key.Key_Enter)
+    panel.confirm()
     assert session.calls == [("confirm_frame",)]
     assert panel.problems() == ["missing_shape:screw.cpu_cooler.03"]
 
 
-def test_review_r_marks_rework_for_the_selected_step(session: StubSession) -> None:
+def test_review_rework_reports_the_selected_step(session: StubSession) -> None:
     panel = ReviewPanel(session)
     seen: list[int] = []
     panel.sigRework.connect(seen.append)
     lw = panel.list_for(api.QUEUE_CONFLICTS)
     lw.setCurrentRow(1)
-    send_key(lw, Qt.Key.Key_R, text="r")
+    panel.rework()               # the window binds R to this
     assert seen == [11]
     lw.setCurrentRow(-1)
-    send_key(panel, Qt.Key.Key_R, text="r")
+    panel.rework()
     assert seen == [11, session.current().step]  # falls back to the current frame
+    assert not hasattr(panel, "handle_key")
 
 
 def test_review_refreshes_on_frame_change(session: StubSession) -> None:

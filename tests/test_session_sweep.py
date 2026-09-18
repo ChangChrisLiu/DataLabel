@@ -54,7 +54,7 @@ def qapp():
 def session(qapp, tmp_path: Path) -> AnnotationSession:
     made = make_session(tmp_path)
     yield made
-    made.close()  # the worker must never outlive the object it signals
+    made.close(force=True)  # the worker must never outlive the object it signals
 
 
 def exploding(message: str, fail_times: int = 1_000_000, then=None):

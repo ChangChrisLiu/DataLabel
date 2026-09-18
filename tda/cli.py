@@ -40,6 +40,7 @@ from typing import Callable, Iterator, Optional
 
 from tda import pipeline as P
 from tda import pipeline_logs as L
+from tda.cli_app import SUBCOMMANDS as _APP_SUBCOMMANDS
 from tda.cli_relations import _add_infer_relations
 from tda.core.db import Db
 from tda.core.index import build_index, load_index, save_index
@@ -440,8 +441,10 @@ def _add_status(sub) -> None:
 # --------------------------------------------------------------------------- #
 # entry point
 # --------------------------------------------------------------------------- #
-#: Registrars, in the order the commands appear in ``--help``. Later tasks add
-#: ``app``, ``check``, ``build-cache`` and the exports by appending here.
+#: Registrars, in the order the commands appear in ``--help``: first the four
+#: pipeline imports and the two database utilities, then the commands of
+#: :mod:`tda.cli_app` that use what they produced (``app``, ``check``,
+#: ``build-cache``, ``export-coco``, ``export-vlm``).
 SUBCOMMANDS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
     _add_build_index,
     _add_load_index,
@@ -450,6 +453,7 @@ SUBCOMMANDS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
     _add_infer_relations,
     _add_backup,
     _add_status,
+    *_APP_SUBCOMMANDS,
 )
 
 

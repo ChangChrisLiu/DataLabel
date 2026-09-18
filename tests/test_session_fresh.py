@@ -51,7 +51,7 @@ def session(qapp, tmp_path: Path) -> AnnotationSession:
     made.sweeper_enabled = False  # nothing may compile behind the counter
     made.sweeper.stop()
     yield made
-    made.close()
+    made.close(force=True)
 
 
 @pytest.fixture

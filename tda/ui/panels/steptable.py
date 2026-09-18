@@ -77,6 +77,16 @@ __all__ = [
 DEFAULT_SPLIT = 2
 
 
+def _default_cache_dir() -> str:
+    """``cache_dir`` from ``configs/paths.yaml``, falling back to the checkout."""
+    from tda import pipeline as P
+
+    try:
+        return str(P.require(P.load_paths(P.DEFAULT_PATHS_PATH), "cache_dir"))
+    except Exception:  # noqa: BLE001 - no config: stay inside the repository
+        return str(Path(__file__).resolve().parents[3] / "cache")
+
+
 class StepTablePanel(QWidget):
     """Stage S1: review one desktop's step table and instance table."""
 
@@ -88,14 +98,17 @@ class StepTablePanel(QWidget):
         db: Db,
         desktop: int,
         taxonomy: Taxonomy | None = None,
-        cache_dir: str | Path = "D:/DataSet/cache",
+        cache_dir: str | Path | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.db = db
         self.desktop = desktop
         self.tax = taxonomy or load_taxonomy()
-        self.cache_dir = Path(cache_dir)
+        # No literal path here: the cache directory is configuration, and a
+        # default baked into the panel would write to this machine's real cache
+        # from any caller (or test) that forgot to pass one.
+        self.cache_dir = Path(cache_dir if cache_dir else _default_cache_dir())
         self.data = StepTableData.load(db, desktop, self.tax)
 
         self.steps_model = StepTableModel(self.data, self.cache_dir, self)

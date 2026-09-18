@@ -36,6 +36,12 @@ from PySide6.QtCore import QObject, Qt, Signal
 
 from tda.models.sam_service import SamRequest, SamResult
 from tda.ui.canvas.overlay import LabelOverlay
+from tda.ui.canvas.sam_crop import (
+    MAX_SAM_SIDE,
+    SamResultBridge,
+    norm_box,
+    viewport_crop,
+)
 from tda.ui.canvas.tools import Box, Point, Rect, Tool
 
 __all__ = [
@@ -52,9 +58,6 @@ __all__ = [
     "viewport_crop",
 ]
 
-#: SAM 2.1 resizes its input to 1024 anyway, so a longer crop wastes work
-#: and costs boundary precision on the way back (spec 4.6).
-MAX_SAM_SIDE = 1024
 
 #: Emitted on :attr:`SamToolBase.sigHint` when cycling is abandoned because the
 #: annotator painted on the proposal (their edit is never discarded).
@@ -69,64 +72,6 @@ ERR_NO_FRAME_TOKEN = "frame token not set: call set_frame_token(...) on frame ch
 FALLBACK_INSTANCE = "editing"
 
 
-def _norm_box(a: tuple[float, float], b: tuple[float, float]) -> Box:
-    return (min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
-
-
-def viewport_crop(
-    canvas: Any, max_side: int = MAX_SAM_SIDE
-) -> Optional[tuple[np.ndarray, Rect, float]]:
-    """``(crop, rect, scale)`` for the visible image region, or ``None``.
-
-    ``rect`` is the crop window in image coordinates and ``scale`` the factor
-    applied to fit ``max_side`` (1.0 when the viewport is already small enough,
-    which is the normal case once the annotator has zoomed in).
-
-    A viewport larger than ``max_side`` is **downscaled rather than tiled**
-    (spec 4.6 mentions tiling; deferred to P2).  SAM 2 resizes whatever it gets
-    to 1024x1024 internally, so tiling would buy detail only where the
-    annotator is already expected to zoom in, and there the crop is native
-    resolution.  The one visible consequence: ``SamService`` measures its local
-    refinement radius (:data:`~tda.models.sam_service.REFINE_RADIUS_PX`, 48 px)
-    in *crop* pixels, so the region a refinement click can change spans
-    ``REFINE_RADIUS_PX / scale`` **image** pixels -- a zoomed-out view refines
-    coarsely.  Zoom in for a tight correction.
-    """
-    rgb = canvas.image_rgb()
-    if rgb is None:
-        return None
-    rect = canvas.viewport_image_rect()
-    x0, y0, x1, y1 = rect
-    if x1 <= x0 or y1 <= y0:
-        return None
-    crop = rgb[y0:y1, x0:x1]
-    h, w = crop.shape[:2]
-    scale = 1.0
-    longest = max(h, w)
-    if longest > max_side:
-        scale = max_side / float(longest)
-        crop = cv2.resize(
-            crop,
-            (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
-            interpolation=cv2.INTER_AREA,
-        )
-    return np.ascontiguousarray(crop), rect, scale
-
-
-class SamResultBridge(QObject):
-    """Moves a SAM result from the worker thread onto the GUI thread.
-
-    ``SamQueue`` calls its callback on its own thread; touching the overlay or
-    the scene from there would be a data race.  :meth:`deliver` is the callback
-    and does nothing but emit -- the connection is queued, so the slot runs in
-    the thread that owns this object (the GUI thread).
-    """
-
-    sigResult = Signal(object)
-
-    def deliver(self, payload: object) -> None:
-        """Callback for ``SamQueue.submit`` -- runs on the worker thread."""
-        self.sigResult.emit(payload)
 
 
 class SamToolBase(Tool):
@@ -185,6 +130,9 @@ class SamToolBase(Tool):
         self._bridge = SamResultBridge(self)
         self._bridge.sigResult.connect(
             self._on_result, Qt.ConnectionType.QueuedConnection
+        )
+        self._bridge.sigFailed.connect(
+            self.sigError, Qt.ConnectionType.QueuedConnection
         )
 
     # -- lifecycle ----------------------------------------------------------
@@ -409,7 +357,21 @@ class SamToolBase(Tool):
         self._token += 1
         stamp = (self._token, self._identity())
         bridge, refine = self._bridge, self.refine
-        self.queue.submit(req, lambda res: bridge.deliver((res, rect, refine, stamp)))
+        # on_error matters as much as the callback: without it a failed
+        # inference (out of memory, a malformed prompt) leaves the annotator
+        # waiting for a mask that is never coming, with nothing on screen.
+        self._submit_to_queue(
+            req,
+            lambda res: bridge.deliver((res, rect, refine, stamp)),
+            lambda exc: bridge.deliver_error(f"SAM failed: {exc}"),
+        )
+
+    def _submit_to_queue(self, req, callback, on_error) -> None:
+        """``queue.submit`` with the error hook, for queues that accept one."""
+        try:
+            self.queue.submit(req, callback, on_error)
+        except TypeError:  # an older queue (or a stub) without the hook
+            self.queue.submit(req, callback)
 
     def _mask_input(
         self, rect: Rect, crop_hw: tuple[int, int]
@@ -530,13 +492,30 @@ class SamPointTool(SamToolBase):
         self.points: list[Point] = []
 
     def on_press(self, x: float, y: float, ev: Any) -> None:
+        """Left click = foreground, right click **or ``Alt`` + click** = background.
+
+        The ``Alt`` spelling exists because a right click is also how a tablet
+        pen's barrel button and most trackpads raise a context menu, and because
+        "hold a modifier" is one hand on a keyboard the annotator already has.
+        """
         self._sync_identity()  # the box may belong to the previous target
-        label = 1
-        button = getattr(ev, "button", None)
-        if button is not None and button() == Qt.MouseButton.RightButton:
-            label = 0
-        self.points.append((float(x), float(y), label))
+        self.points.append((float(x), float(y), 0 if self._is_negative(ev) else 1))
         self._submit(self.points, box=self.prompt_box)
+
+    @staticmethod
+    def _is_negative(ev: Any) -> bool:
+        button = getattr(ev, "button", None)
+        try:
+            if button is not None and button() == Qt.MouseButton.RightButton:
+                return True
+        except TypeError:  # pragma: no cover - a stub without a callable button
+            return False
+        modifiers = getattr(ev, "modifiers", None)
+        try:
+            return (modifiers is not None
+                    and bool(modifiers() & Qt.KeyboardModifier.AltModifier))
+        except TypeError:  # pragma: no cover
+            return False
 
     def clear_points(self) -> None:
         """Forget the collected prompts (e.g. after accepting the mask)."""
@@ -573,7 +552,7 @@ class SamBoxTool(SamToolBase):
     def on_move(self, x: float, y: float, ev: Any) -> None:
         if not self._dragging or self._start is None:
             return
-        self.box = _norm_box(self._start, (float(x), float(y)))
+        self.box = norm_box(self._start, (float(x), float(y)))
         if self.canvas is not None:
             self.canvas.set_rubber_band(self.box)
 
@@ -581,7 +560,7 @@ class SamBoxTool(SamToolBase):
         if not self._dragging or self._start is None:
             return
         self._dragging = False
-        box = _norm_box(self._start, (float(x), float(y)))
+        box = norm_box(self._start, (float(x), float(y)))
         self._start = None
         if self.canvas is not None:
             self.canvas.set_rubber_band(None)

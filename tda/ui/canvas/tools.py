@@ -179,8 +179,24 @@ class PaintTool(Tool):
         return self.overlay.paint((x, y), self.radius, self.ADD)
 
     # -- events -------------------------------------------------------------
+    @staticmethod
+    def _is_right(ev: Any) -> bool:
+        """Was this the right button? (Qt6 events answer, stubs may not.)"""
+        from PySide6.QtCore import Qt as _Qt
+
+        button = getattr(ev, "button", None)
+        try:
+            return button is not None and button() == _Qt.MouseButton.RightButton
+        except TypeError:  # pragma: no cover - a stub without a callable button
+            return False
+
     def on_press(self, x: float, y: float, ev: Any) -> None:
         if self.overlay is None:
+            return
+        if self._is_right(ev):
+            # The right button belongs to the SAM tools (a negative point) and
+            # to the context menu; painting with it was never asked for and a
+            # right-click meant as "undo that point" would add pixels instead.
             return
         self.stroke_before = self._target().copy()
         self._active = True

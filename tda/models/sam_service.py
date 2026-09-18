@@ -435,8 +435,15 @@ class SamQueue:
         self._thread = threading.Thread(target=self._run, name="sam-queue", daemon=True)
         self._thread.start()
 
-    def submit(self, req: SamRequest, cb: Callable[[SamResult], None]) -> None:
-        """Queue ``req``, dropping any request that has not started running yet."""
+    def submit(self, req: SamRequest, cb: Callable[[SamResult], None],
+               on_error: Optional[Callable[[BaseException], None]] = None) -> None:
+        """Queue ``req``, dropping any request that has not started running yet.
+
+        ``on_error`` is called (on the worker thread, like ``cb``) when the
+        prediction raises: without it an out-of-memory or a malformed prompt is
+        only visible in :attr:`last_error` and the log, and the annotator sits
+        waiting for a mask that will never arrive.
+        """
         with self._lock:
             if self._stopped:
                 raise RuntimeError("SamQueue has been stopped")
@@ -447,7 +454,7 @@ class SamQueue:
                     break
                 self._queue.task_done()
                 self.dropped += 1
-            self._queue.put((req, cb))
+            self._queue.put((req, cb, on_error))
 
     def stop(self, timeout: float = 30.0) -> None:
         """Drop pending work, let the in-flight request finish, join the thread."""
@@ -477,12 +484,17 @@ class SamQueue:
             try:
                 if item is _STOP:
                     return
-                req, cb = item
+                req, cb, on_error = item
                 try:
                     result = self._service.predict(req)
                 except Exception as exc:  # keep the worker alive on bad prompts
                     self.last_error = exc
                     log.exception("SAM predict failed: %s", exc)
+                    if on_error is not None:
+                        try:
+                            on_error(exc)
+                        except Exception:  # pragma: no cover - reporting must not loop
+                            log.exception("SAM error callback failed")
                     continue
                 try:
                     cb(result)

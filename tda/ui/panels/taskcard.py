@@ -6,8 +6,10 @@ that one in the staging area, split this keyframe, only flip that state -- and
 this panel is their checklist: done items are struck through, the first open one
 is highlighted and is what the four buttons act on.
 
-The panel decides nothing.  Activating an item is ``begin_edit`` plus a
-:attr:`TaskCardPanel.sigRequestEdit` for the canvas; the buttons are the four
+The panel decides nothing.  Activating an item only emits
+:attr:`TaskCardPanel.sigRequestEdit`; the main window is what calls
+``begin_edit``, because it is the one that can refuse -- switching instance
+while pixels are uncommitted has to be answerable.  The buttons are the four
 commit/confirm calls of spec 4.3, with their keyboard equivalents handled here
 so they work while the list has focus.  When ``confirm_frame`` refuses, the
 problems that came with ``sigProblems`` are shown instead of any local check.
@@ -16,14 +18,15 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QKeyEvent
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QGridLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -47,12 +50,20 @@ KIND_ICONS: dict[str, str] = {
 #: Rows whose work is already done.
 DONE_COLOR = QColor(128, 128, 132)
 
+#: :attr:`TaskCardPanel.sigCommit` payload meaning "ask the session".
+SUGGESTED = ""
+
 
 class TaskCardPanel(QWidget):
     """The per-frame instruction list with the commit and confirm actions."""
 
     #: An item was activated: the canvas should start editing this instance.
     sigRequestEdit = Signal(str)
+    #: A commit button was pressed; the payload is the scope it asks for, or
+    #: :data:`SUGGESTED` for "whatever the session suggests" (the plain Commit).
+    sigCommit = Signal(str)
+    #: The confirm button was pressed.
+    sigConfirm = Signal()
 
     def __init__(self, session: Optional[api.SessionLike] = None,
                  parent: Optional[QWidget] = None) -> None:
@@ -63,19 +74,34 @@ class TaskCardPanel(QWidget):
         self._list = QListWidget()
         self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self._list.setAlternatingRowColors(True)
+        # An instruction is a sentence; the dock's width is not negotiable by it
+        self._list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._list.setMinimumWidth(160)
         self._list.itemActivated.connect(self._on_item_activated)
-        self._list.installEventFilter(self)
 
-        self.commit_button = QPushButton("Commit edit (Enter)")
-        self.override_button = QPushButton("Commit as frame override (Alt+Enter)")
-        self.split_button = QPushButton("Split keyframe (Ctrl+K)")
-        self.confirm_button = QPushButton("Confirm frame (Space)")
-        self.commit_button.clicked.connect(lambda: self.commit(api.SCOPE_KEYFRAME))
+        # Short captions in a 2x2 grid, full sentences in the tooltips: laid out
+        # in a row with their long names the four buttons asked for 747 px of
+        # dock width -- "Commit as frame override (Alt+Enter)" alone is 446 --
+        # and the canvas was left with less than half the window.
+        self.commit_button = self._button("Commit  ⏎", "Commit the edit (Enter)")
+        self.override_button = self._button(
+            "This frame  Alt+⏎", "Commit as a frame override (Alt+Enter)")
+        self.split_button = self._button(
+            "Split  Ctrl+K", "Split the keyframe here (Ctrl+K)")
+        self.confirm_button = self._button(
+            "Confirm  Space", "Confirm the frame and step back (Space)")
+        # The buttons **report**; they do not act.  Calling the session from
+        # here made "Confirm" step the frame back over an uncommitted layer --
+        # the window never heard about the click, so nothing checked and nothing
+        # was said -- and made "Commit" mean ``keyframe`` while the same label's
+        # key asked the session what the edit meant.
+        self.commit_button.clicked.connect(lambda: self.sigCommit.emit(SUGGESTED))
         self.override_button.clicked.connect(
-            lambda: self.commit(api.SCOPE_FRAME_OVERRIDE)
+            lambda: self.sigCommit.emit(api.SCOPE_FRAME_OVERRIDE)
         )
-        self.split_button.clicked.connect(lambda: self.commit(api.SCOPE_SPLIT))
-        self.confirm_button.clicked.connect(self.confirm)
+        self.split_button.clicked.connect(lambda: self.sigCommit.emit(api.SCOPE_SPLIT))
+        self.confirm_button.clicked.connect(self.sigConfirm.emit)
 
         self._problems_label = QLabel("Problems")
         self._problems_list = QListWidget()
@@ -102,6 +128,16 @@ class TaskCardPanel(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         if session is not None:
             self.set_session(session)
+
+    @staticmethod
+    def _button(caption: str, tooltip: str) -> QPushButton:
+        """A button that shows its key, explains itself, and stays narrow."""
+        button = QPushButton(caption)
+        button.setToolTip(tooltip)
+        button.setMinimumWidth(1)
+        button.setSizePolicy(QSizePolicy.Policy.Ignored,
+                             QSizePolicy.Policy.Fixed)
+        return button
 
     # -- wiring -------------------------------------------------------------
     def set_session(self, session: Optional[api.SessionLike]) -> None:
@@ -195,43 +231,22 @@ class TaskCardPanel(QWidget):
         return self._problems_list.isVisibleTo(self)
 
     # -- keys ---------------------------------------------------------------
-    def handle_key(self, event: QKeyEvent) -> bool:
-        """Spec 4.3 keys; ``True`` when the event was consumed."""
-        key = event.key()
-        mods = event.modifiers()
-        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            if mods & Qt.KeyboardModifier.AltModifier:
-                self.commit(api.SCOPE_FRAME_OVERRIDE)
-            else:
-                self.commit(api.SCOPE_KEYFRAME)
-            return True
-        if key == Qt.Key.Key_K and mods & Qt.KeyboardModifier.ControlModifier:
-            self.commit(api.SCOPE_SPLIT)
-            return True
-        if key == Qt.Key.Key_Space:
-            self.confirm()
-            return True
-        return False
+    # There is exactly one key map, and it is not here: the main window's
+    # ``tda.ui.app_actions.ACTIONS`` table owns every binding, per mode, and
+    # calls the plain methods above.  A second table in the panel is how ``Ctrl+K``
+    # on this list came to raise out of ``keyPressEvent`` in Steps mode and how
+    # ``Enter`` in Review committed with keyframe scope past ``act_commit``.
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: D102 - Qt override
-        if self.handle_key(event):
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: D102
-        # The list would otherwise swallow Enter (activation) and Space
-        # (selection toggle) while it has the focus.
-        if obj is self._list and event.type() == QEvent.Type.KeyPress:
-            if self.handle_key(event):
-                return True
-        return super().eventFilter(obj, event)
 
     # -- slots --------------------------------------------------------------
     def _on_item_activated(self, item: QListWidgetItem) -> None:
+        """Report the request; the window decides whether the edit may start.
+
+        The panel used to call ``begin_edit`` itself and then emit, which made
+        it impossible to refuse: by the time the window heard about it the
+        previous instance's uncommitted pixels were already gone.
+        """
         instance = str(item.data(INSTANCE_ROLE))
-        if self._session is not None and instance:
-            self._session.begin_edit(instance)
         if instance:
             self.sigRequestEdit.emit(instance)
 

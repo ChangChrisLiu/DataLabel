@@ -37,6 +37,10 @@ class ReviewMixin:
         problem list is emitted on :attr:`sigProblems` first, so a panel can
         show exactly what the annotator has to fix.
         """
+        # The step back at the end would drop an uncommitted layer, and this
+        # method must not depend on its caller having checked: a panel button
+        # wired straight to it is exactly how that assumption was broken.
+        self._refuse_if_editing("confirming the frame", force=False)
         key = self.current()
         try:
             self.truth.verify_frame(key, self.annotator)
@@ -49,7 +53,10 @@ class ReviewMixin:
         self._invalidate()
         # exactly one frame change: the step back is the change, and a panel
         # that reloads on every emit must not reload the frame being left
-        if not self._step_to([s for s in self._available if s < key.step], last=True):
+        # force: the layer was committed or empty before verify_frame let this
+        # frame through, so there is nothing left for the gate to protect
+        if not self._step_to([s for s in self._available if s < key.step], last=True,
+                             force=True):
             self._announce()
         return True
 
