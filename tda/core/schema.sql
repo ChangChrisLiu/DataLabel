@@ -1,7 +1,9 @@
--- TDA SQLite schema (schema_version = 1).
+-- TDA SQLite schema (schema_version = 2).
 -- One table per entity of design spec section 3.1. Every JSON column is TEXT
 -- holding json.dumps(..., ensure_ascii=False); RLE dicts are stored as JSON.
--- All statements are IF NOT EXISTS so that Db.__init__ stays idempotent.
+-- All statements are IF NOT EXISTS so that Db.__init__ stays idempotent -- which
+-- is why columns added after version 1 (see tda/core/dbconn.py: MIGRATIONS) are
+-- both listed here, for a fresh file, and added with ALTER TABLE on an old one.
 
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -207,6 +209,10 @@ CREATE TABLE IF NOT EXISTS compiled_mask (
     input_hash       TEXT,
     verified_by      TEXT,
     verified_at      TEXT,
+    -- schema_version 2: box rows (a bench part) keep their rectangle here and
+    -- leave visible_rle_json NULL; mask rows do the opposite.
+    geom_type        TEXT    NOT NULL DEFAULT 'mask',
+    box_json         TEXT,
     PRIMARY KEY (desktop, step, view, instance)
 );
 
