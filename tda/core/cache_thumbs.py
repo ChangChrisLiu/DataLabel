@@ -27,7 +27,10 @@ segment's own ``roi_json`` is the right crop for its steps.  Where the lookup
 has nothing, :func:`tda.core.cache.suggest_roi` measures **one** box for the
 whole desktop+view - on the reference frame, its first step, the assembled
 chassis and so the largest silhouette, falling back to a median over a few
-sampled steps and then to the frame's central box.  A measured box is
+sampled steps and then to the frame's central box.  (``suggest_roi`` itself
+measures the frame twice, as the darkest object on the bed and as whatever is
+not the bed, and picks by shape; this tier only sees its answer.)  A measured
+box is
 deliberately *not* per frame: it would wobble from step to step and make the
 timeline jitter.  A frame the lookup has no box for falls back to that measured
 box, never to a neighbouring segment's.
@@ -70,14 +73,13 @@ DEFAULT_MAX_SIDE = 192  # a timeline row is ~120 px tall on a HiDPI screen
 DEFAULT_QUALITY = 85  # JPEG quality; 85 is visually lossless at this size
 ROI_PAD_FRAC = 0.04  # grow a chassis box by 4% of its own size before cropping
 ROI_SAMPLES = 5  # how many steps the fallback ROI is measured over
-#: A measured box outside these bounds is not a chassis and is thrown away.  The
-#: floor is a **stopgap**: on a light-coloured chassis (D64) the dark-object
-#: stage of :func:`~tda.core.cache.suggest_roi` latches onto the motherboard and
-#: returns 13% of the frame with every sampled step agreeing, so the median
-#: cannot catch it.  Over the 66 real scanner desktops the next smallest box is
-#: 30% and the median 42%, so 20% rejects exactly that one failure and degrades
-#: it to the central-70% crop.  The real fix is teaching ``suggest_roi`` about
-#: light chassis; until then a wrong crop is worse than none.
+#: A measured box outside these bounds is not a chassis and is thrown away.
+#: :func:`~tda.core.cache.suggest_roi` now applies the same bounds itself -- it
+#: has a second strategy for the light chassis this floor used to be a stopgap
+#: for (D64) and picks between them by shape -- so this is the guard on the
+#: *median over sampled steps* below, which ``suggest_roi`` never sees.  They are
+#: deliberately the same numbers: a box this tier would reject is not one to cut
+#: a timeline with, whichever stage measured it.
 ROI_MIN_AREA_FRAC = 0.20
 ROI_MAX_AREA_FRAC = 0.95  # ... and one this big is not a crop worth making
 
