@@ -1,0 +1,379 @@
+"""The index half of the data pipeline behind ``python -m tda.cli`` (spec 2.2-2.5).
+
+:mod:`tda.cli` holds the argument parsing and the printing, this module and
+:mod:`tda.pipeline_logs` hold the work, so every step is callable from a test or
+from the GUI without going through ``argparse``.
+
+The pipeline runs in one order, because each step needs what the previous one
+wrote::
+
+    build-index -> load-index -> import-logs -> import-ls
+
+Here: the shared configuration helpers, ``index.json`` -> ``frame`` rows and
+pose segments, the pose-segment split at the ``reorient`` steps, and the
+counters behind ``status``. The Drive-sheet import lives next door in
+:mod:`tda.pipeline_logs`.
+
+Nothing here writes outside ``D:`` -- :meth:`tda.core.db.Db.backup` is the one
+command that may reach ``F:``, and only into ``backup_dir``.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Callable, Iterable, Optional
+
+from tda.core.db import Db
+from tda.core.db_status import VIEW_COUNTERS
+from tda.core.index import DesktopIndex, load_index
+from tda.core.model import VIEWS, StepType
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_PATHS_PATH = "configs/paths.yaml"
+INDEX_NAME = "index.json"
+INDEX_REPORT_NAME = "index_report.md"
+LOGS_REPORT_NAME = "import_logs_issues.md"
+LS_SUMMARY_NAME = "ls_import_summary.json"
+LS_EXPORT_NAME = "labelstudio/humansignal_annotated_projects_export.json"
+DRIVE_SUBDIR = "drive"
+ALL_DESKTOPS = range(1, 67)
+#: How many pose issues one desktop's meta keeps (newest last).
+POSE_ISSUE_LIMIT = 50
+
+#: ``print`` by default; tests and the GUI pass their own sink.
+Log = Callable[[str], None]
+
+__all__ = [
+    "backup_dest", "cache_file", "desktops_without_steps", "drive_dir", "index_path",
+    "load_index_into_db", "load_paths", "ls_export_path", "merge_desktop_meta", "open_db",
+    "parse_desktops", "read_index", "require", "split_pose_segments", "status_rows",
+]
+
+
+# --------------------------------------------------------------------------- #
+# configuration
+# --------------------------------------------------------------------------- #
+def load_paths(path: str = DEFAULT_PATHS_PATH) -> dict:
+    """Load ``paths.yaml``; a relative path may be given from the repo root."""
+    import yaml
+
+    if not (os.path.isabs(path) or os.path.exists(path)):
+        path = str(REPO_ROOT / path)
+    with open(path, "r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def require(paths: dict, key: str) -> str:
+    """One path from ``paths.yaml``, with a readable error when it is missing."""
+    value = paths.get(key)
+    if not value:
+        raise ValueError(f"paths.yaml defines no {key}")
+    return str(value)
+
+
+def parse_desktops(spec: Optional[str]) -> Optional[set[int]]:
+    """Parse ``"13"`` / ``"1-66"`` / ``"1-3,13,60-61"``; ``None`` means "all"."""
+    if spec is None:
+        return None
+    out: set[int] = set()
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        first, _, last = part.partition("-")
+        try:
+            lo = int(first)
+            hi = int(last) if last else lo
+        except ValueError:
+            raise ValueError(f"not a desktop range: {part!r}") from None
+        if hi < lo:
+            raise ValueError(f"empty desktop range: {part!r}")
+        out.update(range(lo, hi + 1))
+    if not out:
+        raise ValueError(f"no desktops in {spec!r}")
+    return out
+
+
+def wanted(desktop: int, desktops: Optional[set[int]]) -> bool:
+    """Is this desktop in the ``--desktops`` selection (``None`` means all)?"""
+    return desktops is None or desktop in desktops
+
+
+def index_path(paths: dict) -> str:
+    """``<cache_dir>/index.json``."""
+    return os.path.join(paths.get("cache_dir", "cache"), INDEX_NAME)
+
+
+def cache_file(paths: dict, name: str) -> str:
+    """A file inside ``cache_dir`` (the directory is created on demand)."""
+    cache = paths.get("cache_dir", "cache")
+    os.makedirs(cache, exist_ok=True)
+    return os.path.join(cache, name)
+
+
+def drive_dir(paths: dict) -> str:
+    """``<raw_logs_dir>/drive`` -- the exported Drive sheets."""
+    return os.path.join(paths.get("raw_logs_dir", "raw_logs"), DRIVE_SUBDIR)
+
+
+def ls_export_path(paths: dict) -> str:
+    """``<raw_logs_dir>/labelstudio/humansignal_annotated_projects_export.json``."""
+    return os.path.join(paths.get("raw_logs_dir", "raw_logs"), *LS_EXPORT_NAME.split("/"))
+
+
+def backup_dest(paths: dict, dest: Optional[str] = None) -> str:
+    """Where a backup may go: ``backup_dir`` itself or a folder inside it.
+
+    ``backup_dir`` is the one place on the read-only ``F:`` drive this tool
+    writes to (spec 3.5), so an explicit ``--dest`` is confined to it rather
+    than trusted.
+    """
+    root = Path(require(paths, "backup_dir")).resolve()
+    if dest is None:
+        return str(root)
+    target = Path(dest).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError(f"--dest must be inside the configured backup_dir ({root})")
+    return str(target)
+
+
+def open_db(paths: dict, override: Optional[str] = None) -> Db:
+    """Open the database named by ``--db`` or by ``paths.yaml``."""
+    return Db(override or require(paths, "db_path"))
+
+
+def read_index(paths: dict, path: Optional[str] = None) -> dict[int, DesktopIndex]:
+    """Read ``index.json``; an absent file yields an empty index."""
+    target = path or index_path(paths)
+    if not os.path.exists(target):
+        return {}
+    return load_index(target)
+
+
+# --------------------------------------------------------------------------- #
+# desktop meta
+# --------------------------------------------------------------------------- #
+def merge_desktop_meta(db: Db, desktop: int, updates: dict) -> None:
+    """Update part of a desktop's meta, keeping what other steps wrote.
+
+    :meth:`tda.core.db.Db.upsert_desktop` replaces the whole row, so the stored
+    meta is read back first: ``load-index`` must not drop the brand
+    ``import-logs`` wrote, and vice versa. A ``None`` in ``updates`` clears its
+    field.
+    """
+    meta = db.get_desktop(desktop) or {}
+    meta.pop("id", None)
+    meta.update(updates)
+    db.upsert_desktop(desktop, {k: v for k, v in meta.items() if v is not None})
+
+
+def add_desktop_issues(db: Db, desktop: int, key: str, lines: Iterable[str]) -> None:
+    """Append issue lines to one meta list, without repeating what is there."""
+    meta = db.get_desktop(desktop) or {}
+    kept = list(meta.get(key) or [])
+    for line in lines:
+        if line not in kept:
+            kept.append(line)
+    merge_desktop_meta(db, desktop, {key: kept[-POSE_ISSUE_LIMIT:]})
+
+
+# --------------------------------------------------------------------------- #
+# load-index
+# --------------------------------------------------------------------------- #
+def load_index_into_db(
+    db: Db,
+    index: dict[int, DesktopIndex],
+    desktops: Optional[set[int]] = None,
+    log: Optional[Log] = None,
+) -> dict:
+    """Write ``index.json`` into the database: frames + pose segment 1.
+
+    Every indexed frame becomes a ``frame`` row carrying its path, aux files and
+    capture time; every key in :attr:`~tda.core.index.DesktopIndex.missing` gets
+    a row with ``missing=1`` so the logical step still exists in every view
+    (spec 2.2). Each view then gets one pose segment covering steps ``1..n`` --
+    immediately re-cut at the ``reorient`` steps when the logs are already in
+    (see :func:`split_pose_segments`).
+
+    The frames' own ``pose_segment`` column is left unset on purpose: a frame
+    resolves its segment through the step range, so re-cutting the segments
+    never has to rewrite thousands of frame rows. One desktop is one
+    transaction, so a run that dies half way leaves no half-loaded desktop.
+    """
+    counts = {"desktops": 0, "frames": 0, "missing": 0, "segments": 0, "skipped": 0}
+    for desktop in sorted(index):
+        if not wanted(desktop, desktops):
+            continue
+        di = index[desktop]
+        counts["desktops"] += 1
+        with db.transaction():
+            merge_desktop_meta(
+                db, desktop, {"index_issues": list(di.issues), "index_n_steps": di.n_steps}
+            )
+            for ff in di.frames.values():
+                db.upsert_frame(ff.key, ff.path, ff.aux, ff.ts, {"missing": False})
+            for key in di.missing:
+                db.upsert_frame(key, None, {}, None, {"missing": True})
+            counts["frames"] += len(di.frames)
+            counts["missing"] += len(di.missing)
+            if di.n_steps < 1:
+                counts["skipped"] += 1
+                if log:
+                    log(f"[load-index] D{desktop:02d}: no steps in the index, no pose segment")
+                continue
+            _seed_pose_segments(db, desktop, di.n_steps)
+            segments = split_pose_segments(db, desktop)
+        counts["segments"] += sum(segments.values())
+        if log:
+            extra = f", {len(di.missing)} missing" if di.missing else ""
+            cut = f", {max(segments.values())} pose segments" if segments else ""
+            log(
+                f"[load-index] D{desktop:02d}: {di.n_steps} steps, "
+                f"{len(di.frames)} frames{extra}{cut}"
+            )
+    return counts
+
+
+# --------------------------------------------------------------------------- #
+# pose segments
+# --------------------------------------------------------------------------- #
+def _seed_pose_segments(db: Db, desktop: int, n_steps: int) -> None:
+    """Give every view a segment covering ``1..n_steps`` without erasing anything.
+
+    A view with no segment yet gets segment 1. A view that already has segments
+    keeps them -- only the last one's ``end_step`` follows a re-built index --
+    because rewriting segment 1 wholesale would drop the chassis corners a human
+    clicked (spec 2.4). :func:`split_pose_segments` then re-derives the cuts.
+    """
+    for view in VIEWS:
+        segments = db.pose_segments(desktop, view)
+        if not segments:
+            db.set_pose_segment(desktop, view, 1, 1, n_steps, n_steps, None, None)
+        elif segments[-1]["end_step"] != n_steps:
+            db.update_pose_segment(desktop, view, segments[-1]["seg"], end_step=n_steps)
+
+
+def _segment_ranges(n_steps: int, boundaries: Iterable[int]) -> list[tuple[int, int]]:
+    """Cut ``1..n_steps`` at every boundary; segment k+1 starts at its boundary."""
+    starts = [1] + [b for b in sorted(set(boundaries)) if 1 < b <= n_steps]
+    return [
+        (start, (starts[i + 1] - 1) if i + 1 < len(starts) else n_steps)
+        for i, start in enumerate(starts)
+    ]
+
+
+def _reference_step(old: Optional[dict], start: int, end: int) -> int:
+    """The segment's reference frame: the stored one while it is still inside it.
+
+    A new segment references its last step -- the most disassembled frame, which
+    spec 4.2 annotates first.
+    """
+    if old is None or old["ref_step"] is None:
+        return end
+    return old["ref_step"] if start <= old["ref_step"] <= end else end
+
+
+def _has_pose_geometry(row: dict) -> bool:
+    """Does this segment carry anything drawn against its reference frame?"""
+    return any(row.get(name) is not None for name in ("corners", "homography", "roi"))
+
+
+def split_pose_segments(db: Db, desktop: int) -> dict[str, int]:
+    """Re-cut every view's pose segments at the desktop's ``reorient`` steps.
+
+    Flipping the chassis breaks the pose (spec 2.5), so the steps typed
+    ``reorient`` open a new segment: segment ``k+1`` starts *at* the reorient
+    step itself. The function is idempotent and is called by both ``load-index``
+    and ``import-logs``, because either order leaves the same segments behind:
+    it re-derives the whole segment list from the recorded steps every time.
+
+    A segment's ``corners``/``homography``/``roi`` are drawn against its
+    ``ref_step``, so they survive only while that reference frame does. When a
+    new cut pushes the reference out of the segment, the stale geometry is
+    dropped and the loss is recorded in the desktop's ``pose_issues`` meta --
+    shapes anchored to that segment need a second look either way.
+
+    Returns ``{view: number of segments}`` for the views that have any.
+    """
+    reorients = [
+        s.step for s in db.steps(desktop) if s.step_type == StepType.REORIENT.value
+    ]
+    out: dict[str, int] = {}
+    issues: list[str] = []
+    for view in VIEWS:
+        segments = db.pose_segments(desktop, view)
+        ends = [s["end_step"] for s in segments if s["end_step"] is not None]
+        if not ends:
+            continue
+        existing = {s["seg"]: s for s in segments}
+        ranges = _segment_ranges(max(ends), reorients)
+        for seg, (start, end) in enumerate(ranges, start=1):
+            old = existing.get(seg)
+            ref = _reference_step(old, start, end)
+            if old is None:
+                db.set_pose_segment(desktop, view, seg, start, end, ref, None, None)
+                continue
+            db.update_pose_segment(
+                desktop, view, seg, start_step=start, end_step=end, ref_step=ref
+            )
+            if old["ref_step"] != ref:
+                issues.append(_ref_moved(view, seg, old, start, end, ref))
+                if _has_pose_geometry(old):
+                    db.clear_pose_geometry(desktop, view, seg)
+        if len(existing) > len(ranges):
+            db.delete_pose_segments_from(desktop, view, len(ranges) + 1)
+        out[view] = len(ranges)
+    if issues:
+        add_desktop_issues(db, desktop, "pose_issues", issues)
+    return out
+
+
+def _ref_moved(view: str, seg: int, old: dict, start: int, end: int, ref: int) -> str:
+    """The audit line for a pose segment whose reference frame moved."""
+    lost = " the stored corners/homography/ROI were dropped;" if _has_pose_geometry(old) \
+        else ""
+    return (
+        f"{view} pose segment {seg}: a reorient moved the range to [{start}-{end}] and the "
+        f"reference step from {old['ref_step']} to {ref};{lost} shapes anchored to it need "
+        f"re-checking"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# import-ls order guard
+# --------------------------------------------------------------------------- #
+def desktops_without_steps(db: Db, desktops: Iterable[int]) -> list[int]:
+    """Which of ``desktops`` have no step table yet (the pipeline-order guard)."""
+    return [d for d in sorted(set(desktops)) if not db.steps(d)]
+
+
+# --------------------------------------------------------------------------- #
+# status
+# --------------------------------------------------------------------------- #
+#: The per-desktop counters ``status`` shows (a subset of the repository's).
+STATUS_TOTALS = ("steps", "actions", "instances", "events")
+
+
+def status_rows(db: Db, desktops: Optional[set[int]] = None) -> list[dict]:
+    """Per-desktop counters: steps, instances and the four views' frame counters.
+
+    Each view carries ``frames`` (rows in the index, missing ones included),
+    ``missing``, ``keyframes`` (drawn or imported shapes) and ``verified``
+    (frames a human signed off).
+    """
+    totals = {name: db.count_per_desktop(name) for name in STATUS_TOTALS}
+    per_view = {name: db.count_per_view(name) for name in VIEW_COUNTERS}
+    ids = set(db.desktop_ids()) | set(totals["steps"]) | {d for d, _v in per_view["frames"]}
+    out = []
+    for desktop in sorted(d for d in ids if wanted(d, desktops)):
+        meta = db.get_desktop(desktop) or {}
+        out.append({
+            "desktop": desktop,
+            "brand": meta.get("brand_model_raw") or meta.get("brand") or "",
+            **{name: totals[name].get(desktop, 0) for name in STATUS_TOTALS},
+            "views": {
+                view: {name: per_view[name].get((desktop, view), 0) for name in VIEW_COUNTERS}
+                for view in VIEWS
+            },
+        })
+    return out

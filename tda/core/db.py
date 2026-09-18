@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from tda.core import dbrows as R
-from tda.core.dbconn import MIGRATIONS, ConnectionMixin
+from tda.core.db_pose import PoseSegmentMixin
+from tda.core.db_status import StatusMixin
+from tda.core.dbconn import ConnectionMixin
 from tda.core.dbdelete import DeleteMixin
 from tda.core.model import (
     ActionRec,
@@ -41,14 +43,17 @@ from tda.core.model import (
 
 SCHEMA_VERSION = 2
 LOCK_TTL = timedelta(hours=12)
-RESOLUTIONS = ("keep_old", "accept_new", "edited")
+#: How a conflict may be closed. The first three are a human's decision;
+#: ``superseded`` is what the truth service records when the inputs moved on
+#: before anybody got to the conflict (spec 3.4).
+RESOLUTIONS = ("keep_old", "accept_new", "edited", "superseded")
 
 
-class Db(ConnectionMixin, DeleteMixin):
+class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin):
     """Repository over the TDA SQLite file. Every write commits immediately --
-    unless it runs inside :meth:`~tda.core.dbconn.ConnectionMixin.transaction`.
-
-    The undo-side row removals are :class:`~tda.core.dbdelete.DeleteMixin`'s."""
+    unless it runs inside :meth:`~tda.core.dbconn.ConnectionMixin.transaction`;
+    :mod:`tda.core.db_pose` and :mod:`tda.core.db_status` mix in more readers,
+    and :mod:`tda.core.dbdelete` the undo-side row removals."""
 
     def __init__(self, path: str):
         self.path = str(path)
@@ -63,27 +68,13 @@ class Db(ConnectionMixin, DeleteMixin):
         self._lock_path = Path(self.path + ".lock")
         self._lock_annotator: Optional[str] = None
         self._tx_depth = 0
-        self._init_schema()
+        try:
+            self.init_schema(Path(__file__).with_name("schema.sql"), SCHEMA_VERSION)
+        except Exception:
+            self.conn.close()  # an unusable file leaves no connection behind
+            raise
 
     # ------------------------------------------------------------------ setup
-
-    def _init_schema(self) -> None:
-        """Replay ``schema.sql``, migrate an older file, and stamp the version.
-
-        The DDL is all ``IF NOT EXISTS``, which is why columns added after
-        version 1 go through :data:`~tda.core.dbconn.MIGRATIONS` instead: an
-        existing table keeps its old shape. Both steps are idempotent.
-        """
-        sql = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
-        with self.conn:
-            self.conn.executescript(sql)
-            for table, columns in MIGRATIONS.items():
-                self._add_missing_columns(table, columns)
-            self.conn.execute(
-                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (str(SCHEMA_VERSION),),
-            )
 
     def close(self) -> None:
         """Close the connection; safe to call more than once."""
@@ -215,6 +206,61 @@ class Db(ConnectionMixin, DeleteMixin):
         """Insert or update one instance identity row."""
         self._upsert("instance", {"desktop": inst.desktop, "key": inst.key},
                      R.instance_data(inst), desktop=inst.desktop)
+
+    def delete_instance(self, desktop: int, key: str) -> None:
+        """Drop one instance identity row; unknown keys are a no-op.
+
+        Only the identity row goes: the caller decides what to do with the
+        geometry, events and relations that may still name the key (stage S1
+        refuses the deletion outright while any of them do, see
+        :meth:`instance_reference_counts`).
+        """
+        with self._tx():
+            self.conn.execute(
+                'DELETE FROM instance WHERE desktop=? AND "key"=?', (desktop, key)
+            )
+
+    def _count(self, sql: str, args: tuple) -> int:
+        return int(self.conn.execute(sql, args).fetchone()[0])
+
+    def instance_reference_counts(self, desktop: int, key: str) -> dict[str, int]:
+        """Rows still naming one instance, per table; empty when nothing does.
+
+        Covers the tables that have no per-instance query of their own, so a
+        caller about to delete an identity row can refuse in one call. Tables
+        left out on purpose: ``shape_keyframe`` and ``relation``, which
+        :meth:`keyframes` and :meth:`relations` already answer for a single
+        instance and with more to say (which view, which edge type), and
+        ``action``, which the step table owns. Only *manual* state events count
+        -- the automatic ones are derived and go with
+        :meth:`delete_auto_events`.
+        """
+        counts = {
+            "frame_override": self._count(
+                "SELECT COUNT(*) FROM frame_override WHERE desktop=? AND instance=?",
+                (desktop, key)),
+            "pair_override": self._count(
+                "SELECT COUNT(*) FROM pair_override WHERE desktop=? AND (above=? OR below=?)",
+                (desktop, key, key)),
+            "compiled_mask": self._count(
+                "SELECT COUNT(*) FROM compiled_mask WHERE desktop=? AND instance=?",
+                (desktop, key)),
+            "conflict": self._count(
+                "SELECT COUNT(*) FROM conflict WHERE desktop=? AND instance=? AND status='open'",
+                (desktop, key)),
+            "state_event": self._count(
+                "SELECT COUNT(*) FROM state_event WHERE desktop=? AND target=? AND auto=0",
+                (desktop, key)),
+        }
+        return {table: n for table, n in counts.items() if n}
+
+    def delete_auto_events(self, desktop: int, target: str) -> None:
+        """Drop the derived state events of one target; hand-written ones stay."""
+        with self._tx():
+            self.conn.execute(
+                "DELETE FROM state_event WHERE desktop=? AND target=? AND auto=1",
+                (desktop, target),
+            )
 
     def instances(self, desktop: int) -> dict[str, InstanceRec]:
         """All instances of one desktop keyed by ``instance_key``."""
