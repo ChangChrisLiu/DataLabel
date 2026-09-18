@@ -535,3 +535,47 @@ def test_close_is_idempotent(tmp_db_path: str):
     db = Db(tmp_db_path)
     db.close()
     db.close()
+
+
+# ------------------------------------------------------ instance reference counts
+def _seed_instance(db: Db, desktop: int = 13, key: str = "psu.01") -> None:
+    db.upsert_instance(InstanceRec(key, desktop, "psu"))
+
+
+def test_a_key_in_a_zorder_list_is_a_reference(db: Db):
+    """S1's delete has to refuse: the layer order would name a key that is gone."""
+    _seed_instance(db)
+    db.set_zorder(ZOrderRec(13, "scan", 1, [("chassis.01", "main"), ("psu.01", "main")]))
+    counts = db.instance_reference_counts(13, "psu.01")
+    assert counts.get("zorder") == 1
+    assert db.instance_reference_counts(13, "chassis.01").get("zorder") == 1
+
+
+def test_every_order_list_naming_the_key_is_counted(db: Db):
+    _seed_instance(db)
+    for view in ("scan", "oak1"):
+        db.set_zorder(ZOrderRec(13, view, 1, [("psu.01", "main")]))
+    db.set_zorder(ZOrderRec(13, "scan", 2, [("psu.01", "main")]))
+    db.set_zorder(ZOrderRec(13, "oak2", 1, [("cpu.01", "main")]))  # a different key
+    assert db.instance_reference_counts(13, "psu.01")["zorder"] == 3
+
+
+def test_an_unlayered_instance_has_no_zorder_reference(db: Db):
+    _seed_instance(db)
+    db.set_zorder(ZOrderRec(13, "scan", 1, [("chassis.01", "main")]))
+    assert "zorder" not in db.instance_reference_counts(13, "psu.01")
+
+
+def test_another_desktops_order_list_is_not_a_reference(db: Db):
+    _seed_instance(db)
+    db.set_zorder(ZOrderRec(14, "scan", 1, [("psu.01", "main")]))
+    assert "zorder" not in db.instance_reference_counts(13, "psu.01")
+
+
+def test_a_corrupt_order_list_does_not_break_the_count(db: Db):
+    _seed_instance(db)
+    db.set_zorder(ZOrderRec(13, "scan", 1, [("psu.01", "main")]))
+    db.conn.execute("UPDATE zorder SET order_json='not json' WHERE view='oak1'")
+    db.conn.execute(
+        "INSERT INTO zorder(desktop, view, pose_segment, order_json) VALUES(13,'rs',1,'{}')")
+    assert db.instance_reference_counts(13, "psu.01")["zorder"] == 1

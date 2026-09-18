@@ -244,6 +244,12 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
         ``action``, which the step table owns. Only *manual* state events count
         -- the automatic ones are derived and go with
         :meth:`delete_auto_events`.
+
+        ``zorder`` is counted from the JSON list rather than by a join: it holds
+        one ``(instance_key, part)`` total order per ``(view, pose_segment)``,
+        and a deleted key would sit in it as a layer the compiler can never
+        resolve (``zorder_missing``). The count is how many of those order lists
+        name it.
         """
         counts = {
             "frame_override": self._count(
@@ -261,8 +267,28 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
             "state_event": self._count(
                 "SELECT COUNT(*) FROM state_event WHERE desktop=? AND target=? AND auto=0",
                 (desktop, key)),
+            "zorder": self._zorder_references(desktop, key),
         }
         return {table: n for table, n in counts.items() if n}
+
+    def _zorder_references(self, desktop: int, key: str) -> int:
+        """How many of a desktop's layer orders name ``key`` (see above).
+
+        An order list that will not parse, or that is not a list of pairs, is
+        counted as naming nothing: it is already broken in a way the compiler
+        reports, and it must not turn into an undeletable instance here.
+        """
+        rows = self.conn.execute(
+            "SELECT order_json FROM zorder WHERE desktop=?", (desktop,)
+        ).fetchall()
+        found = 0
+        for row in rows:
+            order = R.loads(row["order_json"])
+            if not isinstance(order, list):
+                continue
+            if any(isinstance(p, (list, tuple)) and p and p[0] == key for p in order):
+                found += 1
+        return found
 
     def delete_auto_events(self, desktop: int, target: str) -> None:
         """Drop the derived state events of one target; hand-written ones stay."""
