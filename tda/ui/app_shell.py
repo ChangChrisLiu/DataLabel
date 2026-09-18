@@ -21,7 +21,6 @@ from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QAbstractScrollArea,
     QApplication,
     QButtonGroup,
@@ -158,13 +157,9 @@ class ShellMixin:
         self.task_card = TaskCardPanel(self.session)
         self.instances = InstanceListPanel(self.session)
         self.review = ReviewPanel(self.session)
-        # A seven-column table of instance keys will happily ask for 700 px of
-        # dock; the dock decides its own width, the table scrolls inside it.
+        # The dock decides its own width; the table scrolls inside it.
         self.instances.table().setSizeAdjustPolicy(
             QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
-        )
-        self.instances.table().setHorizontalScrollMode(
-            QAbstractItemView.ScrollMode.ScrollPerPixel
         )
 
         self.timeline_dock = self._dock("Timeline", self.timeline,

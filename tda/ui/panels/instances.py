@@ -88,9 +88,12 @@ class InstanceListPanel(QWidget):
         )
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setStretchLastSection(False)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self._table.setMinimumWidth(240)
+        self._apply_column_widths()
         self._table.itemChanged.connect(self._on_item_changed)
         self._table.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._table.installEventFilter(self)
@@ -182,11 +185,29 @@ class InstanceListPanel(QWidget):
                     self._table.setItem(row, col, item)
         finally:
             self._loading = False
-            header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            self._apply_column_widths()
             self._table.setUpdatesEnabled(True)
         if keep is not None:
             self.select_instance(keep)
+
+    #: Column widths in pixels; ``None`` means "take what is left" (the key).
+    WIDTHS: tuple[Optional[int], ...] = (26, None, 96, 84, 92, 96, 52)
+
+    def _apply_column_widths(self) -> None:
+        """Fixed widths, not "resize to contents".
+
+        An instance key is long, and a table that sizes itself to its contents
+        reports that length as the dock's preferred width -- which is how the
+        canvas ended up with less than half the window.  The key column takes
+        whatever is left instead, and the table scrolls when the dock is narrow.
+        """
+        header = self._table.horizontalHeader()
+        for column, width in enumerate(self.WIDTHS):
+            if width is None:
+                header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+                continue
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+            self._table.setColumnWidth(column, width)
 
     def rows(self) -> list[dict]:
         """The row dicts currently displayed, top layer first."""
