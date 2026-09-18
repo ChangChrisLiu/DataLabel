@@ -1,15 +1,10 @@
 """Offscreen tests for :class:`tda.ui.session.AnnotationSession` (spec 4.2-4.4).
 
-The scene is the real D13 step sheet (``tests/fixtures/logs/desktop_13.csv``)
-imported with :func:`tda.core.logs.import_log` and truncated to its first
-:data:`LAST_STEP` logical steps, plus one synthetic 64x64 frame per step written
-into a temporary cache directory.  The database is therefore exactly what S0/S1
-would leave behind, and the session is driven through the public
-:class:`tda.ui.session_api.SessionLike` surface only.
-
-One thing the importer cannot know is filled in the way the S1 step-table review
-would (spec 4.1): the four captive CPU-cooler screws are marked ``attached`` to
-the cooler, so that removing the cooler at step 13 takes them out with it.
+Navigation, images, the task card, the four edit scopes and the review queues.
+Undo/redo lives in ``test_session_undo.py``, the scope suggestion and the
+main-window interface in ``test_session_scope.py``, and the lazy-truth and
+sweeper behaviour in ``test_session_perf.py``.  The scene every one of them
+drives is ``tests/session_scene.py``.
 """
 from __future__ import annotations
 
@@ -19,152 +14,30 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pathlib import Path
 
-import cv2
 import numpy as np
 import pytest
 from PySide6.QtWidgets import QApplication
 
 from tda.core import masks
-from tda.core.cache import VIEW_EXT, cache_path
-from tda.core.db import Db
-from tda.core.logs import import_log, read_desktop_csv
-from tda.core.model import FrameKey, ShapeKeyframe, ShapePart, ZOrderRec
-from tda.core.states import needs_geom
-from tda.core.taxonomy import load_taxonomy
-from tda.core.truth import TruthService
-from tda.core.truth_inputs import instances_of, state_of
+from tda.core.model import FrameKey
 from tda.ui import session_api as api
 from tda.ui.commands import edit_editing_mask_op
 from tda.ui.session import AnnotationSession
-from tda.ui.session_edit import suggest_scope
-
-FIXTURES = Path(__file__).parent / "fixtures" / "logs"
-
-DESKTOP = 13
-VIEW = "scan"
-HW = (64, 64)
-#: The sheet has 42 steps; the first 14 carry every transition the tests need
-#: (cover, four captive screws, SSD, cage, fan connector, the cooler itself)
-#: and keep a full-scene recompile to a fraction of a second.
-LAST_STEP = 14
-COOLER = "cpu_cooler.fan.01"
-SCREWS = tuple(f"screw.cpu_cooler.{i:02d}" for i in (1, 2, 3, 4))
-CHASSIS = "chassis"
-FAN_CONNECTOR = "connector.fan.01"
-
-
-# --------------------------------------------------------------------------- #
-# scene
-# --------------------------------------------------------------------------- #
-def rect(x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
-    """A filled ``[x0, x1) x [y0, y1)`` rectangle as a 64x64 bool mask."""
-    mask = np.zeros(HW, dtype=bool)
-    mask[y0:y1, x0:x1] = True
-    return mask
-
-
-def cell(index: int) -> np.ndarray:
-    """A small rectangle in cell ``index`` of an 8x8 grid over the frame.
-
-    Distinct, non-overlapping shapes keep every instance visible, so seeded
-    scenes produce no ``empty_visible`` noise.
-    """
-    col, row = index % 8, (index // 8) % 8
-    x0, y0 = col * 8 + 1, row * 8 + 1
-    return rect(x0, y0, x0 + 6, y0 + 6)
-
-
-def _write_frames(db: Db, cache_dir: Path, steps, missing=()) -> None:
-    """One synthetic 64x64 PNG per step, plus its ``frame`` row."""
-    for step in steps:
-        key = FrameKey(DESKTOP, step, VIEW)
-        path = cache_path(str(cache_dir), key, VIEW_EXT[VIEW])
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        img = np.full((*HW, 3), 20 + step, dtype=np.uint8)
-        img[8:24, 8:24] = 200
-        cv2.imwrite(path, img)
-        aux = {"cache_path": path, "hw": [HW[0], HW[1]]}
-        flags = {"missing": True} if step in missing else None
-        db.upsert_frame(key, path, aux, None, flags)
-
-
-def seed_db(db: Db, tax, cache_dir: Path, last_step: int = LAST_STEP, missing=()) -> None:
-    """Import the D13 sheet, truncate it, and write the frames."""
-    rows, meta = read_desktop_csv(FIXTURES / f"desktop_{DESKTOP}.csv")
-    imported = import_log(DESKTOP, rows, meta, tax)
-    db.replace_steps(
-        DESKTOP,
-        [s for s in imported.steps if s.step <= last_step],
-        [a for a in imported.actions if a.step <= last_step],
-    )
-    for key, rec in imported.instances.items():
-        if key in SCREWS:  # what the S1 review records: captive, rides out with the cooler
-            rec.parent = COOLER
-            rec.attached = True
-            rec.fastens = COOLER
-        db.upsert_instance(rec)
-    _write_frames(db, cache_dir, range(1, last_step + 1), missing=missing)
-
-
-def make_session(tmp_path: Path, last_step: int = LAST_STEP, missing=()) -> AnnotationSession:
-    """A session opened on the seeded D13 scanner view."""
-    tax = load_taxonomy()
-    db = Db(str(tmp_path / "tda.sqlite"))
-    cache_dir = tmp_path / "cache"
-    seed_db(db, tax, cache_dir, last_step=last_step, missing=missing)
-    session = AnnotationSession(db, tax, TruthService(db, tax), str(cache_dir), "tester")
-    session.open(DESKTOP, VIEW)
-    return session
-
-
-def chassis_instances(session: AnnotationSession, step: int) -> list[str]:
-    """Instances that need a chassis mask at ``step``, in a stable order."""
-    db, tax = session.db, session.tax
-    insts = instances_of(db, DESKTOP)
-    state = state_of(db, tax, DESKTOP, step)
-    return sorted(
-        key
-        for key, kind in needs_geom(insts, state, tax).items()
-        if kind == "mask" and state[key].placement == "in_chassis"
-    )
-
-
-def seed_shapes(session: AnnotationSession, step: int, skip=()) -> None:
-    """Give every chassis instance of ``step`` its own rectangle, cheaply.
-
-    Written straight to the database (one refresh at the end) rather than
-    through ``commit_edit``, so a test that needs a fully drawn frame does not
-    pay for one refresh sweep per instance.  The anchor is the last logical step
-    of the scene, which selects the keyframe for every step where the instance
-    is still in the chassis.
-    """
-    db = session.db
-    keys = [k for k in chassis_instances(session, step) if k not in skip]
-    order: list[tuple[str, str]] = []
-    for index, key in enumerate(keys):
-        db.add_keyframe(
-            ShapeKeyframe(
-                id=None,
-                instance=key,
-                desktop=DESKTOP,
-                view=VIEW,
-                pose_segment=1,
-                anchor_step=LAST_STEP,
-                placement="in_chassis",
-                geom_type="mask",
-                parts=[ShapePart("main", masks.encode_rle(cell(index)))],
-            )
-        )
-        order.append((key, "main"))
-    db.set_zorder(ZOrderRec(DESKTOP, VIEW, 1, order))
-    session.refresh_all()
-
-
-def draw(session: AnnotationSession, instance: str, mask: np.ndarray, scope: str) -> dict:
-    """``begin_edit`` + paint + ``commit_edit`` in one call."""
-    session.begin_edit(instance)
-    session.set_editing_mask(mask)
-    return session.commit_edit(scope)
+from session_scene import (
+    CHASSIS,
+    COOLER,
+    DESKTOP,
+    FAN_CONNECTOR,
+    HW,
+    LAST_STEP,
+    SCREWS,
+    VIEW,
+    cell,
+    draw,
+    make_session,
+    rect,
+    seed_shapes,
+)
 
 
 @pytest.fixture(scope="session")
@@ -399,30 +272,6 @@ def test_commit_box_writes_a_bench_rectangle(session):
     assert kfs[0].placement == "on_bench"
     assert kfs[0].anchor_step == LAST_STEP
     assert result["affected"] == [13, 14]
-
-
-# --------------------------------------------------------------------------- #
-# scope suggestion (spec 4.3)
-# --------------------------------------------------------------------------- #
-def test_suggest_scope_proposes_a_zorder_change_inside_another_shape(session):
-    session.goto(10)
-    draw(session, CHASSIS, rect(0, 0, 40, 40), api.SCOPE_KEYFRAME)
-    draw(session, COOLER, rect(50, 50, 60, 60), api.SCOPE_KEYFRAME)
-    compiled = session.compiled()
-    assert suggest_scope(compiled, COOLER, rect(4, 4, 12, 12)) == f"zorder:{CHASSIS}"
-    assert suggest_scope(compiled, COOLER, rect(44, 44, 48, 48)) == api.SCOPE_KEYFRAME
-
-
-def test_commit_with_a_zorder_scope_writes_a_pair_override(session):
-    session.goto(10)
-    draw(session, CHASSIS, rect(0, 0, 40, 40), api.SCOPE_KEYFRAME)
-    draw(session, COOLER, rect(50, 50, 60, 60), api.SCOPE_KEYFRAME)
-    session.begin_edit(COOLER)
-    session.set_editing_mask(rect(4, 4, 12, 12))
-    session.commit_edit(f"zorder:{CHASSIS}")
-
-    pairs = session.db.pair_overrides(DESKTOP, VIEW, 1)
-    assert [(p.above, p.below) for p in pairs] == [(COOLER, CHASSIS)]
 
 
 # --------------------------------------------------------------------------- #
