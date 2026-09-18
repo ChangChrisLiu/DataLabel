@@ -24,8 +24,16 @@ from test_cli import d13_steps, env, open_db, run  # noqa: F401  (re-used fixtur
 
 from tda.cli import EXIT_ERROR, EXIT_LOCKED, EXIT_OK
 from tda.core.db import Db
-from tda.core.graph_rules import infer_relational_fields, unresolved_relations
-from tda.core.model import InstanceRec
+from tda.core.graph_infer import (
+    AMBIGUOUS,
+    NO_CANDIDATE,
+    UNRESOLVED,
+    infer_relational_fields,
+    unresolved_kind,
+    unresolved_relations,
+)
+from tda.core.model import ActionRec, FrameKey, InstanceRec
+from tda.core.states import needs_geom
 from tda.core.taxonomy import load_taxonomy
 from tda.core.truth_inputs import state_of
 from tda.ui.steps_issues import unresolved_issues
@@ -110,7 +118,8 @@ def test_two_real_instances_stay_unresolved_rather_than_guessed(tax):
     assert instances["connector.01"].socket_host == "motherboard"
     lines = unresolved_relations(instances, tax)
     assert any("connector.01.socket_host" in line for line in lines)
-    assert all(line.startswith("unresolved:") for line in lines)
+    assert all(line.startswith(f"{UNRESOLVED} (") for line in lines)
+    assert all(unresolved_kind(line) == AMBIGUOUS for line in lines)
 
 
 def test_a_captive_screw_with_nothing_to_hang_on_is_unresolved(tax):
@@ -129,6 +138,142 @@ def test_unresolved_is_silent_once_everything_is_filled(tax):
     instances = _one_board_plus_a_draft()
     infer_relational_fields(instances, tax)
     assert unresolved_relations(instances, tax) == []
+
+
+# --------------------------------------------------------------------------- #
+# 1b. two coolers: physical necessity in time breaks the tie
+# --------------------------------------------------------------------------- #
+FAN = "cpu_cooler.fan.01"
+HEATSINK = "cpu_cooler.heatsink.01"
+#: The machine the eight real two-cooler desktops all look like: the fan comes
+#: off at step 10, the heatsink at 15.
+FAN_STEP, HEATSINK_STEP = 10, 15
+
+
+def _two_cooler_desktop() -> dict[str, InstanceRec]:
+    """Five cooler screws and two candidates for every one of them."""
+    recs = [
+        inst("chassis", "chassis"),
+        inst(FAN, "cpu_cooler", attrs={"kind": "fan"}, raw_names=["CPU fan"]),
+        inst(HEATSINK, "cpu_cooler", attrs={"kind": "heatsink"}, raw_names=["Heatsink"]),
+    ]
+    for n, (step, name) in enumerate(
+        [(6, "CPU fan screw 1"), (9, "CPU fan screw 2"),
+         (11, "Heatsink screw 1"), (14, "Heatsink screw 2"),
+         (HEATSINK_STEP + 3, "Spare screw")],
+        start=1,
+    ):
+        recs.append(inst(
+            f"screw.cpu_cooler.{n:02d}", "screw",
+            attrs={"role": "cpu_cooler", "captive": True, "unscrewed_at": step},
+            raw_names=[name],
+        ))
+    return {r.key: r for r in recs}
+
+
+def _two_cooler_actions(instances: dict[str, InstanceRec]) -> list[ActionRec]:
+    """One ``unscrew`` per screw at its own step, then the two removals."""
+    out = [
+        ActionRec(900, int(rec.attrs["unscrewed_at"]), 0, key, "unscrew")
+        for key, rec in sorted(instances.items()) if rec.cls == "screw"
+    ]
+    out.append(ActionRec(900, FAN_STEP, 0, FAN, "remove"))
+    out.append(ActionRec(900, HEATSINK_STEP, 0, HEATSINK, "remove"))
+    return out
+
+
+def test_a_screw_fastens_the_part_that_leaves_soonest_after_it(tax):
+    instances = _two_cooler_desktop()
+    infer_relational_fields(instances, tax, _two_cooler_actions(instances))
+    # unscrewed at 6 and 9, before the fan goes at 10
+    assert instances["screw.cpu_cooler.01"].fastens == FAN
+    assert instances["screw.cpu_cooler.02"].fastens == FAN
+    # unscrewed at 11 and 14: the fan is already gone, the heatsink goes at 15
+    assert instances["screw.cpu_cooler.03"].fastens == HEATSINK
+    assert instances["screw.cpu_cooler.04"].fastens == HEATSINK
+
+
+def test_the_captive_parent_follows_the_resolved_fastens(tax):
+    instances = _two_cooler_desktop()
+    infer_relational_fields(instances, tax, _two_cooler_actions(instances))
+    for key, part in (("screw.cpu_cooler.01", FAN), ("screw.cpu_cooler.03", HEATSINK)):
+        rec = instances[key]
+        assert (rec.parent, rec.attached) == (part, True), key
+
+
+def test_a_screw_undone_after_both_removals_stays_unresolved(tax):
+    instances = _two_cooler_desktop()
+    actions = _two_cooler_actions(instances)
+    infer_relational_fields(instances, tax, actions)
+    late = instances["screw.cpu_cooler.05"]  # unscrewed at 18, after both parts left
+    assert late.fastens is None
+    assert late.parent is None
+    lines = unresolved_relations(instances, tax, actions)
+    assert any("screw.cpu_cooler.05" in line and "is removed after" in line
+               for line in lines)
+    assert all(unresolved_kind(line) == AMBIGUOUS for line in lines)
+
+
+def test_the_clock_and_the_sheet_name_disagreeing_is_left_to_the_human(tax):
+    instances = _two_cooler_desktop()
+    # the sheet calls it a heatsink screw, but it is undone before the fan goes
+    instances["screw.cpu_cooler.01"].raw_names = ["Heatsink screw 9"]
+    actions = _two_cooler_actions(instances)
+    infer_relational_fields(instances, tax, actions)
+    assert instances["screw.cpu_cooler.01"].fastens is None
+    lines = [
+        line for line in unresolved_relations(instances, tax, actions)
+        if "screw.cpu_cooler.01." in line
+    ]
+    assert len(lines) == 1
+    assert "the two heuristics disagree" in lines[0]
+    assert HEATSINK in lines[0] and FAN in lines[0]
+
+
+def test_two_parts_removed_on_the_same_step_are_not_a_tie_break(tax):
+    instances = _two_cooler_desktop()
+    actions = [a for a in _two_cooler_actions(instances) if a.verb != "remove"]
+    actions.append(ActionRec(900, FAN_STEP, 0, FAN, "remove"))
+    actions.append(ActionRec(900, FAN_STEP, 1, HEATSINK, "remove"))
+    infer_relational_fields(instances, tax, actions)
+    assert instances["screw.cpu_cooler.01"].fastens is None
+    assert any("are both removed at step" in line
+               for line in unresolved_relations(instances, tax, actions))
+
+
+def test_without_actions_the_tie_break_is_simply_not_attempted(tax):
+    """The keyword is additive: leaving it out must change nothing else."""
+    instances = _two_cooler_desktop()
+    assert infer_relational_fields(instances, tax) == []
+    lines = unresolved_relations(instances, tax)
+    assert any("nothing ranks them" in line for line in lines)
+
+
+def test_a_role_with_no_part_at_all_is_a_different_kind_of_unresolved(tax):
+    instances = {
+        "chassis": inst("chassis", "chassis"),
+        "screw.card.01": inst("screw.card.01", "screw", attrs={"role": "card"}),
+    }
+    lines = unresolved_relations(instances, tax, [])
+    assert lines and all(unresolved_kind(line) == NO_CANDIDATE for line in lines)
+    assert any("names no part of this desktop" in line for line in lines)
+
+
+def test_a_socket_host_class_with_no_instance_asks_for_one_to_be_created(tax):
+    instances = {
+        "chassis": inst("chassis", "chassis"),
+        "connector.01": inst("connector.01", "connector", socket_host="motherboard"),
+    }
+    lines = unresolved_relations(instances, tax)
+    assert len(lines) == 1
+    assert unresolved_kind(lines[0]) == NO_CANDIDATE
+    assert "has no instance on this desktop" in lines[0]
+
+    issues = list(unresolved_issues(instances, tax))
+    assert issues == [
+        "unresolved socket host: class 'motherboard' has no instance on this "
+        "desktop - add the instance in the Instances tab or leave it unresolved"
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -168,6 +313,38 @@ def test_the_cooler_screws_leave_the_chassis_with_the_cooler(env, tax):
             assert (before[key].state, before[key].placement) == ("loosened", "in_chassis"), key
             assert (after[key].state, after[key].placement) == ("removed", "on_bench"), key
             assert later[key].state == "removed", key
+    finally:
+        db.close()
+
+
+def test_a_screw_that_left_inside_the_cooler_is_never_asked_for_again(env, tax):
+    """User decision C7: 子零件随父零件一起消失 -- no mask, no bench box, no row."""
+    from tda.core.truth_inputs import instances_of
+
+    imported(env)
+    db = open_db(env)
+    try:
+        instances = instances_of(db, 13)
+        before = needs_geom(instances, state_of(db, tax, 13, COOLER_STEP - 1), tax)
+        assert all(before[key] == "mask" for key in COOLER_SCREWS)  # still in the chassis
+        for step in (COOLER_STEP, COOLER_STEP + 1, COOLER_STEP + 5):
+            geom = needs_geom(instances, state_of(db, tax, 13, step), tax)
+            assert all(key not in geom for key in COOLER_SCREWS), step
+            assert COOLER not in geom or geom[COOLER] == "box"  # the parent still is
+    finally:
+        db.close()
+
+
+def test_the_compiler_reports_no_missing_shape_for_a_screw_inside_its_parent(env, tax):
+    """The frame the annotator actually opens must carry no question about them."""
+    from tda.core.truth_inputs import gather
+
+    imported(env)
+    db = open_db(env)
+    try:
+        for step in (COOLER_STEP, COOLER_STEP + 1):
+            needs = gather(db, tax, FrameKey(13, step, "scan")).needs
+            assert all(key not in needs for key in COOLER_SCREWS), step
     finally:
         db.close()
 
@@ -358,10 +535,10 @@ def test_one_failing_desktop_does_not_abort_the_rest(env, capsys, monkeypatch):
 
     real = CR.infer_relational_fields
 
-    def flaky(instances, tax):
+    def flaky(instances, tax, actions=None):
         if any(rec.desktop == 13 for rec in instances.values()):
             raise RuntimeError("boom")
-        return real(instances, tax)
+        return real(instances, tax, actions)
 
     imported(env)
     db = open_db(env)

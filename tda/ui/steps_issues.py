@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Callable, Iterable, Iterator, Optional
 
-from tda.core.graph_rules import is_provisional
+from tda.core.graph_infer import is_provisional, real_instances
 from tda.core.logs import CHASSIS_KEY, NO_ACTION_TYPES, UNRESOLVED
 from tda.core.model import ActionRec, InstanceRec, StepType
 from tda.core.taxonomy import Taxonomy
@@ -118,7 +118,11 @@ def unresolved_issues(
     * **unresolved socket host** -- ``connector.socket_host`` is still the bare
       taxonomy class the importer wrote, because the desktop has no unique
       instance of it. Rule 7.2 (the connector gates the part it plugs into)
-      cannot fire on a class name.
+      cannot fire on a class name. Two different jobs hide behind that, so they
+      are two different lines: when the desktop has *several* instances one has
+      to be picked, and when it has *none* one has to be created first -- which
+      is a decision about what this desktop tracks at all (user decision C7),
+      never something to invent automatically.
     * **captive screw without parent** -- a captive screw stays in its part when
       the part comes out (spec 7.1), which only happens if ``parent`` names it;
       without one the screw is left behind ``loosened`` and in the chassis, and
@@ -134,12 +138,22 @@ def unresolved_issues(
             continue
         host = inst.socket_host
         if inst.cls == "connector" and host and host not in instances and host in tax.classes:
-            yield (
-                f"unresolved socket host: {key}.socket_host is still the class "
-                f"{host!r} - name the instance it plugs into"
-            )
+            yield _socket_host_issue(instances, key, host)
         if inst.cls == "screw" and inst.attrs.get("captive") and not inst.parent:
             yield (
                 f"captive screw without parent: {key} is captive but leaves the "
                 f"chassis with nothing - name the part it stays in"
             )
+
+
+def _socket_host_issue(instances: dict[str, InstanceRec], key: str, host: str) -> str:
+    """The socket-host question, worded for the work it actually needs."""
+    if real_instances(instances, host):
+        return (
+            f"unresolved socket host: {key}.socket_host is still the class "
+            f"{host!r} - name the instance it plugs into"
+        )
+    return (
+        f"unresolved socket host: class {host!r} has no instance on this desktop "
+        f"- add the instance in the Instances tab or leave it unresolved"
+    )

@@ -25,7 +25,9 @@ as a whole, which is a state change only, because an unplugged/removed
 connector carries no geometry of its own (spec 6.2). That cascade is enforced
 twice over: :func:`events_from_actions` materialises it as explicit events, and
 :func:`state_at` closes over it again, so a hand-entered (``auto=False``) parent
-removal never leaves an attached child behind asking for a mask.
+removal never leaves an attached child behind asking for a mask. The child is
+then *inside* its parent rather than beside it, so :func:`needs_geom` stops
+asking for geometry of its own as well (:func:`gone_with_parent`).
 
 Virtual nodes are targets starting with ``cable:`` (or, for actions, anything
 absent from ``instances``). They have their own small state machine and are
@@ -44,6 +46,7 @@ __all__ = [
     "FrameState",
     "diff_states",
     "events_from_actions",
+    "gone_with_parent",
     "initial_state",
     "is_virtual_target",
     "needs_geom",
@@ -281,6 +284,34 @@ def state_at(
 # --------------------------------------------------------------------------- #
 # 2. geometry policy
 # --------------------------------------------------------------------------- #
+def gone_with_parent(
+    instances: dict[str, InstanceRec],
+    fs: FrameState,
+    key: str,
+) -> bool:
+    """Has this instance left the chassis inside its parent rather than on its own?
+
+    A captive cooler screw is ``attached`` to the cooler: once the cooler is
+    out, the screw is *in* it, not lying beside it, so it is neither visible in
+    the chassis nor a separate thing in the staging area (user decision C7,
+    "子零件随父零件一起消失"). The test is the parent's placement rather than
+    its state, which makes the rule transitive for free: a child of a child is
+    suppressed too, because its own parent was moved out of the chassis by the
+    same cascade (:func:`_close_attached_cascade`).
+
+    ``False`` for anything not ``attached``, with no ``parent``, or whose parent
+    is not in this snapshot -- and for a child whose parent is still in the
+    chassis, which is the normal case while the assembly is intact.
+    """
+    rec = instances.get(key)
+    if rec is None or not rec.attached or not rec.parent:
+        return False
+    parent = fs.get(rec.parent)
+    return parent is not None and (
+        parent.placement != IN_CHASSIS or parent.state == REMOVED
+    )
+
+
 def needs_geom(
     instances: dict[str, InstanceRec],
     fs: FrameState,
@@ -292,12 +323,14 @@ def needs_geom(
     the per-class table of spec 6.2, ``"box"`` for one lying in the bench area
     (the chassis excepted -- it never goes on the bench). Everything else is
     omitted: an unplugged connector, anything ``elsewhere`` or in some other
-    placement, and any key that is not a real instance (a ``cable:*`` node).
+    placement, any key that is not a real instance (a ``cable:*`` node), and --
+    see :func:`gone_with_parent` -- an attached child that went out inside its
+    parent, which the annotator must not be asked to draw a second time.
     """
     geom: dict[str, str] = {}
     for key, inst in fs.items():
         rec = instances.get(key)
-        if rec is None:
+        if rec is None or gone_with_parent(instances, fs, key):
             continue
         if inst.placement == IN_CHASSIS:
             kind = "mask"

@@ -293,7 +293,9 @@ def _write_import(
     ``parent``/``attached`` and a latch's ``of`` empty and may put a bare class
     name in ``socket_host``, and the state machine reads those the moment the
     annotator opens the desktop -- a captive cooler screw with no ``parent``
-    stays in the chassis after its cooler is gone (spec 3.3). Filling them
+    stays in the chassis after its cooler is gone (spec 3.3). The freshly
+    parsed actions go in with them, because the step order is what breaks the
+    tie on a desktop that lists two coolers. Filling them
     first also means ``events_from_actions`` below already emits the cascade,
     so the stored automatic log and the one
     :func:`tda.core.truth_inputs.events_of` re-derives on every read agree.
@@ -302,13 +304,13 @@ def _write_import(
         kept = carry_ls_notes(li.steps, previous)
         merge_desktop_meta(db, li.desktop, desktop_fields(li.meta))
         db.replace_steps(li.desktop, li.steps, li.actions)
-        fills = infer_relational_fields(li.instances, tax)
+        fills = infer_relational_fields(li.instances, tax, li.actions)
         for inst in li.instances.values():
             db.upsert_instance(inst)
         events = events_from_actions(li.instances, li.actions, tax)
         db.replace_events(li.desktop, events, auto_only=True)
         split_pose_segments(db, li.desktop)
-    return len(events), kept, fills, unresolved_relations(li.instances, tax)
+    return len(events), kept, fills, unresolved_relations(li.instances, tax, li.actions)
 
 
 def _force_warning(db: Db, desktop: int, previous: list[StepRec]) -> str:

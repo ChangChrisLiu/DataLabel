@@ -14,6 +14,7 @@ from tda.core.states import (
     InstState,
     diff_states,
     events_from_actions,
+    gone_with_parent,
     initial_state,
     needs_geom,
     state_at,
@@ -292,7 +293,11 @@ def test_state_at_step_zero_is_the_initial_state(instances, cooler_actions, tax)
 
 
 def test_state_at_cascades_a_manually_removed_parent(instances, tax):
-    """A hand-entered parent removal must still take the attached screws along."""
+    """A hand-entered parent removal must still take the attached screws along.
+
+    They leave *inside* the cooler, so the snapshot moves them out of the
+    chassis but nobody is asked to draw them again (user decision C7).
+    """
     manual = [
         _ev(13, COOLER, "state", "installed", "removed", auto=False),
         _ev(13, COOLER, "placement", "in_chassis", "on_bench", auto=False),
@@ -302,7 +307,8 @@ def test_state_at_cascades_a_manually_removed_parent(instances, tax):
         fs[key] == InstState(state="removed", placement="on_bench") for key in COOLER_SCREWS
     )
     geom = needs_geom(instances, fs, tax)
-    assert all(geom[key] == "box" for key in COOLER_SCREWS)
+    assert all(key not in geom for key in COOLER_SCREWS)
+    assert all(gone_with_parent(instances, fs, key) for key in COOLER_SCREWS)
 
 
 def test_state_at_cascade_closure_is_transitive_and_cycle_safe(tax):

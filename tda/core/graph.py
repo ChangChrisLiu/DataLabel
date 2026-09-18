@@ -40,6 +40,7 @@ from tda.core.graph_rules import (
     infer_relational_fields,
     is_provisional,
     propose_edges,
+    unresolved_kind,
     unresolved_relations,
     verb_applies,
 )
@@ -67,6 +68,7 @@ __all__ = [
     "remaining_plan",
     "save_template",
     "unmet",
+    "unresolved_kind",
     "unresolved_relations",
     "validate_sequence",
 ]

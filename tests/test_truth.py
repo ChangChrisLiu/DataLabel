@@ -86,17 +86,25 @@ def test_manual_events_are_merged_on_top_of_the_derived_ones(scene: Scene):
 
 
 def test_a_manual_removal_still_cascades_to_attached_children(scene: Scene):
+    """The screw follows the PSU out, and is then asked about no further.
+
+    It left *inside* its parent, so it is neither in the chassis nor a thing of
+    its own in the staging area: the snapshot still says ``removed/on_bench``,
+    but no geometry is wanted and no row is compiled (user decision C7).
+    """
     scene.db.replace_events(
         DESKTOP,
         [StateEvent(DESKTOP, 2, PSU, "state", "installed", "removed", auto=False)],
         auto_only=False,
     )
 
+    state = state_of(scene.db, scene.tax, DESKTOP, 2)
     out = scene.svc.compile(scene.key(2))
 
+    assert (state[SCREW].state, state[SCREW].placement) == ("removed", "on_bench")
     assert PSU not in out.instances  # removed: it needs no geometry in the chassis
-    assert out.instances[SCREW].placement == "on_bench"  # dragged out with its parent
-    assert out.instances[SCREW].box == pytest.approx(BENCH_BOX)
+    assert SCREW not in out.instances  # and neither does what went out inside it
+    assert not [p for p in out.problems if SCREW in p]
 
 
 def test_compile_gathers_occluders_overrides_and_the_transform(scene: Scene):

@@ -35,7 +35,13 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from tda.core.db import Db
-from tda.core.graph_rules import infer_relational_fields, unresolved_relations
+from tda.core.graph_infer import (
+    AMBIGUOUS,
+    NO_CANDIDATE,
+    infer_relational_fields,
+    unresolved_kind,
+    unresolved_relations,
+)
 from tda.core.model import InstanceRec
 from tda.core.states import events_from_actions
 from tda.core.taxonomy import Taxonomy, load_taxonomy
@@ -72,6 +78,10 @@ class DesktopRelations:
     changed: int = 0  # instances whose stored row was rewritten
     error: str = ""
 
+    def unresolved_of(self, kind: str) -> int:
+        """How many unresolved lines are of one kind (ambiguous / no candidate)."""
+        return sum(1 for line in self.unresolved if unresolved_kind(line) == kind)
+
 
 @dataclass
 class RelationsRun:
@@ -96,9 +106,25 @@ class RelationsRun:
     def unresolved(self) -> int:
         return sum(len(r.unresolved) for r in self.runs)
 
+    def unresolved_of(self, kind: str) -> int:
+        return sum(r.unresolved_of(kind) for r in self.runs)
+
     @property
     def changed(self) -> int:
         return sum(r.changed for r in self.runs)
+
+    def tally(self) -> str:
+        """``N unresolved (A ambiguous, C no candidate)`` for a summary line.
+
+        The split is what decides who does the next piece of work: an ambiguous
+        reference needs one of several instances picked, a missing one needs an
+        instance created first -- and whether a never-removed part gets an
+        instance at all is the user's call (decision C7), not this command's.
+        """
+        return (
+            f"{self.unresolved} unresolved ({self.unresolved_of(AMBIGUOUS)} "
+            f"{AMBIGUOUS}, {self.unresolved_of(NO_CANDIDATE)} {NO_CANDIDATE})"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -133,8 +159,9 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool) -> DesktopRel
     :mod:`tda.ui.steps_model` and the status report read directly.)
     """
     instances = db.instances(desktop)
+    actions = db.actions(desktop)
     before = {key: _snapshot(rec) for key, rec in instances.items()}
-    fills = infer_relational_fields(instances, tax)
+    fills = infer_relational_fields(instances, tax, actions)
     changes = []
     for key, rec in sorted(instances.items()):
         new, old = _diff(before[key], _snapshot(rec))
@@ -142,7 +169,8 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool) -> DesktopRel
             changes.append((key, new, old))
     out = DesktopRelations(
         desktop=desktop, status="applied", fills=fills,
-        unresolved=unresolved_relations(instances, tax), changed=len(changes),
+        unresolved=unresolved_relations(instances, tax, actions),
+        changed=len(changes),
     )
     if dry_run or not changes:
         return out
@@ -155,8 +183,7 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool) -> DesktopRel
                 ANNOTATOR,
             )
         db.replace_events(
-            desktop, events_from_actions(instances, db.actions(desktop), tax),
-            auto_only=True,
+            desktop, events_from_actions(instances, actions, tax), auto_only=True
         )
     return out
 
@@ -189,7 +216,7 @@ def infer_relations_into_db(
             _log_desktop(log, prefix, one)
     if log:
         log(f"{prefix} {len(run.applied)} desktops, {run.fills} fills on {run.changed} "
-            f"instances, {run.unresolved} unresolved, {len(run.failed)} failed")
+            f"instances, {run.tally()}, {len(run.failed)} failed")
     return run
 
 
@@ -199,7 +226,9 @@ def _log_desktop(log, prefix: str, one: DesktopRelations) -> None:
         log(f"{prefix} D{one.desktop:02d}: FAILED, {one.error}")
         return
     log(f"{prefix} D{one.desktop:02d}: {len(one.fills)} fills on {one.changed} "
-        f"instances, {len(one.unresolved)} unresolved")
+        f"instances, {len(one.unresolved)} unresolved "
+        f"({one.unresolved_of(AMBIGUOUS)} {AMBIGUOUS}, "
+        f"{one.unresolved_of(NO_CANDIDATE)} {NO_CANDIDATE})")
     for text in one.fills:
         log(f"{prefix}   {text}")
     for text in one.unresolved:
