@@ -35,7 +35,6 @@ from typing import Any, Optional, Sequence
 from tda.core import masks
 from tda.core.compiler import select_keyframe
 from tda.core.db import Db
-from tda.core.ls_export import NATIVE_HW
 from tda.core.model import (
     VIEWS,
     ActionRec,
@@ -44,10 +43,12 @@ from tda.core.model import (
     ShapeKeyframe,
     StateEvent,
     StepRec,
+    StepType,
     Visibility,
 )
-from tda.core.states import FrameState, events_from_actions, state_at
+from tda.core.states import FrameState, state_at
 from tda.core.taxonomy import Taxonomy
+from tda.core.truth_inputs import events_of, infer_hw, pose_segment_of
 
 __all__ = [
     "ANSWERABLE",
@@ -63,6 +64,7 @@ __all__ = [
     "load_ctx",
     "mask_bbox_xywh",
     "roi_of",
+    "row_bbox_xywh",
     "view_index",
 ]
 
@@ -80,8 +82,16 @@ ANSWERABLE = (
 QUALITY_GOLD = "gold"
 QUALITY_AUTO = "auto"
 VERIFIED = "verified"
+GEOM_BOX = "box"
 DEFAULT_EXT = ".png"
 EXPORT_VERSION = "1"
+
+#: Steps that describe no annotatable moment of the teardown (spec 6.6).
+SKIP_STEP_TYPES = frozenset({StepType.IGNORE.value})
+#: Steps that are never the "after" frame of a change question.
+NO_CHANGE_STEP_TYPES = frozenset(
+    {StepType.IGNORE.value, StepType.INITIAL.value, StepType.DUPLI.value}
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -132,7 +142,7 @@ def frame_hw(frame: Optional[dict], compiled: dict[str, dict], view: str) -> tup
         size = (row.get("visible_rle") or {}).get("size")
         if isinstance(size, (list, tuple)) and len(size) == 2:
             return (int(size[0]), int(size[1]))
-    return NATIVE_HW[view]
+    return infer_hw(view)
 
 
 def bbox_xywh(box: Optional[Sequence[float]]) -> Optional[list]:
@@ -150,6 +160,17 @@ def mask_bbox_xywh(rle: Optional[dict]) -> Optional[list]:
     return bbox_xywh(masks.bbox(masks.decode_rle(rle)))
 
 
+def row_bbox_xywh(row: dict) -> Optional[list]:
+    """COCO ``[x, y, w, h]`` of a compiled row, whichever geometry it carries.
+
+    A ``mask`` row is measured off its visible RLE, a ``box`` row (a part lying
+    on the bench, spec 3.4) reads its stored rectangle. ``None`` means the row
+    has no geometry at all -- a missing shape, or one put out of view.
+    """
+    box = bbox_xywh(row.get("box")) if row.get("geom_type") == GEOM_BOX else None
+    return box if box is not None else mask_bbox_xywh(row.get("visible_rle"))
+
+
 # --------------------------------------------------------------------------- #
 # per-desktop context (shared with the VLM export)
 # --------------------------------------------------------------------------- #
@@ -157,9 +178,10 @@ def mask_bbox_xywh(rle: Optional[dict]) -> Optional[list]:
 class DesktopCtx:
     """Everything both exports need about one desktop, loaded once.
 
-    ``events`` are the stored state events when the database has them and the
-    ones derived from the action log otherwise, so an export works before the
-    truth service has written its event table.
+    ``events`` come from :func:`tda.core.truth_inputs.events_of`, so an export
+    reads exactly the log the truth service compiled the frames from: always
+    derived from the recorded actions, with the hand-written (``auto=False``)
+    events merged on top.
     """
 
     desktop: int
@@ -168,7 +190,7 @@ class DesktopCtx:
     events: list[StateEvent]
     actions: list[ActionRec]
     steps: dict[int, StepRec]
-    keyframes: dict[tuple[str, str], list[ShapeKeyframe]] = field(default_factory=dict)
+    keyframes: dict[tuple[str, str, int], list[ShapeKeyframe]] = field(default_factory=dict)
     _states: dict[int, FrameState] = field(default_factory=dict, repr=False)
 
     def state_at(self, step: int) -> FrameState:
@@ -178,13 +200,37 @@ class DesktopCtx:
         return self._states[step]
 
     def cls_of(self, instance: str) -> Optional[str]:
-        """Taxonomy class of an instance key, or ``None`` when it is unknown."""
-        rec = self.instances.get(instance)
-        return None if rec is None else rec.cls
+        """Taxonomy class of an instance key, ``None`` when it has none.
 
-    def keyframe_at(self, instance: str, step: int, placement: str) -> Optional[ShapeKeyframe]:
-        """The keyframe that applies to one instance at one step, if any."""
-        return select_keyframe(self.keyframes.get((instance, placement), []), step)
+        ``None`` covers both an instance that is not in the table at all and one
+        carrying a class the taxonomy does not know -- a provisional ``ls:``
+        draft key, say. Neither can be exported, and both must be skipped rather
+        than crash the export.
+        """
+        rec = self.instances.get(instance)
+        if rec is None or rec.cls not in self.tax.classes:
+            return None
+        return rec.cls
+
+    def keyframe_at(self, instance: str, step: int, placement: str,
+                    pose_segment: int) -> Optional[ShapeKeyframe]:
+        """The keyframe that applies to one instance at one step, if any.
+
+        Narrowed to the frame's placement chain *and* pose segment first, the
+        way :func:`tda.core.compiler.compile_frame` does it: shapes of two pose
+        segments are drawn in different reference frames and are not comparable.
+        """
+        chain = self.keyframes.get((instance, placement, pose_segment), [])
+        return select_keyframe(chain, step)
+
+    def step_type(self, step: int) -> str:
+        """Recorded step type, or ``"normal"`` when the step table has no row."""
+        rec = self.steps.get(step)
+        return StepType.NORMAL.value if rec is None else rec.step_type
+
+    def exportable(self, step: int) -> bool:
+        """Is this step a moment worth exporting at all? (``ignore`` is not.)"""
+        return self.step_type(step) not in SKIP_STEP_TYPES
 
     def actions_at(self, step: int, successful_only: bool = True) -> list[ActionRec]:
         """Actions recorded at ``step``, in ``idx`` order."""
@@ -196,14 +242,12 @@ class DesktopCtx:
 
 def load_ctx(db: Db, tax: Taxonomy, desktop: int, view: str) -> DesktopCtx:
     """Read instances, steps, actions, events and keyframes of one desktop/view."""
-    instances = db.instances(desktop)
-    actions = db.actions(desktop)
-    events = db.events(desktop) or events_from_actions(instances, actions, tax)
-    chains: dict[tuple[str, str], list[ShapeKeyframe]] = {}
+    chains: dict[tuple[str, str, int], list[ShapeKeyframe]] = {}
     for kf in db.keyframes(desktop, view):
-        chains.setdefault((kf.instance, kf.placement), []).append(kf)
+        chains.setdefault((kf.instance, kf.placement, kf.pose_segment), []).append(kf)
     return DesktopCtx(
-        desktop=desktop, tax=tax, instances=instances, events=events, actions=actions,
+        desktop=desktop, tax=tax, instances=db.instances(desktop),
+        events=events_of(db, tax, desktop), actions=db.actions(desktop),
         steps={s.step: s for s in db.steps(desktop)}, keyframes=chains,
     )
 
@@ -296,19 +340,16 @@ def _attributes(ctx: DesktopCtx, instance: str, row: dict, step: int,
     }
 
 
-def _box_from_keyframe(keyframe: Optional[ShapeKeyframe]) -> Optional[list]:
-    """Union of a keyframe's part boxes as ``[x, y, w, h]``, or ``None``."""
-    boxes = [p.box for p in (keyframe.parts if keyframe else []) if p.box]
-    if not boxes:
-        return None
-    return bbox_xywh((min(b[0] for b in boxes), min(b[1] for b in boxes),
-                      max(b[2] for b in boxes), max(b[3] for b in boxes)))
-
-
 def _annotation(ann_id: int, img_id: int, category: int, row: dict, attributes: dict,
-                roi: Optional[tuple[int, int, int, int]],
-                keyframe: Optional[ShapeKeyframe], include_boxes: bool) -> Optional[dict]:
-    """One COCO annotation, or ``None`` when the row carries nothing to export."""
+                roi: Optional[tuple[int, int, int, int]], include_boxes: bool) -> Optional[dict]:
+    """One COCO annotation, or ``None`` when the row carries nothing to export.
+
+    A ``mask`` row becomes a full segmentation; a ``box`` row -- a bench part
+    whose truth is a rectangle -- only becomes an annotation under
+    ``include_boxes``, with ``segmentation: []``. Both geometries come from the
+    compiled row itself, so nothing here re-derives what the truth service has
+    already resolved.
+    """
     rle = row.get("visible_rle")
     if rle:
         if roi is not None:
@@ -323,7 +364,7 @@ def _annotation(ann_id: int, img_id: int, category: int, row: dict, attributes: 
     else:
         if not include_boxes:
             return None
-        box = _box_from_keyframe(keyframe)
+        box = bbox_xywh(row.get("box"))
         if box is None:
             return None
         if roi is not None:
@@ -372,9 +413,11 @@ def export_coco(
     roi_crop:
         Write ROI-relative coordinates (see the module docstring).
     include_boxes:
-        Also emit the rows that carry no visible mask -- a part lying on the
-        bench, whose geometry is the box of its keyframe -- as bbox-only
-        annotations with ``segmentation: []``.
+        Also emit the compiled ``box`` rows -- a part lying on the bench, whose
+        truth is a rectangle rather than a mask -- as bbox-only annotations with
+        ``segmentation: []``.
+
+    Steps typed ``ignore`` are skipped: they describe no moment of the teardown.
 
     Returns the COCO document that was written (``images``, ``annotations``,
     ``categories``, plus a deterministic ``info`` block: nothing in the file
@@ -402,6 +445,8 @@ def export_coco(
         ctx = load_ctx(db, tax, desktop, view)
         for frame in db.frames_for(desktop, view):
             key = FrameKey(desktop, frame["step"], view)
+            if not ctx.exportable(key.step):
+                continue
             rows = db.compiled(key)
             if only_verified:
                 rows = {k: r for k, r in rows.items() if r.get("status") == VERIFIED}
@@ -422,16 +467,18 @@ def export_coco(
                 image["roi"] = list(roi)
             doc["images"].append(image)
 
+            segment = pose_segment_of(db, key)
             for instance in sorted(rows):
                 row = rows[instance]
                 cls = ctx.cls_of(instance)
-                if cls not in cat_of:
+                if cls is None:
                     continue  # an unresolved draft key: no category to export it under
-                keyframe = ctx.keyframe_at(instance, key.step, row.get("placement") or "")
+                keyframe = ctx.keyframe_at(instance, key.step, row.get("placement") or "",
+                                           segment)
                 ann = _annotation(
                     ann_id, img_id, cat_of[cls], row,
                     _attributes(ctx, instance, row, key.step, keyframe),
-                    roi, keyframe, include_boxes,
+                    roi, include_boxes,
                 )
                 if ann is not None:
                     doc["annotations"].append(ann)

@@ -10,7 +10,7 @@ from pycocotools.coco import COCO
 
 from tda.core.db import Db
 from tda.core.export import export_coco, export_vlm
-from tda.core.export.coco import cache_rel_path, categories, image_id
+from tda.core.export.coco import cache_rel_path, categories, image_id, load_ctx
 from tda.core.masks import encode_rle
 from tda.core.model import (
     ActionRec,
@@ -18,6 +18,7 @@ from tda.core.model import (
     InstanceRec,
     ShapeKeyframe,
     ShapePart,
+    StateEvent,
     StepRec,
 )
 from tda.core.taxonomy import load_taxonomy
@@ -27,6 +28,11 @@ VIEW = "scan"
 HW = (64, 64)
 PSU = "psu.01"
 SCREW = "screw.motherboard.03"
+GHOST = "ls:mystery#1"  # a provisional draft key with no instance record
+#: The pose segment `truth_inputs.pose_segment_of` reports when none is recorded.
+SEGMENT = 1
+#: The psu's rectangle once it lies on the bench: x0, y0, x1, y1.
+BENCH_BOX = [2.0, 3.0, 12.0, 15.0]
 
 
 def _rect(y0: int, y1: int, x0: int, x1: int) -> np.ndarray:
@@ -41,6 +47,21 @@ PSU_MASK = _rect(10, 30, 5, 25)
 SCREW_MASK = _rect(40, 48, 50, 58)
 #: x0, y0, x1, y1 -- contains both masks, 40x32 pixels
 ROI = [4, 8, 44, 40]
+
+
+def _steps() -> list[StepRec]:
+    return [
+        StepRec(DESKTOP, 1, "initial", "initial"),
+        StepRec(DESKTOP, 2, "normal", "motherboard screw 3"),
+        StepRec(DESKTOP, 3, "normal", "psu"),
+    ]
+
+
+def _actions() -> list[ActionRec]:
+    return [
+        ActionRec(DESKTOP, 2, 0, SCREW, "unscrew", tool="PH2", direction="+Z"),
+        ActionRec(DESKTOP, 3, 0, PSU, "remove", tool="hand", direction="+Z"),
+    ]
 
 
 @pytest.fixture
@@ -65,18 +86,7 @@ def db(tmp_db_path: str, tax):
             attrs={"role": "motherboard", "head": "PH2", "captive": False},
         )
     )
-    d.replace_steps(
-        DESKTOP,
-        [
-            StepRec(DESKTOP, 1, "initial", "initial"),
-            StepRec(DESKTOP, 2, "normal", "motherboard screw 3"),
-            StepRec(DESKTOP, 3, "normal", "psu"),
-        ],
-        [
-            ActionRec(DESKTOP, 2, 0, SCREW, "unscrew", tool="PH2", direction="+Z"),
-            ActionRec(DESKTOP, 3, 0, PSU, "remove", tool="hand", direction="+Z"),
-        ],
-    )
+    d.replace_steps(DESKTOP, _steps(), _actions())
     for step in (1, 2, 3):
         d.upsert_frame(
             FrameKey(DESKTOP, step, VIEW),
@@ -92,18 +102,18 @@ def db(tmp_db_path: str, tax):
                    "in_chassis", "verified", "h1", verified_by="tester")
     d.put_compiled(FrameKey(DESKTOP, 2, VIEW), PSU, psu_rle, 0.0, "visible",
                    "in_chassis", "auto", "h2")
-    # step 3: the psu lies on the bench -- box geometry only, so no visible RLE.
+    # step 3: the psu lies on the bench -- a box row, no visible RLE.
     d.put_compiled(FrameKey(DESKTOP, 3, VIEW), PSU, None, 0.0, "visible",
-                   "on_bench", "auto", "h3")
+                   "on_bench", "auto", "h3", geom_type="box", box=BENCH_BOX)
     d.add_keyframe(ShapeKeyframe(
-        id=None, instance=PSU, desktop=DESKTOP, view=VIEW, pose_segment=0, anchor_step=2,
-        placement="in_chassis", geom_type="mask",
+        id=None, instance=PSU, desktop=DESKTOP, view=VIEW, pose_segment=SEGMENT,
+        anchor_step=2, placement="in_chassis", geom_type="mask",
         parts=[ShapePart("main", rle=psu_rle)], amodal_complete=False,
     ))
     d.add_keyframe(ShapeKeyframe(
-        id=None, instance=PSU, desktop=DESKTOP, view=VIEW, pose_segment=0, anchor_step=3,
-        placement="on_bench", geom_type="box",
-        parts=[ShapePart("main", box=(2.0, 3.0, 12.0, 15.0))], amodal_complete=True,
+        id=None, instance=PSU, desktop=DESKTOP, view=VIEW, pose_segment=SEGMENT,
+        anchor_step=3, placement="on_bench", geom_type="box",
+        parts=[ShapePart("main", box=tuple(BENCH_BOX))], amodal_complete=True,
     ))
     yield d
     d.close()
@@ -111,11 +121,11 @@ def db(tmp_db_path: str, tax):
 
 def _with_roi(d: Db) -> None:
     """Give the view a pose segment carrying an ROI (no Db writer for roi_json yet)."""
-    d.set_pose_segment(DESKTOP, VIEW, 0, 1, 3, 1, None, None)
+    d.set_pose_segment(DESKTOP, VIEW, SEGMENT, 1, 3, 1, None, None)
     with d.conn:
         d.conn.execute(
             "UPDATE pose_segment SET roi_json=? WHERE desktop=? AND view=? AND seg=?",
-            (json.dumps(ROI), DESKTOP, VIEW, 0),
+            (json.dumps(ROI), DESKTOP, VIEW, SEGMENT),
         )
 
 
@@ -221,7 +231,7 @@ def test_include_boxes_emits_bbox_only_rows(db, tax, tmp_path: Path):
     assert len(doc["annotations"]) == 4
     bench = _ann_of(doc, 3, PSU)
     assert bench["segmentation"] == []
-    assert bench["bbox"] == [2.0, 3.0, 10.0, 12.0]
+    assert bench["bbox"] == [2.0, 3.0, 10.0, 12.0]  # the compiled row's own box
     assert bench["area"] == 120.0
     assert bench["attributes"]["amodal_complete"] is True
 
@@ -265,7 +275,9 @@ def test_vlm_writes_at_least_one_record_per_task(db, tax, tmp_path: Path):
     assert len({r["id"] for r in records}) == len(records)
     for rec in records:
         assert set(rec) >= {"id", "task", "desktop", "step", "view", "images",
-                            "question", "answer", "evidence", "graph_version"}
+                            "question", "answer", "evidence", "rationale", "quality",
+                            "graph_version"}
+        assert rec["quality"] in ("gold", "auto")
         assert rec["desktop"] == DESKTOP and rec["view"] == VIEW
         assert rec["graph_version"] is None
         assert rec["question"] and isinstance(rec["question"], str)
@@ -282,9 +294,14 @@ def test_vlm_v1_lists_the_visible_components(db, tax, tmp_path: Path):
     assert {c["instance"] for c in components} == {PSU, SCREW}
     psu = next(c for c in components if c["instance"] == PSU)
     assert psu["class"] == "psu" and psu["bbox"] == [5, 10, 20, 20]
+    assert psu["placement"] == "in_chassis"
     assert first[0]["evidence"]["bboxes"][SCREW] == [50, 40, 8, 8]
-    # step 3 holds a bench row without a mask: nothing to point at
-    assert [r["step"] for r in _records(out)] == [1, 2]
+
+    # spec 8.2: the bench part at step 3 is a box row, and V1 must still list it
+    assert [r["step"] for r in _records(out)] == [1, 2, 3]
+    bench = [r for r in _records(out) if r["step"] == 3][0]["answer"]["components"]
+    assert bench == [{"class": "psu", "instance": PSU, "bbox": [2.0, 3.0, 10.0, 12.0],
+                      "placement": "on_bench"}]
 
 
 def test_vlm_v2_asks_states_and_counts(db, tax, tmp_path: Path):
@@ -332,3 +349,111 @@ def test_vlm_tasks_argument_selects_the_rows(db, tax, tmp_path: Path):
     summary = export_vlm(db, tax, [DESKTOP], VIEW, str(out), tasks=("V3",))
     assert summary["by_task"] == {"V3": 2}
     assert {r["task"] for r in _records(out)} == {"V3"}
+
+
+def test_vlm_only_verified_keeps_gold_records(db, tax, tmp_path: Path):
+    out = tmp_path / "vlm.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out), only_verified=True)
+    records = _records(out)
+    assert records and {r["quality"] for r in records} == {"gold"}
+    # step 1 is the only verified frame; the V3 pair (1, 2) still reads it
+    assert {r["step"] for r in records} == {1, 2}
+
+
+def test_rationale_never_observes_without_a_box(db, tax, tmp_path: Path):
+    """An instance the frame cannot localise is `propagate_state`, not `observe`."""
+    db.upsert_instance(InstanceRec(
+        key="screw.motherboard.04", desktop=DESKTOP, cls="screw",
+        attrs={"role": "motherboard", "head": "PH2", "captive": False},
+    ))
+    out = tmp_path / "vlm.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    records = _records(out)
+
+    count = next(r for r in records if "count" in r["answer"])
+    assert count["answer"] == {"count": 2}  # the unseen screw is still fastened
+    assert [s["op"] for s in count["rationale"]["steps"]] == [
+        "observe", "propagate_state", "conclude"
+    ]
+    for rec in records:
+        for step in rec["rationale"]["steps"]:
+            if step["op"] == "observe":
+                assert step["evidence"]["bbox"], rec["id"]
+                assert step["evidence"]["visibility"], rec["id"]
+
+
+# --------------------------------------------------------------------------- #
+# inputs shared by both exports
+# --------------------------------------------------------------------------- #
+def test_manual_events_do_not_erase_the_action_log(db, tax, tmp_path: Path):
+    """A hand-written event corrects the derived log; it never replaces it."""
+    db.replace_events(DESKTOP, [StateEvent(DESKTOP, 1, SCREW, "state", "fastened",
+                                           "loosened", auto=False)])
+    ctx = load_ctx(db, tax, DESKTOP, VIEW)
+    assert ctx.state_at(1)[SCREW].state == "loosened"  # the correction lands
+    assert ctx.state_at(2)[SCREW].state == "removed"   # the unscrew at step 2 survives
+    assert ctx.state_at(3)[PSU].state == "removed"
+
+    doc = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"), only_verified=False)
+    assert _ann_of(doc, 1, SCREW)["attributes"]["state"] == "loosened"
+
+
+def test_amodal_complete_reads_the_frames_pose_segment(db, tax, tmp_path: Path):
+    """A shape drawn in another pose segment must not answer for this frame."""
+    db.add_keyframe(ShapeKeyframe(
+        id=None, instance=SCREW, desktop=DESKTOP, view=VIEW, pose_segment=SEGMENT + 1,
+        anchor_step=1, placement="in_chassis", geom_type="mask",
+        parts=[ShapePart("main", rle=encode_rle(SCREW_MASK))], amodal_complete=True,
+    ))
+    doc = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"), only_verified=False)
+    assert _ann_of(doc, 1, SCREW)["attributes"]["amodal_complete"] is None
+    assert _ann_of(doc, 1, PSU)["attributes"]["amodal_complete"] is False
+
+
+def test_unknown_instance_keys_are_skipped(db, tax, tmp_path: Path):
+    """A provisional draft key has no taxonomy class: skip it instead of crashing."""
+    db.put_compiled(FrameKey(DESKTOP, 1, VIEW), GHOST, encode_rle(SCREW_MASK), 0.0,
+                    "visible", "in_chassis", "verified", "h1", verified_by="tester")
+    doc = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"), only_verified=False)
+    assert GHOST not in {a["attributes"]["instance_key"] for a in doc["annotations"]}
+
+    out = tmp_path / "vlm.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    assert GHOST not in out.read_text(encoding="utf-8")
+
+
+def test_unknown_action_target_produces_no_v3_record(db, tax, tmp_path: Path):
+    db.replace_steps(
+        DESKTOP,
+        [*_steps(), StepRec(DESKTOP, 4, "normal", "mystery part")],
+        [*_actions(), ActionRec(DESKTOP, 4, 0, GHOST, "remove", tool="hand")],
+    )
+    db.upsert_frame(FrameKey(DESKTOP, 4, VIEW), "F:/scan/019/004/P_0.png",
+                    {"hw": [64, 64]}, None)
+    db.put_compiled(FrameKey(DESKTOP, 4, VIEW), PSU, None, 0.0, "visible", "on_bench",
+                    "auto", "h4", geom_type="box", box=BENCH_BOX)
+
+    out = tmp_path / "vlm.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out), tasks=("V3",))
+    assert [r["step"] for r in _records(out)] == [2, 3]
+
+
+def test_step_types_gate_both_exports(db, tax, tmp_path: Path):
+    """`ignore` frames are never exported and `dupli`/`initial` never end a V3 pair."""
+    db.replace_steps(
+        DESKTOP,
+        [
+            StepRec(DESKTOP, 1, "initial", "initial"),
+            StepRec(DESKTOP, 2, "dupli", "motherboard screw 3", dupli=True),
+            StepRec(DESKTOP, 3, "ignore", "calibration shot"),
+        ],
+        _actions(),
+    )
+    doc = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"),
+                      only_verified=False, include_boxes=True)
+    assert [im["extra"]["step"] for im in doc["images"]] == [1, 2]
+
+    out = tmp_path / "vlm.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    assert {r["step"] for r in _records(out)} == {1, 2}
+    assert not [r for r in _records(out) if r["task"] == "V3"]

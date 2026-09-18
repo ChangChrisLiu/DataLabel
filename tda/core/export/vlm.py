@@ -3,10 +3,10 @@
 One JSON object per line::
 
     {"id", "task", "desktop", "step", "view", "images", "question",
-     "answer", "evidence", "rationale", "graph_version"}
+     "answer", "evidence", "rationale", "quality", "graph_version"}
 
 * **V1** (perception): one record per frame -- every component the view can be
-  pointed at, with its box.
+  pointed at, with its box, ``on_bench`` parts included.
 * **V2** (state / counting): per-instance state questions for the classes whose
   state is multi-valued, plus one "how many <role> screws are still fastened?"
   per screw role present in the frame.
@@ -19,11 +19,15 @@ checksum of the record id rather than at random, and the file is written in a
 fixed frame/task order.
 
 Grounding (spec 8.2, principle 1 and the rationale format): a record is only
-emitted for instances whose compiled row carries a visible mask *and* an
-answerable visibility, so every ``observe`` step of the ``rationale`` chain can
-name the box it read the value off. Bench parts whose geometry is a box rather
-than a mask are therefore still missing from V1 -- the truth table stores no
-box column yet.
+emitted for instances whose compiled row carries geometry -- a visible mask or
+a bench box -- *and* an answerable visibility, so every ``observe`` step of the
+``rationale`` chain names the box it read the value off. An instance the frame
+cannot localise enters the chain as ``propagate_state`` instead, which carries
+no evidence box by construction.
+
+Steps typed ``ignore`` produce no records at all, and an ``initial``, ``dupli``
+or ``ignore`` step is never the "after" frame of a V3 pair even when the step
+table records an action for it.
 
 ``graph_version`` is ``None`` until the constraint graph exists (it is a Plan-B
 module); the field is written now so the JSONL schema does not change later.
@@ -38,10 +42,14 @@ from typing import Any, Iterable, Optional, Sequence
 from tda.core.db import Db
 from tda.core.export.coco import (
     ANSWERABLE,
+    NO_CHANGE_STEP_TYPES,
+    QUALITY_AUTO,
+    QUALITY_GOLD,
+    VERIFIED,
     DesktopCtx,
     frame_file_name,
     load_ctx,
-    mask_bbox_xywh,
+    row_bbox_xywh,
 )
 from tda.core.model import ActionRec, FrameKey, InstanceRec
 from tda.core.taxonomy import Taxonomy
@@ -101,13 +109,31 @@ def _evidence(bboxes: dict[str, list], **extra) -> dict:
     return {"instances": sorted(bboxes), "bboxes": bboxes, **extra}
 
 
-def _observe(instance: str, value: Any, view: str, bbox: Optional[list],
+def _observe(instance: str, value: Any, view: str, bbox: list,
              visibility: Optional[str], step: Optional[int] = None) -> dict:
-    """One ``observe`` step of a rationale chain (spec 8.2 closed op set)."""
+    """One ``observe`` step of a rationale chain (spec 8.2 closed op set).
+
+    Every ``observe`` carries the box it read the value off; an instance this
+    frame cannot localise gets :func:`_propagate` instead.
+    """
     evidence: dict[str, Any] = {"view": view, "bbox": bbox, "visibility": visibility}
     if step is not None:
         evidence["step"] = step
     return {"op": "observe", "target": instance, "value": value, "evidence": evidence}
+
+
+def _propagate(instance: str, value: Any) -> dict:
+    """``propagate_state``: a value carried over from the event log, not seen here."""
+    return {"op": "propagate_state", "target": instance, "value": value}
+
+
+def _step_for(instance: str, value: Any, view: str,
+              seen: dict[str, tuple[dict, list]], step: Optional[int] = None) -> dict:
+    """``observe`` when the frame can point at the instance, else ``propagate_state``."""
+    if instance not in seen:
+        return _propagate(instance, value)
+    row, box = seen[instance]
+    return _observe(instance, value, view, box, row.get("visibility"), step=step)
 
 
 def _rationale(steps: list[dict]) -> dict:
@@ -117,11 +143,12 @@ def _rationale(steps: list[dict]) -> dict:
 
 
 def _record(rec_id: str, task: str, key: FrameKey, images: list[str], question: str,
-            answer: dict, evidence: dict, rationale: dict) -> dict:
+            answer: dict, evidence: dict, rationale: dict, quality: str) -> dict:
     return {
         "id": rec_id, "task": task, "desktop": key.desktop, "step": key.step,
         "view": key.view, "images": images, "question": question, "answer": answer,
-        "evidence": evidence, "rationale": rationale, "graph_version": None,
+        "evidence": evidence, "rationale": rationale, "quality": quality,
+        "graph_version": None,
     }
 
 
@@ -129,14 +156,31 @@ def _frame_id(key: FrameKey) -> str:
     return f"D{key.desktop:02d}-{key.view}-s{key.step:03d}"
 
 
-def _pointable(rows: dict[str, dict]) -> dict[str, tuple[dict, list]]:
-    """``instance -> (row, bbox)`` for the rows this view can be asked about."""
+def _quality(rows: Iterable[dict]) -> str:
+    """``gold`` only when every compiled row behind the record is human-verified."""
+    used = list(rows)
+    if used and all(row.get("status") == VERIFIED for row in used):
+        return QUALITY_GOLD
+    return QUALITY_AUTO
+
+
+def _pointable(ctx: DesktopCtx, rows: dict[str, dict],
+               only_verified: bool) -> dict[str, tuple[dict, list]]:
+    """``instance -> (row, bbox)`` for the rows this view can be asked about.
+
+    Both geometries qualify -- a visible mask and a bench box -- as long as the
+    row's visibility is answerable and its instance carries a taxonomy class.
+    """
     out: dict[str, tuple[dict, list]] = {}
     for instance in sorted(rows):
         row = rows[instance]
         if row.get("visibility") not in ANSWERABLE:
             continue
-        box = mask_bbox_xywh(row.get("visible_rle"))
+        if only_verified and row.get("status") != VERIFIED:
+            continue
+        if ctx.cls_of(instance) is None:
+            continue
+        box = row_bbox_xywh(row)
         if box is not None:
             out[instance] = (row, box)
     return out
@@ -147,19 +191,22 @@ def _pointable(rows: dict[str, dict]) -> dict[str, tuple[dict, list]]:
 # --------------------------------------------------------------------------- #
 def _v1(ctx: DesktopCtx, key: FrameKey, image: str,
         pointable: dict[str, tuple[dict, list]]) -> Optional[dict]:
-    components, bboxes, steps = [], {}, []
+    components, bboxes, steps, used = [], {}, [], []
     for instance, (row, box) in pointable.items():
         cls = ctx.cls_of(instance)
         if cls is None:
             continue
-        components.append({"class": cls, "instance": instance, "bbox": box})
+        components.append({"class": cls, "instance": instance, "bbox": box,
+                           "placement": row.get("placement")})
         bboxes[instance] = box
+        used.append(row)
         steps.append(_observe(instance, cls, key.view, box, row.get("visibility")))
     if not components:
         return None
     rec_id = f"V1-{_frame_id(key)}"
     return _record(rec_id, "V1", key, [image], _pick(V1_QUESTIONS, rec_id),
-                   {"components": components}, _evidence(bboxes), _rationale(steps))
+                   {"components": components}, _evidence(bboxes), _rationale(steps),
+                   _quality(used))
 
 
 # --------------------------------------------------------------------------- #
@@ -183,6 +230,7 @@ def _v2_states(ctx: DesktopCtx, key: FrameKey, image: str,
             _evidence({instance: box}),
             _rationale([_observe(instance, inst_state.state, key.view, box,
                                  row.get("visibility"))]),
+            _quality([row]),
         ))
     return records
 
@@ -215,15 +263,12 @@ def _v2_counts(ctx: DesktopCtx, key: FrameKey, image: str,
         ]
         bboxes = {i: pointable[i][1] for i in fastened if i in pointable}
         rec_id = f"V2-{_frame_id(key)}-count-{role}"
-        steps = [
-            _observe(i, "fastened", key.view, bboxes.get(i),
-                     pointable[i][0].get("visibility") if i in pointable else None)
-            for i in fastened
-        ]
+        steps = [_step_for(i, "fastened", key.view, pointable) for i in fastened]
         records.append(_record(
             rec_id, "V2", key, [image],
             V2_COUNT_QUESTION.format(role=role.replace("_", " ")),
             {"count": len(fastened)}, _evidence(bboxes), _rationale(steps),
+            _quality([pointable[i][0] for i in fastened if i in pointable]),
         ))
     return records
 
@@ -232,6 +277,11 @@ def _v2_counts(ctx: DesktopCtx, key: FrameKey, image: str,
 # V3 -- what happened between two frames
 # --------------------------------------------------------------------------- #
 def _target_class(ctx: DesktopCtx, target: str) -> Optional[str]:
+    """Class of an action target: ``cable`` for a virtual node, else the taxonomy's.
+
+    ``None`` marks a target this export cannot name -- a provisional or deleted
+    instance key -- and drops the action from the answer.
+    """
     if target.startswith(CABLE_PREFIX):
         return CABLE_CLASS
     return ctx.cls_of(target)
@@ -249,29 +299,27 @@ def _slots(ctx: DesktopCtx, action: ActionRec) -> dict:
 def _v3(ctx: DesktopCtx, key: FrameKey, images: list[str], actions: list[ActionRec],
         before: dict[str, tuple[dict, list]],
         after: dict[str, tuple[dict, list]]) -> Optional[dict]:
-    if not actions:
+    named = [a for a in actions if _target_class(ctx, a.target) is not None]
+    if not named or ctx.step_type(key.step) in NO_CHANGE_STEP_TYPES:
         return None
-    answer = _slots(ctx, actions[0])
-    if len(actions) > 1:  # a compound step: keep every slot set, first one on top
-        answer["actions"] = [_slots(ctx, a) for a in actions]
+    answer = _slots(ctx, named[0])
+    if len(named) > 1:  # a compound step: keep every slot set, first one on top
+        answer["actions"] = [_slots(ctx, a) for a in named]
 
-    target = actions[0].target
+    target = named[0].target
     source_step, source = key.step - 1, before
     if target not in before and target in after:
         source_step, source = key.step, after
-    bboxes, visibility = {}, None
-    if target in source:
-        bboxes[target] = source[target][1]
-        visibility = source[target][0].get("visibility")
+    bboxes = {target: source[target][1]} if target in source else {}
 
     rec_id = f"V3-{_frame_id(key)}"
     steps = [
         {"op": "compare_frames", "frames": [key.step - 1, key.step], "view": key.view},
-        _observe(target, answer["verb"], key.view, bboxes.get(target), visibility,
-                 step=source_step),
+        _step_for(target, answer["verb"], key.view, source, step=source_step),
     ]
     return _record(rec_id, "V3", key, images, _pick(V3_QUESTIONS, rec_id), answer,
-                   _evidence(bboxes, from_step=source_step), _rationale(steps))
+                   _evidence(bboxes, from_step=source_step), _rationale(steps),
+                   _quality([source[target][0]] if target in source else []))
 
 
 # --------------------------------------------------------------------------- #
@@ -284,37 +332,48 @@ def export_vlm(
     view: str,
     out_jsonl: str,
     tasks: Iterable[str] = TASKS,
+    only_verified: bool = False,
 ) -> dict:
     """Write the V1/V2/V3 question set of ``desktops`` in ``view`` as JSONL.
 
     Records are grouped by frame in step order and, inside a frame, by task, so
-    two exports of the same database are byte-identical.
+    two exports of the same database are byte-identical. ``only_verified``
+    restricts every question to the compiled rows a human confirmed, which makes
+    each record's ``quality`` ``gold``.
 
     Returns ``{"path", "records", "by_task", "desktops", "view"}``.
     """
     wanted = [t for t in TASKS if t in set(tasks)]
     records: list[dict] = []
 
+    def emit(record: Optional[dict]) -> None:
+        """Keep a record, unless ``only_verified`` and nothing verified backs it."""
+        if record is None:
+            return
+        if only_verified and record["quality"] != QUALITY_GOLD:
+            return
+        records.append(record)
+
     for desktop in desktops:
         ctx = load_ctx(db, tax, desktop, view)
         previous: Optional[tuple[int, dict[str, tuple[dict, list]], str]] = None
         for frame in db.frames_for(desktop, view):
             key = FrameKey(desktop, frame["step"], view)
+            if not ctx.exportable(key.step):
+                continue  # an `ignore` step is no moment of the teardown
             image = frame_file_name(frame, key)
-            pointable = _pointable(db.compiled(key))
+            pointable = _pointable(ctx, db.compiled(key), only_verified)
 
             if "V1" in wanted:
-                first = _v1(ctx, key, image, pointable)
-                if first is not None:
-                    records.append(first)
+                emit(_v1(ctx, key, image, pointable))
             if "V2" in wanted:
-                records.extend(_v2_states(ctx, key, image, pointable))
-                records.extend(_v2_counts(ctx, key, image, pointable))
+                for record in _v2_states(ctx, key, image, pointable):
+                    emit(record)
+                for record in _v2_counts(ctx, key, image, pointable):
+                    emit(record)
             if "V3" in wanted and previous is not None and previous[0] == key.step - 1:
-                pair = _v3(ctx, key, [previous[2], image], ctx.actions_at(key.step),
-                           previous[1], pointable)
-                if pair is not None:
-                    records.append(pair)
+                emit(_v3(ctx, key, [previous[2], image], ctx.actions_at(key.step),
+                         previous[1], pointable))
             previous = (key.step, pointable, image)
 
     out = Path(out_jsonl)
