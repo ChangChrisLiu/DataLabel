@@ -36,7 +36,8 @@ from tda.core.index import DEFAULT_PATHS_PATH, REPO_ROOT, DesktopIndex, FrameFil
 from tda.core.model import FrameKey
 
 __all__ = [
-    "build_cache", "burst_metrics", "cache_path", "choose_scan_image", "suggest_roi",
+    "build_cache", "build_thumbs", "burst_metrics", "cache_path", "choose_scan_image",
+    "suggest_roi", "thumb_path",
 ]
 
 # --- burst metrics -------------------------------------------------------
@@ -519,6 +520,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     """
     import argparse
 
+    from tda.core.cache_thumbs import add_thumb_args, run_thumb_cli  # see __getattr__
+
     ap = argparse.ArgumentParser(description="Build the local TDA image cache.")
     ap.add_argument("--cache", default=None, help="cache dir (default: paths.yaml cache_dir)")
     ap.add_argument("--index", default=None, help="index JSON (default: <cache>/index.json)")
@@ -530,16 +533,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="measure every burst again instead of reusing the stored metrics")
     ap.add_argument("--force", action="store_true",
                     help="rebuild: measure again and re-copy every file")
+    add_thumb_args(ap)
     args = ap.parse_args(argv)
 
     cache_dir = args.cache or _default_cache_dir()
     index_path = args.index or f"{_norm(cache_dir).rstrip('/')}/index.json"
     views = tuple(v.strip() for v in args.views.split(",") if v.strip())
     desktops = [d for d in range(args.first, args.last + 1)]
-
-    index = load_index(index_path)
-    total = sum(1 for d in desktops if d in index
-                for k in index[d].frames if k.view in views)
     log = open(args.log, "a", encoding="utf-8", buffering=1) if args.log else None
 
     def emit(line: str) -> None:
@@ -547,23 +547,30 @@ def main(argv: Optional[list[str]] = None) -> int:
         if log:
             log.write(line + "\n")
 
-    started = time.time()
-    done = 0
-
-    def on_step(desktop: int, step: int, view: str) -> None:
-        nonlocal done
-        done += 1
-        if done % 25 == 0 or done == total:
-            elapsed = time.time() - started
-            eta = elapsed / done * (total - done) if done else 0.0
-            emit(f"[{time.strftime('%H:%M:%S')}] {done}/{total} "
-                 f"({100.0 * done / max(total, 1):.1f}%) D{desktop:02d} s{step:03d} {view} "
-                 f"elapsed {elapsed / 60:.1f}min eta {eta / 60:.1f}min")
-
-    emit(f"[{time.strftime('%H:%M:%S')}] start views={views} desktops={args.first}-{args.last} "
-         f"steps={total} cache={cache_dir} index={index_path}")
     code = 0
     try:
+        if args.thumbs_only:  # the thumbnail tier alone: no index, no source drive
+            return run_thumb_cli(args, cache_dir, views, desktops, emit)
+
+        index = load_index(index_path)
+        total = sum(1 for d in desktops if d in index
+                    for k in index[d].frames if k.view in views)
+        started = time.time()
+        done = 0
+
+        def on_step(desktop: int, step: int, view: str) -> None:
+            nonlocal done
+            done += 1
+            if done % 25 == 0 or done == total:
+                elapsed = time.time() - started
+                eta = elapsed / done * (total - done) if done else 0.0
+                emit(f"[{time.strftime('%H:%M:%S')}] {done}/{total} "
+                     f"({100.0 * done / max(total, 1):.1f}%) D{desktop:02d} s{step:03d} {view} "
+                     f"elapsed {elapsed / 60:.1f}min eta {eta / 60:.1f}min")
+
+        emit(f"[{time.strftime('%H:%M:%S')}] start views={views} "
+             f"desktops={args.first}-{args.last} steps={total} cache={cache_dir} "
+             f"index={index_path}")
         stats = build_cache(index, cache_dir, views=views, desktops=desktops, progress=on_step,
                             force=args.force, recompute=args.recompute)
         emit(f"[{time.strftime('%H:%M:%S')}] done steps={stats['steps']} copied={stats['copied']} "
@@ -587,10 +594,24 @@ def main(argv: Optional[list[str]] = None) -> int:
             code = 1
             emit(f"[{time.strftime('%H:%M:%S')}] {len(stats['failures'])} step(s) could not be "
                  f"cached - see the FAIL lines above")
+        if args.thumbs:
+            code = run_thumb_cli(args, cache_dir, views, desktops, emit) or code
     finally:
         if log:
             log.close()
     return code
+
+
+def __getattr__(name: str):
+    """Re-export the thumbnail tier, which imports this module itself (PEP 562).
+
+    ``from tda.core.cache import thumb_path`` works; resolving it on first use
+    instead of at import time is what keeps the two modules acyclic.
+    """
+    if name in ("build_thumbs", "thumb_path", "DbRoiLookup"):
+        from tda.core import cache_thumbs
+        return getattr(cache_thumbs, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 if __name__ == "__main__":  # pragma: no cover
