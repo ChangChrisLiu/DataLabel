@@ -1,8 +1,10 @@
-"""Hard-constraint edges and the attribute rules that derive them (spec 7.1-7.3).
+"""The constraint graph's vocabulary, and the rules that derive its edges.
 
-The :class:`Edge` type and the semantic tables live here so that
-:mod:`tda.core.graph` (the reasoning layer) and :mod:`tda.core.graph_templates`
-(the family templates) can both import them without a cycle;
+This is the bottom of the graph stack: the :class:`Edge` type, the spec 7.2
+semantics, the verb-applicability tables, and the spec 7.3 attribute rules.
+:mod:`tda.core.graph` (the reasoning layer), :mod:`tda.core.graph_plan` (the
+planner) and :mod:`tda.core.graph_templates` (the family templates) all import
+from here, which is what keeps the four modules acyclic;
 :mod:`tda.core.graph` re-exports everything a caller needs.
 
 Two functions matter:
@@ -18,19 +20,28 @@ overwrites a value that is already there) and reports what it filled.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterable, Optional
 
 from tda.core.model import InstanceRec
+from tda.core.states import FrameState
 from tda.core.taxonomy import Taxonomy
 
 __all__ = [
+    "CABLE_DEFAULT_STATE",
     "CABLE_PREFIX",
     "Edge",
     "HARD_TYPES",
     "REQUIRED_STATES",
+    "VerbTarget",
+    "active_edges",
+    "blocker_state",
+    "cable_nodes",
     "cable_owner",
+    "connector_owner",
     "infer_relational_fields",
     "propose_edges",
+    "verb_applies",
+    "verb_effect",
 ]
 
 #: The five hard-constraint edge types of spec 7.2, most-specific first.
@@ -51,6 +62,34 @@ BLOCKED_MODES = ("physical_path", "tool_access", "cable_tension")
 
 CABLE_PREFIX = "cable:"
 REMOVED = "removed"
+REJECTED = "rejected"
+
+#: The default state of a ``cable:*`` node, mirroring ``taxonomy.yaml``. A
+#: cable enters the frame state only once an event names it (see
+#: :func:`tda.core.states.state_at`), so an edge may well point at one that is
+#: not in the snapshot yet; it is still routed until something releases it.
+CABLE_DEFAULT_STATE = "routed"
+
+#: Which states a verb may be applied *from*, where the taxonomy's effect table
+#: alone is too permissive. ``remove`` is handled by :data:`REMOVE_FROM_STATES`.
+VERB_FROM_STATES: dict[str, frozenset[str]] = {
+    "unscrew": frozenset({"fastened"}),
+    "disconnect": frozenset({"plugged"}),
+    "open": frozenset({"closed"}),
+    "release": frozenset({"closed", "routed"}),
+    "displace": frozenset({"installed"}),
+}
+
+#: Classes that need an intermediate step before ``remove``: a screw has to come
+#: loose first. Every other class can be taken straight out of whatever state it
+#: is in -- including a ``connector``, which spec 6.3 lets you remove while it
+#: is still plugged, meaning the whole cable was pulled out in one go.
+REMOVE_FROM_STATES: dict[str, frozenset[str]] = {
+    "screw": frozenset({"loosened"}),
+}
+
+#: One action as the graph talks about it: ``(verb, target)``.
+VerbTarget = tuple[str, str]
 
 
 @dataclass(frozen=True)
@@ -78,6 +117,52 @@ class Edge:
 
 
 # --------------------------------------------------------------------------- #
+# shared helpers: edge status, verb applicability, cable nodes
+# --------------------------------------------------------------------------- #
+def active_edges(edges: Iterable["Edge"]) -> list["Edge"]:
+    """Edges a human has not rejected (spec 7.3: proposed / accepted / rejected)."""
+    return [e for e in edges if e.status != REJECTED]
+
+
+def verb_effect(tax: Taxonomy, cls: str, attrs: dict, verb: str) -> Optional[str]:
+    """The state this verb would put the class in, or ``None`` for no effect."""
+    effect = tax.apply_verb(cls, attrs, verb)
+    if effect is None or effect[0] != "state":
+        return None
+    return effect[1]
+
+
+def verb_applies(tax: Taxonomy, cls: str, attrs: dict, verb: str, current: str) -> bool:
+    """Can this verb be performed on an instance of ``cls`` in state ``current``?
+
+    Independent of the constraint graph: it only asks whether the verb belongs
+    to the class (spec 6.3), does something, and starts from a sane state.
+    """
+    new = verb_effect(tax, cls, attrs, verb)
+    if new is None or current == REMOVED or new == current:
+        return False
+    allowed = REMOVE_FROM_STATES.get(cls) if verb == "remove" else VERB_FROM_STATES.get(verb)
+    return allowed is None or current in allowed
+
+
+def blocker_state(state: FrameState, blocker: str) -> Optional[str]:
+    """A node's state, or ``None`` when it is not a node of this desktop."""
+    inst = state.get(blocker)
+    if inst is not None:
+        return inst.state
+    if blocker.startswith(CABLE_PREFIX):
+        return CABLE_DEFAULT_STATE
+    return None
+
+
+def cable_nodes(edges: list["Edge"], state: FrameState) -> dict[str, str]:
+    """Every virtual cable node this graph mentions, with its current state."""
+    keys = {e.blocker for e in edges if e.blocker.startswith(CABLE_PREFIX)}
+    keys |= {k for k in state if k.startswith(CABLE_PREFIX)}
+    return {k: blocker_state(state, k) or CABLE_DEFAULT_STATE for k in keys}
+
+
+# --------------------------------------------------------------------------- #
 # cables
 # --------------------------------------------------------------------------- #
 #: ``cable:<owner>`` tokens the logs use that are not taxonomy class names.
@@ -91,11 +176,18 @@ CABLE_OWNER_ALIASES = {
 }
 
 #: Classes whose cables are *not* captive to them, however ``logs.py`` groups
-#: them. A drive's SATA data and power leads unplug at both ends, so spec 7.2
-#: says each plug gates only the part it sits on -- unlike a PSU harness, a fan
-#: lead or a front-panel loom, which are moulded into their part and therefore
-#: gate it wherever they plug in.
+#: them. A drive's SATA leads unplug at both ends, so spec 7.2 says each plug
+#: gates only the part it sits on -- unlike a fan lead or a front-panel loom,
+#: which are moulded into their part and gate it wherever they plug in.
 DETACHABLE_CABLE_OWNERS = frozenset({"storage_drive", "optical_drive"})
+
+#: Connector kinds that are power leads: whatever ``taxonomy_map`` tagged them
+#: with, the far end of one is moulded into the PSU, so the PSU harness owns it
+#: (spec 7.2: every plug of the harness must be out before the PSU can go).
+POWER_LEAD_KINDS = frozenset({"atx_24pin", "cpu_power", "sata_power", "molex"})
+
+#: Connector kinds with a detachable plug at *both* ends, owned by nobody.
+TWO_ENDED_KINDS = frozenset({"sata_data"})
 
 
 def cable_owner(
@@ -125,6 +217,32 @@ def cable_owner(
     if instances is None:
         return owner
     return _unique_of_class(instances, owner)
+
+
+def connector_owner(
+    rec: InstanceRec,
+    instances: dict[str, InstanceRec],
+) -> Optional[str]:
+    """The part one connector's cable is captive to, or ``None``.
+
+    The connector's ``kind`` decides first, because it is the physical fact and
+    ``logs.py``'s ``cable_owner`` is only a grouping key:
+
+    * a power lead (:data:`POWER_LEAD_KINDS`) belongs to the PSU harness, even
+      when the sheet filed it under the drive it feeds -- so the PSU cannot come
+      out until every one of its plugs is pulled;
+    * a ``sata_data`` lead has a detachable plug at both ends and belongs to
+      nobody, so each end gates only its own socket host (spec 7.2);
+    * anything else falls back to the tagged cable owner, which still drops the
+      drive classes of :data:`DETACHABLE_CABLE_OWNERS` -- an untyped connector
+      filed under a drive is one of its SATA leads.
+    """
+    kind = str(rec.attrs.get("kind") or "")
+    if kind in POWER_LEAD_KINDS:
+        return _unique_of_class(instances, "psu")
+    if kind in TWO_ENDED_KINDS:
+        return None
+    return cable_owner(rec.cable or "", instances)
 
 
 def _unique_of_class(instances: dict[str, InstanceRec], cls: str) -> Optional[str]:
@@ -227,7 +345,8 @@ def _connected_to(instances: dict[str, InstanceRec], tax: Taxonomy) -> list[Edge
     For a part X, every connector whose ``socket_host`` is X *or* whose cable is
     owned by X must be unplugged before X may be removed. The two ends of a SATA
     data cable carry no owner, so each gates only the part it plugs into; every
-    plug of the PSU harness gates the PSU as well as its own socket host.
+    plug of the PSU harness gates the PSU as well as its own socket host. See
+    :func:`connector_owner` for how the owner is decided.
     """
     out: list[Edge] = []
     for key, rec in sorted(instances.items()):
@@ -236,7 +355,7 @@ def _connected_to(instances: dict[str, InstanceRec], tax: Taxonomy) -> list[Edge
         host = _resolve(instances, rec.socket_host)
         if host:
             out.append(_edge("connected_to", host, key, f"{key} plugs into {host}"))
-        owner = cable_owner(rec.cable or "", instances)
+        owner = connector_owner(rec, instances)
         if owner and owner != host:
             out.append(
                 _edge("connected_to", owner, key, f"{key} is on the {owner} cable")

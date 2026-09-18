@@ -17,7 +17,7 @@ from typing import Optional
 
 import yaml
 
-from tda.core.graph_rules import Edge
+from tda.core.graph_rules import CABLE_PREFIX, HARD_TYPES, Edge
 from tda.core.model import InstanceRec
 
 __all__ = ["apply_template", "load_template", "save_template"]
@@ -31,7 +31,16 @@ _FIELDS = ("necessity", "mode", "reason")
 
 
 def _slot_of(instances: dict[str, InstanceRec], key: str) -> Optional[str]:
-    """The template slot an instance key stands for."""
+    """The template slot an instance key stands for.
+
+    A virtual ``cable:<owner>`` node is its own slot: it has no ``slot_id``
+    because it is not an instance, but its id is derived from the owning part
+    and so is stable across a family. That matters because the ``blocked_by``
+    edges pointing at one are hand-made ``cable_tension`` edges -- the most
+    expensive input in the whole tool, and the least affordable to drop.
+    """
+    if key.startswith(CABLE_PREFIX):
+        return key
     rec = instances.get(key)
     if rec is None:
         return None
@@ -42,17 +51,23 @@ def save_template(
     path: str | Path,
     instances: dict[str, InstanceRec],
     edges: list[Edge],
+    report: Optional[list[str]] = None,
 ) -> int:
     """Write ``edges`` to ``path`` as a slot-level YAML; returns how many.
 
-    An edge whose endpoints are not instances of this desktop is dropped -- it
-    has no slot and could not be instantiated anywhere.
+    An edge with an endpoint that is neither an instance of this desktop nor a
+    virtual cable node is dropped -- it has no slot and could not be
+    instantiated anywhere -- and a line saying so is appended to ``report``.
     """
+    notes = report if report is not None else []
     rows = []
     for edge in edges:
         target = _slot_of(instances, edge.target)
         blocker = _slot_of(instances, edge.blocker)
         if target is None or blocker is None:
+            missing = edge.target if target is None else edge.blocker
+            _note(notes, f"{edge.label()}: {missing!r} is not an instance of this "
+                         "desktop, so it has no slot; edge not saved")
             continue
         row = {"type": edge.type, "target": target, "blocker": blocker}
         row.update({name: getattr(edge, name) for name in _FIELDS})
@@ -73,10 +88,17 @@ def load_template(path: str | Path) -> list[dict]:
 
 
 def _slot_index(instances: dict[str, InstanceRec]) -> dict[str, list[str]]:
-    """slot (or instance key) -> the keys that fill it, sorted."""
+    """slot (or instance key) -> the keys that fill it, sorted.
+
+    Every virtual cable node the desktop's connectors reference is indexed under
+    its own id, so a ``cable:*`` endpoint resolves exactly when this machine
+    really has that cable and is reported as missing when it does not.
+    """
     index: dict[str, list[str]] = {}
     for key, rec in sorted(instances.items()):
         index.setdefault(rec.slot_id or rec.key, []).append(key)
+        if rec.cable:
+            index.setdefault(rec.cable, [rec.cable])
     return index
 
 
@@ -88,11 +110,12 @@ def apply_template(
     """Instantiate a family template onto another desktop's instances.
 
     Every endpoint slot is looked up among ``instances``; an edge is kept only
-    when both ends resolve to exactly one instance. A slot this machine does not
-    have -- or one filled ambiguously by several instances -- is skipped, and a
-    line saying so is appended to ``report`` when the caller passes a list. The
-    report is per *slot*, not per edge: one missing screw slot that appears in
-    four edges is one line, because that is the one thing a human has to fix.
+    when its type is one of :data:`~tda.core.graph_rules.HARD_TYPES` and both
+    ends resolve to exactly one node. A slot this machine does not have -- or
+    one filled ambiguously by several instances -- is skipped, and a line saying
+    so is appended to ``report`` when the caller passes a list. The report is
+    per *slot*, not per edge: one missing screw slot that appears in four edges
+    is one line, because that is the one thing a human has to fix.
 
     The edges come back with ``source="template"`` and ``status="proposed"``:
     a template is a strong suggestion, not an observation, and the S1 panel is
@@ -103,13 +126,17 @@ def apply_template(
     out: list[Edge] = []
 
     for row in load_template(path):
+        etype = str(row.get("type") or "")
+        if etype not in HARD_TYPES:
+            _note(notes, f"edge type {etype!r} is not one of {HARD_TYPES}; edge skipped")
+            continue
         target = _one(index, row.get("target"), notes)
         blocker = _one(index, row.get("blocker"), notes)
         if target is None or blocker is None:
             continue
         out.append(
             Edge(
-                type=str(row.get("type") or ""),
+                type=etype,
                 target=target,
                 blocker=blocker,
                 necessity=str(row.get("necessity") or "required"),
