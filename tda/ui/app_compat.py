@@ -32,6 +32,7 @@ __all__ = [
     "overlay_layers",
     "preview",
     "push_stroke",
+    "removed_rows",
     "resolve_conflict",
     "session_refusal",
     "set_unexplained",
@@ -300,5 +301,39 @@ def retry_rechecks(session: Any) -> int:
     if steps:
         sweeper.enqueue(steps)
     return len(steps)
+
+
+def removed_rows(session: Any) -> list[dict]:
+    """The parts the open frame no longer has, in the instance table's shape.
+
+    ``instance_rows()`` is the *compiled* frame, which by definition holds only
+    what is in the picture; in reverse order most of the machine is not, and the
+    annotator had no way to see what had already come out.  The frame's state
+    knows about every instance the log ever mentioned, so the rows are read from
+    there and marked with the state that took them out of the frame.
+    """
+    from tda.core.states import REMOVED
+    from tda.core.truth_inputs import instances_of, state_of
+
+    db, tax = getattr(session, "db", None), getattr(session, "tax", None)
+    if db is None or tax is None or not is_open(session):
+        return []
+    key = session.current()
+    here = {str(row.get("key")) for row in session.instance_rows()}
+    state = state_of(db, tax, key.desktop, key.step)
+    known = instances_of(db, key.desktop)
+    rows = []
+    for instance, held in sorted(state.items()):
+        # ``known`` keeps the pseudo-nodes out: a state map also carries the
+        # ``cable:*`` keys the graph uses, which are not parts of anything.
+        if instance in here or instance not in known or held is None:
+            continue
+        if held.state != REMOVED:
+            continue
+        rec = known.get(instance)
+        rows.append({"key": instance, "cls": "" if rec is None else rec.cls,
+                     "state": held.state, "placement": held.placement,
+                     "visibility": "", "z": "", "hidden": False})
+    return rows
 
 

@@ -21,12 +21,13 @@ the checkbox sends the value the session actually holds.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -49,6 +50,10 @@ KEY_ROLE = int(Qt.ItemDataRole.UserRole)
 _SHORT_VIS = {"visible": "vis", "occluded_partial": "occ-p", "occluded_full": "occ-f",
               "out_of_view": "out", "too_small": "tiny", "visible_tiny": "v-tiny",
               "motion_blur": "blur"}
+
+
+#: Rows for parts the frame no longer has: shown, but not to be acted on.
+GONE_COLOR = QColor(128, 128, 132)
 
 
 def _short(value: str) -> str:
@@ -87,6 +92,8 @@ class InstanceListPanel(QWidget):
         super().__init__(parent)
         self._session: Optional[api.SessionLike] = None
         self._rows: list[dict] = []
+        self._gone: list[dict] = []
+        self._removed_source: Optional[Callable[[], list[dict]]] = None
         self._loading = False
 
         self._table = QTableWidget(0, len(self.COLUMNS))
@@ -112,6 +119,16 @@ class InstanceListPanel(QWidget):
         self._table.itemChanged.connect(self._on_item_changed)
         self._table.itemDoubleClicked.connect(self._on_item_double_clicked)
 
+        # A teardown is annotated backwards, so most of the machine is already
+        # out of the frame: without this the annotator cannot see what has been
+        # removed at all.  The rows are read-only -- there is nothing to reorder,
+        # hide or re-label about a part that is not in the picture.
+        self.show_removed = QCheckBox("Removed")
+        self.show_removed.setToolTip(
+            "Also list the parts this frame no longer has (read-only)")
+        self.show_removed.setMinimumWidth(1)
+        self.show_removed.toggled.connect(lambda _on: self.refresh())
+
         self.up_button = QPushButton("▲ Ctrl+↑")
         self.down_button = QPushButton("▼ Ctrl+↓")
         self.up_button.setToolTip("Move up: put the selected instance above the one over it")
@@ -127,6 +144,7 @@ class InstanceListPanel(QWidget):
         buttons.addWidget(self.up_button)
         buttons.addWidget(self.down_button)
         buttons.addStretch(1)
+        buttons.addWidget(self.show_removed)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -168,20 +186,26 @@ class InstanceListPanel(QWidget):
         """
         keep = self.selected_instance()
         self._rows = self._session.instance_rows() if self._session is not None else []
+        self._gone = self._removed_rows()
         self._loading = True
         header = self._table.horizontalHeader()
         self._table.setUpdatesEnabled(False)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         try:
             self._table.clearContents()
-            self._table.setRowCount(len(self._rows))
-            for row, data in enumerate(self._rows):
+            self._table.setRowCount(len(self._rows) + len(self._gone))
+            for row, data in enumerate(self._rows + self._gone):
                 key = str(data.get("key", ""))
+                # A removed part is shown, not offered: its cells carry no
+                # instance key, so a double click or a checkbox on one reaches
+                # nothing.  There is no z-order, visibility or mask to edit.
+                gone = row >= len(self._rows)
                 tooltip = (f"{key}\nclass: {data.get('cls', '')}\n"
                            f"placement: {data.get('placement', '')}\n"
                            f"visibility: {data.get('visibility', '')}\nz {data.get('z', '')}")
                 swatch = QTableWidgetItem("")
-                swatch.setBackground(QBrush(QColor(*palette_color(key))))
+                if not gone:
+                    swatch.setBackground(QBrush(QColor(*palette_color(key))))
                 cells = [
                     swatch,
                     QTableWidgetItem(key),
@@ -189,20 +213,26 @@ class InstanceListPanel(QWidget):
                     QTableWidgetItem(_short(str(data.get("visibility", "")))),
                 ]
                 hidden = QTableWidgetItem("")
-                hidden.setFlags(
-                    Qt.ItemFlag.ItemIsEnabled
-                    | Qt.ItemFlag.ItemIsSelectable
-                    | Qt.ItemFlag.ItemIsUserCheckable
-                )
-                hidden.setCheckState(
-                    Qt.CheckState.Checked
-                    if data.get("hidden", False)
-                    else Qt.CheckState.Unchecked
-                )
+                if gone:
+                    hidden.setFlags(Qt.ItemFlag.NoItemFlags)
+                else:
+                    hidden.setFlags(
+                        Qt.ItemFlag.ItemIsEnabled
+                        | Qt.ItemFlag.ItemIsSelectable
+                        | Qt.ItemFlag.ItemIsUserCheckable
+                    )
+                    hidden.setCheckState(
+                        Qt.CheckState.Checked
+                        if data.get("hidden", False)
+                        else Qt.CheckState.Unchecked
+                    )
                 cells.append(hidden)
                 for col, item in enumerate(cells):
-                    item.setData(KEY_ROLE, key)
+                    item.setData(KEY_ROLE, "" if gone else key)
                     item.setToolTip(tooltip)
+                    if gone:
+                        item.setForeground(QBrush(GONE_COLOR))
+                        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
                     self._table.setItem(row, col, item)
         finally:
             self._loading = False
@@ -234,8 +264,25 @@ class InstanceListPanel(QWidget):
             self._table.setColumnWidth(column, width)
 
     def rows(self) -> list[dict]:
-        """The row dicts currently displayed, top layer first."""
+        """The instances of the frame, top layer first (never the removed ones)."""
         return [dict(r) for r in self._rows]
+
+    def set_removed_source(self, source: Optional[Callable[[], list[dict]]]) -> None:
+        """Install what lists the parts the frame no longer has.
+
+        The compiler only knows about instances that are *in* the frame, so the
+        rows come from the window (:func:`tda.ui.app_compat.removed_rows`), which
+        reads them off the frame's state.
+        """
+        self._removed_source = source
+        if self.show_removed.isChecked():
+            self.refresh()
+
+    def _removed_rows(self) -> list[dict]:
+        """The removed parts to list, or nothing while the toggle is off."""
+        if not self.show_removed.isChecked() or self._removed_source is None:
+            return []
+        return list(self._removed_source() or [])
 
     # -- selection ----------------------------------------------------------
     def selected_instance(self) -> Optional[str]:

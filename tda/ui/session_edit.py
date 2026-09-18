@@ -59,7 +59,7 @@ from tda.ui.session_ops import (
     REVERSE,
     annotatable_steps,
     apply_frame_override,
-    apply_keyframes,
+    apply_keyframes as _apply_keyframe_rows,
     apply_occluder,
     apply_pair_override,
     apply_zorder,
@@ -150,7 +150,7 @@ def _result(db: Db, truth: TruthService, key: FrameKey, steps: Sequence[int], op
 # --------------------------------------------------------------------------- #
 def commit_edit(db: Db, truth: TruthService, key: FrameKey, instance: str,
                 mask: np.ndarray, scope: str, direction: str = REVERSE,
-                annotator: str = "system") -> dict:
+                annotator: str = "system", pair: Optional[str] = None) -> dict:
     """Write one pixel edit back with the scope the annotator chose (spec 4.3).
 
     ``scope`` is one of :data:`tda.ui.session_api.COMMIT_SCOPES`:
@@ -171,6 +171,10 @@ def commit_edit(db: Db, truth: TruthService, key: FrameKey, instance: str,
         Only this frame: the edited pixels, minus the frame's occluders, become
         the instance's visible mask here and nothing else changes.
 
+    ``pair`` names the instance this one is put *above* in the same gesture: a
+    layering answer whose added pixels are not in this instance's shape yet has
+    to write both, or the annotator's paint is silently dropped (spec 4.3).
+
     Raises ``ValueError`` for an unknown scope or direction, or for a mask that
     is not in the frame's coordinates.
     """
@@ -186,7 +190,7 @@ def commit_edit(db: Db, truth: TruthService, key: FrameKey, instance: str,
         raise SessionRefusal(f"unknown commit scope {scope!r}")
     parts = [ShapePart(MAIN, masks.encode_rle(edited))]
     return _commit_shape(db, truth, key, instance, parts, GEOM_MASK, scope, direction,
-                         cache, annotator)
+                         cache, annotator, pair=pair)
 
 
 def commit_box(db: Db, truth: TruthService, key: FrameKey, instance: str,
@@ -206,8 +210,15 @@ def commit_box(db: Db, truth: TruthService, key: FrameKey, instance: str,
 
 def _commit_shape(db: Db, truth: TruthService, key: FrameKey, instance: str,
                   parts: list[ShapePart], geom_type: str, scope: str, direction: str,
-                  cache: InputCache, annotator: str) -> dict:
-    """The shared body of :func:`commit_edit` and :func:`commit_box`."""
+                  cache: InputCache, annotator: str,
+                  pair: Optional[str] = None) -> dict:
+    """The shared body of :func:`commit_edit` and :func:`commit_box`.
+
+    ``pair`` is the instance this one is to be put *above* in the same gesture
+    (spec 4.3 改层级 with new pixels): the ``PairOverride`` is written in the
+    same transaction and travels in the same op, so one ``Ctrl+Z`` takes back
+    both halves of what was one decision.
+    """
     seg = pose_segment_of(db, key, cache)
     placement = placement_of(db, truth.tax, key, instance, cache)
     chosen = select_keyframe(chain_for(db, key, instance, seg, placement), key.step)
@@ -252,17 +263,26 @@ def _commit_shape(db: Db, truth: TruthService, key: FrameKey, instance: str,
             after.append(keyframe_state(kf, ref))
 
         zorder = None if geom_type == GEOM_BOX else _append_to_zorder(db, key, seg, instance)
-        steps = annotatable_steps(
-            db, key.desktop, key.view,
-            set(truth.affected_steps(key.desktop, key.view, instance, kf)) | {key.step},
-        )
+        reach = set(truth.affected_steps(key.desktop, key.view, instance, kf)) | {key.step}
+        pair_state = None
+        if pair is not None:
+            po = PairOverride(key.desktop, key.view, seg, instance, pair)
+            existed = any(p == po for p in db.pair_overrides(key.desktop, key.view, seg))
+            db.set_pair_override(po)
+            # exactly the frames preview_pair promised, on top of the shape's own
+            reach |= set(pair_steps(db, truth.tax, key, instance, pair, seg, cache))
+            pair_state = {"pose_segment": seg, "above": instance, "below": pair,
+                          "existed": existed}
+        steps = annotatable_steps(db, key.desktop, key.view, reach)
         common = {"desktop": key.desktop, "view": key.view, "step": key.step,
                   "instance": instance, "scope": scope, "direction": direction,
                   "steps": steps}
         payload = common | {"keyframes": after,
-                            "zorder": None if zorder is None else zorder["after"]}
+                            "zorder": None if zorder is None else zorder["after"],
+                            "pair": _pair_payload(pair_state, True)}
         inverse = common | {"keyframes": list(reversed(before)),
-                            "zorder": None if zorder is None else zorder["before"]}
+                            "zorder": None if zorder is None else zorder["before"],
+                            "pair": _pair_payload(pair_state, False)}
         db.log_op(key.desktop, key.view, "commit_keyframe",
                   _loggable(payload), _loggable(inverse), annotator)
 
@@ -270,6 +290,35 @@ def _commit_shape(db: Db, truth: TruthService, key: FrameKey, instance: str,
     return _result(db, truth, key, steps, op,
                    {"keyframe_id": kf.id, "anchor_step": kf.anchor_step, "scope": scope,
                     "changed": True})
+
+
+def _pair_payload(state: Optional[dict], forward: bool) -> Optional[dict]:
+    """The ``pair`` half of a ``commit_keyframe`` payload, either way round."""
+    if state is None:
+        return None
+    return {"pose_segment": state["pose_segment"], "above": state["above"],
+            "below": state["below"],
+            "exists": True if forward else bool(state["existed"])}
+
+
+def apply_keyframes(db: Db, truth: TruthService, payload: dict,
+                    current: Optional[int] = None) -> dict:
+    """:func:`tda.ui.session_ops.apply_keyframes`, plus the pair a commit carried.
+
+    A layering commit that also re-traced the shape is one op with two writes
+    (see :func:`_commit_shape`), so undo and redo have to move both; the shared
+    ``steps`` cover the union, so one settle brings the frames up to date.
+    """
+    pair = payload.get("pair")
+    if pair is not None:
+        po = PairOverride(payload["desktop"], payload["view"], pair["pose_segment"],
+                          pair["above"], pair["below"])
+        with db.transaction():
+            if pair["exists"]:
+                db.set_pair_override(po)
+            else:
+                db.delete_pair_override(po)
+    return _apply_keyframe_rows(db, truth, payload, current)
 
 
 def preview(db: Db, truth: TruthService, key: FrameKey, instance: str, scope: str,

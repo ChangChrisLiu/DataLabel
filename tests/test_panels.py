@@ -481,18 +481,16 @@ def test_taskcard_buttons_only_report(session: StubSession) -> None:
 
 
 def test_taskcard_methods_are_what_the_keys_call(session: StubSession) -> None:
-    """The panel has no key table of its own; the window's ACTIONS calls these."""
+    """The panel has no key table of its own; the window's ACTIONS calls these.
+
+    ``commit(scope)`` is gone with it: it wrote straight to the session, so the
+    window never cleared the layer, never dropped the crash sidecar and never
+    offered the scope bar.
+    """
     panel = TaskCardPanel(session)
-    panel.commit(api.SCOPE_KEYFRAME)
-    panel.commit(api.SCOPE_FRAME_OVERRIDE)
-    panel.commit(api.SCOPE_SPLIT)
+    assert not hasattr(panel, "commit")
     panel.confirm()
-    assert session.calls == [
-        ("commit_edit", api.SCOPE_KEYFRAME),
-        ("commit_edit", api.SCOPE_FRAME_OVERRIDE),
-        ("commit_edit", api.SCOPE_SPLIT),
-        ("confirm_frame",),
-    ]
+    assert session.calls == [("confirm_frame",)]
     assert not hasattr(panel, "handle_key")
 
 
@@ -729,38 +727,40 @@ def test_review_has_one_tab_per_queue(session: StubSession) -> None:
         (api.QUEUE_UNEXPLAINED, 0, 12),
     ],
 )
-def test_review_activation_opens_the_frame(
+def test_review_activation_asks_for_the_frame(
     session: StubSession, queue: str, row: int, step: int
 ) -> None:
+    """It called an un-forced ``session.goto``, which an uncommitted layer raised on."""
     panel = ReviewPanel(session)
+    seen: list[int] = []
+    panel.sigOpenStep.connect(seen.append)
     lw = panel.list_for(queue)
     lw.itemActivated.emit(lw.item(row))
-    assert ("goto", step) in session.calls
+    assert seen == [step]
+    assert session.calls == []
 
 
-def test_review_resolves_conflicts(session: StubSession) -> None:
+def test_review_resolution_buttons_report_the_verdict(session: StubSession) -> None:
+    """A resolution has three outcomes and only the window can tell which."""
     panel = ReviewPanel(session)
+    seen: list[str] = []
+    panel.sigResolve.connect(seen.append)
     lw = panel.list_for(api.QUEUE_CONFLICTS)
     lw.setCurrentRow(0)
     panel.keep_old_button.click()
-    assert ("resolve_conflict", 7, api.RESOLVE_KEEP_OLD) in session.calls
-    assert len(texts(lw)) == 1  # refreshed from the session
-    lw.setCurrentRow(0)
+    assert seen == [api.RESOLVE_KEEP_OLD]
+    assert panel.selected_conflict() == 7
     panel.accept_new_button.click()
-    assert ("resolve_conflict", 8, api.RESOLVE_ACCEPT_NEW) in session.calls
+    assert seen == [api.RESOLVE_KEEP_OLD, api.RESOLVE_ACCEPT_NEW]
+    assert session.calls == []
 
 
-def test_review_confirm_reports_the_problems_it_was_given(session: StubSession) -> None:
-    """``Enter`` is the window's binding; it calls this method, nothing else."""
+def test_review_has_no_confirm_of_its_own(session: StubSession) -> None:
+    """``Enter`` is the window's binding and it goes through the task card."""
     panel = ReviewPanel(session)
-    panel.confirm()
-    assert ("confirm_frame",) in session.calls
-    assert panel.problems() == []
-    session.calls.clear()
-    session.confirm_result = False
-    panel.confirm()
-    assert session.calls == [("confirm_frame",)]
-    assert panel.problems() == ["missing_shape:screw.cpu_cooler.03"]
+    assert not hasattr(panel, "confirm")
+    assert not hasattr(panel, "open_selected")
+    assert not hasattr(panel, "_goto")
 
 
 def test_review_rework_reports_the_selected_step(session: StubSession) -> None:

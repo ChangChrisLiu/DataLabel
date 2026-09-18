@@ -147,23 +147,88 @@ def test_a_trip_through_review_mode_gives_the_canvas_back(qapp, tmp_path, width,
         close_window(win)
 
 
-def test_a_saved_layout_that_starves_the_canvas_is_ignored(qapp, tmp_path):
-    """A poisoned INI must not follow the annotator around forever."""
+def _save_a_layout(tmp_path: Path, right: int) -> None:
+    """Leave a dock layout with the right dock ``right`` px wide in the INI."""
     win = open_window(tmp_path)
-    win.resize(1920, 1080)
+    try:
+        win.resize(1920, 1080)
+        win.show()
+        QApplication.processEvents()
+        win.resizeDocks([win.right_dock], [right], Qt.Orientation.Horizontal)
+        QApplication.processEvents()
+        win.save_window_state()
+    finally:
+        close_window(win)
+
+
+def _reopen_at(tmp_path: Path, width: int = 1920) -> MainWindow:
+    """Re-open the window with the saved layout restored at a real desktop width.
+
+    ``restoreGeometry`` is clamped to the offscreen screen (798 px), which would
+    restore the docks at a size no desktop ever has; the state is therefore
+    restored once more at the width the annotator really runs at.
+    """
+    win = MainWindow(make_session(tmp_path), make_paths(tmp_path), "tester",
+                     sam_queue=StubSamQueue())
+    win.resize(width, 1080)
+    win.restoreState(win.settings.value("state"))
     win.show()
     QApplication.processEvents()
-    win.resizeDocks([win.right_dock], [1500], Qt.Orientation.Horizontal)
-    QApplication.processEvents()
-    win.save_window_state()
-    close_window(win)
+    return win
 
-    again = MainWindow(make_session(tmp_path), make_paths(tmp_path), "tester",
-                       sam_queue=StubSamQueue())
+
+def test_the_layout_guard_waits_until_the_canvas_has_a_real_width(qapp, tmp_path):
+    """It must be asked once, after the layout, and never from ``__init__``.
+
+    ``restore_window_state`` runs before ``show()``, where the canvas still
+    reports the ``QWidget`` default of 640 px.  Measured against a restored
+    1920 px window that is under half, so on every real desktop the guard fired
+    at every launch: the annotator's own dock layout was discarded each time and
+    the status bar blamed it.  Offscreen, ``restoreGeometry`` is clamped to the
+    798 px screen and hides the symptom, so what is checked here is that the
+    early call is gone and the ``showEvent`` one is the only one left.
+    """
+    _save_a_layout(tmp_path, right=500)
+    seen: list[tuple[int, int]] = []
+    original = MainWindow._reject_a_starved_canvas
+
+    def spy(self) -> None:
+        seen.append((self.width(), self.canvas.width()))
+        original(self)
+
+    MainWindow._reject_a_starved_canvas = spy
     try:
-        again.show()
-        QApplication.processEvents()
-        assert again.canvas.width() >= 0.5 * again.width()
+        again = _reopen_at(tmp_path, 1920)
+    finally:
+        MainWindow._reject_a_starved_canvas = original
+    try:
+        assert len(seen) == 1, f"the guard ran {len(seen)} times: {seen}"
+        width, canvas = seen[0]
+        assert canvas * 2 > width, f"judged an unlaid-out canvas: {canvas} of {width}"
+    finally:
+        close_window(again)
+
+
+@pytest.mark.parametrize("right,kept", [(500, True), (1500, False)])
+def test_only_a_layout_that_starves_the_canvas_is_reset(qapp, tmp_path, right, kept):
+    """A poisoned INI must not follow the annotator around -- and a healthy one must.
+
+    500 px of right dock at 1920 leaves the canvas 62 %: the annotator widened
+    it on purpose and it has to survive the restart.  1500 px leaves 12 %, which
+    nobody chose.
+    """
+    _save_a_layout(tmp_path, right=right)
+    again = _reopen_at(tmp_path, 1920)
+    try:
+        canvas = again.canvas.width()
+        if kept:
+            assert abs(again.right_dock.width() - right) <= 40, "the layout was reset"
+            assert canvas >= 0.55 * again.width()
+        else:
+            assert canvas >= 0.5 * again.width(), (
+                f"canvas {canvas} of {again.width()}; right {again.right_dock.width()}"
+            )
+            assert "too small" in again.status_message()
     finally:
         close_window(again)
 
@@ -466,3 +531,59 @@ def test_a_second_window_on_the_same_database_shares_its_session(qapp, tmp_path)
     finally:
         close_window(win)
         db.close()
+
+
+# --------------------------------------------------------------------------- #
+# round 4 minors
+# --------------------------------------------------------------------------- #
+def test_the_instance_table_can_show_the_parts_that_are_gone(window):
+    """A removed part has no compiled row, so it dropped off the list entirely.
+
+    The annotator loses sight of everything already taken out of the machine,
+    which in reverse order is most of it.  The toggle adds them back as greyed,
+    un-editable rows read from the frame's state.
+    """
+    panel = window.instances
+    live = {row["key"] for row in panel.rows()}
+    assert panel.show_removed.isChecked() is False
+
+    panel.show_removed.setChecked(True)
+    QApplication.processEvents()
+
+    shown = [panel.table().item(r, 1).text()
+             for r in range(panel.table().rowCount())]
+    extra = [key for key in shown if key not in live]
+    assert extra, "no removed part was added"
+    # they are not editable: the selection cannot land on one
+    panel.table().setCurrentCell(panel.table().rowCount() - 1, 1)
+    assert panel.selected_instance() is None
+
+
+def test_a_click_on_the_minimap_pans_instead_of_painting(window):
+    """It was transparent to the mouse, so the click fell through as a stroke."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    window.resize(900, 700)
+    window.show()
+    QApplication.processEvents()
+    mini = window.canvas.minimap()
+    assert not mini.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    window.canvas.set_zoom(32.0)      # far enough in that panning has somewhere to go
+    window.canvas.center_on((32.0, 32.0))
+    QApplication.processEvents()
+    before = window.canvas.viewport_image_rect()
+
+    QTest.mouseClick(mini, Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, QPoint(4, 4))
+    QApplication.processEvents()
+
+    assert window.canvas.viewport_image_rect() != before
+
+
+def test_no_panel_reaches_the_session_behind_the_window(window):
+    """The dead ones were still there to be called, and still un-forced."""
+    assert not hasattr(window.task_card, "commit")
+    assert not hasattr(window.review, "confirm")
+    assert not hasattr(window.review, "open_selected")
+    assert not hasattr(window.review, "_goto")

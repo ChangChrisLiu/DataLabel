@@ -390,3 +390,70 @@ def test_a_sidecar_for_another_frame_is_not_offered(qapp, tmp_path):
         assert again.pending_restore() is None
     finally:
         close_window(again)
+
+
+def test_the_scope_bar_says_whether_the_shape_is_written_too(window, monkeypatch):
+    """A layering commit that carries painted pixels writes two things, not one.
+
+    ``zorder:above:B`` with pixels added inside ``B`` re-traces the keyframe as
+    well; ``zorder:below:B`` only reverses the pair.  The bar has to say which
+    of the two the annotator is about to accept.
+    """
+    session = window.session
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    monkeypatch.setattr(session, "suggest_scope", lambda *a, **k: "zorder:above:other")
+    window.act_commit()
+    assert "层级 + 形状" in window.scope_bar_text()
+
+    window.act_clear_edit()
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    monkeypatch.setattr(session, "suggest_scope", lambda *a, **k: "zorder:below:other")
+    window.act_commit()
+    assert "仅层级" in window.scope_bar_text()
+
+
+# --------------------------------------------------------------------------- #
+# a blocked list click does not leave the list pointing somewhere else
+# --------------------------------------------------------------------------- #
+def test_a_blocked_timeline_click_snaps_the_selection_back(window):
+    """The row the annotator clicked stayed highlighted over a refused move.
+
+    Qt selects the row before the click is delivered, so a refusal left the
+    timeline pointing at a frame that is not the one on the canvas.
+    """
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    here = window.session.current().step
+    lw = window.timeline.list_widget()
+    row = next(r for r in range(lw.count())
+               if int(lw.item(r).data(int(Qt.ItemDataRole.UserRole))) != here)
+
+    lw.setCurrentRow(row)                 # what the mouse does before the click
+    lw.itemClicked.emit(lw.item(row))
+    QApplication.processEvents()
+
+    assert window.session.current().step == here
+    assert window.timeline.current_step() == here
+
+
+def test_a_blocked_card_activation_snaps_the_selection_back(window):
+    """... and so did the task-card row of the instance that was refused."""
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    lw = window.task_card.list_widget()
+    rows = [r for r in range(lw.count())
+            if str(lw.item(r).data(int(Qt.ItemDataRole.UserRole))) != instance]
+    if not rows:
+        pytest.skip("need a second card item")
+
+    lw.setCurrentRow(rows[0])
+    lw.itemActivated.emit(lw.item(rows[0]))
+    QApplication.processEvents()
+
+    assert window.session.editing_instance == instance
+    assert window.task_card.current_instance() == instance
