@@ -106,6 +106,12 @@ class ImageCache:
         self._trim()
         return rgb
 
+    def put(self, key: FrameKey, rgb: np.ndarray) -> None:
+        """Adopt a frame somebody else decoded (the background prefetch)."""
+        self._images[(key.view, int(key.step))] = rgb
+        self._images.move_to_end((key.view, int(key.step)))
+        self._trim()
+
     def peek(self, key: FrameKey) -> Optional[np.ndarray]:
         """The frame if it is already decoded, without reading any file."""
         return self._images.get((key.view, int(key.step)))

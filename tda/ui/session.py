@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 import numpy as np
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QCoreApplication, QObject, Signal
 
 from tda.core import masks
 from tda.core.compiler import CompiledFrame
@@ -27,20 +27,25 @@ from tda.core.db import Db
 from tda.core.model import FrameKey
 from tda.core.taxonomy import Taxonomy
 from tda.core.truth import StaleConflictError, TruthService
-from tda.core.truth_inputs import frame_hw, instances_of, state_of
-from tda.ui import session_api as api
+from tda.core.truth_inputs import instances_of, state_of
 from tda.ui import session_edit as edit
 from tda.ui.commands import Op, UndoStack
+from tda.ui.session_commits import CommitMixin
+from tda.ui.session_coverage import coverage
 from tda.ui.session_images import ImageCache
 from tda.ui.session_layer import EditingLayer
-from tda.ui.session_ops import GEOM_BOX, ON_BENCH
 from tda.ui import session_rows as rows
 from tda.ui.session_queues import ReviewState
+from tda.ui.session_sweep import TruthSweeper
 
-__all__ = ["AnnotationSession"]
+__all__ = ["COMPILED_CACHE_SIZE", "AnnotationSession"]
+
+#: Compiled frames kept in memory. Four covers the Tab compare between
+#: k and k-1 plus the prefetched next frame, at a few MB of masks each.
+COMPILED_CACHE_SIZE = 4
 
 
-class AnnotationSession(QObject):
+class AnnotationSession(CommitMixin, QObject):
     """One annotator's working set: a desktop, a view, and the frame in hand."""
 
     #: The current frame changed; payload is a :class:`~tda.core.model.FrameKey`.
@@ -54,6 +59,10 @@ class AnnotationSession(QObject):
     sigEditingChanged = Signal(object)
     #: The session let go of its desktop/view; the panels must detach.
     sigClosed = Signal()
+    #: ``(done, total)`` of the background re-check of frozen frames (spec 3.4).
+    sigSweepProgress = Signal(int, int)
+    #: Something the review queues show has changed.
+    sigQueuesChanged = Signal()
 
     def __init__(self, db: Db, tax: Taxonomy, truth: TruthService, cache_dir: str,
                  annotator: str) -> None:
@@ -72,8 +81,20 @@ class AnnotationSession(QObject):
 
         self.images = ImageCache(db, self.cache_dir)
         self.review = ReviewState(db)
-        self._compiled: Optional[CompiledFrame] = None
+        #: Compiled frames kept in memory: step -> (edit epoch, frame).
+        self._compiled: dict[int, tuple[int, CompiledFrame]] = {}
+        #: Bumped by every change to the annotation inputs, which is what makes
+        #: a compilation from before it (a prefetch in flight) unusable.
+        self._epoch = 0
         self._hidden: set[str] = set()
+        #: Set False by a test that wants to inspect the queue before it drains.
+        self.sweeper_enabled = True
+        self.sweeper = TruthSweeper(db.path, tax, self.cache_dir,
+                                    truth.compiler_version, parent=self)
+        self.sweeper.sigProgress.connect(self._on_sweep_progress)
+        self.sweeper.sigQueuesChanged.connect(self._on_queues_changed)
+        self.sweeper.sigPrefetched.connect(self._on_prefetched)
+        self.sweeper.sigPrefetchedImage.connect(self._on_prefetched_image)
         self._dirty = False
 
         self.layer = EditingLayer()
@@ -117,9 +138,10 @@ class AnnotationSession(QObject):
     def _make_handler(self, apply: Callable[..., dict]) -> Callable[[dict], None]:
         """Wrap one ``apply_*`` function so the caches and the panels follow it."""
         def handler(payload: dict) -> None:
-            stats = apply(self.db, self.truth, payload)
+            stats = apply(self.db, self.truth, payload, self._step)
             self.review.problems.update(stats["problems"])
             self._invalidate()
+            self._hand_to_sweeper(stats.get("rechecks") or [])
             self._announce()
 
         return handler
@@ -147,18 +169,28 @@ class AnnotationSession(QObject):
         self.view = str(view)
         self._steps = [int(row["step"]) for row in self.db.frames_for(self.desktop, self.view)]
         self._available = edit.annotatable_steps(self.db, self.desktop, self.view, self._steps)
-        self.review.open(self.desktop, self.view)
+        self.review.open(self.desktop, self.view, self._coverage)
         self._step = self._available[-1] if self._available else (
             self._steps[-1] if self._steps else None
         )
         self._reset_working_set()
         self._set_dirty(False)
+        if self.sweeper_enabled:
+            self.sweeper.open(self.desktop, self.view)
+            # a re-check the last session did not get to is still owed
+            self.sweeper.enqueue(self.db.rechecks(self.desktop, self.view))
         if self._step is not None:
             self._announce()
 
     def close(self) -> None:
-        """Drop the working set; the database itself belongs to the caller."""
+        """Drop the working set; the database itself belongs to the caller.
+
+        The sweeper is joined here and nowhere else: it is the one place the GUI
+        may wait for it, and leaving a thread writing to the database behind a
+        closed session is how a half-written re-check would happen.
+        """
         self.save()
+        self.sweeper.stop()
         self._steps = []
         self._available = []
         self._step = None
@@ -169,6 +201,7 @@ class AnnotationSession(QObject):
         """Forget everything that belonged to the desktop/view being left."""
         self.images.clear()
         self.review.clear()
+        self._compiled.clear()
         self._hidden.clear()
         self.clear_edit()
         self.undo_stack.clear()
@@ -214,8 +247,10 @@ class AnnotationSession(QObject):
             return
         self._step = step
         self.clear_edit()
-        self._invalidate()
+        self.review.invalidate()
+        self._compile_on_visit()
         self._announce()
+        self._prefetch_next()
 
     def prev(self) -> None:
         """Go one step towards the start of the teardown (the reverse-order 前进)."""
@@ -283,11 +318,52 @@ class AnnotationSession(QObject):
 
     # ---------------------------------------------------------------- content
     def compiled(self) -> CompiledFrame:
-        """Compiler output for the current frame (cached until something changes)."""
-        if self._compiled is None:
-            self._compiled = self.truth.compile(self.current())
-            self.review.problems[self.current().step] = list(self._compiled.problems)
-        return self._compiled
+        """Compiler output for the current frame.
+
+        Kept in memory per step and per edit epoch, so that stepping back and
+        forth between two frames -- which is what the ``Tab`` compare does -- is
+        free, and so that a frame the sweeper compiled ahead of time is used
+        rather than compiled again.
+        """
+        key = self.current()
+        hit = self._compiled.get(key.step)
+        if hit is not None and hit[0] == self._epoch:
+            return hit[1]
+        compiled = self.truth.compile(key)
+        self._keep_compiled(key.step, self._epoch, compiled)
+        return compiled
+
+    def _compile_on_visit(self) -> None:
+        """Bring the frame just opened up to date in the truth table (spec 3.4).
+
+        A commit only compiles the frame in front of the annotator, so the rows
+        of every other frame it reached are stale until somebody looks at them.
+        This is that moment: one frame, and only when its stored rows do not
+        already carry the current inputs' hash.
+        """
+        key = self.current()
+        if key.step not in self._available:
+            return
+        held = self._compiled.get(key.step)
+        if held is not None and held[0] == self._epoch:
+            stored = self.db.compiled(key)
+            if stored and all(row["input_hash"] == held[1].input_hash
+                              for row in stored.values()):
+                return  # the sweeper already brought this frame up to date
+        # one compilation for the whole visit: the refresh hands back the frame
+        # it made its decisions from, which is the one the panels are about to
+        # ask for -- compiling it twice is what made arriving cost 0.9 s
+        stats = self.truth.refresh(key)
+        self.review.problems[key.step] = list(stats["problems"])
+        self.review.invalidate()
+        self._keep_compiled(key.step, self._epoch, stats["compiled"])
+
+    def _keep_compiled(self, step: int, epoch: int, compiled: CompiledFrame) -> None:
+        """Remember one compilation, and what the truth table owes because of it."""
+        self._compiled[int(step)] = (int(epoch), compiled)
+        self.review.problems[int(step)] = list(compiled.problems)
+        while len(self._compiled) > COMPILED_CACHE_SIZE:
+            self._compiled.pop(next(iter(self._compiled)))
 
     def instance_rows(self) -> list[dict]:
         """One row per instance of the current frame, top-most layer first."""
@@ -311,166 +387,6 @@ class AnnotationSession(QObject):
             start_step=self._available[-1] if self._available else None,
         )
 
-    # ------------------------------------------------------------------ edits
-    def _editable_frame(self) -> FrameKey:
-        """The current frame, refusing one there is nothing to draw on.
-
-        A step flagged ``missing``, or whose image never made it into the cache,
-        has no canvas: its state and its shape anchors are real (spec 4.2
-        缺帧处理) but a mask drawn "on" it would be in nobody's coordinates.
-        """
-        key = self.current()
-        if key.step not in self._available or self.image_path(key.step) is None:
-            raise ValueError(
-                f"step {key.step} of {self.view} has no image: it cannot be annotated"
-            )
-        return key
-
-    def begin_edit(self, instance: str) -> None:
-        """Load the instance's amodal shape into the editing layer (spec 4.3)."""
-        key = self._editable_frame()
-        found = self.compiled().instances.get(instance)
-        self.layer.begin(instance, None if found is None else found.amodal,
-                         frame_hw(self.db, key))
-
-    @property
-    def editing_instance(self) -> Optional[str]:
-        """The instance being drawn, or ``None``."""
-        return self.layer.instance
-
-    def editing_mask(self) -> Optional[np.ndarray]:
-        """The editing layer as the session last saw it, or ``None``.
-
-        The array belongs to the session: the window paints into its own overlay
-        buffer and hands the result over with :meth:`set_editing_mask`.
-        """
-        return self.layer.mask()
-
-    def set_editing_mask(self, mask: np.ndarray) -> None:
-        """Take a copy of the layer the window has been painting into."""
-        self.layer.set(mask)
-
-    def push_stroke(self, before: np.ndarray, after: np.ndarray) -> None:
-        """Record one brush/eraser stroke on the undo stack (spec 4.6).
-
-        The pixels are already painted, so the op is logged rather than applied;
-        undoing it hands the earlier mask back on :attr:`sigEditingChanged`.
-        """
-        self.undo_stack.push(self.layer.stroke_op(before, after), apply=False)
-        self._refresh_dirty()
-
-    def clear_edit(self) -> None:
-        """Drop the editing layer without writing anything."""
-        self.layer.clear()
-
-    def commit_edit(self, scope: str, direction: str = edit.REVERSE) -> dict:
-        """Write the editing layer back with the scope the annotator chose.
-
-        ``scope`` is one of :data:`tda.ui.session_api.COMMIT_SCOPES`, or one of
-        the two layering answers :func:`tda.ui.session_edit.suggest_scope` gives
-        -- ``zorder:above:<B>`` / ``zorder:below:<B>`` -- which write a
-        ``PairOverride`` instead of pixels (spec 4.3 改层级).
-
-        A pixel scope with nothing changed is a no-op: loading a shape and
-        pressing Enter must not mint a new version of it.  An explicit layering
-        scope is always honoured, because there the pixels are not the point.
-        """
-        if not self.layer.active:
-            raise RuntimeError("commit_edit() needs begin_edit() first")
-        key, instance = self._editable_frame(), self.layer.instance
-        pair = edit.split_zorder_scope(scope)
-        if pair is None and not self.layer.changed():
-            return {"changed": False, "affected": [], "conflicts": 0, "problems": {},
-                    "scope": scope}
-        if pair is not None:
-            other, above = pair
-            result = edit.commit_pair_override(
-                self.db, self.truth, key,
-                instance if above else other, other if above else instance,
-                self.annotator, known=self._known_instances(),
-            )
-        else:
-            self._refuse_mask_on_bench(key, instance)
-            result = edit.commit_edit(self.db, self.truth, key, instance, self.layer.mask(),
-                                      scope, direction, self.annotator)
-        return self._after_edit(result)
-
-    def _known_instances(self) -> set[str]:
-        """The instances this frame has, which a layering gesture may name."""
-        return set(self.compiled().instances)
-
-    def _refuse_mask_on_bench(self, key: FrameKey, instance: str) -> None:
-        """A part on the bench is tracked by a rectangle, not by a mask (spec 4.2)."""
-        placement = edit.placement_of(self.db, self.tax, key, instance)
-        if placement == ON_BENCH:
-            raise ValueError(
-                f"{instance} is on the bench at step {key.step}: use the bench box tool"
-            )
-
-    def commit_box(self, instance: str, box, direction: str = edit.REVERSE) -> dict:
-        """Draw the staging-area rectangle of a part on the bench (spec 4.2 S4)."""
-        result = edit.commit_box(self.db, self.truth, self._editable_frame(), instance, box,
-                                 direction=direction, annotator=self.annotator)
-        return self._after_edit(result)
-
-    def commit_occluder(self, mask: np.ndarray, occluder_type: str = "hand") -> dict:
-        """Store one occluder layer of the current frame (spec 4.2 step 4)."""
-        result = edit.commit_occluder(self.db, self.truth, self._editable_frame(), mask,
-                                      occluder_type, self.annotator)
-        return self._after_edit(result)
-
-    def preview(self, scope: str, direction: str = edit.REVERSE) -> dict:
-        """How far the pending edit would reach, before it is written (spec 4.3).
-
-        ``{"steps", "verified_steps"}`` -- the frames the scope would change and
-        the already-confirmed ones among them, i.e. the "影响 N 帧 / 将产生 N 个
-        冲突" strip.  Nothing is written and no pixels are touched.
-        """
-        if self.editing_instance is None:
-            return {"steps": [], "verified_steps": []}
-        geom = GEOM_BOX if edit.placement_of(
-            self.db, self.tax, self.current(), self.editing_instance
-        ) == ON_BENCH else None
-        return edit.preview(self.db, self.truth, self.current(), self.editing_instance,
-                            scope, direction, **({"geom_type": geom} if geom else {}))
-
-    def set_visibility(self, instance: str, vis: str) -> None:
-        """Override one instance's visibility label on this frame (spec 6.2)."""
-        self._after_edit(
-            edit.set_visibility(self.db, self.truth, self.current(), instance, vis,
-                                self.annotator)
-        )
-
-    def set_hidden(self, instance: str, hidden: bool) -> None:
-        """Show or hide an instance in the canvas.
-
-        A view setting, not data: it is never written to the database and never
-        logged, and it is forgotten when another desktop/view is opened.
-        """
-        if hidden:
-            self._hidden.add(instance)
-        else:
-            self._hidden.discard(instance)
-
-    def set_zorder_move(self, instance: str, above_of: str) -> None:
-        """Move ``instance`` directly above ``above_of`` in the layer order."""
-        self._after_edit(
-            edit.set_zorder_move(self.db, self.truth, self.current(), instance, above_of,
-                                 self.annotator, known=self._known_instances())
-        )
-
-    def suggest_scope(self, edited: Optional[np.ndarray] = None) -> str:
-        """The scope the pending edit would default to (spec 4.3).
-
-        Answered from the pixels that *changed* since :meth:`begin_edit`, so
-        opening a shape and touching nothing suggests nothing.
-        """
-        if not self.layer.active:
-            return api.SCOPE_KEYFRAME
-        mask = self.layer.mask() if edited is None else edited
-        return edit.suggest_scope(self.compiled(), self.layer.instance,
-                                  self.layer.before(), mask)
-
     def _after_edit(self, result: dict) -> dict:
         """Record the op, refresh the caches and tell the panels (spec 4.6)."""
         op = result.get("op")
@@ -479,8 +395,18 @@ class AnnotationSession(QObject):
         self.review.problems.update(result.get("problems") or {})
         self._invalidate()
         self._refresh_dirty()
+        self._hand_to_sweeper(result.get("rechecks") or [])
         self._announce()
         return result
+
+    def _hand_to_sweeper(self, steps) -> None:
+        """Let the background worker know which frozen frames are owed a check.
+
+        The request is already in the database, so dropping it here delays the
+        verdict but never loses it: :meth:`open` re-queues whatever is left.
+        """
+        if steps and self.sweeper_enabled:
+            self.sweeper.enqueue(steps)
 
     # ------------------------------------------------------------------- undo
     def undo(self) -> bool:
@@ -525,6 +451,12 @@ class AnnotationSession(QObject):
             self._announce()
         return True
 
+    def _coverage(self) -> dict:
+        """What has been drawn in every frame of this view, without compiling."""
+        if self.desktop is None:
+            return {}
+        return coverage(self.db, self.tax, self.desktop, self.view, self._available)
+
     def refresh_all(self) -> dict:
         """Recompile every frame of the open view (spec 3.4).
 
@@ -533,6 +465,7 @@ class AnnotationSession(QObject):
         a bulk import, or when the review panel is opened on a view nobody has
         visited in this session.
         """
+        self.truth.run_pending_rechecks(self.desktop, self.view)
         stats = edit.refresh_steps(self.db, self.truth, self.desktop, self.view,
                                    self._available)
         self.review.problems.update(stats["problems"])
@@ -589,9 +522,56 @@ class AnnotationSession(QObject):
 
     # --------------------------------------------------------------- internals
     def _invalidate(self) -> None:
-        """Forget what depends on the annotation inputs of the current frame."""
-        self._compiled = None
+        """The annotation inputs changed: everything derived from them is stale."""
+        self._epoch += 1
+        self._compiled.clear()
         self.review.invalidate()
+
+    # -------------------------------------------------- the background worker
+    def _on_sweep_progress(self, done: int, total: int) -> None:
+        self.sigSweepProgress.emit(done, total)
+
+    def _on_queues_changed(self) -> None:
+        """A re-check finished: its verdict may have changed a status or a queue."""
+        self.review.invalidate()
+        self.sigQueuesChanged.emit()
+
+    def _on_prefetched(self, step: int, epoch: int, compiled: object) -> None:
+        """Adopt a frame the sweeper compiled ahead, unless it went stale."""
+        if epoch == self._epoch and isinstance(compiled, CompiledFrame):
+            self._keep_compiled(step, epoch, compiled)
+
+    def _on_prefetched_image(self, step: int, rgb: object) -> None:
+        """Adopt a frame the sweeper decoded ahead of the annotator reaching it."""
+        key = self._key(step)
+        if key is not None and isinstance(rgb, np.ndarray):
+            self.images.put(key, rgb)
+
+    def _prefetch_next(self) -> None:
+        """Warm the frame the annotator is about to reach: ``k-1`` (spec 4.2).
+
+        Reverse-order annotation always lands there next, and both halves of the
+        cost -- bringing its truth rows up to date and decoding its image -- are
+        done on the sweeper thread, so arriving is free.
+        """
+        if not self.sweeper_enabled or self._step is None:
+            return
+        earlier = [s for s in self._available if s < self._step]
+        if not earlier:
+            return
+        step = earlier[-1]
+        if self._compiled.get(step, (None,))[0] != self._epoch:
+            self.sweeper.prefetch(step, self._epoch)
+
+    def drain_sweeper(self, timeout: float = 30.0) -> bool:
+        """Wait for the background re-checks to finish (tests, exports, quit)."""
+        drained = self.sweeper.wait_idle(timeout)
+        QCoreApplication.processEvents()
+        self.review.invalidate()
+        return drained
+
+    #: The GUI never waits for a prefetch; a test that measures one does.
+    drain_prefetch = drain_sweeper
 
     def _announce(self) -> None:
         """Tell the panels which frame is open and what is wrong with it.

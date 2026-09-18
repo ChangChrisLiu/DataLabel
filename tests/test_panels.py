@@ -288,6 +288,7 @@ def test_constants_cover_the_spec_domains() -> None:
         "verified",
         "needs_review",
         "conflict",
+        "recheck",
         "missing",
     )
     assert api.TASK_KINDS == (

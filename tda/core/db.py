@@ -23,6 +23,7 @@ from typing import Any, Iterable, Optional
 
 from tda.core import dbrows as R
 from tda.core.db_pose import PoseSegmentMixin
+from tda.core.db_recheck import RecheckMixin
 from tda.core.db_status import StatusMixin
 from tda.core.dbconn import ConnectionMixin
 from tda.core.dbdelete import DeleteMixin
@@ -49,11 +50,12 @@ LOCK_TTL = timedelta(hours=12)
 RESOLUTIONS = ("keep_old", "accept_new", "edited", "superseded")
 
 
-class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin):
+class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin, RecheckMixin):
     """Repository over the TDA SQLite file. Every write commits immediately --
     unless it runs inside :meth:`~tda.core.dbconn.ConnectionMixin.transaction`;
     :mod:`tda.core.db_pose` and :mod:`tda.core.db_status` mix in more readers,
-    and :mod:`tda.core.dbdelete` the undo-side row removals."""
+    :mod:`tda.core.dbdelete` the undo-side row removals and
+    :mod:`tda.core.db_recheck` the queue of frames awaiting a truth re-check."""
 
     def __init__(self, path: str):
         self.path = str(path)
@@ -65,6 +67,9 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin):
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        # the truth sweeper writes through a second connection to this same
+        # file, so a writer must wait rather than fail (spec 3.5, WAL)
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self._lock_path = Path(self.path + ".lock")
         self._lock_annotator: Optional[str] = None
         self._tx_depth = 0

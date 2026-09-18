@@ -192,7 +192,10 @@ def test_keyframe_commit_anchors_at_the_last_step_that_needs_geometry(session):
     assert kfs[0].anchor_step == 12
     assert kfs[0].placement == "in_chassis"
     assert result["affected"] == list(range(1, 13))
+    # the truth rows of the other frames are a cache: they are written when the
+    # frame is visited, not by the commit (see test_session_perf.py)
     for step in result["affected"]:
+        session.goto(step)
         assert COOLER in session.db.compiled(FrameKey(DESKTOP, step, VIEW))
 
 
@@ -223,10 +226,11 @@ def test_split_in_reverse_anchors_the_new_keyframe_at_the_current_step(session):
 
     anchors = sorted(kf.anchor_step for kf in session.db.keyframes(DESKTOP, VIEW, COOLER))
     assert anchors == [8, 12]
-    at_8 = session.db.compiled(FrameKey(DESKTOP, 8, VIEW))[COOLER]
-    at_9 = session.db.compiled(FrameKey(DESKTOP, 9, VIEW))[COOLER]
-    assert masks.decode_rle(at_8["visible_rle"]).sum() == cell(3).sum()
-    assert at_8["visible_rle"]["counts"] != at_9["visible_rle"]["counts"]
+    at_8 = session.compiled().instances[COOLER].visible
+    session.goto(9)
+    at_9 = session.compiled().instances[COOLER].visible
+    assert np.array_equal(at_8, cell(3))
+    assert not np.array_equal(at_8, at_9)  # the split really did cut the chain
 
 
 def test_split_forward_moves_the_old_anchor_back(session):
@@ -249,10 +253,9 @@ def test_frame_override_touches_only_this_frame(session):
     assert result["affected"] == [10]
     assert COOLER in session.db.frame_overrides(FrameKey(DESKTOP, 10, VIEW))
     assert session.db.frame_overrides(FrameKey(DESKTOP, 9, VIEW)) == {}
-    at_10 = session.db.compiled(FrameKey(DESKTOP, 10, VIEW))[COOLER]
-    at_9 = session.db.compiled(FrameKey(DESKTOP, 9, VIEW))[COOLER]
-    assert np.array_equal(masks.decode_rle(at_10["visible_rle"]), cell(6))
-    assert np.array_equal(masks.decode_rle(at_9["visible_rle"]), cell(0))
+    assert np.array_equal(session.compiled().instances[COOLER].visible, cell(6))
+    session.goto(9)
+    assert np.array_equal(session.compiled().instances[COOLER].visible, cell(0))
 
 
 def test_commit_logs_a_source_level_operation(session):

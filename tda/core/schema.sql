@@ -232,6 +232,19 @@ CREATE TABLE IF NOT EXISTS conflict (
 );
 CREATE INDEX IF NOT EXISTS ix_conflict_open ON conflict(desktop, view, status);
 
+-- Frozen frames whose inputs changed and that still have to be compared
+-- against their frozen rows (spec 3.4). The work is done off the GUI thread, so
+-- the request is persisted: a crash or a restart must not lose a re-check, or a
+-- conflict would silently never be raised. Purely additive, hence no schema
+-- version bump: an older build simply never reads it.
+CREATE TABLE IF NOT EXISTS recheck_queue (
+    desktop      INTEGER NOT NULL REFERENCES desktop(id) ON DELETE CASCADE,
+    step         INTEGER NOT NULL,
+    view         TEXT    NOT NULL,
+    requested_at TEXT,
+    PRIMARY KEY (desktop, step, view)
+);
+
 CREATE TABLE IF NOT EXISTS relation (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     desktop       INTEGER NOT NULL REFERENCES desktop(id) ON DELETE CASCADE,
