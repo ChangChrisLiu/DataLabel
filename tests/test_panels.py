@@ -453,7 +453,11 @@ def test_taskcard_lists_items_with_icons_and_highlights_the_first_open_one(
     assert panel.list_widget().item(1).font().bold() is True
 
 
-def test_taskcard_buttons_call_the_session(session: StubSession) -> None:
+def test_taskcard_buttons_only_report(session: StubSession) -> None:
+    """The buttons emit; the window acts.  Calling the session from here let
+    "Confirm" step the frame back over an uncommitted layer."""
+    from tda.ui.panels.taskcard import SUGGESTED
+
     panel = TaskCardPanel(session)
     # Short captions keep the dock narrow; the full sentence is the tooltip.
     for button, key in ((panel.commit_button, "Enter"),
@@ -462,16 +466,18 @@ def test_taskcard_buttons_call_the_session(session: StubSession) -> None:
                         (panel.confirm_button, "Space")):
         assert key in button.toolTip()
         assert len(button.text()) <= 20
+
+    scopes: list[str] = []
+    confirms: list[int] = []
+    panel.sigCommit.connect(scopes.append)
+    panel.sigConfirm.connect(lambda: confirms.append(1))
     panel.commit_button.click()
     panel.override_button.click()
     panel.split_button.click()
     panel.confirm_button.click()
-    assert session.calls == [
-        ("commit_edit", api.SCOPE_KEYFRAME),
-        ("commit_edit", api.SCOPE_FRAME_OVERRIDE),
-        ("commit_edit", api.SCOPE_SPLIT),
-        ("confirm_frame",),
-    ]
+    assert scopes == [SUGGESTED, api.SCOPE_FRAME_OVERRIDE, api.SCOPE_SPLIT]
+    assert confirms == [1]
+    assert session.calls == []
 
 
 def test_taskcard_methods_are_what_the_keys_call(session: StubSession) -> None:
@@ -494,11 +500,11 @@ def test_taskcard_shows_problems_when_confirm_fails(session: StubSession) -> Non
     panel = TaskCardPanel(session)
     assert panel.problems_visible() is False
     session.confirm_result = False
-    panel.confirm_button.click()
+    panel.confirm()          # what the window's act_confirm calls
     assert panel.problems_visible() is True
     assert panel.problems() == ["missing_shape:screw.cpu_cooler.03"]
     session.confirm_result = True
-    panel.confirm_button.click()
+    panel.confirm()
     assert panel.problems_visible() is False
 
 
@@ -516,7 +522,7 @@ def test_taskcard_activation_only_reports_the_request(session: StubSession) -> N
 def test_taskcard_problems_do_not_survive_a_frame_change(session: StubSession) -> None:
     panel = TaskCardPanel(session)
     session.confirm_result = False
-    panel.confirm_button.click()
+    panel.confirm()
     assert panel.problems_visible() is True
 
     session.sigFrameChanged.emit(session.current())  # next frame
@@ -562,27 +568,30 @@ def test_instances_table_shows_its_four_columns_and_tells_the_rest(
     assert table.item(1, hidden_col).checkState() == Qt.CheckState.Checked
 
 
-def test_instances_checkbox_writes_hidden(session: StubSession) -> None:
+def test_instances_checkbox_reports_hidden(session: StubSession) -> None:
+    """The window applies it, so that the canvas overlay is repainted with it."""
     panel = InstanceListPanel(session)
+    seen: list[tuple] = []
+    panel.sigHiddenToggled.connect(lambda key, hidden: seen.append((key, hidden)))
     table = panel.table()
     hidden_col = InstanceListPanel.COLUMNS.index("Hidden")
     table.item(0, hidden_col).setCheckState(Qt.CheckState.Checked)
-    assert session.calls == [("set_hidden", "cpu_cooler.01", True)]
+    assert seen == [("cpu_cooler.01", True)]
+    assert session.calls == []
 
 
-def test_instances_h_after_a_checkbox_click_sends_the_opposite_value(
-    session: StubSession,
-) -> None:
+def test_instances_h_sends_the_value_the_session_holds(session: StubSession) -> None:
+    """``H`` reads the session's row, not the checkbox somebody just clicked."""
     panel = InstanceListPanel(session)
     panel.select_instance("cpu_cooler.01")
     hidden_col = InstanceListPanel.COLUMNS.index("Hidden")
     panel.table().item(0, hidden_col).setCheckState(Qt.CheckState.Checked)
+    session._rows[0]["hidden"] = True     # what the window's slot would produce
+    panel.refresh()
     panel.toggle_hidden()
-    assert session.calls == [
-        ("set_hidden", "cpu_cooler.01", True),
-        ("set_hidden", "cpu_cooler.01", False),
-    ]
-    assert panel.table().item(0, hidden_col).checkState() == Qt.CheckState.Unchecked
+    assert session.calls == [("set_hidden", "cpu_cooler.01", False)]
+    # and the table is re-read from the session afterwards, never patched locally
+    assert panel.rows()[0]["hidden"] == session.instance_rows()[0]["hidden"]
 
 
 def test_instances_toggle_hidden_flips_the_selected_row(session: StubSession) -> None:
@@ -641,16 +650,23 @@ def test_instances_set_visibility_covers_the_seven_values(session: StubSession) 
 
 def test_instances_up_and_down_move_the_z_order(session: StubSession) -> None:
     panel = InstanceListPanel(session)
-    panel.select_instance("screw.cpu_cooler.03")  # middle row
+    seen: list[int] = []
+    panel.sigReorder.connect(seen.append)
     panel.up_button.click()
+    panel.down_button.click()
+    assert seen == [-1, +1]          # the buttons report; the window acts
+    assert session.calls == []
+
+    panel.select_instance("screw.cpu_cooler.03")  # middle row
+    panel.move_up()
     assert session.calls == [("set_zorder_move", "screw.cpu_cooler.03", "cpu_cooler.01")]
     session.calls.clear()
-    panel.down_button.click()
+    panel.move_down()
     # moving a row down = the row below it goes above the selected one
     assert session.calls == [("set_zorder_move", "chassis.01", "screw.cpu_cooler.03")]
     session.calls.clear()
     panel.select_instance("cpu_cooler.01")  # top row: up does nothing
-    panel.up_button.click()
+    panel.move_up()
     assert session.calls == []
 
 

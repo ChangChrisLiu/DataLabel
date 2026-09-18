@@ -71,6 +71,10 @@ class InstanceListPanel(QWidget):
 
     #: An instance was double-clicked: the canvas should start editing it.
     sigRequestEdit = Signal(str)
+    #: A move button was pressed; ``-1`` is up, ``+1`` is down.
+    sigReorder = Signal(int)
+    #: The hidden checkbox of one instance was toggled: ``(key, hidden)``.
+    sigHiddenToggled = Signal(str, bool)
 
     #: Four columns, not seven.  Class and placement are in every row's tooltip
     #: instead: the instance key already names the class (``screw.cpu_cooler.01``)
@@ -100,7 +104,10 @@ class InstanceListPanel(QWidget):
         )
         self._table.setMinimumWidth(180)
         self._table.setWordWrap(False)
-        self._table.setTextElideMode(Qt.TextElideMode.ElideLeft)  # keep the ordinal
+        # ElideMiddle, not ElideLeft: a Label Studio key such as
+        # "RAM Module Retention Clip (open)#8" elided from the left reads
+        # "...n Clip (open)#8", which names neither the part nor the ordinal.
+        self._table.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self._apply_column_widths()
         self._table.itemChanged.connect(self._on_item_changed)
         self._table.itemDoubleClicked.connect(self._on_item_double_clicked)
@@ -111,8 +118,9 @@ class InstanceListPanel(QWidget):
         self.down_button.setToolTip("Move down: put it below the one under it")
         for button in (self.up_button, self.down_button):
             button.setMinimumWidth(1)
-        self.up_button.clicked.connect(self.move_up)
-        self.down_button.clicked.connect(self.move_down)
+        # Report, do not act: the window owns every gesture that mutates.
+        self.up_button.clicked.connect(lambda: self.sigReorder.emit(-1))
+        self.down_button.clicked.connect(lambda: self.sigReorder.emit(+1))
 
         buttons = QHBoxLayout()
         buttons.setContentsMargins(4, 0, 4, 4)
@@ -314,11 +322,10 @@ class InstanceListPanel(QWidget):
             return
         if item.column() != self.COLUMNS.index("Hidden"):
             return
-        # Read the item *before* refreshing: the rebuild below deletes it.
+        # Read the item *before* anything refreshes: a rebuild deletes it.  The
+        # window applies it, so that the canvas overlay is repainted with it.
         key = str(item.data(KEY_ROLE))
-        hidden = item.checkState() == Qt.CheckState.Checked
-        self._session.set_hidden(key, hidden)
-        self.refresh()
+        self.sigHiddenToggled.emit(key, item.checkState() == Qt.CheckState.Checked)
 
     def _on_item_double_clicked(self, item: QTableWidgetItem) -> None:
         """Report the request only; ``begin_edit`` belongs to the main window.

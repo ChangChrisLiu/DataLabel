@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -78,10 +79,18 @@ class ReviewPanel(QWidget):
             self._tabs.addTab(lw, QUEUE_TITLES[queue])
         self._tabs.currentChanged.connect(lambda _i: self._sync_buttons())
 
-        self.keep_old_button = QPushButton("Keep old")
-        self.accept_new_button = QPushButton("Accept new")
-        self.keep_old_button.setToolTip("Discard the conflicting edit")
-        self.accept_new_button.setToolTip("Take the edit and re-freeze the frames")
+        # Short captions and a tooltip, like the task card's: the row of long
+        # labels below used to make this panel ask for 642 px of dock, and one
+        # trip through Review mode took a third of the canvas away for good.
+        self.keep_old_button = QPushButton("Keep old  K")
+        self.accept_new_button = QPushButton("Take new  N")
+        self.keep_old_button.setToolTip("Keep the frozen shape, discard the "
+                                        "conflicting edit (K)")
+        self.accept_new_button.setToolTip("Take the edit and re-freeze the "
+                                          "affected frames (N)")
+        for button in (self.keep_old_button, self.accept_new_button):
+            button.setMinimumWidth(1)
+            button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.keep_old_button.clicked.connect(
             lambda: self.resolve_selected(api.RESOLVE_KEEP_OLD)
         )
@@ -99,8 +108,10 @@ class ReviewPanel(QWidget):
         buttons.setContentsMargins(4, 0, 4, 4)
         buttons.addWidget(self.keep_old_button)
         buttons.addWidget(self.accept_new_button)
-        buttons.addStretch(1)
-        buttons.addWidget(QLabel("Enter: confirm frame   R: rework"))
+        # The two other keys live in the tooltip and in the cheat sheet, not in
+        # a 384 px label that decides how wide the dock has to be.
+        self.setToolTip("Enter: accept the frame    R: rework it in Annotate mode\n"
+                        "K: keep the frozen shape    N: take the edit")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

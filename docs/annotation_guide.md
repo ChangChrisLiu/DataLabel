@@ -92,8 +92,11 @@ D:\Anaconda\envs\tda\python.exe -m tda.cli app --annotator chang --desktop 13 --
 
 - 编辑层里有没提交的像素时，**下面每一件事都会被挡住**，并提示"未提交的修改：Enter 提交 /
   Esc 放弃"：`PgUp`/`PgDn`/`Home`/`End`、点时间轴、点复查队列、切视图、切机器、切模式、
-  双击另一个实例、`Space` 确认、`F5`、复查里的 `R` 返工、S1 `Apply` 后的重载、
-  从 sidecar 恢复旧编辑。按 `Enter` 或 `Esc` 之后再走。被挡住时 sidecar 会立刻落盘。
+  双击另一个实例、`Space` 确认（**包括任务卡上的 `Confirm  Space` 按钮**）、`F5`、
+  复查里的 `R` 返工、S1 `Apply` 后的重载、从 sidecar 恢复旧编辑。
+  按 `Enter` 或 `Esc` 之后再走；被挡住时 sidecar 会立刻落盘。
+- 任务卡上的四个按钮和它们的键**完全等价**：`Commit ⏎` 和 `Enter` 一样会先问会话建议哪种
+  范围（不是一律 `keyframe`），按钮点下去和按键走的是同一条路。
 - **没选中实例就开始画**：程序自动认领任务卡上第一条还没做完的"画形状"条目（状态栏写
   `editing <实例>`）；实在没有可认领的，这一笔原样撤销并提示"先在任务卡或实例表里选一个实例"。
 - 每一笔画完 0.3 秒后，未提交的编辑层写到 `D:\DataSet\.cache\sidecar\<你的名字>\`，

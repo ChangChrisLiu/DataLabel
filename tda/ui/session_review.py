@@ -37,6 +37,10 @@ class ReviewMixin:
         problem list is emitted on :attr:`sigProblems` first, so a panel can
         show exactly what the annotator has to fix.
         """
+        # The step back at the end would drop an uncommitted layer, and this
+        # method must not depend on its caller having checked: a panel button
+        # wired straight to it is exactly how that assumption was broken.
+        self._refuse_if_editing("confirming the frame", force=False)
         key = self.current()
         try:
             self.truth.verify_frame(key, self.annotator)

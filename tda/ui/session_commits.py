@@ -110,11 +110,17 @@ class CommitMixin:
             self._refuse_mask_on_bench(key, instance)
             result = edit.commit_edit(self.db, self.truth, key, instance, self.layer.mask(),
                                       scope, direction, self.annotator)
-        # What was just written is no longer uncommitted: the layer's baseline
-        # moves to the mask that went to the database, so the guard on goto/
-        # open/close sees a settled layer rather than refusing to leave a frame
-        # whose work is already saved.
-        self.layer.settle()
+            # What was just written is no longer uncommitted: the layer's
+            # baseline moves to the mask that went to the database, so the guard
+            # on goto/open/close sees a settled layer rather than refusing to
+            # leave a frame whose work is already saved.
+            #
+            # A layering scope deliberately does **not** settle: it writes a
+            # PairOverride and no pixels, so the painted ones are still nobody's
+            # but the annotator's to keep or discard.  The window clears them
+            # after such a commit; a direct API user is left holding them rather
+            # than having them silently marked as written.
+            self.layer.settle()
         return self._after_edit(result)
 
     def _known_instances(self) -> set[str]:

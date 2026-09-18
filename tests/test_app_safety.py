@@ -36,6 +36,7 @@ from tda.core.db_pose import clean_roi
 from tda.core.model import FrameKey
 from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
+from tda.ui import session_api as api
 from tda.ui.app import MainWindow
 
 
@@ -140,6 +141,19 @@ WAYS_OUT = {
 }
 
 
+def click(button) -> None:
+    """A real mouse click, not ``button.click()``: the reviewer's probe."""
+    QTest.mouseClick(button, Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, button.rect().center())
+    QApplication.processEvents()
+
+
+#: "Confirm" steps the frame back, so the button is a way out like the key is.
+#: The reviewer's probe clicked it with 250 uncommitted pixels and watched the
+#: frame move from 14 to 13 with nothing written and nothing said.
+WAYS_OUT["button_confirm"] = lambda w: click(w.task_card.confirm_button)
+
+
 def _offer_a_sidecar(win: MainWindow) -> None:
     """A recovered layer waiting to be restored, for the ``restore_sidecar`` case."""
     other = [i for i in card_instances(win) if i != win.session.editing_instance][0]
@@ -172,6 +186,115 @@ def test_an_uncommitted_edit_blocks_every_way_out_of_the_frame(window, name):
     assert window.sidecar.pending_for(window.session.current(), instance) is not None
 
 
+# --------------------------------------------------------------------------- #
+# the panel buttons are the window's actions, not their own
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("button,key", [
+    ("commit_button", "act_commit"),
+    ("override_button", "act_commit_override"),
+    ("split_button", "act_commit_split"),
+    ("confirm_button", "act_confirm"),
+])
+def test_each_task_card_button_is_its_key(window, monkeypatch, button, key):
+    """One label, one meaning: the button calls exactly what the key calls."""
+    seen: list[str] = []
+    monkeypatch.setattr(window, key, lambda *a: seen.append(key) or False)
+    click(getattr(window.task_card, button))
+    assert seen == [key]
+
+
+def test_the_commit_button_honours_the_suggested_scope(window, monkeypatch):
+    """It used to hard-code ``keyframe`` while ``Enter`` asked the session."""
+    session = window.session
+    start_edit(window)
+    paint(window)
+    monkeypatch.setattr(session, "suggest_scope", lambda *a, **k: api.SCOPE_SPLIT)
+    committed: list[str] = []
+    monkeypatch.setattr(session, "commit_edit",
+                        lambda scope, *a, **k: committed.append(scope) or {})
+    click(window.task_card.commit_button)
+    # exactly what Enter does: a suggestion that is not a plain keyframe is
+    # shown first, and the next press accepts it
+    assert committed == [] and api.SCOPE_SPLIT in window.scope_bar_text()
+    click(window.task_card.commit_button)
+    assert committed == [api.SCOPE_SPLIT]
+
+
+def test_a_button_commit_clears_the_layer_and_the_sidecar(window):
+    """The panel's own call skipped every bit of the window's post-processing."""
+    instance = drawable_instances(window)[0]
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    window.flush_sidecar()
+    key = window.session.current()
+    assert Path(window.sidecar.path_for(key, instance)).exists()
+    click(window.task_card.commit_button)
+    assert window.session.editing_instance is None
+    assert not window.overlay.editing.any()
+    assert not Path(window.sidecar.path_for(key, instance)).exists()
+    assert window.pending_restore() is None
+
+
+def test_the_instance_move_buttons_go_through_the_window(window, monkeypatch):
+    seen: list[int] = []
+    monkeypatch.setattr(window, "move_instance", lambda d: seen.append(d))
+    click(window.instances.up_button)
+    click(window.instances.down_button)
+    assert seen == [-1, +1]
+
+
+def test_the_hidden_checkbox_goes_through_the_window(window):
+    session = window.session
+    rows = session.instance_rows()
+    if not rows:
+        pytest.skip("no instances on this frame")
+    key = str(rows[0]["key"])
+    table = window.instances.table()
+    column = window.instances.COLUMNS.index("Hidden")
+    table.item(0, column).setCheckState(Qt.CheckState.Checked)
+    QApplication.processEvents()
+    assert key in session._hidden
+    assert window.overlay is not None        # the overlay was rebuilt without it
+
+
+def test_activating_a_task_item_outside_annotate_mode_does_nothing(window):
+    """Qt's own itemActivated fires in Steps mode, where the canvas is hidden."""
+    window.set_mode(A.MODE_STEPS)
+    instance = card_instances(window)[0]
+    window.task_card.sigRequestEdit.emit(instance)
+    assert window.session.editing_instance is None
+    assert "Annotate" in window.status_message() or "标注" in window.status_message()
+
+
+def test_a_bench_box_item_arms_the_box_tool_not_the_brush(window, monkeypatch):
+    """A part on the bench is boxed, so no mask layer is opened for it at all.
+
+    Going through ``begin_edit`` only ended in a refusal at commit time, with
+    the annotator's strokes already on the canvas.
+    """
+    kind = getattr(api, "KIND_ADD_BENCH_BOX", None)
+    if kind is None:
+        pytest.skip("the session has no add_bench_box kind yet")
+    instance = "cpu_cooler.fan.01"
+    monkeypatch.setattr(window.session, "task_card", lambda: [
+        {"instance": instance, "kind": kind, "text": "box it", "done": False},
+    ])
+    window.task_card.refresh()
+    window.task_card.sigRequestEdit.emit(instance)
+
+    assert window.session.editing_instance is None      # no mask layer
+    assert window.active_tool is window.bench_tool
+    assert window.bench_instance == instance
+    assert "台面框" in window.status_message() or "staging" in window.status_message()
+
+    boxed: list[tuple] = []
+    monkeypatch.setattr(window.session, "commit_box",
+                        lambda key, box, *a, **k: boxed.append((key, tuple(box))) or {})
+    window.on_bench_box((10.0, 12.0, 40.0, 44.0))
+    assert boxed == [(instance, (10.0, 12.0, 40.0, 44.0))]
+    assert window.bench_instance is None
+
+
 def test_the_session_itself_refuses_to_move_with_an_uncommitted_layer(window):
     """Defence in depth: the gate is in the session too, not only in the window."""
     from tda.ui.session_api import SessionRefusal
@@ -190,6 +313,44 @@ def test_the_session_itself_refuses_to_move_with_an_uncommitted_layer(window):
     step = session.current().step
     session.goto(min(session.steps()), force=True)      # what the window uses
     assert session.current().step < step
+
+
+def test_the_session_refuses_to_confirm_a_frame_with_an_uncommitted_layer(window):
+    """``confirm_frame`` stepped back with ``force``, trusting a caller that may not check."""
+    from tda.ui.session_api import SessionRefusal
+
+    session = window.session
+    start_edit(window)
+    paint(window)
+    step = session.current().step
+    with pytest.raises(SessionRefusal):
+        session.confirm_frame()
+    assert session.current().step == step
+    assert session.frame_status(step) != "verified"
+
+
+def test_a_layering_commit_does_not_swallow_painted_pixels(window):
+    """``zorder:`` writes no pixels, so it must not mark painted ones as written.
+
+    A direct API user is left holding the mask edit rather than having it
+    silently settled under a statement about z-order; the *window* clears it,
+    because in the window the painted pixels were only ever the gesture that
+    made the session suggest layering in the first place.
+    """
+    session = window.session
+    instance = drawable_instances(window)[0]
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    other = [i for i in drawable_instances(window) if i != instance]
+    if not other:
+        pytest.skip("need a second instance to layer against")
+    session.commit_edit(f"zorder:above:{other[0]}")
+    assert session.layer.changed()          # still the annotator's to settle
+
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    window._commit(f"zorder:above:{other[0]}")
+    assert session.editing_instance is None  # the window settles it by clearing
 
 
 def test_navigation_is_allowed_again_once_the_edit_is_committed(window):

@@ -50,12 +50,20 @@ KIND_ICONS: dict[str, str] = {
 #: Rows whose work is already done.
 DONE_COLOR = QColor(128, 128, 132)
 
+#: :attr:`TaskCardPanel.sigCommit` payload meaning "ask the session".
+SUGGESTED = ""
+
 
 class TaskCardPanel(QWidget):
     """The per-frame instruction list with the commit and confirm actions."""
 
     #: An item was activated: the canvas should start editing this instance.
     sigRequestEdit = Signal(str)
+    #: A commit button was pressed; the payload is the scope it asks for, or
+    #: :data:`SUGGESTED` for "whatever the session suggests" (the plain Commit).
+    sigCommit = Signal(str)
+    #: The confirm button was pressed.
+    sigConfirm = Signal()
 
     def __init__(self, session: Optional[api.SessionLike] = None,
                  parent: Optional[QWidget] = None) -> None:
@@ -83,12 +91,17 @@ class TaskCardPanel(QWidget):
             "Split  Ctrl+K", "Split the keyframe here (Ctrl+K)")
         self.confirm_button = self._button(
             "Confirm  Space", "Confirm the frame and step back (Space)")
-        self.commit_button.clicked.connect(lambda: self.commit(api.SCOPE_KEYFRAME))
+        # The buttons **report**; they do not act.  Calling the session from
+        # here made "Confirm" step the frame back over an uncommitted layer --
+        # the window never heard about the click, so nothing checked and nothing
+        # was said -- and made "Commit" mean ``keyframe`` while the same label's
+        # key asked the session what the edit meant.
+        self.commit_button.clicked.connect(lambda: self.sigCommit.emit(SUGGESTED))
         self.override_button.clicked.connect(
-            lambda: self.commit(api.SCOPE_FRAME_OVERRIDE)
+            lambda: self.sigCommit.emit(api.SCOPE_FRAME_OVERRIDE)
         )
-        self.split_button.clicked.connect(lambda: self.commit(api.SCOPE_SPLIT))
-        self.confirm_button.clicked.connect(self.confirm)
+        self.split_button.clicked.connect(lambda: self.sigCommit.emit(api.SCOPE_SPLIT))
+        self.confirm_button.clicked.connect(self.sigConfirm.emit)
 
         self._problems_label = QLabel("Problems")
         self._problems_list = QListWidget()

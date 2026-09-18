@@ -105,6 +105,8 @@ class EditMixin:
         self._roi_asked: set[tuple] = set()
         self._pending_scope: Optional[str] = None
         self._restore_offer: Optional[dict] = None
+        #: The instance an ``add_bench_box`` card item armed the box tool for.
+        self.bench_instance: Optional[str] = None
 
         self.scope_bar = Bar(self)
         self.scope_bar.add_button("Enter 接受", self.act_commit)
@@ -135,17 +137,39 @@ class EditMixin:
         for queue in api.QUEUE_NAMES:
             self._reconnect(self.review.list_for(queue).itemActivated,
                             lambda item: self.timeline_goto(int(item.data(_STEP_ROLE))))
-        self._reconnect(self.instances.up_button.clicked,
-                        lambda _c=False: self.move_instance(-1))
-        self._reconnect(self.instances.down_button.clicked,
-                        lambda _c=False: self.move_instance(+1))
-        # The panel's key handler calls these by name, so shadow them on the
-        # instance: re-wiring the buttons alone would leave Ctrl+Up unguarded.
-        self._panel_move = lambda d: (self.instances.__class__.move_up(self.instances)
-                                      if d < 0 else
-                                      self.instances.__class__.move_down(self.instances))
-        self.instances.move_up = lambda: self.move_instance(-1)
-        self.instances.move_down = lambda: self.move_instance(+1)
+        self.instances.sigReorder.connect(self.move_instance)
+        self.instances.sigHiddenToggled.connect(self.on_hidden_toggled)
+        self.task_card.sigCommit.connect(self.on_panel_commit)
+        self.task_card.sigConfirm.connect(self.act_confirm)
+        self._panel_move = lambda d: (self.instances.move_up() if d < 0
+                                      else self.instances.move_down())
+
+    @S.guard
+    def on_panel_commit(self, scope: str) -> None:
+        """A commit button was pressed; run the action its key runs.
+
+        ``""`` is the plain "Commit" button, which means the same as ``Enter``:
+        ask the session what the edit is, and show the scope bar when the answer
+        is not a plain keyframe.  Hard-coding ``keyframe`` here was one label
+        with two meanings.
+        """
+        if scope == api.SCOPE_FRAME_OVERRIDE:
+            self.act_commit_override()
+        elif scope == api.SCOPE_SPLIT:
+            self.act_commit_split()
+        else:
+            self.act_commit()
+
+    @S.guard
+    def on_hidden_toggled(self, instance: str, hidden: bool) -> None:
+        """The instance list's hidden checkbox: a view setting, applied here.
+
+        The panel used to call the session itself, which left the canvas showing
+        a layer the table said was hidden until something else repainted it.
+        """
+        self.session.set_hidden(str(instance), bool(hidden))
+        self.instances.refresh()
+        self.refresh_overlay()
 
     @staticmethod
     def _reconnect(signal, slot) -> None:
@@ -262,6 +286,31 @@ class EditMixin:
     def _is_right_button(ev: Any) -> bool:
         return _is_right(ev)
 
+    def _is_bench_item(self, instance: str) -> bool:
+        """Does the card ask for a staging-area box rather than a mask?"""
+        want = getattr(api, "KIND_ADD_BENCH_BOX", None)
+        if want is None:
+            return False
+        return any(row.get("instance") == instance and row.get("kind") == want
+                   for row in self.session.task_card())
+
+    @S.guard
+    def begin_bench_box(self, instance: str) -> None:
+        """Arm the box tool for a part on the bench: no mask layer at all.
+
+        A bench part's geometry is a rectangle, so beginning a mask edit for it
+        only ends in a refusal at commit time -- with the annotator's strokes
+        already on screen.  The tool is armed instead and the drag writes
+        ``commit_box`` directly.
+        """
+        self.cancel_roi_edit()
+        self.bench_instance = str(instance)
+        self._tool_name = "bench_box"
+        self.set_sam_instance(None)
+        self._attach_tool()
+        self.update_status()
+        self.report(f"{instance}: 拖一个台面框（R）/ drag the staging-area box for it")
+
     def _adoptable_instance(self) -> Optional[str]:
         """The task-card item a stroke may adopt: an open ``add_shape``/split.
 
@@ -290,9 +339,18 @@ class EditMixin:
         that switching instance while pixels are uncommitted can be refused in
         one place instead of three.
         """
+        if self.mode != "annotate":
+            # Qt activates a list row on Enter, and the task card is still
+            # mounted in Steps mode with the canvas hidden: an edit begun there
+            # is one nobody can see, finish or discard.
+            self.report("切到标注模式再编辑 / switch to Annotate mode to edit")
+            return
         if getattr(self.session, "editing_instance", None) == instance:
             return
         if not self.can_leave_edit():
+            return
+        if self._is_bench_item(instance):
+            self.begin_bench_box(instance)
             return
         self.cancel_roi_edit()
         try:

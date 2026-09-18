@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QApplication
 
 from app_scene import (
@@ -115,14 +115,57 @@ def test_the_canvas_gets_most_of_the_window_by_default(qapp, tmp_path, width, sh
         close_window(win)
 
 
-def test_the_right_dock_panels_can_be_narrow(qapp, tmp_path):
-    """Their minimum width is what clamped ``resizeDocks`` to 747 px."""
+def test_every_dock_panel_can_be_narrow(qapp, tmp_path):
+    """Their minimum width is what clamped ``resizeDocks``; the review panel's
+    ``Enter: confirm frame   R: rework`` label alone was 384 px."""
     win = open_window(tmp_path)
     try:
-        for panel in (win.task_card, win.instances):
+        for panel in (win.task_card, win.instances, win.review, win.timeline):
             assert panel.minimumSizeHint().width() <= 320, type(panel).__name__
     finally:
         close_window(win)
+
+
+@pytest.mark.parametrize("width,share", [(1920, 0.65), (1600, 0.60)])
+def test_a_trip_through_review_mode_gives_the_canvas_back(qapp, tmp_path, width, share):
+    """Entering Review once pushed the right dock to 642 px and it never returned."""
+    win = open_window(tmp_path)
+    try:
+        win.resize(width, 1080)
+        win.show()
+        QApplication.processEvents()
+        before = win.canvas.width()
+        win.set_mode(A.MODE_REVIEW)
+        QApplication.processEvents()
+        win.set_mode(A.MODE_ANNOTATE)
+        QApplication.processEvents()
+        assert win.canvas.width() >= share * win.width(), (
+            f"canvas {win.canvas.width()} px of {win.width()} after a Review trip "
+            f"(was {before}); right dock {win.right_dock.width()}"
+        )
+    finally:
+        close_window(win)
+
+
+def test_a_saved_layout_that_starves_the_canvas_is_ignored(qapp, tmp_path):
+    """A poisoned INI must not follow the annotator around forever."""
+    win = open_window(tmp_path)
+    win.resize(1920, 1080)
+    win.show()
+    QApplication.processEvents()
+    win.resizeDocks([win.right_dock], [1500], Qt.Orientation.Horizontal)
+    QApplication.processEvents()
+    win.save_window_state()
+    close_window(win)
+
+    again = MainWindow(make_session(tmp_path), make_paths(tmp_path), "tester",
+                       sam_queue=StubSamQueue())
+    try:
+        again.show()
+        QApplication.processEvents()
+        assert again.canvas.width() >= 0.5 * again.width()
+    finally:
+        close_window(again)
 
 
 def test_settings_live_in_an_ini_file_under_the_cache_parent(window, tmp_path):

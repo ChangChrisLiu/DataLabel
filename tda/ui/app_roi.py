@@ -103,8 +103,14 @@ class RoiMixin:
     # ------------------------------------------------------------ bench box
     @S.guard
     def on_bench_box(self, box: object) -> None:
-        """``R`` + a drag: the staging-area rectangle of a part on the bench."""
-        instance = (self.instances.selected_instance()
+        """``R`` + a drag: the staging-area rectangle of a part on the bench.
+
+        The instance an ``add_bench_box`` card item armed the tool for wins:
+        that is the one the annotator activated, whatever the instance table
+        happens to have selected.
+        """
+        instance = (getattr(self, "bench_instance", None)
+                    or self.instances.selected_instance()
                     or self.task_card.current_instance())
         if not instance:
             self.report("select the instance the bench box belongs to first")
@@ -115,6 +121,7 @@ class RoiMixin:
         except ValueError as refused:
             self.report_error(f"refused: {refused}")
             return
+        self.bench_instance = None
         self.refresh_overlay()
         self.report(f"bench box stored for {instance}")
 

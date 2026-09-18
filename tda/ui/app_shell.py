@@ -63,6 +63,9 @@ DEFAULT_WINDOW_SIZE = (1600, 1000)
 #: ``tests/test_app.py`` measures what actually comes out, not what is asked.
 TIMELINE_FRACTION = 0.11
 RIGHT_FRACTION = 0.20
+#: A restored layout that leaves the canvas less than this is not one anybody
+#: chose: it is a dock that grew once and was saved.
+MIN_CANVAS_FRACTION = 0.5
 
 
 def _read_last_frame(settings, annotator: str) -> dict:
@@ -223,6 +226,9 @@ class ShellMixin:
         self.tool_label = QLabel("")
         self.sam_label = QLabel("")
         self.hint_label = QLabel("")
+        # The Chinese hints start with a full-width glyph, which Qt draws hard
+        # against the window edge without this.
+        self.hint_label.setContentsMargins(8, 0, 4, 0)
         bar = self.statusBar()
         for label in (self.zoom_label, self.frame_label, self.tool_label,
                       self.sam_label):
@@ -346,12 +352,41 @@ class ShellMixin:
             self.resize(*DEFAULT_WINDOW_SIZE)
         if state is not None:
             self.restoreState(state)
+            self._reject_a_starved_canvas()
         else:
             self.apply_default_layout()
 
+    def showEvent(self, event) -> None:  # noqa: D102 - Qt override
+        # The dock widths a restored layout really produces only exist once the
+        # window has been laid out, so the guard runs here as well as at restore
+        # time -- once, so that a deliberate later drag is left alone.
+        super().showEvent(event)
+        if not getattr(self, "_layout_checked", False):
+            self._layout_checked = True
+            if self.settings.value("state") is not None:
+                self._reject_a_starved_canvas()
+
+    def _reject_a_starved_canvas(self) -> None:
+        """Throw a saved layout away when it leaves the canvas too little.
+
+        A dock that grew once -- a panel with a wide label, a drag -- is written
+        to the INI by ``saveState`` and then follows the annotator to every later
+        session.  A layout that gives the frame less than half the window is not
+        one anybody chose on purpose.
+        """
+        width = self.width() or DEFAULT_WINDOW_SIZE[0]
+        # Measure the canvas rather than subtracting the docks: margins and
+        # splitters are the difference between "just over half" and "under".
+        canvas = self.canvas.width() or (width - self.timeline_dock.width()
+                                         - self.right_dock.width())
+        if canvas < MIN_CANVAS_FRACTION * width:
+            self.apply_default_layout()
+            self.report("the saved dock layout left the canvas too small; "
+                        "it was reset")
+
     def apply_default_layout(self) -> None:
-        """Timeline ~11 %, the right docks ~22 %, the canvas the rest."""
-        width = max(self.width(), DEFAULT_WINDOW_SIZE[0])
+        """Timeline ~11 %, the right docks ~20 %, the canvas the rest."""
+        width = self.width() or DEFAULT_WINDOW_SIZE[0]
         self.resizeDocks(
             [self.timeline_dock, self.right_dock, self.review_dock],
             [int(width * TIMELINE_FRACTION), int(width * RIGHT_FRACTION),

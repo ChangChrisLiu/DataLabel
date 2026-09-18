@@ -105,10 +105,11 @@ class TimelinePanel(QWidget):
         self._descending = True
         self._syncing = False
 
-        self.order_toggle = QCheckBox("Oldest first")
+        self.order_toggle = QCheckBox("Oldest ↑")
         self.order_toggle.setToolTip(
-            "Off: newest step first, the order frames are annotated in."
+            "Oldest first.  Off: newest step first, the order frames are annotated in."
         )
+        self.order_toggle.setMinimumWidth(1)
         self.order_toggle.toggled.connect(self._on_order_toggled)
 
         self._list = QListWidget()
@@ -116,6 +117,14 @@ class TimelinePanel(QWidget):
         self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self._list.setUniformItemSizes(True)
         self._list.setItemDelegate(_StatusBarDelegate(self.BAR_WIDTH, self._list))
+        # The dock decides how wide it is; a 96 px thumbnail plus its label must
+        # not be the thing that sets it.  Narrower than a thumbnail the list
+        # simply scrolls sideways.
+        self._list.setMinimumWidth(1)
+        self._list.setHorizontalScrollMode(
+            QListWidget.ScrollMode.ScrollPerPixel
+        )
+        self._list.setTextElideMode(Qt.TextElideMode.ElideRight)
         self._list.itemClicked.connect(self._on_item_clicked)
         self._list.verticalScrollBar().valueChanged.connect(
             lambda _v: self.ensure_visible_thumbs()
