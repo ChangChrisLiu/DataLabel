@@ -19,9 +19,11 @@ What the window owns is exactly what no single part can:
   a failure becomes a log entry and one status line instead of an exception
   escaping into the Qt event loop with the database mid-transaction.
 
-The editing, ROI, review and crash-safety flows live in :mod:`tda.ui.app_edit`,
-the model assist in :mod:`tda.ui.app_assist` and the widgets, the status bar and
-the lifecycle in :mod:`tda.ui.app_shell`; all three are mixed in below.
+The editing layer lives in :mod:`tda.ui.app_edit` and the moment it is written
+in :mod:`tda.ui.app_commit`; the ROI, the bench box, the review verdicts and
+crash safety are in :mod:`tda.ui.app_roi`, the model assist in
+:mod:`tda.ui.app_assist` and the widgets, the status bar and the lifecycle in
+:mod:`tda.ui.app_shell`; all of them are mixed in below.
 """
 from __future__ import annotations
 
@@ -35,6 +37,7 @@ from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 from tda.ui.app_assist import AssistMixin
+from tda.ui.app_commit import CommitMixin
 from tda.ui.app_edit import EditMixin
 from tda.ui.app_roi import RoiMixin
 from tda.ui.app_shell import (
@@ -54,7 +57,7 @@ OPACITY_STEP = 20
 GRID_OFF = 1e9
 
 
-class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
+class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
     """One annotator, one desktop/view, three modes."""
 
     def __init__(self, session, paths: dict, annotator: str, *,
@@ -286,6 +289,7 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
                 return
             self._steps_dirty = False
         self.mode = mode
+        self.disarm_bench()
         if mode == A.MODE_STEPS:
             self.stack.setCurrentWidget(self.steps_panel)
         else:
@@ -394,9 +398,14 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
 
         The panels call ``session.goto`` themselves, which would walk straight
         past the uncommitted-edit rule, so the window takes their activation
-        signals over instead of letting them through.
+        signals over instead of letting them through.  Qt has already moved the
+        selection by the time the click arrives, so a refusal has to put it
+        back: a list pointing at a frame that is not on the canvas is a lie the
+        annotator will act on.
         """
-        self.leave_frame(lambda: self.session.goto(int(step), force=True))
+        if not self.leave_frame(lambda: self.session.goto(int(step), force=True)):
+            self.timeline.select_current_step()
+            self.review.select_current_step()
 
     @S.guard
     def act_flash_compare(self, pressed: bool, other: bool = False) -> None:
@@ -432,6 +441,8 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
         if name in ("sam_point", "sam_box") and not self.sam_available:
             self.report(f"SAM is unavailable: {self.sam_reason}")
             return
+        if name != "bench_box":
+            self.disarm_bench()   # the arm belongs to the box tool, not to the brush
         self.cancel_roi_edit()
         self._tool_name = name
         self._attach_tool()

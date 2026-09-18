@@ -11,11 +11,8 @@ Three flows are worth reading as a whole:
   dirty rect; the window turns the tool's ``stroke_before`` snapshot plus the
   layer into one undoable op on the session and queues the layer for the crash
   sidecar.  That layer is the only thing a crash can lose.
-* **A commit.**  ``Enter`` asks the session what scope the edit means.  A plain
-  ``keyframe`` is written immediately; anything else (a layering statement, a
-  split) opens a small non-modal bar showing the suggestion and its two
-  alternatives, because a modal dialog every few seconds is unusable at six
-  hours a day.
+* **A commit.**  ``Enter`` asks the session what scope the edit means; the scope
+  bar and everything that writes are next door in :mod:`tda.ui.app_commit`.
 * **Leaving.**  An editing layer with uncommitted pixels blocks every way out of
   the frame, the instance and the mode, with one hint.  A stroke that lands with
   no instance to hold it adopts the task card's open item or is reverted.
@@ -31,7 +28,7 @@ from tda.core import masks as _masks
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 from tda.ui import session_api as api
-from tda.ui.app_widgets import MIN_BOX_PX, Bar, BoxDragTool
+from tda.ui.app_widgets import Bar, BoxDragTool
 from tda.ui.canvas.tools import BrushTool, EraserTool, OccluderTool
 
 #: Where the timeline and the review panel keep a row's step number.
@@ -119,24 +116,19 @@ class EditMixin:
         self._central_layout.addWidget(self.restore_bar)
 
     def _rewire_panels(self) -> None:
-        """Take over the panel gestures the window has to be able to refuse.
+        """Every panel gesture the window has to be able to refuse, in one place.
 
-        Three of them reach the session directly, and all three have an answer
-        only the window can give: a conflict resolution has three verdicts, a
-        timeline click may not leave an uncommitted edit behind, and a refused
-        reorder must not escape a Qt slot as an exception.  The panels keep
-        their logic; the window only intercepts the connection.
+        The panels report; the window acts.  Each of these has an answer only
+        the window can give: a conflict resolution has three verdicts, opening
+        another frame may not leave an uncommitted edit behind, and a refused
+        reorder must not escape a Qt slot as an exception.  The timeline's own
+        ``itemClicked`` is the last one still intercepted rather than emitted,
+        because the click *is* the panel's whole signal.
         """
-        for button, resolution in ((self.review.keep_old_button, api.RESOLVE_KEEP_OLD),
-                                   (self.review.accept_new_button,
-                                    api.RESOLVE_ACCEPT_NEW)):
-            self._reconnect(button.clicked,
-                            lambda _c=False, r=resolution: self.resolve_selected(r))
+        self.review.sigResolve.connect(self.resolve_selected)
+        self.review.sigOpenStep.connect(self.timeline_goto)
         self._reconnect(self.timeline.list_widget().itemClicked,
                         lambda item: self.timeline_goto(int(item.data(_STEP_ROLE))))
-        for queue in api.QUEUE_NAMES:
-            self._reconnect(self.review.list_for(queue).itemActivated,
-                            lambda item: self.timeline_goto(int(item.data(_STEP_ROLE))))
         self.instances.sigReorder.connect(self.move_instance)
         self.instances.sigHiddenToggled.connect(self.on_hidden_toggled)
         self.task_card.sigCommit.connect(self.on_panel_commit)
@@ -185,6 +177,7 @@ class EditMixin:
         """What the editing half has to do when the frame changes."""
         self._pending_scope = None
         self.scope_bar.hide()
+        self.disarm_bench()
         if self.session.image() is not None:
             segment = (int(key.desktop), str(key.view), self._pose_segment(key))
             if self.roi() is not None:
@@ -249,6 +242,11 @@ class EditMixin:
         except self.refusal as refused:      # the session's own backstop
             self.report_error(f"refused: {refused}")
             return False
+        # Whatever the move was -- frame, view, desktop, session -- the bench arm
+        # was about the frame that has just been left.  ``on_frame_changed_edit``
+        # covers the moves that repaint; this covers the ones that do not,
+        # including a view with no image at this step.
+        self.disarm_bench()
         return True
 
     @S.guard
@@ -293,6 +291,18 @@ class EditMixin:
             return False
         return any(row.get("instance") == instance and row.get("kind") == want
                    for row in self.session.task_card())
+
+    def disarm_bench(self) -> None:
+        """Forget which instance the box tool was armed for.
+
+        The arm is a statement about *this* frame -- "the rectangle you draw
+        next belongs to that part, here" -- and it used to be cleared only by a
+        successful drag.  It therefore survived frame, view, desktop and mode
+        changes, every tool switch and every ``begin_edit``, and the next
+        rectangle drawn anywhere was filed under a part the annotator had armed
+        minutes and several frames ago.  Every one of those gestures calls this.
+        """
+        self.bench_instance = None
 
     @S.guard
     def begin_bench_box(self, instance: str) -> None:
@@ -348,7 +358,10 @@ class EditMixin:
         if getattr(self.session, "editing_instance", None) == instance:
             return
         if not self.can_leave_edit():
+            self.task_card.select_instance(
+                getattr(self.session, "editing_instance", None) or "")
             return
+        self.disarm_bench()
         if self._is_bench_item(instance):
             self.begin_bench_box(instance)
             return
@@ -459,179 +472,4 @@ class EditMixin:
             _masks.remove_small_components(mask, DESPECKLE_MIN_PX), undoable=True
         )
         self.report(f"removed components under {DESPECKLE_MIN_PX} px")
-
-    # --------------------------------------------------------------- commits
-    @S.guard
-    def act_commit(self) -> None:
-        """``Enter``: accept the pending scope, commit the edit, or store the ROI."""
-        if self._pending_scope is not None:
-            self._commit(self._pending_scope)
-            return
-        if getattr(self.session, "editing_instance", None) is not None \
-                and self.session.editing_mask() is not None:
-            scope = self.session.suggest_scope()
-            if scope == api.SCOPE_KEYFRAME:
-                self._commit(scope)
-            else:
-                self._offer_scope(scope)
-            return
-        if self.roi_editing:
-            self.accept_roi()
-
-    @S.guard
-    def commit_with_suggested_scope(self) -> None:
-        """Commit straight away with whatever the session suggests, no bar.
-
-        The close dialog's "Save": there is no non-modal conversation left to
-        have, so a layering or split suggestion is written as suggested rather
-        than parked behind a bar nobody will read.
-        """
-        if getattr(self.session, "editing_instance", None) is None:
-            return
-        self._pending_scope = None
-        self._commit(self.session.suggest_scope())
-
-    @S.guard
-    def act_commit_override(self) -> None:
-        """``Alt+Enter``: this frame only."""
-        self._commit(api.SCOPE_FRAME_OVERRIDE)
-
-    @S.guard
-    def act_commit_split(self) -> None:
-        """``Ctrl+K``: a new shape version from this step on."""
-        self._commit(api.SCOPE_SPLIT)
-
-    def scope_bar_text(self) -> str:
-        """What the non-modal scope bar is currently saying."""
-        return self.scope_bar.label.text()
-
-    def _offer_scope(self, scope: str) -> None:
-        """Show the suggestion and its alternatives without blocking the canvas."""
-        self._pending_scope = scope
-        # A layering statement reaches frames too -- the session answers for a
-        # pair override the same way it answers for pixels -- so the strip says
-        # so for every scope now.
-        counts = compat.preview(self.session, scope)
-        detail = ""
-        if counts:
-            detail = (f"，影响 {len(counts.get('steps', []))} 帧 / 将产生 "
-                      f"{len(counts.get('verified_steps', []))} 个冲突")
-        self.scope_bar.show_text(f"建议范围 {scope}{detail}")
-        self.report(f"suggested scope: {scope}")
-
-    def _commit(self, scope: str) -> None:
-        """Write the edit, or show why the session will not take it.
-
-        A refusal -- "this part is on the bench, use the bench box" -- is an
-        ordinary answer, not a failure: it keeps the editing layer so the
-        annotator can press ``R`` and draw the box instead, and it does not go
-        through the exception path, which would log a traceback for something
-        the annotator simply has to read.
-        """
-        instance = getattr(self.session, "editing_instance", None)
-        if instance is None:
-            self.report("nothing is being edited")
-            return
-        key = self.session.current()
-        try:
-            result = self.session.commit_edit(scope) or {}
-        except ValueError as refused:
-            self._pending_scope = None
-            self.scope_bar.hide()
-            self.report_error(f"refused: {refused}")
-            return
-        self._pending_scope = None
-        self.scope_bar.hide()
-        self.session.clear_edit()
-        self.drop_sidecar(key, instance)
-        self.set_sam_instance(None)
-        self._sync_editing_layer()
-        self.refresh_overlay()
-        # No re_explain() here: committing re-renders the frame, which clears
-        # assist_result, so a re-split would run against nothing.  The real one
-        # happens at confirm time, where the answer is actually used.
-        self.report(f"committed ({scope}): {result.get('changed', '')}".strip())
-
-    @S.guard
-    def act_clear_edit(self) -> None:
-        """``Esc``: drop the editing layer, or abandon the ROI rectangle."""
-        instance = getattr(self.session, "editing_instance", None)
-        if instance is not None:
-            key = self.session.current()
-            self.session.clear_edit()
-            self.drop_sidecar(key, instance)
-            self._restore_offer = None
-            self.restore_bar.hide()
-            self._pending_scope = None
-            self.scope_bar.hide()
-            self.set_sam_instance(None)
-            self._sync_editing_layer()
-            self.report("edit discarded")
-            return
-        if self.roi_editing:
-            self.cancel_roi_edit()
-            self.report("ROI unchanged")
-
-    @S.guard
-    def act_confirm(self) -> bool:
-        """``Space``: verify the frame; on refusal the problems are shown, not a dialog.
-
-        The unexplained differences are re-derived *here*, against what the frame
-        holds now, and only what is still unexplained goes to the review queue.
-        If the comparison has not come back yet it is finished synchronously
-        under a short cap; if even that fails the step is recorded as "not
-        analysed" rather than as "nothing unexplained", which would quietly
-        claim the frame had been checked.
-        """
-        if not self.can_leave_edit():
-            return False      # confirming steps the frame back: same gate
-        step = self.session.current().step
-        blobs = self.unexplained_at_confirm()
-        ok = self.task_card.confirm()
-        if ok:
-            self.hand_over_unexplained(step, blobs)
-            self.report(f"step {step} confirmed")
-        else:
-            problems = self.task_card.problems()
-            self.report(f"step {step} is not complete: {'; '.join(problems) or 'see the task card'}")
-        return bool(ok)
-
-    # ------------------------------------------------------------------ undo
-    @S.guard
-    def act_undo(self) -> None:
-        self._history(self.session.undo(), "undo")
-
-    @S.guard
-    def act_redo(self) -> None:
-        self._history(self.session.redo(), "redo")
-
-    def _history(self, moved: bool, what: str) -> None:
-        if not moved:
-            self.report(f"nothing to {what}")
-            return
-        self.refresh_overlay()
-        self._sync_editing_layer()
-        self.update_status()
-        self.report(what)
-
-    @S.guard
-    def _on_editing_changed(self, mask: object) -> None:
-        """The session moved the editing layer behind our back (undo/redo)."""
-        self._sync_editing_layer()
-
-    # ------------------------------------------------------------ visibility
-    @S.guard
-    def act_set_visibility(self, value: str) -> None:
-        self.instances.set_visibility(value)
-        self.refresh_overlay()
-
-    @S.guard
-    def act_cycle_visibility(self) -> None:
-        self.instances.cycle_visibility()
-        self.refresh_overlay()
-
-    @S.guard
-    def act_toggle_hidden(self) -> None:
-        self.instances.toggle_hidden()
-        self.refresh_overlay()
 

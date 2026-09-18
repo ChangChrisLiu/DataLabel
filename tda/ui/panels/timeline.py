@@ -199,6 +199,15 @@ class TimelinePanel(QWidget):
         item = self._list.currentItem()
         return None if item is None else int(item.data(STEP_ROLE))
 
+    def select_current_step(self) -> None:
+        """Put the highlight back on the frame that is actually open.
+
+        Qt selects the row under the mouse *before* the click reaches anybody,
+        so when the window refuses the move the list is left pointing at a frame
+        the canvas is not showing.  The window calls this on a refusal.
+        """
+        self._select_current()
+
     def step_brush(self, step: int) -> QBrush:
         """The brush the status bar of ``step`` is painted with."""
         item = self._item_for(step)

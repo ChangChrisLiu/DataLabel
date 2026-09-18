@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QApplication
 from tda.core import masks
 from tda.core.model import FrameKey
 from tda.ui import session_api as api
+from tda.ui import session_edit as edit
 from tda.ui.session import AnnotationSession
 from session_scene import (
     CHASSIS,
@@ -421,3 +422,93 @@ def test_the_image_cache_respects_a_byte_budget(qapp, tmp_path, monkeypatch):
         session.goto(step)
         session.image()
     assert 1 <= len(session.image_cache) <= 2
+
+
+# --------------------------------------------------------------------------- #
+# a layering commit never discards the pixels the annotator painted
+# --------------------------------------------------------------------------- #
+def _cooler_shape(session) -> np.ndarray:
+    """The cooler's stored amodal shape, straight out of its keyframe."""
+    kf = session.db.keyframes(DESKTOP, VIEW, COOLER)[-1]
+    return masks.decode_rle(kf.parts[0].rle)
+
+
+def test_going_above_a_neighbour_writes_the_new_pixels_too(two_shapes):
+    """Accepting ``zorder:above:B`` used to store the pair and drop the paint.
+
+    The editing layer is the instance's *amodal* shape, so pixels added inside
+    ``B`` are by definition not in ``A``'s shape yet: an order change alone
+    cannot make them ``A``'s, and the annotator who painted them would watch
+    them vanish.  One gesture, both writes.
+    """
+    added = rect(4, 4, 16, 16)
+    two_shapes.begin_edit(COOLER)
+    two_shapes.set_editing_mask(SMALL | added)
+    assert two_shapes.suggest_scope() == f"zorder:above:{CHASSIS}"
+
+    two_shapes.commit_edit(f"zorder:above:{CHASSIS}")
+
+    assert not (added & ~_cooler_shape(two_shapes)).any()      # the shape grew
+    assert [(p.above, p.below) for p in two_shapes.db.pair_overrides(DESKTOP, VIEW, 1)] \
+        == [(COOLER, CHASSIS)]                                # ... and it is on top
+    row = two_shapes.db.compiled(FrameKey(DESKTOP, 10, VIEW))[COOLER]
+    assert (masks.decode_rle(row["visible_rle"]) & added).any()
+    assert two_shapes.layer.changed() is False                # nothing left uncommitted
+
+
+def test_one_undo_takes_back_both_halves_of_a_layering_commit(two_shapes):
+    """Two writes made by one gesture are one entry in the history (spec 4.6)."""
+    before = _cooler_shape(two_shapes)
+    history = len(two_shapes.undo_stack)
+    two_shapes.begin_edit(COOLER)
+    two_shapes.set_editing_mask(SMALL | rect(4, 4, 16, 16))
+    two_shapes.commit_edit(f"zorder:above:{CHASSIS}")
+    assert len(two_shapes.undo_stack) == history + 1
+
+    assert two_shapes.undo() is True
+
+    assert np.array_equal(_cooler_shape(two_shapes), before)
+    assert two_shapes.db.pair_overrides(DESKTOP, VIEW, 1) == []
+
+
+def test_going_below_a_neighbour_leaves_the_shape_alone(session):
+    """The eraser direction is an order change and nothing else.
+
+    Erased pixels lie in ``A ∩ B``: saying "B was on top all along" hides them
+    without taking them out of ``A``'s amodal shape, so the keyframe must not
+    shrink.
+    """
+    session.goto(10)
+    draw(session, CHASSIS, BIG, api.SCOPE_KEYFRAME)
+    draw(session, COOLER, rect(20, 20, 50, 50), api.SCOPE_KEYFRAME)
+    before = _cooler_shape(session)
+
+    session.begin_edit(COOLER)
+    session.set_editing_mask(rect(20, 20, 50, 50) & ~BIG)
+    session.commit_edit(f"zorder:below:{CHASSIS}")
+
+    assert np.array_equal(_cooler_shape(session), before)
+    assert [(p.above, p.below) for p in session.db.pair_overrides(DESKTOP, VIEW, 1)] == [
+        (CHASSIS, COOLER)
+    ]
+
+
+def test_the_preview_of_a_layering_commit_covers_both_reaches(two_shapes):
+    """"影响 N 帧" has to count the frames the *shape* reaches as well.
+
+    The drive cage is gone by step 11, so the pair can only bite on 1-10 while
+    the cooler's keyframe reaches 1-12: a preview that answered for the pair
+    alone under-reported the edit by two frames.
+    """
+    other = "drive_cage.01"
+    two_shapes.begin_edit(COOLER)
+    two_shapes.set_editing_mask(SMALL | rect(4, 4, 16, 16))
+
+    both = two_shapes.preview(f"zorder:above:{other}")
+
+    pair_only = edit.preview_pair(two_shapes.db, two_shapes.truth,
+                                  two_shapes.current(), COOLER, other)
+    shape_only = edit.preview(two_shapes.db, two_shapes.truth, two_shapes.current(),
+                              COOLER, api.SCOPE_KEYFRAME)
+    assert set(both["steps"]) == set(pair_only["steps"]) | set(shape_only["steps"])
+    assert set(both["steps"]) > set(pair_only["steps"])

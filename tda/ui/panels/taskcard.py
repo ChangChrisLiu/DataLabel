@@ -193,11 +193,24 @@ class TaskCardPanel(QWidget):
         item = self._list.currentItem()
         return None if item is None else str(item.data(INSTANCE_ROLE))
 
+    def select_instance(self, instance: str) -> bool:
+        """Highlight the row of ``instance``; ``False`` when the card has none.
+
+        The window uses it to put the highlight back after refusing an
+        activation: Qt has already moved it by then, and a card pointing at an
+        instance that is not the one being edited is the wrong instruction.
+        """
+        for row in range(self._list.count()):
+            if str(self._list.item(row).data(INSTANCE_ROLE)) == instance:
+                self._list.setCurrentRow(row)
+                return True
+        return False
+
     # -- actions ------------------------------------------------------------
-    def commit(self, scope: str) -> None:
-        """Commit the current edit with one of :data:`api.COMMIT_SCOPES`."""
-        if self._session is not None:
-            self._session.commit_edit(scope)
+    # ``commit(scope)`` is gone: it called ``session.commit_edit`` straight, so
+    # the window never cleared the layer, never dropped the crash sidecar and
+    # never showed the scope bar.  ``Enter`` and the buttons both reach
+    # ``MainWindow.act_commit`` now.
 
     def confirm(self) -> bool:
         """Confirm the frame; on refusal show the problems the session sent.

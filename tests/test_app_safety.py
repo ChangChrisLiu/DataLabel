@@ -138,6 +138,10 @@ WAYS_OUT = {
     "steps_saved": lambda w: w.on_steps_saved(DESKTOP),
     "restore_sidecar": lambda w: w.restore_pending(),
     "confirm": lambda w: w.act_confirm(),
+    # Shift+R armed the ROI tool over an uncommitted layer: Esc then discarded
+    # the *pixels* and Enter committed them, while the bar said "Enter 确认"
+    # about a rectangle.
+    "edit_roi": lambda w: w.act_edit_roi(),
 }
 
 
@@ -329,13 +333,14 @@ def test_the_session_refuses_to_confirm_a_frame_with_an_uncommitted_layer(window
     assert session.frame_status(step) != "verified"
 
 
-def test_a_layering_commit_does_not_swallow_painted_pixels(window):
-    """``zorder:`` writes no pixels, so it must not mark painted ones as written.
+def test_a_layering_commit_the_other_way_round_does_not_swallow_pixels(window):
+    """``zorder:below:`` writes no pixels, so it must not mark any as written.
 
-    A direct API user is left holding the mask edit rather than having it
-    silently settled under a statement about z-order; the *window* clears it,
-    because in the window the painted pixels were only ever the gesture that
-    made the session suggest layering in the first place.
+    Erasing where ``B`` lies under ``A`` says "B should have been on top": the
+    pixels stay in ``A``'s amodal shape, they are merely hidden.  A direct API
+    user is therefore left holding the mask edit rather than having it silently
+    settled; the *window* clears it, because there the erasure was only ever the
+    gesture that made the session suggest layering.
     """
     session = window.session
     instance = drawable_instances(window)[0]
@@ -344,13 +349,116 @@ def test_a_layering_commit_does_not_swallow_painted_pixels(window):
     other = [i for i in drawable_instances(window) if i != instance]
     if not other:
         pytest.skip("need a second instance to layer against")
-    session.commit_edit(f"zorder:above:{other[0]}")
+    session.commit_edit(f"zorder:below:{other[0]}")
     assert session.layer.changed()          # still the annotator's to settle
 
     window.task_card.sigRequestEdit.emit(instance)
     paint(window)
-    window._commit(f"zorder:above:{other[0]}")
+    window._commit(f"zorder:below:{other[0]}")
     assert session.editing_instance is None  # the window settles it by clearing
+
+
+# --------------------------------------------------------------------------- #
+# the bench arm is not allowed to outlive the gesture that set it
+# --------------------------------------------------------------------------- #
+def arm_bench(window, monkeypatch, instance: str) -> None:
+    """Activate an ``add_bench_box`` card item for ``instance`` (what R + a card does)."""
+    kind = getattr(api, "KIND_ADD_BENCH_BOX", None)
+    if kind is None:  # pragma: no cover - the session always has it now
+        pytest.skip("the session has no add_bench_box kind yet")
+    monkeypatch.setattr(window.session, "task_card", lambda: [
+        {"instance": instance, "kind": kind, "text": "box it", "done": False},
+    ])
+    window.task_card.refresh()
+    window.task_card.sigRequestEdit.emit(instance)
+    assert window.bench_instance == instance
+
+
+LOSES_THE_ARM = {
+    "frame": lambda w: w.act_step(-1),
+    "view": lambda w: w.act_set_view("oak1"),
+    "desktop": lambda w: w.act_set_desktop(DESKTOP),
+    "mode": lambda w: w.set_mode(A.MODE_REVIEW),
+    "tool": lambda w: w.act_tool("brush"),
+    "escape": lambda w: w.act_clear_edit(),
+}
+
+
+@pytest.mark.parametrize("name", sorted(LOSES_THE_ARM), ids=sorted(LOSES_THE_ARM))
+def test_the_bench_arm_does_not_outlive_the_frame_it_was_set_on(window, monkeypatch, name):
+    """Armed on step 14, dragged on step 13: the box was stored on the wrong frame.
+
+    ``bench_instance`` was only ever cleared by a *successful* drag, so it rode
+    along through frame, view, desktop and mode changes and through every tool
+    switch, waiting to claim somebody else's rectangle.
+    """
+    instance = "cpu_cooler.fan.01"
+    arm_bench(window, monkeypatch, instance)
+    LOSES_THE_ARM[name](window)
+    assert window.bench_instance is None, f"{name} left the bench tool armed"
+
+
+def test_a_bench_drag_with_nothing_armed_needs_a_part_on_the_bench(window, monkeypatch):
+    """``R`` + a drag on a chassis part is a mistake, not a box for it."""
+    rows = [{"key": "cpu_cooler.fan.01", "placement": "in_chassis", "state": "",
+             "visibility": "visible", "z": 0, "cls": "", "hidden": False}]
+    monkeypatch.setattr(window.session, "instance_rows", lambda: rows)
+    window.instances.refresh()
+    window.instances.select_instance("cpu_cooler.fan.01")
+    boxed: list = []
+    monkeypatch.setattr(window.session, "commit_box",
+                        lambda *a, **k: boxed.append(a) or {})
+
+    window.on_bench_box((10.0, 12.0, 40.0, 44.0))
+
+    assert boxed == []
+    assert "bench" in window.status_message() or "台面" in window.status_message()
+
+
+def test_a_bench_drag_with_nothing_armed_boxes_the_selected_bench_part(window, monkeypatch):
+    """A part the frame says is on the bench is exactly what ``R`` is for."""
+    rows = [{"key": "cpu_cooler.fan.01", "placement": "on_bench", "state": "",
+             "visibility": "visible", "z": 0, "cls": "", "hidden": False}]
+    monkeypatch.setattr(window.session, "instance_rows", lambda: rows)
+    window.instances.refresh()
+    window.instances.select_instance("cpu_cooler.fan.01")
+    boxed: list = []
+    monkeypatch.setattr(window.session, "commit_box",
+                        lambda key, box, *a, **k: boxed.append((key, tuple(box))) or {})
+
+    window.on_bench_box((10.0, 12.0, 40.0, 44.0))
+
+    assert boxed == [("cpu_cooler.fan.01", (10.0, 12.0, 40.0, 44.0))]
+
+
+# --------------------------------------------------------------------------- #
+# one owner of Enter and Esc at a time
+# --------------------------------------------------------------------------- #
+def test_enter_stores_the_roi_while_the_roi_bar_is_up(window):
+    """The bar says "Enter 确认" about a rectangle, so Enter must mean that."""
+    start_edit(window)                       # a clean layer, nothing painted
+    window.act_edit_roi()
+    assert window.roi_editing
+    window.roi_draft = (4, 4, 40, 40)
+
+    window.act_commit()
+
+    assert window.roi_editing is False
+    assert window.roi() == (4, 4, 40, 40)
+
+
+def test_esc_drops_the_roi_rectangle_while_the_roi_bar_is_up(window):
+    """... and Esc means the rectangle too, not the instance loaded behind it."""
+    instance = start_edit(window)
+    stored = window.roi()
+    window.act_edit_roi()
+    window.roi_draft = (4, 4, 40, 40)
+
+    window.act_clear_edit()
+
+    assert window.roi_editing is False
+    assert window.roi() == stored
+    assert window.session.editing_instance == instance
 
 
 def test_navigation_is_allowed_again_once_the_edit_is_committed(window):
