@@ -10,13 +10,10 @@ from pathlib import Path
 
 import pytest
 
+from steps_fixtures import seeded_db
 from tda.core.db import Db
-from tda.core.logs import import_log, read_desktop_csv
-from tda.core.states import events_from_actions
 from tda.core.taxonomy import load_taxonomy
 from tda.ui.steps_model import LS_NOTE_PREFIX, EditError, StepTableData, thumb_path
-
-FIXTURES = Path(__file__).resolve().parent / "fixtures" / "logs"
 
 
 # --------------------------------------------------------------------------- #
@@ -27,22 +24,9 @@ def tax():
     return load_taxonomy()
 
 
-def _seed(db: Db, desktop: int, tax) -> None:
-    """Write one desktop's import drafts, as stage S0 does."""
-    rows, meta = read_desktop_csv(FIXTURES / f"desktop_{desktop:02d}.csv")
-    imp = import_log(desktop, rows, meta, tax)
-    db.upsert_desktop(desktop, {"brand": meta.get("brand_model_raw") or ""})
-    db.replace_steps(desktop, imp.steps, imp.actions)
-    for inst in imp.instances.values():
-        db.upsert_instance(inst)
-    db.replace_events(desktop, events_from_actions(imp.instances, imp.actions, tax))
-
-
 @pytest.fixture
 def db(tmp_db_path, tax) -> Db:
-    conn = Db(tmp_db_path)
-    _seed(conn, 13, tax)
-    _seed(conn, 63, tax)
+    conn = seeded_db(tmp_db_path, tax)
     yield conn
     conn.close()
 
@@ -237,6 +221,30 @@ def test_change_target_rejects_an_unknown_class(data):
         data.change_target(42, cls="flux_capacitor")
 
 
+def test_change_target_rejects_a_role_outside_the_class_vocabulary(data):
+    with pytest.raises(EditError) as err:
+        data.change_target(42, cls="screw", attrs={"role": "mainboard"})
+    assert "motherboard" in str(err.value)  # the message lists what is allowed
+    assert not any(k.startswith("screw.mainboard") for k in data.instances)
+
+
+def test_change_target_rejects_a_kind_outside_the_class_vocabulary(data):
+    with pytest.raises(EditError):
+        data.change_target(42, cls="expansion_card", attrs={"kind": "soundcard"})
+
+
+def test_change_target_rejects_a_discriminator_the_class_does_not_have(data):
+    with pytest.raises(EditError) as err:
+        data.change_target(42, cls="motherboard", attrs={"kind": "atx"})
+    assert "kind" in str(err.value)
+
+
+def test_change_target_accepts_a_free_form_discriminator(data):
+    """``ram_latch.of`` is an open list, so the taxonomy states no vocabulary."""
+    key = data.change_target(17, cls="ram_latch", attrs={"of": "ram_module.01"})
+    assert key == "ram_latch.05"
+
+
 def test_change_target_accepts_a_virtual_cable_node(data):
     key = data.change_target(42, target="cable:psu", verb="release")
     assert key == "cable:psu"
@@ -411,66 +419,6 @@ def test_issues_flag_a_failed_step_without_a_reason(data):
     assert any("failure_reason" in i for i in data.row(3).issues)
 
 
-def test_issues_flag_an_instance_no_action_targets_any_more(data):
-    data.change_target(4, target="screw.cpu_cooler.01")  # step 4 leaves .02 behind
-    assert data.orphans == ["no action references screw.cpu_cooler.02 - "
-                            "delete it or retarget a step at it"]
-    assert data.issues[-1] == data.orphans[0]
-
-
-def test_the_implicit_chassis_is_never_reported_as_an_orphan(data):
-    assert "chassis" in data.instances
-    assert not any("chassis" in text for text in data.orphans)
-
-
-# --------------------------------------------------------------------------- #
-# delete_instance
-# --------------------------------------------------------------------------- #
-def test_delete_instance_drops_an_orphan_and_clears_the_references_to_it(db, data, tax):
-    data.apply_instance_edit("screw.cpu_cooler.01", "parent", "screw.cpu_cooler.02")
-    data.change_target(4, target="screw.cpu_cooler.01")
-    data.delete_instance(db, "screw.cpu_cooler.02")
-
-    assert "screw.cpu_cooler.02" not in data.instances
-    assert data.instances["screw.cpu_cooler.01"].parent is None
-    assert data.orphans == []
-    assert "screw.cpu_cooler.02" not in db.instances(13)
-
-
-def test_delete_instance_refuses_while_a_step_still_targets_it(db, data):
-    with pytest.raises(EditError) as err:
-        data.delete_instance(db, "screw.cpu_cooler.02")
-    assert "step(s) 4" in str(err.value)
-    assert "screw.cpu_cooler.02" in data.instances
-
-
-def test_delete_instance_refuses_while_a_keyframe_references_it(db, data):
-    from tda.core.model import ShapeKeyframe, ShapePart
-
-    data.change_target(4, target="screw.cpu_cooler.01")
-    db.add_keyframe(ShapeKeyframe(None, "screw.cpu_cooler.02", 13, "oak1", 0, 9,
-                                  parts=[ShapePart("main")]))
-    with pytest.raises(EditError) as err:
-        data.delete_instance(db, "screw.cpu_cooler.02")
-    assert "oak1" in str(err.value)
-    assert "screw.cpu_cooler.02" in data.instances
-
-
-def test_delete_instance_refuses_while_a_relation_references_it(db, data):
-    data.change_target(4, target="screw.cpu_cooler.01")
-    db.add_relation(13, "fastened_by", "cpu_cooler.fan.01", "screw.cpu_cooler.02")
-    with pytest.raises(EditError) as err:
-        data.delete_instance(db, "screw.cpu_cooler.02")
-    assert "fastened_by" in str(err.value)
-
-
-def test_delete_instance_refuses_the_chassis_and_unknown_keys(db, data):
-    with pytest.raises(EditError):
-        data.delete_instance(db, "chassis")
-    with pytest.raises(EditError):
-        data.delete_instance(db, "nope.01")
-
-
 # --------------------------------------------------------------------------- #
 # notes: the imported Label Studio lines are preserved
 # --------------------------------------------------------------------------- #
@@ -619,3 +567,15 @@ def test_thumb_path_tolerates_a_missing_cache_root():
 def test_thumb_path_of_step_zero_is_none(tmp_path):
     """There is no frame before step 1, so the "before" cell stays empty."""
     assert thumb_path(tmp_path, 13, 0) is None
+
+
+def test_thumb_path_agrees_with_the_cache_module(tmp_path):
+    """Drift guard: the panel must look where :mod:`tda.core.cache` writes."""
+    from tda.core.cache import cache_path
+    from tda.core.model import FrameKey
+
+    key = FrameKey(13, 4, "scan")
+    expected = Path(cache_path(tmp_path, key, "png"))
+    expected.parent.mkdir(parents=True)
+    expected.write_bytes(b"x")
+    assert thumb_path(tmp_path, key.desktop, key.step, key.view) == expected

@@ -392,14 +392,72 @@ def test_split_menu_entry_asks_for_the_count(qapp, db, tmp_path, tax, monkeypatc
     widget.deleteLater()
 
 
-def test_retarget_menu_entry_creates_a_new_instance(panel, monkeypatch):
+def _fake_get_item(monkeypatch, answers: list[str], asked: list):
+    """Answer successive ``QInputDialog.getItem`` calls, recording the choices."""
     from PySide6.QtWidgets import QInputDialog
 
-    monkeypatch.setattr(QInputDialog, "getItem", staticmethod(lambda *a, **k: ("screw", True)))
-    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("motherboard", True)))
+    replies = iter(answers)
+
+    def fake(parent, title, label, items, current=0, editable=False):
+        asked.append((label, list(items)))
+        return next(replies), True
+
+    monkeypatch.setattr(QInputDialog, "getItem", staticmethod(fake))
+    monkeypatch.setattr(
+        QInputDialog, "getText",
+        staticmethod(lambda *a, **k: pytest.fail("the retarget dialog must not ask for free text")),
+    )
+
+
+def test_retarget_menu_entry_offers_the_class_vocabulary(panel, monkeypatch):
+    asked: list = []
+    _fake_get_item(monkeypatch, ["screw", "motherboard"], asked)
     panel.steps_menu(2).actions()[3].trigger()
+
     assert panel.data.row(3).actions[0].target == "screw.motherboard.07"
     assert "screw.motherboard.07" in panel.instances_model.keys
+    assert asked[0][0] == "Taxonomy class:"
+    assert asked[1][0] == "Role:"
+    assert asked[1][1] == ["motherboard", "cpu_cooler", "cooler_bracket", "drive",
+                           "optical_drive", "card", "psu", "other"]
+
+
+def test_retarget_menu_entry_skips_the_vocabulary_for_a_class_without_one(panel, monkeypatch):
+    asked: list = []
+    _fake_get_item(monkeypatch, ["motherboard"], asked)
+    panel.steps_menu(41).actions()[3].trigger()  # step 42
+
+    assert len(asked) == 1  # a motherboard has no role and no kind
+    assert panel.data.row(42).actions[0].target == "motherboard.02"
+
+
+def test_retarget_refuses_a_discriminator_outside_the_vocabulary(panel):
+    panel.retarget_new(3, "screw", "mainboard")
+    assert "Rejected" in panel.status.text()
+    assert panel.data.row(3).actions[0].target == "screw.cpu_cooler.01"
+
+
+def test_a_command_reports_an_unexpected_exception(panel, monkeypatch):
+    monkeypatch.setattr(
+        panel.data, "add_action",
+        lambda step: (_ for _ in ()).throw(RuntimeError("the disk went away")),
+    )
+    panel.add_action(3)
+    assert "RuntimeError" in panel.status.text()
+    assert "the disk went away" in panel.status.text()
+
+
+def test_the_issues_cell_of_a_split_row_repaints_from_a_later_action(panel):
+    """Step-level cells live on the first row, so the whole step must repaint."""
+    model = panel.steps_model
+    panel.add_action(3)
+    first = model.first_row_of(3)
+    spans: list[tuple[int, int]] = []
+    model.dataChanged.connect(lambda tl, br, *_: spans.append((tl.row(), br.row())))
+
+    assert model.setData(model.index(first + 1, _column(model, "Result")), "failed", Qt.EditRole)
+    assert any(top <= first <= bottom for top, bottom in spans)
+    assert "failure_reason" in model.index(first, _column(model, "Issues")).data()
 
 
 def test_instances_context_menu_deletes_the_row(panel):

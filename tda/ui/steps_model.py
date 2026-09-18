@@ -26,7 +26,7 @@ from typing import Any, Optional
 
 from tda.core.db import Db
 from tda.core.logs import CHASSIS_KEY, UNRESOLVED, instance_key
-from tda.core.model import VIEWS, ActionRec, InstanceRec, StepRec, StepType
+from tda.core.model import ActionRec, InstanceRec, StepRec, StepType
 from tda.core.states import (
     CABLE_CLASS,
     CABLE_PREFIX,
@@ -34,11 +34,14 @@ from tda.core.states import (
     validate_events,
 )
 from tda.core.taxonomy import Taxonomy, load_taxonomy, parse_raw_name
-from tda.ui.steps_issues import orphan_issues, row_issues
+from tda.ui.steps_delete import delete_instance
+from tda.ui.steps_issues import dangling_issues, orphan_issues, row_issues
 from tda.ui.steps_values import (
+    DISCRIMINATORS,
     FAILURE_REASONS,
     GROUP_ORDERS,
     LS_NOTE_PREFIX,
+    RELATION_FIELDS,
     RESULTS,
     SCREW_HEADS,
     STEP_TYPES,
@@ -72,8 +75,6 @@ __all__ = [
 DEFAULT_VERB = "remove"
 
 _ACTION_FIELDS = ("verb", "tool", "direction", "result", "failure_reason", "difficulty")
-#: Instance fields holding another instance's key.
-_RELATION_FIELDS = ("parent", "mounted_on", "fastens", "socket_host")
 #: Relations only one class may carry (spec 7.1).
 _RELATION_CLASS = {"fastens": "screw", "socket_host": "connector"}
 _ATTR_FIELDS = ("head", "captive")
@@ -323,7 +324,7 @@ class StepTableData:
         inst = self.instances.get(key)
         if inst is None:
             raise EditError(f"D{self.desktop:02d} has no instance {key!r}")
-        if field in _RELATION_FIELDS:
+        if field in RELATION_FIELDS:
             self._set_relation(inst, field, value)
         elif field == "cable":
             text = text_of(value)
@@ -394,37 +395,13 @@ class StepTableData:
 
     # -- saving ------------------------------------------------------------ #
     def delete_instance(self, db: Db, key: str) -> None:
-        """Drop an instance nothing points at any more.
+        """Drop an instance nothing points at any more, writing straight through.
 
-        Refused while a step still targets it, while any view holds a shape
-        keyframe for it, or while a constraint edge mentions it (spec 7.1) --
-        deleting it then would orphan geometry or break the graph. References
-        from *other instances* (``parent``, ``fastens``...) are cleared instead,
-        because they are attributes of those rows, not of this one.
+        See :mod:`tda.ui.steps_delete` for what is refused, what goes with the
+        identity row and why the neighbours are repaired from their stored
+        records rather than from memory.
         """
-        if key not in self.instances:
-            raise EditError(f"D{self.desktop:02d} has no instance {key!r}")
-        if key == CHASSIS_KEY:
-            raise EditError("the chassis is implicit and cannot be deleted")
-        steps = sorted({a.step for a in self.actions if a.target == key})
-        if steps:
-            raise EditError(
-                f"{key!r} is still the target of step(s) {', '.join(map(str, steps))}"
-            )
-        for view in VIEWS:
-            if db.keyframes(self.desktop, view, key):
-                raise EditError(f"{key!r} still has shape keyframes in view {view!r}")
-        for rel in db.relations(self.desktop):
-            if key in (rel.get("target"), rel.get("blocker")):
-                raise EditError(f"{key!r} is still used by a {rel.get('type')!r} constraint edge")
-
-        del self.instances[key]
-        for other in self.instances.values():
-            for field_name in _RELATION_FIELDS:
-                if getattr(other, field_name) == key:
-                    setattr(other, field_name, None)
-        db.delete_instance(self.desktop, key)
-        self.refresh_issues()
+        delete_instance(self, db, key)
 
     def save(self, db: Db) -> list[str]:
         """Write the session back and recompile the automatic state events.
@@ -455,7 +432,9 @@ class StepTableData:
         """
         for row in self.rows:
             row.issues = list(row_issues(row, self.tax, self.class_of))
-        self.orphans = list(orphan_issues(self.instances, self.actions))
+        self.orphans = list(orphan_issues(self.instances, self.actions)) + list(
+            dangling_issues(self.instances, self.tax)
+        )
 
     # -- helpers ----------------------------------------------------------- #
     def _action(self, row: StepRow, idx: int) -> ActionRec:
@@ -531,6 +510,7 @@ class StepTableData:
             raise EditError(f"{cls!r} is not a taxonomy class")
         self._check_verb(verb, cls, f"new {cls}")
         attrs = {k: v for k, v in attrs.items() if k != "instance_nos"}
+        self._check_discriminator(cls, attrs)
         key = instance_key(cls, attrs, self._next_ordinal(cls, attrs, staged))
         if key in self.instances or key in staged:  # only `chassis`, unique per desktop
             raise EditError(f"D{self.desktop:02d} already has an instance {key!r}")
@@ -543,6 +523,42 @@ class StepTableData:
             cable=f"{CABLE_PREFIX}{owner}" if owner else None,
             raw_names=[raw_name] if raw_name else [],
         )
+
+    def _check_discriminator(self, cls: str, attrs: dict) -> None:
+        """The ``role`` / ``kind`` of a new instance must be one the class has.
+
+        It becomes part of the instance key, so a typo would silently start a
+        parallel ordinal run (``screw.mainboard.01`` next to
+        ``screw.motherboard.07``). The rule lives here rather than in the
+        dialog, so it holds however the instance is created. A class whose
+        taxonomy entry lists the attribute with an empty value list (e.g.
+        ``ram_latch.of``) accepts anything -- that list is deliberately open.
+        """
+        defined = self.tax.classes[cls].get("attrs") or {}
+        for name in DISCRIMINATORS:
+            value = attrs.get(name)
+            if value is None:
+                continue
+            if name not in defined:
+                raise EditError(f"class {cls!r} has no {name!r} attribute")
+            allowed = defined[name]
+            if allowed and value not in allowed:
+                raise EditError(
+                    f"{value!r} is not a {name} of {cls!r} ({', '.join(map(str, allowed))})"
+                )
+
+    def discriminator_of(self, cls: str) -> tuple[str, list[str]]:
+        """The class's key discriminator and its vocabulary, or ``("", [])``.
+
+        What the retarget dialog offers: ``("role", [...])`` for a screw,
+        ``("kind", [...])`` for a drive or a connector, nothing for a class
+        that carries no discriminator at all.
+        """
+        defined = self.tax.classes.get(cls, {}).get("attrs") or {}
+        for name in DISCRIMINATORS:
+            if name in defined:
+                return name, [str(v) for v in defined[name]]
+        return "", []
 
     def _next_ordinal(self, cls: str, attrs: dict, staged: frozenset | set = frozenset()) -> int:
         """One past the highest ordinal among the instances of the same group."""

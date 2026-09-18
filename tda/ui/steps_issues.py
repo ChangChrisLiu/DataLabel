@@ -15,7 +15,10 @@ What is asked about:
 * a difficulty outside 1-5, a failed attempt without a ``failure_reason`` and a
   ``failure_reason`` on a successful one (spec 3.1);
 * an instance no action targets any more -- retargeting a row leaves its old
-  instance behind, and nothing else would ever mention it again.
+  instance behind, and nothing else would ever mention it again;
+* an instance whose ``parent`` / ``mounted_on`` / ``fastens`` / ``socket_host``
+  names something that is not an instance, so a stale pointer can never sit in
+  the table unnoticed.
 """
 from __future__ import annotations
 
@@ -24,9 +27,9 @@ from typing import Callable, Iterable, Iterator, Optional
 from tda.core.logs import CHASSIS_KEY, NO_ACTION_TYPES, UNRESOLVED
 from tda.core.model import ActionRec, InstanceRec, StepType
 from tda.core.taxonomy import Taxonomy
-from tda.ui.steps_values import DIFFICULTY_MAX, DIFFICULTY_MIN
+from tda.ui.steps_values import DIFFICULTY_MAX, DIFFICULTY_MIN, RELATION_FIELDS
 
-__all__ = ["action_issues", "orphan_issues", "row_issues"]
+__all__ = ["action_issues", "dangling_issues", "orphan_issues", "row_issues"]
 
 #: ``StepTableData.class_of``: the taxonomy class of a target, when knowable.
 ClassOf = Callable[[str], Optional[str]]
@@ -72,3 +75,24 @@ def orphan_issues(
     for key in sorted(instances):
         if key != CHASSIS_KEY and key not in targeted:
             yield f"no action references {key} - delete it or retarget a step at it"
+
+
+def dangling_issues(instances: dict[str, InstanceRec], tax: Taxonomy) -> Iterator[str]:
+    """Relations pointing at something that is not an instance of this desktop.
+
+    A bare taxonomy class name is *not* dangling: the log importer writes
+    ``socket_host = "motherboard"`` when it knows which class carries the
+    socket but not which instance, and every motherboard-side connector of
+    every desktop comes out that way. Narrowing those down is ordinary S1 work,
+    not a broken pointer -- whereas a key like ``screw.cpu_cooler.02`` that no
+    longer exists always is one, and is what this catches.
+    """
+    for key in sorted(instances):
+        inst = instances[key]
+        for name in RELATION_FIELDS:
+            value = getattr(inst, name)
+            if value and value not in instances and value not in tax.classes:
+                yield (
+                    f"{key}.{name} points at {value}, which is not an instance "
+                    f"- clear it or recreate the instance"
+                )

@@ -56,6 +56,7 @@ from tda.ui.panels.steptable_models import (
     StepTableModel,
 )
 from tda.ui.steps_model import EditError, StepTableData, thumb_path
+from tda.ui.steps_values import DISCRIMINATORS
 
 __all__ = [
     "BLANK",
@@ -218,11 +219,13 @@ class StepTablePanel(QWidget):
 
         ``disc`` is the class's discriminator -- ``role`` for a screw, ``kind``
         for everything else that has one -- and decides which ordinal run the
-        new key continues.
+        new key continues. The view-model checks it against the class's
+        vocabulary, so a value from anywhere but the dialog is checked too.
         """
         attrs = {}
         if disc:
-            attrs["role" if cls == "screw" else "kind"] = disc
+            name, _vocabulary = self.data.discriminator_of(cls)
+            attrs[name or DISCRIMINATORS[0]] = disc
         self._command(
             lambda: self.data.change_target(step, action_idx=action_idx, cls=cls, attrs=attrs),
             f"Retargeted step {step}.",
@@ -233,11 +236,18 @@ class StepTablePanel(QWidget):
         self._command(lambda: self.data.delete_instance(self.db, key), f"Deleted {key}.")
 
     def _command(self, run, done: str) -> None:
-        """Run one structural command, then rebuild both tables and the issues."""
+        """Run one structural command, then rebuild both tables and the issues.
+
+        A refused command shows its reason; anything unexpected shows its type
+        as well, and neither takes the panel down.
+        """
         try:
             run()
         except EditError as error:
             self._show_error(str(error))
+            return
+        except Exception as error:
+            self._show_error(f"{type(error).__name__}: {error}")
             return
         self.steps_model.refresh_structure()
         self.instances_model.refresh_structure()
@@ -293,16 +303,26 @@ class StepTablePanel(QWidget):
             self.split_step(step, count)
 
     def _prompt_retarget(self, step: int, action_idx: int) -> None:
+        """Ask for the class, then for its discriminator from a closed list.
+
+        A class that carries no ``role``/``kind`` -- a motherboard, a CPU --
+        skips the second question instead of inviting free text that would
+        silently start a parallel ordinal run.
+        """
         cls, ok = QInputDialog.getItem(
             self, "New instance", "Taxonomy class:", sorted(self.tax.classes), 0, False
         )
         if not ok or not cls:
             return
-        disc, ok = QInputDialog.getText(
-            self, "New instance", "Role / kind (optional):"
-        )
-        if ok:
-            self.retarget_new(step, cls, disc.strip(), action_idx)
+        name, vocabulary = self.data.discriminator_of(cls)
+        disc = BLANK
+        if vocabulary:
+            disc, ok = QInputDialog.getItem(
+                self, "New instance", f"{name.capitalize()}:", vocabulary, 0, False
+            )
+            if not ok:
+                return
+        self.retarget_new(step, cls, disc, action_idx)
 
     # -- feedback ---------------------------------------------------------- #
     def _on_data_changed(self, *_args) -> None:

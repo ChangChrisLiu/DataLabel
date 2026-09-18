@@ -288,6 +288,25 @@ class StepTableModel(_TableModel):
         position, action_idx = self._map[index.row()]
         return self.data_model.rows[position], action_idx
 
+    def _span(self, view_row: int) -> tuple[int, int]:
+        """The first and last view row of the step ``view_row`` belongs to."""
+        first = view_row - self.action_at(view_row)
+        last = first
+        while last + 1 < len(self._map) and self._map[last + 1][1] > 0:
+            last += 1
+        return first, last
+
+    def _changed(self, index: QModelIndex) -> bool:
+        """Repaint the whole step, not just the edited action's row.
+
+        The step-level cells -- the Issues column above all -- are drawn on the
+        step's *first* row, so editing the second action of a split row has to
+        repaint that first row too or the issue list in the table goes stale.
+        """
+        first, last = self._span(index.row())
+        self.dataChanged.emit(self.index(first, 0), self.index(last, self.columnCount() - 1))
+        return True
+
     # -- Qt ----------------------------------------------------------------- #
     def flags(self, index: QModelIndex) -> Qt.ItemFlags:
         if not index.isValid():

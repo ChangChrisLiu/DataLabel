@@ -20,9 +20,11 @@ from tda.core.model import StepType
 __all__ = [
     "DIFFICULTY_MAX",
     "DIFFICULTY_MIN",
+    "DISCRIMINATORS",
     "FAILURE_REASONS",
     "GROUP_ORDERS",
     "LS_NOTE_PREFIX",
+    "RELATION_FIELDS",
     "RESULTS",
     "SCREW_HEADS",
     "STEP_TYPES",
@@ -45,6 +47,12 @@ GROUP_ORDERS = ("unordered", "sequential", "opposite_pairs")
 SCREW_HEADS = ("PH1", "PH2", "PH3", "T15", "T20", "unknown")
 STEP_TYPES = tuple(t.value for t in StepType)
 DIFFICULTY_MIN, DIFFICULTY_MAX = 1, 5
+
+#: Instance fields that hold another instance's key (spec 7.1).
+RELATION_FIELDS = ("parent", "mounted_on", "fastens", "socket_host")
+#: The attribute that discriminates instances of one class, in priority order;
+#: :func:`tda.core.logs.instance_key` builds the key from the first one present.
+DISCRIMINATORS = ("role", "kind")
 
 #: Prefix of the note lines :mod:`tda.core.ls_import` writes into ``Step.notes``.
 #: Mirrored here so the head-less UI layer does not import the Label Studio
