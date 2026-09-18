@@ -44,6 +44,7 @@ from tda.core.graph_rules import (
 from tda.core.graph_templates import apply_template, save_template
 from tda.core.model import ActionRec, InstanceRec
 from tda.core.states import FrameState, events_from_actions, state_at
+from tda.core.taxonomy import Taxonomy
 
 __all__ = [
     "BLOCKED_MODES",
