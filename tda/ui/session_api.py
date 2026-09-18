@@ -202,12 +202,18 @@ class SessionLike(Protocol):
     def overlay_layers(self):
         """``({instance: visible mask}, bottom-up order)`` for the canvas overlay."""
 
+    def task_neighbour(self) -> int | None:
+        """The annotated frame :meth:`task_card` is diffed against, or ``None``."""
+
     # -- content ------------------------------------------------------------
     def instance_rows(self) -> list[dict]:
         """``{"key","cls","state","placement","visibility","z","hidden"}``, top first."""
 
     def task_card(self) -> list[dict]:
-        """``{"instance","kind","text","done"}`` with ``kind`` in :data:`TASK_KINDS`."""
+        """``{"instance","kind","text","done"}`` with ``kind`` in :data:`TASK_KINDS`.
+
+        The work of the frame on screen, diffed against :meth:`task_neighbour`.
+        """
 
     # -- edits --------------------------------------------------------------
     def begin_edit(self, instance: str) -> None:

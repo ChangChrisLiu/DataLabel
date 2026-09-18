@@ -184,6 +184,10 @@ class StubSession(QObject):
     def task_card(self) -> list[dict]:
         return [dict(r) for r in self._card]
 
+    def task_neighbour(self) -> Optional[int]:
+        later = [s for s in self._steps if s > self._step]
+        return later[0] if later else None
+
     def overlay_layers(self):
         return {}, []
 

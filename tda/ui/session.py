@@ -20,7 +20,7 @@ import logging
 from typing import Callable, Optional
 
 import numpy as np
-from PySide6.QtCore import QCoreApplication, QObject, Signal
+from PySide6.QtCore import QObject, Signal
 
 from tda.core import masks
 from tda.core.compiler import CompiledFrame
@@ -37,18 +37,16 @@ from tda.ui.session_images import ImageCache
 from tda.ui.session_layer import EditingLayer
 from tda.ui import session_rows as rows
 from tda.ui.session_queues import ReviewState
+from tda.ui.session_truth import TruthCacheMixin
 from tda.ui.session_sweep import TruthSweeper
 
-__all__ = ["COMPILED_CACHE_SIZE", "AnnotationSession"]
+__all__ = ["AnnotationSession"]
+
+_MISSING_SHAPE = "missing_shape:"
 
 log = logging.getLogger("tda.session")
 
-#: Compiled frames kept in memory. Four covers the Tab compare between
-#: k and k-1 plus the prefetched next frame, at a few MB of masks each.
-COMPILED_CACHE_SIZE = 4
-
-
-class AnnotationSession(CommitMixin, QObject):
+class AnnotationSession(CommitMixin, TruthCacheMixin, QObject):
     """One annotator's working set: a desktop, a view, and the frame in hand."""
 
     #: The current frame changed; payload is a :class:`~tda.core.model.FrameKey`.
@@ -108,6 +106,9 @@ class AnnotationSession(CommitMixin, QObject):
         self._dirty = False
 
         self.layer = EditingLayer()
+        #: Which way the annotator is walking the teardown. Reverse is the
+        #: order the work is done in (spec 4.2); forward is for repairs.
+        self.browsing = edit.REVERSE
 
         self.undo_stack = UndoStack()
         self._saved_at = self._history_mark()
@@ -290,10 +291,19 @@ class AnnotationSession(CommitMixin, QObject):
         """RGB pixels of the current frame, or ``None`` when it has no image."""
         return self.image_at(self._step) if self._step is not None else None
 
-    def flash_compare(self) -> Optional[np.ndarray]:
-        """The image of step ``k-1``, for the ``Tab`` flash compare (spec 4.5)."""
-        earlier = [s for s in self._available if s < (self._step or 0)]
-        return self.image_at(earlier[-1]) if earlier else None
+    def flash_compare(self, other: bool = False) -> Optional[np.ndarray]:
+        """The image the ``Tab`` flash compares this frame against (spec 4.5).
+
+        By default the frame the task card is about -- :meth:`task_neighbour` --
+        so that flashing shows exactly the difference the card describes.
+        ``other=True`` gives the neighbour on the far side, for a look at where
+        the teardown is going rather than where it came from.
+        """
+        direction = self.browsing
+        if other:
+            direction = edit.FORWARD if direction == edit.REVERSE else edit.REVERSE
+        step = self._neighbour(direction)
+        return None if step is None else self.image_at(step)
 
     def image_at(self, step: int) -> Optional[np.ndarray]:
         """One step's image as RGB, decoded at most once (see :mod:`session_images`)."""
@@ -332,54 +342,6 @@ class AnnotationSession(CommitMixin, QObject):
         return FrameKey(self.desktop, int(step), self.view)
 
     # ---------------------------------------------------------------- content
-    def compiled(self) -> CompiledFrame:
-        """Compiler output for the current frame.
-
-        Kept in memory per step and per edit epoch, so that stepping back and
-        forth between two frames -- which is what the ``Tab`` compare does -- is
-        free, and so that a frame the sweeper compiled ahead of time is used
-        rather than compiled again.
-        """
-        key = self.current()
-        hit = self._compiled.get(key.step)
-        if hit is not None and hit[0] == self._epoch:
-            return hit[1]
-        compiled = self.truth.compile(key)
-        self._keep_compiled(key.step, self._epoch, compiled)
-        return compiled
-
-    def _compile_on_visit(self) -> None:
-        """Bring the frame just opened up to date in the truth table (spec 3.4).
-
-        A commit only compiles the frame in front of the annotator, so the rows
-        of every other frame it reached are stale until somebody looks at them.
-        This is that moment: one frame, and only when its stored rows do not
-        already carry the current inputs' hash.
-        """
-        key = self.current()
-        if key.step not in self._available:
-            return
-        held = self._compiled.get(key.step)
-        if held is not None and held[0] == self._epoch:
-            stored = self.db.compiled(key)
-            if stored and all(row["input_hash"] == held[1].input_hash
-                              for row in stored.values()):
-                return  # the sweeper already brought this frame up to date
-        # one compilation for the whole visit: the refresh hands back the frame
-        # it made its decisions from, which is the one the panels are about to
-        # ask for -- compiling it twice is what made arriving cost 0.9 s
-        stats = self.truth.refresh(key)
-        self.review.problems[key.step] = list(stats["problems"])
-        self.review.invalidate()
-        self._keep_compiled(key.step, self._epoch, stats["compiled"])
-
-    def _keep_compiled(self, step: int, epoch: int, compiled: CompiledFrame) -> None:
-        """Remember one compilation, and what the truth table owes because of it."""
-        self._compiled[int(step)] = (int(epoch), compiled)
-        self.review.problems[int(step)] = list(compiled.problems)
-        while len(self._compiled) > COMPILED_CACHE_SIZE:
-            self._compiled.pop(next(iter(self._compiled)))
-
     def instance_rows(self) -> list[dict]:
         """One row per instance of the current frame, top-most layer first."""
         key = self.current()
@@ -395,12 +357,44 @@ class AnnotationSession(CommitMixin, QObject):
         return rows.overlay_layers(self.compiled(), self._hidden)
 
     def task_card(self) -> list[dict]:
-        """The instructions for stepping from the current frame back to ``k-1``."""
+        """What has to be annotated on the frame in front of the annotator.
+
+        The card describes *this* frame, diffed against the neighbour the
+        annotator came from (:meth:`task_neighbour`): in reverse order that is
+        ``k+1``, which is already done, so the card asks for the parts that are
+        back in the machine on the image being looked at.
+        """
         key = self.current()
-        return edit.task_card_for(
-            self.db, self.tax, key.desktop, key.view, key.step,
-            start_step=self._available[-1] if self._available else None,
-        )
+        return edit.task_card_for(self.db, self.tax, key.desktop, key.view, key.step,
+                                  neighbour=self.task_neighbour())
+
+    def task_neighbour(self) -> Optional[int]:
+        """The annotated frame :meth:`task_card` is diffed against, or ``None``.
+
+        The frame the annotator came from: the next available step in the
+        browsing direction, skipping one with no image.  ``None`` on the start
+        frame, which has nobody behind it and whose card is "draw everything".
+        The window uses the same frame for the difference map and for the
+        ``Tab`` flash, so that all three agree on what is being compared.
+        """
+        return self._neighbour(self.browsing)
+
+    def _neighbour(self, direction: str) -> Optional[int]:
+        if self._step is None:
+            return None
+        if direction == edit.REVERSE:
+            later = [s for s in self._available if s > self._step]
+            return later[0] if later else None
+        earlier = [s for s in self._available if s < self._step]
+        return earlier[-1] if earlier else None
+
+    def browse_reverse(self) -> None:
+        """Walk the teardown backwards, which is the order it is annotated in."""
+        self.browsing = edit.REVERSE
+
+    def browse_forward(self) -> None:
+        """Walk it forwards, to repair a frame that was already done."""
+        self.browsing = edit.FORWARD
 
     def _after_edit(self, result: dict) -> dict:
         """Record the op, refresh the caches and tell the panels (spec 4.6)."""
@@ -468,7 +462,7 @@ class AnnotationSession(CommitMixin, QObject):
             self._invalidate()
             problems = list(self.compiled().problems)
             self.review.problems[key.step] = problems
-            self.sigProblems.emit(problems)
+            self.sigProblems.emit(problems + self._how_to_fix(problems))
             return False
         self._invalidate()
         # exactly one frame change: the step back is the change, and a panel
@@ -482,6 +476,16 @@ class AnnotationSession(CommitMixin, QObject):
         if self.desktop is None:
             return {}
         return coverage(self.db, self.tax, self.desktop, self.view, self._available)
+
+    @staticmethod
+    def _how_to_fix(problems: list[str]) -> list[str]:
+        """Say a blocking problem the way the task card says it.
+
+        ``missing_shape:cpu_cooler.01`` is what the compiler calls it; what the
+        annotator needs to read is which card item to act on, on which frame.
+        """
+        return [f"draw {p.split(':', 1)[1]} on this frame"
+                for p in problems if p.startswith(_MISSING_SHAPE)]
 
     def refresh_all(self) -> dict:
         """Recompile every frame of the open view (spec 3.4).
@@ -557,61 +561,6 @@ class AnnotationSession(CommitMixin, QObject):
         return outcome
 
     # --------------------------------------------------------------- internals
-    def _invalidate(self) -> None:
-        """The annotation inputs changed: everything derived from them is stale."""
-        self._epoch += 1
-        self._compiled.clear()
-        self.review.invalidate()
-
-    # -------------------------------------------------- the background worker
-    def _on_sweep_error(self, step: int, text: str) -> None:
-        """A background re-check failed: say so, and leave the frame pending."""
-        where = "the truth sweeper" if step < 0 else f"step {step}"
-        self.review.invalidate()
-        self.sigSweepError.emit(step, text)
-        self.sigProblems.emit([f"{where}: re-check failed: {text}"])
-
-    def _on_queues_changed(self) -> None:
-        """A re-check finished: its verdict may have changed a status or a queue."""
-        self.review.invalidate()
-        self.sigQueuesChanged.emit()
-
-    def _on_prefetched(self, step: int, epoch: int, compiled: object) -> None:
-        """Adopt a frame the sweeper compiled ahead, unless it went stale."""
-        if epoch == self._epoch and isinstance(compiled, CompiledFrame):
-            self._keep_compiled(step, epoch, compiled)
-
-    def _on_prefetched_image(self, step: int, rgb: object) -> None:
-        """Adopt a frame the sweeper decoded ahead of the annotator reaching it."""
-        key = self._key(step)
-        if key is not None and isinstance(rgb, np.ndarray):
-            self.images.put(key, rgb)
-
-    def _prefetch_next(self) -> None:
-        """Warm the frame the annotator is about to reach: ``k-1`` (spec 4.2).
-
-        Reverse-order annotation always lands there next, and both halves of the
-        cost -- bringing its truth rows up to date and decoding its image -- are
-        done on the sweeper thread, so arriving is free.
-        """
-        if not self.sweeper_enabled or self._step is None:
-            return
-        earlier = [s for s in self._available if s < self._step]
-        if not earlier:
-            return
-        step = earlier[-1]
-        if self._compiled.get(step, (None,))[0] != self._epoch:
-            self.sweeper.prefetch(step, self._epoch)
-
-    def drain_sweeper(self, timeout: float = 30.0) -> bool:
-        """Wait for the background re-checks to finish (tests, exports, quit)."""
-        drained = self.sweeper.wait_idle(timeout)
-        QCoreApplication.processEvents()
-        self.review.invalidate()
-        return drained
-
-    #: The GUI never waits for a prefetch; a test that measures one does.
-    drain_prefetch = drain_sweeper
 
     def _announce(self) -> None:
         """Tell the panels which frame is open and what is wrong with it.

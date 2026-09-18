@@ -75,6 +75,7 @@ __all__ = [
     "placement_of",
     "refresh_steps",
     "settle",
+    "mask_steps",
     "segment_steps",
     "write_zorder",
 ]
@@ -237,17 +238,29 @@ def chain_steps(db: Db, tax: Taxonomy, key: FrameKey, instance: str, seg: int,
 
 
 def segment_steps(db: Db, tax: Taxonomy, key: FrameKey, instance: str, seg: int,
-                  cache: Optional[InputCache] = None) -> list[int]:
-    """Annotatable steps of this pose segment where ``instance`` carries geometry."""
+                  cache: Optional[InputCache] = None,
+                  geom: Optional[str] = None) -> list[int]:
+    """Annotatable steps of this pose segment where ``instance`` carries geometry.
+
+    ``geom`` narrows it to one kind: ``"mask"`` for the steps where the instance
+    is a *layer*, which is the only place the layering can be argued about.
+    """
     instances = instances_of(db, key.desktop, cache)
     out = []
     for rec in db.steps(key.desktop):
         step = rec.step
         if pose_segment_of(db, FrameKey(key.desktop, step, key.view), cache) != seg:
             continue
-        if instance in needs_geom(instances, state_of(db, tax, key.desktop, step, cache), tax):
+        needs = needs_geom(instances, state_of(db, tax, key.desktop, step, cache), tax)
+        if instance in needs and (geom is None or needs[instance] == geom):
             out.append(step)
     return annotatable_steps(db, key.desktop, key.view, out)
+
+
+def mask_steps(db: Db, tax: Taxonomy, key: FrameKey, instance: str, seg: int,
+               cache: Optional[InputCache] = None) -> list[int]:
+    """Steps of this pose segment where ``instance`` is a mask layer."""
+    return segment_steps(db, tax, key, instance, seg, cache, geom=GEOM_MASK)
 
 
 # --------------------------------------------------------------------------- #

@@ -1,10 +1,11 @@
 """Offscreen tests for :class:`tda.ui.session.AnnotationSession` (spec 4.2-4.4).
 
-Navigation, images, the task card, the four edit scopes and the review queues.
-Undo/redo lives in ``test_session_undo.py``, the scope suggestion and the
-main-window interface in ``test_session_scope.py``, and the lazy-truth and
-sweeper behaviour in ``test_session_perf.py``.  The scene every one of them
-drives is ``tests/session_scene.py``.
+Navigation, images, the four edit scopes and the review queues.  The task card
+lives in ``test_session_card.py``, undo/redo in ``test_session_undo.py``, the
+scope suggestion and the main-window interface in ``test_session_scope.py``,
+the sweeper in ``test_session_sweep.py`` and the lazy-truth behaviour and time
+budgets in ``test_session_perf.py``.  The scene all of them drive is
+``tests/session_scene.py``.
 """
 from __future__ import annotations
 
@@ -27,10 +28,8 @@ from session_scene import (
     CHASSIS,
     COOLER,
     DESKTOP,
-    FAN_CONNECTOR,
     HW,
     LAST_STEP,
-    SCREWS,
     VIEW,
     cell,
     draw,
@@ -106,9 +105,9 @@ def test_image_is_rgb_from_the_cache_and_is_reused(session):
     assert session.image() is img  # the LRU hands back the very same array
 
 
-def test_flash_compare_returns_the_previous_step(session):
-    session.goto(10)
-    assert np.array_equal(session.flash_compare(), session.image_at(9))
+def test_flash_compare_shows_the_frame_the_annotator_came_from(session):
+    session.goto(10)  # in reverse order that is k+1, which is already annotated
+    assert np.array_equal(session.flash_compare(), session.image_at(11))
 
 
 def test_image_cache_is_bounded(session):
@@ -121,64 +120,6 @@ def test_image_cache_is_bounded(session):
 def test_thumb_path_points_at_the_cached_image(session):
     path = session.thumb_path(7)
     assert path is not None and Path(path).exists()
-
-
-# --------------------------------------------------------------------------- #
-# task card (spec 4.2)
-# --------------------------------------------------------------------------- #
-def test_task_card_at_step_13_adds_the_cooler_and_its_captive_screws(session):
-    session.goto(13)
-    card = session.task_card()
-    adds = {item["instance"] for item in card if item["kind"] == api.KIND_ADD_SHAPE}
-    assert COOLER in adds
-    assert set(SCREWS) <= adds
-    assert all(item["done"] is False for item in card if item["kind"] == api.KIND_ADD_SHAPE)
-    assert card[0]["instance"] == COOLER  # the parent leads, its children follow
-
-
-def test_task_card_marks_an_item_done_once_the_shape_exists(session):
-    session.goto(13)
-    seed_shapes(session, 12)
-    card = {item["instance"]: item for item in session.task_card()}
-    assert card[COOLER]["done"] is True
-    assert card[SCREWS[0]]["done"] is True
-
-
-def test_task_card_splits_a_keyframe_for_a_latch_and_a_connector(session):
-    session.goto(7)  # step 7 opens the SSD drive latch
-    kinds = {item["instance"]: item["kind"] for item in session.task_card()}
-    assert kinds["drive_latch.01"] == api.KIND_SPLIT_KEYFRAME
-
-    session.goto(12)  # step 12 unplugs the CPU-fan connector
-    kinds = {item["instance"]: item["kind"] for item in session.task_card()}
-    assert kinds[FAN_CONNECTOR] == api.KIND_SPLIT_KEYFRAME
-
-
-def test_task_card_is_state_only_for_an_unscrewed_screw(session):
-    session.goto(3)  # step 3 unscrews the first CPU-cooler screw
-    kinds = {item["instance"]: item["kind"] for item in session.task_card()}
-    assert kinds[SCREWS[0]] == api.KIND_STATE_ONLY
-
-
-def test_task_card_of_the_start_frame_lists_every_instance_needing_geometry(session):
-    card = session.task_card()  # the session opened on the start frame
-    listed = {item["instance"] for item in card}
-    assert CHASSIS in listed
-    assert COOLER in listed  # on the bench at step 14: it needs a box
-    assert all(item["done"] is False for item in card)
-
-
-def test_task_card_of_the_first_step_is_a_single_confirmation(session):
-    session.goto(1)
-    card = session.task_card()
-    assert [item["kind"] for item in card] == [api.KIND_CONFIRM]
-
-
-def test_task_card_says_the_bench_box_ends_here(session):
-    session.commit_box(COOLER, (2.0, 2.0, 12.0, 12.0))  # the start frame draws the box
-    session.goto(13)
-    kinds = [item["kind"] for item in session.task_card() if item["instance"] == COOLER]
-    assert api.KIND_REMOVE_BENCH_BOX in kinds
 
 
 # --------------------------------------------------------------------------- #

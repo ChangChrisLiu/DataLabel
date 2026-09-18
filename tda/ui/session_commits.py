@@ -145,6 +145,12 @@ class CommitMixin:
         """
         if self.editing_instance is None:
             return {"steps": [], "verified_steps": []}
+        pair = edit.split_zorder_scope(scope)
+        if pair is not None:
+            other, above = pair
+            edit.require_instance(self._known_instances(), other)
+            return edit.preview_pair(self.db, self.truth, self.current(),
+                                     self.editing_instance, other)
         geom = GEOM_BOX if edit.placement_of(
             self.db, self.tax, self.current(), self.editing_instance
         ) == ON_BENCH else None
