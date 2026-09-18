@@ -207,6 +207,10 @@ CREATE TABLE IF NOT EXISTS compiled_mask (
     input_hash       TEXT,
     verified_by      TEXT,
     verified_at      TEXT,
+    -- schema_version 2: box rows (a bench part) keep their rectangle here and
+    -- leave visible_rle_json NULL; mask rows do the opposite.
+    geom_type        TEXT    NOT NULL DEFAULT 'mask',
+    box_json         TEXT,
     PRIMARY KEY (desktop, step, view, instance)
 );
 
