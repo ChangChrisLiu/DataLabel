@@ -353,13 +353,10 @@ def cmd_infer_relations(args: argparse.Namespace) -> int:
     from tda.cli import EXIT_ERROR, EXIT_OK, _desktops, _safety_backup, _session
 
     with _session(args, lock=True) as (paths, db):
-        if not args.dry_run:
-            try:
-                _safety_backup(paths, db, "infer-relations",
-                               "it rewrites the relational fields of every desktop")
-            except OSError as exc:  # a full or unwritable backup_dir, no traceback
-                print(f"[infer-relations] backup failed: {exc}; nothing was written")
-                return EXIT_ERROR
+        if not args.dry_run and not _safety_backup(
+                paths, db, "infer-relations",
+                "it rewrites the relational fields of every desktop"):
+            return EXIT_ERROR  # the line is printed and nothing was written
         run = infer_relations_into_db(
             db, load_taxonomy(), _desktops(args), args.dry_run, args.force, log=print,
             add_implied=args.add_implied,

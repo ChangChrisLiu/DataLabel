@@ -612,10 +612,26 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
     # ------------------------------------------------------------ backup/lock
 
     def backup(self, dest_dir: str) -> str:
-        """Copy the live database with the SQLite backup API; returns the new path."""
+        """Copy the live database with the SQLite backup API; returns the new path.
+
+        The file name carries **local** time (``tda_YYYYmmdd_HHMMSS.sqlite``),
+        because the one person who reads these names is looking for "the copy
+        from before lunch" on their own clock; two copies inside the same second
+        are told apart by a ``_1``, ``_2`` suffix. The consequence is that a
+        daylight-saving step back can make one name sort before an older one --
+        the file's own mtime is the authority, not the name.
+
+        What is written is **verified**: a backup nobody checked is worse than
+        none, because it is what makes the ``--force`` run that rewrites the step
+        table look safe. A copy that did not land, or landed empty, is removed
+        again and raises ``OSError`` here rather than being left in
+        ``backup_dir`` looking like a real one; ``sqlite3.Error`` from the copy
+        itself propagates unchanged. Every caller of the safety copy turns both
+        into one printed line and exit 1 (:func:`tda.cli._safety_backup`).
+        """
         dest = Path(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # local time, see above
         out = dest / f"tda_{stamp}.sqlite"
         serial = 1
         while out.exists():
@@ -626,7 +642,23 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
             self.conn.backup(target)
         finally:
             target.close()
+        self._verify_backup(out)
         return str(out)
+
+    @staticmethod
+    def _verify_backup(out: Path) -> None:
+        """Raise unless ``out`` is a file with something in it; clean up if not."""
+        try:
+            size = out.stat().st_size
+        except OSError:
+            raise OSError(f"the backup was not written: {out}") from None
+        if size > 0:
+            return
+        try:
+            out.unlink()
+        except OSError:  # leaving it is bad, but the error below is the point
+            pass
+        raise OSError(f"the backup is empty and was removed again: {out}")
 
     def _read_lock(self) -> Optional[dict]:
         """Parse the lock file, or None when it is missing, unreadable or not an object.

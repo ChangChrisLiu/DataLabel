@@ -121,18 +121,36 @@ def ls_export_path(paths: dict) -> str:
     return os.path.join(paths.get("raw_logs_dir", "raw_logs"), *LS_EXPORT_NAME.split("/"))
 
 
+def _within(target: Path, root: Path) -> bool:
+    """Is ``target`` ``root`` itself or something under it?
+
+    ``resolve()`` has already followed symlinks and ``subst`` drive mappings, so
+    two spellings of one directory arrive here as one path -- except for its
+    *case*, which ``resolve()`` can only repair for components that exist on
+    disk, and ``backup_dir`` usually does not exist before the first backup.
+    ``os.path.normcase`` finishes the job (and is a no-op on a case-sensitive
+    filesystem). The separator is appended before the prefix test so that
+    ``backups_old`` is not read as being inside ``backups``.
+    """
+    root_text = os.path.normcase(str(root)).rstrip("\\/")
+    target_text = os.path.normcase(str(target)).rstrip("\\/")
+    return target_text == root_text or target_text.startswith(root_text + os.sep)
+
+
 def backup_dest(paths: dict, dest: Optional[str] = None) -> str:
     """Where a backup may go: ``backup_dir`` itself or a folder inside it.
 
     ``backup_dir`` is the one place on the read-only ``F:`` drive this tool
     writes to (spec 3.5), so an explicit ``--dest`` is confined to it rather
-    than trusted.
+    than trusted. A configuration without a ``backup_dir`` raises ``ValueError``
+    from :func:`require` -- ``--dest`` narrows that setting, it never replaces
+    it.
     """
     root = Path(require(paths, "backup_dir")).resolve()
     if dest is None:
         return str(root)
     target = Path(dest).resolve()
-    if target != root and root not in target.parents:
+    if not _within(target, root):
         raise ValueError(f"--dest must be inside the configured backup_dir ({root})")
     return str(target)
 

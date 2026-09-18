@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from contextlib import contextmanager
 from typing import Callable, Iterator, Optional
 
@@ -94,10 +95,25 @@ def _session(
         db.close()
 
 
-def _safety_backup(paths: dict, db: Db, command: str, why: str) -> None:
-    """Back the database up before a destructive run, and say where it went."""
-    out = db.backup(P.backup_dest(paths))
+def _safety_backup(paths: dict, db: Db, command: str, why: str) -> bool:
+    """Back the database up before a destructive run; ``False`` when it failed.
+
+    A destructive command that could not make its safety copy must stop before
+    it writes anything, so this swallows the three ways the copy can fail --
+    ``OSError`` (a full, missing or read-only ``backup_dir``), ``sqlite3.Error``
+    (the copy itself) and ``ValueError`` (``paths.yaml`` defines no
+    ``backup_dir``) -- and turns each into the same single line. The caller
+    returns :data:`EXIT_ERROR` immediately; the lock is released by
+    :func:`_session` on the way out either way. No traceback ever reaches the
+    annotator: there is nothing in it they could act on.
+    """
+    try:
+        out = db.backup(P.backup_dest(paths))
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        print(f"[{command}] backup failed: {exc}; nothing was written")
+        return False
     print(f"[{command}] {why}: backed the database up first -> {out}")
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -224,8 +240,9 @@ def cmd_import_logs(args: argparse.Namespace) -> int:
         index = P.read_index(paths, args.index)
         if not index:
             print("[import-logs] no index.json; step durations will stay unset")
-        if args.force:
-            _safety_backup(paths, db, "import-logs", "--force rewrites the step tables")
+        if args.force and not _safety_backup(
+                paths, db, "import-logs", "--force rewrites the step tables"):
+            return EXIT_ERROR
         run = L.import_logs_into_db(
             db, directory, load_taxonomy(), index, _desktops(args), args.force, log=print
         )
@@ -290,9 +307,10 @@ def cmd_import_ls(args: argparse.Namespace) -> int:
                   f"build-index -> load-index -> import-logs -> import-ls; run import-logs "
                   f"first, or pass --allow-missing-steps.")
             return EXIT_ORDER
-        if args.purge_all:
-            _safety_backup(paths, db, "import-ls",
-                           "--purge-all drops every desktop's Label Studio rows")
+        if args.purge_all and not _safety_backup(
+                paths, db, "import-ls",
+                "--purge-all drops every desktop's Label Studio rows"):
+            return EXIT_ERROR
         summary = import_ls_export(
             export, db, load_taxonomy(), P.read_index(paths, args.index),
             progress=args.progress, purge_all=args.purge_all,
@@ -327,9 +345,19 @@ def _add_import_ls(sub) -> None:
 # backup
 # --------------------------------------------------------------------------- #
 def cmd_backup(args: argparse.Namespace) -> int:
-    """Copy the live database into ``backup_dir`` with the SQLite backup API."""
+    """Copy the live database into ``backup_dir`` with the SQLite backup API.
+
+    A bad ``--dest`` is a usage error and goes through :func:`main`; a copy that
+    could not be made or could not be verified is reported like every other
+    backup failure, without a traceback.
+    """
     with _session(args) as (paths, db):
-        out = db.backup(P.backup_dest(paths, args.dest))
+        dest = P.backup_dest(paths, args.dest)
+        try:
+            out = db.backup(dest)
+        except (OSError, sqlite3.Error) as exc:
+            print(f"[backup] backup failed: {exc}")
+            return EXIT_ERROR
         print(f"[backup] wrote {out}")
         return EXIT_OK
 
@@ -337,7 +365,11 @@ def cmd_backup(args: argparse.Namespace) -> int:
 def _add_backup(sub) -> None:
     p = sub.add_parser("backup", help="back the database up into backup_dir")
     p.add_argument("--dest", default=None,
-                   help="a folder inside paths.yaml's backup_dir (the default)")
+                   help="a folder inside paths.yaml's backup_dir (the default). It "
+                        "narrows that setting and never replaces it: without a "
+                        "backup_dir in paths.yaml there is nowhere a backup may go, "
+                        "and any --dest outside it is refused. A differently cased "
+                        "or subst-mapped spelling of the same folder is accepted")
     p.set_defaults(func=cmd_backup)
 
 
