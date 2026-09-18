@@ -19,12 +19,14 @@ from typing import Iterable, Optional
 
 from tda.core.compiler import select_keyframe
 from tda.core.db import Db
-from tda.core.model import FrameKey, ShapeKeyframe
+from tda.core.model import FrameKey, Placement, ShapeKeyframe
 from tda.core.states import needs_geom
 from tda.core.taxonomy import Taxonomy
 from tda.core.truth_inputs import InputCache, instances_of, pose_segment_of, state_of
 
 __all__ = ["FrameCoverage", "coverage"]
+
+ON_BENCH = Placement.ON_BENCH.value
 
 
 @dataclass
@@ -65,9 +67,15 @@ def coverage(db: Db, tax: Taxonomy, desktop: int, view: str, steps: Iterable[int
         seg = pose_segment_of(db, key, cache)
         state = state_of(db, tax, desktop, step, cache)
         hw = _known_hw(db, key)  # once per frame, and never off the image file
+        # the same gate the compiler's inputs use: a part on the bench is only
+        # this view's work where the view can see the staging area (spec 3.3
+        # step 2), so the queues and the timeline agree with the truth table
+        bench = db.bench_roi(desktop, view, seg) is not None
         found = FrameCoverage(step=step)
         for instance, kind in sorted(needs_geom(instances, state, tax).items()):
             placement = state[instance].placement
+            if placement == ON_BENCH and not bench:
+                continue
             found.needed += 1
             chosen = select_keyframe(chains.get((instance, seg, placement), []), step)
             if chosen is not None and _usable(chosen, hw):

@@ -38,7 +38,13 @@ from tda.core.model import (
     StateEvent,
     ZOrderRec,
 )
-from tda.core.states import FrameState, events_from_actions, needs_geom, state_at
+from tda.core.model import Placement
+from tda.core.states import (
+    FrameState,
+    events_from_actions,
+    needs_geom,
+    state_at,
+)
 from tda.core.taxonomy import Taxonomy
 
 __all__ = [
@@ -74,6 +80,8 @@ VIEW_HW: dict[str, tuple[int, int]] = {
 #: Values of ``aux["hw_source"]``: the view's nominal size vs. the real image's.
 HW_INFERRED = "inferred"
 HW_MEASURED = "measured"
+
+ON_BENCH = Placement.ON_BENCH.value
 
 
 # --------------------------------------------------------------------------- #
@@ -312,6 +320,20 @@ def pose_segment_of(db: Db, key: FrameKey, cache: Optional[InputCache] = None) -
 # --------------------------------------------------------------------------- #
 # the whole bundle
 # --------------------------------------------------------------------------- #
+def _seen_here(needs: dict[str, str], state: FrameState,
+               bench_roi) -> dict[str, str]:
+    """Drop what this view cannot see: the staging area, when it has none.
+
+    A part lying on the bench is not annotated on a view without a bench ROI, so
+    it is not an instance of that frame at all -- not missing, not compiled, and
+    not something ``bench_annotated`` is about (spec 4.2 item 1).
+    """
+    if bench_roi is not None:
+        return needs
+    return {inst: kind for inst, kind in needs.items()
+            if state[inst].placement != ON_BENCH}
+
+
 @dataclass
 class FrameInputs:
     """Everything :func:`tda.core.compiler.compile_frame` needs for one frame."""
@@ -336,22 +358,33 @@ class FrameInputs:
 def gather(
     db: Db, tax: Taxonomy, key: FrameKey, cache: Optional[InputCache] = None
 ) -> FrameInputs:
-    """Read one frame's compiler inputs from the database."""
+    """Read one frame's compiler inputs from the database.
+
+    Spec 3.3 step 2 makes the staging area part of the geometry policy: an
+    instance on the bench needs geometry *and only exists as a row* where the
+    view has a bench ROI to see it in. That gate lives here rather than in
+    :func:`tda.core.states.needs_geom`, which is pure and knows nothing about
+    views: the same state machine serves four of them, and only some can see
+    the bench.
+    """
     cache = cache if cache is not None else InputCache()
     instances = instances_of(db, key.desktop, cache)
     state = state_of(db, tax, key.desktop, key.step, cache)
     seg = pose_segment_of(db, key, cache)
+    bench_roi = db.bench_roi(key.desktop, key.view, seg)
+    needs = _seen_here(needs_geom(instances, state, tax), state, bench_roi)
     return FrameInputs(
         key=key,
         hw=frame_hw(db, key),
-        needs=needs_geom(instances, state, tax),
+        needs=needs,
         keyframes=_keyframes_of(db, key.desktop, key.view, cache),
         zorder=_zorder_of(db, key.desktop, key.view, seg, cache),
         overrides=_overrides_of(db, key.desktop, key.view, seg, cache),
         occluders=db.occluders(key),
         frame_overrides=db.frame_overrides(key),
         transform=db.transform(key),
-        placements={inst: st.placement for inst, st in state.items()},
+        placements={inst: st.placement for inst, st in state.items()
+                    if inst in needs or st.placement != ON_BENCH},
         pose_segment=seg,
-        bench_roi=db.bench_roi(key.desktop, key.view, seg),
+        bench_roi=bench_roi,
     )

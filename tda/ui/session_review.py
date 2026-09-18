@@ -10,6 +10,8 @@ Split off :mod:`tda.ui.session` for size; the methods are part of
 """
 from __future__ import annotations
 
+import logging
+
 from tda.core.truth import StaleConflictError
 from tda.core.truth_inputs import instances_of
 from tda.ui.session_coverage import coverage
@@ -17,6 +19,8 @@ from tda.ui import session_api as api
 from tda.ui import session_edit as edit
 
 __all__ = ["ReviewMixin"]
+
+log = logging.getLogger("tda.session")
 
 MISSING_SHAPE = "missing_shape:"
 
@@ -79,13 +83,18 @@ class ReviewMixin:
                 api.KIND_ADD_SHAPE, instance, {}, records.get(instance)))
         return out
 
-    def refresh_all(self) -> dict:
+    def refresh_all(self, force: bool = True) -> dict:
         """Recompile every frame of the open view (spec 3.4).
 
-        The queues of :meth:`queues` are fed by whatever has been compiled so
-        far, so this is what a session calls to fill them in one sweep -- after
-        a bulk import, or when the review panel is opened on a view nobody has
-        visited in this session.
+        This is the session's "I do not trust the cache" button, so by default
+        it **ignores the stored input digests** and derives every frame again --
+        which is what somebody reaches for when the truth table looks wrong.
+        ``force=False`` makes it the cheap pass instead: only the frames whose
+        inputs have actually moved, which is what an export does.
+
+        The sweeper is stopped for the duration, because one drain racing
+        another over the same rows is how a re-check gets retired unchecked; if
+        it will not stop, nothing is done at all.
         """
         running = self.sweeper.is_running
         if not self.sweeper.stop():  # one drain, not two racing over the same rows
@@ -93,8 +102,8 @@ class ReviewMixin:
             raise RuntimeError("the truth sweeper is still running; cannot refresh now")
         try:
             self.truth.run_pending_rechecks(self.desktop, self.view)
-            stats = edit.refresh_steps(self.db, self.truth, self.desktop, self.view,
-                                       self._available)
+            stats = self.truth.refresh_range(self.desktop, self.view, self._available,
+                                             per_step=True, ignore_digest=force)
         finally:
             if running and self.sweeper_enabled:
                 self.sweeper.open(self.desktop, self.view)
@@ -102,6 +111,27 @@ class ReviewMixin:
         self.review.problems.update(stats["problems"])
         self._invalidate()
         return stats
+
+    def retry_rechecks(self) -> int:
+        """Ask for every outstanding re-check again; returns how many.
+
+        The sweeper parks a frame whose re-check kept failing rather than spin
+        on it, so something has to be able to say "try again" -- a button in the
+        review panel, or the next :meth:`open`. Persisted requests are included,
+        since one that outlived a restart is in the same position.
+
+        It only **enqueues**: with the sweeper disabled nothing is drained, and
+        the caller wanting the work done synchronously calls
+        :meth:`~tda.core.truth.TruthService.run_pending_rechecks` instead.
+        """
+        if not self.is_open:
+            return 0
+        steps = sorted(set(self.db.rechecks(self.desktop, self.view))
+                       | set(self.sweeper.parked()))
+        if steps and self.sweeper_enabled:
+            self.sweeper.enqueue(steps)
+        self.review.invalidate()
+        return len(steps)
 
     def queues(self) -> dict[str, list[dict]]:
         """The four review queues of spec 4.4, keyed by :data:`QUEUE_NAMES`."""

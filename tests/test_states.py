@@ -14,6 +14,7 @@ from tda.core.states import (
     InstState,
     diff_states,
     events_from_actions,
+    gone_with_parent,
     initial_state,
     needs_geom,
     state_at,
@@ -292,7 +293,11 @@ def test_state_at_step_zero_is_the_initial_state(instances, cooler_actions, tax)
 
 
 def test_state_at_cascades_a_manually_removed_parent(instances, tax):
-    """A hand-entered parent removal must still take the attached screws along."""
+    """A hand-entered parent removal must still take the attached screws along.
+
+    They leave *inside* the cooler, so the snapshot moves them out of the
+    chassis but nobody is asked to draw them again (user decision C7).
+    """
     manual = [
         _ev(13, COOLER, "state", "installed", "removed", auto=False),
         _ev(13, COOLER, "placement", "in_chassis", "on_bench", auto=False),
@@ -302,7 +307,9 @@ def test_state_at_cascades_a_manually_removed_parent(instances, tax):
         fs[key] == InstState(state="removed", placement="on_bench") for key in COOLER_SCREWS
     )
     geom = needs_geom(instances, fs, tax)
-    assert all(geom[key] == "box" for key in COOLER_SCREWS)
+    assert all(key not in geom for key in COOLER_SCREWS)
+    assert all(gone_with_parent(fs, key) for key in COOLER_SCREWS)
+    assert all(fs[key].left_with == COOLER for key in COOLER_SCREWS)
 
 
 def test_state_at_cascade_closure_is_transitive_and_cycle_safe(tax):
@@ -326,6 +333,63 @@ def test_state_at_cascade_closure_is_transitive_and_cycle_safe(tax):
     fs = state_at(parts, manual, 9, tax)
     assert fs["cooler_bracket.01"] == InstState(state="removed", placement="on_bench")
     assert fs["screw.cooler_bracket.01"] == InstState(state="removed", placement="on_bench")
+
+
+def test_a_child_that_left_on_its_own_keeps_its_own_geometry(instances, tax):
+    """Only the cascade claims a child; its own ``remove`` does not.
+
+    A screw taken out at step 5 is lying in the staging area in its own right.
+    When its parent follows at step 9 it must not silently stop being asked
+    about -- it is not inside the parent, it left first.
+    """
+    early = COOLER_SCREWS[0]
+    events = [
+        _ev(5, early, "state", "loosened", "removed"),
+        _ev(5, early, "placement", "in_chassis", "on_bench"),
+        _ev(9, COOLER, "state", "installed", "removed", auto=False),
+    ]
+    fs = state_at(instances, events, 9, tax)
+    assert fs[early].state == "removed"
+    assert fs[early].left_with is None
+    assert not gone_with_parent(fs, early)
+    assert needs_geom(instances, fs, tax)[early] == "box"
+    # the ones that did go out inside the cooler are claimed by it
+    for key in COOLER_SCREWS[1:]:
+        assert fs[key].left_with == COOLER
+        assert key not in needs_geom(instances, fs, tax)
+
+
+def test_a_connector_parent_never_claims_its_children(tax):
+    """Removing a connector means the cable went out whole (spec 6.3).
+
+    :func:`_cascades_on_removal` excludes it, so the child keeps its own state
+    *and* its mask -- the two must not be able to drift apart.
+    """
+    parts = {
+        r.key: r
+        for r in (
+            _inst("connector.01", "connector", attrs={"kind": "fan"}),
+            _inst("misc_part.01", "misc_part", parent="connector.01", attached=True),
+        )
+    }
+    events = [_ev(4, "connector.01", "state", "plugged", "removed", auto=False)]
+    fs = state_at(parts, events, 4, tax)
+    assert fs["misc_part.01"] == InstState(state="installed", placement="in_chassis")
+    assert fs["misc_part.01"].left_with is None
+    assert not gone_with_parent(fs, "misc_part.01")
+    assert needs_geom(parts, fs, tax)["misc_part.01"] == "mask"
+
+
+def test_walking_back_before_the_removal_clears_the_claim(instances, cooler_actions, tax):
+    events = events_from_actions(instances, cooler_actions, tax)
+    before = state_at(instances, events, 12, tax)
+    after = state_at(instances, events, 13, tax)
+    for key in COOLER_SCREWS:
+        assert before[key] == InstState(state="loosened", placement="in_chassis")
+        assert before[key].left_with is None
+        assert needs_geom(instances, before, tax)[key] == "mask"
+        assert after[key].left_with == COOLER
+        assert key not in needs_geom(instances, after, tax)
 
 
 def test_state_at_cascade_closure_is_a_no_op_on_compiled_logs(

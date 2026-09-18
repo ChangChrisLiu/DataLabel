@@ -260,3 +260,6 @@ class SessionLike(Protocol):
 
     def set_unexplained(self, step: int, boxes) -> None:
         """Record the difference-map regions of one frame that nothing explains."""
+
+    def retry_rechecks(self) -> int:
+        """Re-arm every outstanding truth re-check; returns how many."""

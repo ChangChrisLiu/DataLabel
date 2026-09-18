@@ -31,6 +31,11 @@ table records an action for it.
 
 ``graph_version`` is ``None`` until the constraint graph exists (it is a Plan-B
 module); the field is written now so the JSONL schema does not change later.
+
+The export **writes**: like the COCO one it calls
+:meth:`~tda.core.truth.TruthService.ensure_fresh` per desktop, so the
+compiled rows it reads are complete. A caller therefore needs the
+single-user lock of spec 3.5.
 """
 from __future__ import annotations
 

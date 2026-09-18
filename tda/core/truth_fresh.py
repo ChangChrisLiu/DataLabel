@@ -78,10 +78,20 @@ def _selected(inputs: FrameInputs) -> list[tuple]:
     The same narrowing :func:`tda.core.compiler.compile_frame` does in its step
     3 -- view, desktop, placement, pose segment, then the smallest anchor at or
     after this step -- so the digest moves exactly when the geometry would.
+
+    Two of the compiler's branches are deliberately not mirrored, because
+    :func:`tda.core.truth_inputs.gather` cannot produce them: it always resolves
+    a concrete ``pose_segment`` (so the ``None`` fallback that picks the newest
+    segment and reports ``pose_segment_ambiguous`` is unreachable), and it
+    always fills ``placements`` from the state machine for every instance it put
+    in ``needs`` (so the ``in_chassis`` default never applies). The assert says
+    so rather than leaving the reader to check.
     """
     key = inputs.key
+    assert inputs.pose_segment is not None, "gather always resolves a pose segment"
     out: list[tuple] = []
     for instance in sorted(inputs.needs):
+        assert instance in inputs.placements, "gather fills placements for every need"
         placement = inputs.placements.get(instance, IN_CHASSIS)
         chain = [
             kf for kf in inputs.keyframes.get(instance, ())

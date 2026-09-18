@@ -6,6 +6,7 @@
     python -m tda.cli load-index  [--desktops ...]    # index.json -> frames, pose segments
     python -m tda.cli import-logs [--desktops ...]    # Drive sheets -> steps/actions/...
     python -m tda.cli import-ls   [--export PATH]     # Label Studio export -> drafts
+    python -m tda.cli infer-relations [--dry-run]     # fill empty relational fields
     python -m tda.cli backup                          # SQLite backup API -> backup_dir
     python -m tda.cli status      [--desktop N]       # what the database holds
 
@@ -40,6 +41,7 @@ from typing import Callable, Iterator, Optional
 from tda import pipeline as P
 from tda import pipeline_logs as L
 from tda.cli_app import SUBCOMMANDS as _APP_SUBCOMMANDS
+from tda.cli_relations import _add_infer_relations
 from tda.core.db import Db
 from tda.core.index import build_index, load_index, save_index
 from tda.core.index_report import write_report
@@ -179,6 +181,7 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
         f"- instances: {sum(r.instances for r in imported)}",
         f"- state events: {sum(r.events for r in imported)}",
         f"- step durations from the index: {sum(r.durations for r in imported)}",
+        f"- {L.INFERRED_HEADING}: {sum(len(r.fills) for r in imported)}",
         f"- issues: {sum(len(r.issues) for r in imported)}",
         "",
         "| desktop | brand | steps | n_logged_steps | match | actions | instances "
@@ -210,6 +213,7 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
         else:
             lines.append("- no issues")
         lines.append("")
+        lines.extend(L.inferred_section(r))
     return "\n".join(lines)
 
 
@@ -446,6 +450,7 @@ SUBCOMMANDS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
     _add_load_index,
     _add_import_logs,
     _add_import_ls,
+    _add_infer_relations,
     _add_backup,
     _add_status,
     *_APP_SUBCOMMANDS,

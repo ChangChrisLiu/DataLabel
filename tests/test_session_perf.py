@@ -245,16 +245,16 @@ def test_a_prefetch_that_lands_after_an_edit_is_never_displayed(session):
     assert visible is not None and np.array_equal(visible, cell(0))
 
 
-def test_a_bench_part_without_a_box_is_not_a_missing_shape(session):
-    """Spec 3.3 step 3: a bench part only warns, it never blocks a frame."""
-    session.goto(14)  # the cooler is on the bench here, with no box drawn
+def test_a_bench_part_is_not_this_views_work_without_a_staging_area(session):
+    """Spec 3.3 step 2: on a view with no bench ROI a bench part is not an instance."""
+    session.goto(14)  # the cooler is out of the machine here
     missing = {e["instance"] for e in session.queues()[api.QUEUE_MISSING_SHAPE]
                if e["step"] == 14}
 
     assert CHASSIS in missing  # a chassis instance with no shape does block
     assert COOLER not in missing
     found = session.review.drawn()[14]
-    assert COOLER in found.bench_missing
+    assert COOLER not in found.bench_missing and COOLER not in found.missing
 
 
 def test_the_sweeper_reports_progress(session):

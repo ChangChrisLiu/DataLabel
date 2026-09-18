@@ -1,34 +1,51 @@
 """The constraint graph's vocabulary, and the rules that derive its edges.
 
-This is the bottom of the graph stack: the :class:`Edge` type, the spec 7.2
-semantics, the verb-applicability tables, and the spec 7.3 attribute rules.
-:mod:`tda.core.graph` (the reasoning layer), :mod:`tda.core.graph_plan` (the
-planner) and :mod:`tda.core.graph_templates` (the family templates) all import
-from here, which is what keeps the four modules acyclic;
-:mod:`tda.core.graph` re-exports everything a caller needs.
+The spec 7.2 semantics, the :class:`Edge` type, the verb-applicability tables
+and the spec 7.3 attribute rules. :mod:`tda.core.graph` (the reasoning layer),
+:mod:`tda.core.graph_plan` (the planner) and :mod:`tda.core.graph_templates`
+(the family templates) all import from here, which is what keeps the modules
+acyclic; :mod:`tda.core.graph` re-exports everything a caller needs.
 
-Two functions matter:
+One function matters here: :func:`propose_edges`, the spec 7.3 attribute rules
+(~90% coverage). Everything in this module is pure.
 
-* :func:`propose_edges`          -- the spec 7.3 attribute rules, ~90% coverage.
-* :func:`infer_relational_fields`-- fill the relational fields the log importer
-  leaves empty, so the rules have something to chew on.
-
-Everything is pure except :func:`infer_relational_fields`, which fills blanks on
-the :class:`~tda.core.model.InstanceRec` objects it is given (it never
-overwrites a value that is already there) and reports what it filled.
+Below it sits :mod:`tda.core.graph_infer`: which instance a name means, and the
+heuristics that fill the relational fields those rules read
+(:func:`infer_relational_fields`, :func:`unresolved_relations`). They are
+re-exported here so the import path callers already use keeps working, and the
+dependency runs one way only -- rules import inference, never the reverse.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
+from tda.core.graph_infer import (
+    AMBIGUOUS,
+    LS_PREFIX,
+    NO_CANDIDATE,
+    SCREW_ROLE_CLASSES,
+    UNRESOLVED,
+    infer_relational_fields,
+    is_provisional,
+    real_instances as _real_instances,
+    resolve_ref as _resolve,
+    unique_of_class as _unique_of_class,
+    unresolved_kind,
+    unresolved_relations,
+)
 from tda.core.model import InstanceRec
 from tda.core.states import FrameState
 from tda.core.taxonomy import Taxonomy
 
 __all__ = [
+    "AMBIGUOUS",
     "CABLE_DEFAULT_STATE",
     "CABLE_PREFIX",
+    "LS_PREFIX",
+    "NO_CANDIDATE",
+    "SCREW_ROLE_CLASSES",
+    "UNRESOLVED",
     "Edge",
     "HARD_TYPES",
     "REQUIRED_STATES",
@@ -39,7 +56,10 @@ __all__ = [
     "cable_owner",
     "connector_owner",
     "infer_relational_fields",
+    "is_provisional",
     "propose_edges",
+    "unresolved_kind",
+    "unresolved_relations",
     "verb_applies",
     "verb_effect",
 ]
@@ -245,26 +265,6 @@ def connector_owner(
     return cable_owner(rec.cable or "", instances)
 
 
-def _unique_of_class(instances: dict[str, InstanceRec], cls: str) -> Optional[str]:
-    """The key of the one instance of ``cls``, or ``None`` when it is not unique."""
-    found = [key for key, rec in sorted(instances.items()) if rec.cls == cls]
-    return found[0] if len(found) == 1 else None
-
-
-def _resolve(instances: dict[str, InstanceRec], ref: Optional[str]) -> Optional[str]:
-    """An instance key from a field that may hold a key or a bare class name.
-
-    ``logs._resolve_socket_hosts`` writes the literal ``"motherboard"`` when the
-    raw step name says so, which is a class, not a key; the same happens for a
-    hand-edited ``fastens`` or ``of``. A class resolves only when it is unique.
-    """
-    if not ref:
-        return None
-    if ref in instances:
-        return ref
-    return _unique_of_class(instances, ref)
-
-
 # --------------------------------------------------------------------------- #
 # propose_edges (spec 7.3 item 1)
 # --------------------------------------------------------------------------- #
@@ -411,91 +411,3 @@ def _cover_targets(instances: dict[str, InstanceRec], cover: InstanceRec) -> lis
         return rec.cls == "screw" and rec.attrs.get("role") in wanted
 
     return [key for key, rec in sorted(instances.items()) if hit(rec)]
-
-
-# --------------------------------------------------------------------------- #
-# infer_relational_fields
-# --------------------------------------------------------------------------- #
-#: ``screw.role`` -> the classes the screw may fasten, best candidate first.
-SCREW_ROLE_CLASSES: dict[str, tuple[str, ...]] = {
-    "motherboard": ("motherboard",),
-    "cpu_cooler": ("cpu_cooler",),
-    "cooler_bracket": ("cooler_bracket",),
-    "drive": ("storage_drive", "drive_cage"),
-    "optical_drive": ("optical_drive",),
-    "card": ("expansion_card",),
-    "psu": ("psu",),
-}
-
-
-def infer_relational_fields(
-    instances: dict[str, InstanceRec],
-    tax: Taxonomy,
-) -> list[str]:
-    """Fill the relational fields the log importer leaves empty (spec 2.3).
-
-    ``logs.py`` never sets ``fastens``, ``parent``/``attached`` or a latch's
-    ``of``, and it may write a bare class name into ``socket_host``. The rules
-    of spec 7.3 need those, so this fills the obvious defaults:
-
-    * ``screw.fastens`` from ``screw.role``, whenever the desktop has exactly
-      one instance of the class that role names;
-    * a captive screw's ``parent`` = what it fastens, with ``attached=True``
-      (spec 7.1: a captive cooler screw leaves with the cooler);
-    * ``ram_latch.of`` by nearest ordinal -- the latches are split evenly over
-      the modules, so two latches per module pair up with module 1, 2, ...;
-    * ``socket_host`` given as a class name -> that class's unique instance.
-
-    Nothing already filled in is ever overwritten, so running this twice is a
-    no-op and a human correction survives a re-import. Returns one
-    ``"<key>.<field> = <value>"`` line per field it filled; every one of them is
-    a guess with source ``"heuristic"``, to be confirmed in the S1 UI.
-    """
-    filled: list[str] = []
-
-    def put(rec: InstanceRec, field: str, value: object) -> None:
-        setattr(rec, field, value)
-        filled.append(f"{rec.key}.{field} = {value}")
-
-    for key, rec in sorted(instances.items()):
-        if rec.cls == "screw":
-            _infer_screw(instances, rec, put, filled)
-        elif rec.cls == "connector":
-            host = _resolve(instances, rec.socket_host)
-            if host and host != rec.socket_host:
-                put(rec, "socket_host", host)
-    _infer_ram_latches(instances, filled)
-    return filled
-
-
-def _infer_screw(instances, rec: InstanceRec, put, filled: list[str]) -> None:
-    """``fastens`` from the role, then ``parent``/``attached`` when captive."""
-    if rec.fastens is None:
-        for cls in SCREW_ROLE_CLASSES.get(str(rec.attrs.get("role") or ""), ()):
-            target = _unique_of_class(instances, cls)
-            if target:
-                put(rec, "fastens", target)
-                break
-    target = _resolve(instances, rec.fastens)
-    if target and rec.attrs.get("captive"):
-        if rec.parent is None:
-            put(rec, "parent", target)
-        if not rec.attached:
-            rec.attached = True
-            filled.append(f"{rec.key}.attached = True")
-
-
-def _infer_ram_latches(instances: dict[str, InstanceRec], filled: list[str]) -> None:
-    """Pair RAM latches with modules by ordinal: N latches spread over M modules."""
-    latches = [
-        rec for _, rec in sorted(instances.items())
-        if rec.cls == "ram_latch" and not rec.attrs.get("of")
-    ]
-    modules = [key for key, rec in sorted(instances.items()) if rec.cls == "ram_module"]
-    if not latches or not modules:
-        return
-    per = max(1, len(latches) // len(modules))
-    for i, rec in enumerate(latches):
-        module = modules[min(i // per, len(modules) - 1)]
-        rec.attrs["of"] = module
-        filled.append(f"{rec.key}.attrs.of = {module}")

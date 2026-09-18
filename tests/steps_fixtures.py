@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from tda.core.db import Db
+from tda.core.graph_rules import infer_relational_fields
 from tda.core.logs import LogImport, import_log, read_desktop_csv
 from tda.core.states import events_from_actions
 from tda.core.taxonomy import Taxonomy
@@ -21,9 +22,18 @@ DESKTOPS = (13, 63)
 
 
 def seed(db: Db, desktop: int, tax: Taxonomy) -> LogImport:
-    """Import one log fixture into ``db`` and return what it yielded."""
+    """Import one log fixture into ``db`` and return what it yielded.
+
+    The relational heuristic runs here for the same reason
+    :func:`tda.pipeline_logs._write_import` runs it: ``logs.py`` leaves
+    ``fastens``, a captive screw's ``parent`` and a latch's ``of`` empty and
+    writes a bare class name into ``socket_host``, and stage S0 fills them in
+    before the annotator ever sees the desktop. Seeding without it would hand
+    every step-table test a database no import can produce any more.
+    """
     rows, meta = read_desktop_csv(FIXTURES / f"desktop_{desktop:02d}.csv")
     imp = import_log(desktop, rows, meta, tax)
+    infer_relational_fields(imp.instances, tax)
     db.upsert_desktop(desktop, {"brand": meta.get("brand_model_raw") or ""})
     db.replace_steps(desktop, imp.steps, imp.actions)
     for inst in imp.instances.values():

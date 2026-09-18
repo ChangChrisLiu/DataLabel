@@ -23,7 +23,9 @@ This module also owns the identity helpers shared with
 the per-desktop state context and the keyframe lookup -- so that both exports
 name the same frame the same way.
 
-Nothing here writes to the database and nothing imports Qt.
+The export **writes**: it brings the truth table up to date first
+(:meth:`~tda.core.truth.TruthService.ensure_fresh`), so a caller needs the
+single-user lock of spec 3.5. What it never does is change an annotation and nothing imports Qt.
 """
 from __future__ import annotations
 
@@ -155,10 +157,16 @@ def bbox_xywh(box: Optional[Sequence[float]]) -> Optional[list]:
 
 
 def mask_bbox_xywh(rle: Optional[dict]) -> Optional[list]:
-    """COCO ``[x, y, w, h]`` of an RLE, or ``None`` when it is empty/absent."""
+    """COCO ``[x, y, w, h]`` of an RLE, or ``None`` when it is empty/absent.
+
+    Measured off the run lengths rather than by decoding: an export writes one
+    box and one area per annotation, and building two ``H x W`` arrays to read
+    four numbers out of them is the single most expensive thing it used to do.
+    """
     if not rle:
         return None
-    return bbox_xywh(masks.bbox(masks.decode_rle(rle)))
+    box = masks.rle_bbox_xywh(rle)
+    return None if box[2] <= 0 or box[3] <= 0 else [int(round(v)) for v in box]
 
 
 def row_bbox_xywh(row: dict) -> Optional[list]:
@@ -360,7 +368,7 @@ def _annotation(ann_id: int, img_id: int, category: int, row: dict, attributes: 
         box = mask_bbox_xywh(rle)
         if box is None:
             return None
-        area = float(masks.area(masks.decode_rle(rle)))
+        area = float(masks.rle_area(rle))
         segmentation: Any = rle
     else:
         if not include_boxes:
