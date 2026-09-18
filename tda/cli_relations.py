@@ -208,22 +208,29 @@ def verified_frames(db: Db, desktop: int) -> int:
 
 
 def _queue_rechecks(db: Db, desktop: int, log) -> None:
-    """Ask the truth service to re-check this desktop's verified frames.
+    """Queue this desktop's verified frames for a re-check by the truth service.
 
-    ``Db.add_rechecks`` arrives with the session branch; until it is there this
-    says what to run by hand instead of pretending the work was queued. Either
-    way the frozen rows are not lost: the truth service raises a conflict when a
-    verified row disappears from a recompiled frame, so the worst case is that
-    the annotator meets it later rather than now.
+    The relational fills can change which instances a later frame needs, so
+    every frozen frame of the desktop is handed to the persisted re-check queue
+    (one request per view). Nothing frozen is lost either way: the truth
+    service raises a conflict when a verified row disappears from a recompiled
+    frame; queueing only makes the annotator meet it now rather than later.
     """
-    if not log:
-        return
-    if hasattr(db, "add_rechecks"):
-        db.add_rechecks(desktop)  # type: ignore[attr-defined]
-        log(f"[infer-relations] D{desktop:02d}: queued its verified frames for re-check")
-        return
-    log(f"[infer-relations] D{desktop:02d}: run `python -m tda.cli check --desktop "
-        f"{desktop}` afterwards to re-check its verified frames")
+    rows = db.conn.execute(
+        "SELECT DISTINCT view, step FROM compiled_mask "
+        "WHERE desktop=? AND status='verified' ORDER BY view, step",
+        (desktop,),
+    ).fetchall()
+    by_view: dict[str, list[int]] = {}
+    for view, step in rows:
+        by_view.setdefault(str(view), []).append(int(step))
+    queued = 0
+    for view, steps in by_view.items():
+        queued += len(db.add_rechecks(desktop, view, steps))
+    if log:
+        log(f"[infer-relations] D{desktop:02d}: queued {queued} verified frames for "
+            f"re-check (open the desktop in the app, or run `python -m tda.cli check "
+            f"--desktop {desktop}`)")
 
 
 def _selected(db: Db, desktops: Optional[set[int]], log) -> list[int]:

@@ -610,10 +610,13 @@ def test_force_runs_a_desktop_with_verified_frames_and_says_what_to_do_next(env,
     assert run(env, "infer-relations", "--desktops", "13", "--force") == EXIT_OK
     out = capsys.readouterr().out
     assert "D13 has 1 verified frames" in out
-    assert "tda.cli check --desktop 13" in out or "queued" in out
+    assert "queued 1 verified frames for re-check" in out
     db = open_db(env)
     try:
         assert db.instances(13)[COOLER_SCREWS[0]].parent == COOLER
+        queued = db.conn.execute(
+            "SELECT COUNT(*) FROM recheck_queue WHERE desktop=13").fetchone()[0]
+        assert queued == 1
     finally:
         db.close()
 
