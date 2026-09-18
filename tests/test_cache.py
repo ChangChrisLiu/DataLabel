@@ -20,9 +20,10 @@ from tda.core.cache import (
     burst_metrics,
     cache_path,
     choose_scan_image,
+    main,
     suggest_roi,
 )
-from tda.core.index import DesktopIndex, FrameFile
+from tda.core.index import DesktopIndex, FrameFile, save_index
 from tda.core.model import FrameKey
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -299,7 +300,8 @@ def test_suggest_roi_finds_the_chassis_in_a_real_scanner_frame():
     cx0, cy0, cx1, cy1 = CHASSIS
 
     assert all(isinstance(v, int) for v in (x0, y0, x1, y1))
-    assert (x0, y0) <= (cx0, cy0) and x1 >= cx1 and y1 >= cy1   # contains the chassis
+    # contains the chassis (element-wise: a tuple compare would be lexicographic)
+    assert x0 <= cx0 and y0 <= cy0 and x1 >= cx1 and y1 >= cy1
     assert x0 >= 60 and y0 >= 35 and x1 <= 845 and y1 <= 795    # inside the tape square
     assert (x1 - x0) * (y1 - y0) <= 1.6 * (cx1 - cx0) * (cy1 - cy0)
 
@@ -483,6 +485,70 @@ def test_build_cache_recheck_relabels_without_recopying(tmp_path):
     assert json.loads(mpath.read_text("utf-8"))["1"]["reason"] == "p0"
 
 
+def test_build_cache_recomputes_when_the_metrics_version_changed(tmp_path, monkeypatch):
+    """A change to burst_metrics itself (a new metric, another SAT_LEVEL) is not
+    visible in the stored records, so the version stamp forces a real recompute."""
+    index = _scan_index(tmp_path, steps=(1,))
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    mpath = tmp_path / "cache" / "scan" / "D07" / "manifest.json"
+    manifest = json.loads(mpath.read_text("utf-8"))
+    assert manifest["1"]["metrics_version"] == 1
+    manifest["1"]["metrics"][0]["mean"] = 999.0          # a stale stored metric
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setattr("tda.core.cache.METRICS_VERSION", 2)
+    stats = build_cache(index, cache)
+    assert stats["skipped"] == 0
+    rec = json.loads(mpath.read_text("utf-8"))["1"]
+    assert rec["metrics_version"] == 2
+    assert rec["metrics"][0]["mean"] != 999.0            # measured again from the images
+
+
+def test_build_cache_treats_a_record_without_a_version_as_the_current_one(tmp_path):
+    """Manifests written before the stamp existed must not trigger a rebuild."""
+    index = _scan_index(tmp_path, steps=(1, 2))
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    mpath = tmp_path / "cache" / "scan" / "D07" / "manifest.json"
+    manifest = json.loads(mpath.read_text("utf-8"))
+    for rec in manifest.values():
+        rec.pop("metrics_version")
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+
+    stats = build_cache(index, cache)
+    assert (stats["skipped"], stats["copied"], stats["relabelled"]) == (2, 0, 0)
+
+
+def test_build_cache_force_rebuilds_every_step(tmp_path):
+    index = _scan_index(tmp_path, steps=(1, 2))
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    dest = tmp_path / "cache" / "scan" / "D07" / "s001.png"
+    stamp = dest.stat().st_mtime_ns
+
+    stats = build_cache(index, cache, force=True)
+    assert (stats["copied"], stats["skipped"]) == (2, 0)
+    assert dest.stat().st_mtime_ns != stamp
+
+
+def test_build_cache_recompute_refreshes_the_stored_metrics(tmp_path):
+    index = _scan_index(tmp_path, steps=(1,))
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    mpath = tmp_path / "cache" / "scan" / "D07" / "manifest.json"
+    manifest = json.loads(mpath.read_text("utf-8"))
+    manifest["1"]["metrics"][0]["lap_var"] = -1.0
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+    dest = tmp_path / "cache" / "scan" / "D07" / "s001.png"
+    stamp = dest.stat().st_mtime_ns
+
+    stats = build_cache(index, cache, recompute=True)
+    assert (stats["copied"], stats["relabelled"]) == (0, 1)   # same image, new metrics
+    assert dest.stat().st_mtime_ns == stamp
+    assert json.loads(mpath.read_text("utf-8"))["1"]["metrics"][0]["lap_var"] > 0
+
+
 def test_build_cache_recopies_a_truncated_file(tmp_path):
     index = _scan_index(tmp_path, steps=(1,))
     cache = str(tmp_path / "cache")
@@ -554,3 +620,45 @@ def test_build_cache_never_writes_outside_the_cache_dir(tmp_path):
     after = {p.name: p.stat().st_mtime_ns for p in src_dir.iterdir()}
     assert before == after
     assert sorted(os.listdir(tmp_path)) == ["cache", "src"]
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+def _cli_index(tmp_path: Path, **kwargs) -> tuple[str, str]:
+    """Write a synthetic index to disk and return (index path, cache dir)."""
+    index = _scan_index(tmp_path, **kwargs)
+    path = str(tmp_path / "index.json")
+    save_index(index, path)
+    return path, str(tmp_path / "cache")
+
+
+def test_main_builds_a_range_and_reports_success(tmp_path):
+    index_path, cache = _cli_index(tmp_path, steps=(1, 2))
+    assert main(["--index", index_path, "--cache", cache, "--first", "7", "--last", "7"]) == 0
+    assert (Path(cache) / "scan" / "D07" / "s002.png").is_file()
+
+
+def test_main_passes_force_and_recompute_through(tmp_path):
+    index_path, cache = _cli_index(tmp_path, steps=(1,))
+    argv = ["--index", index_path, "--cache", cache, "--first", "7", "--last", "7"]
+    assert main(argv) == 0
+    dest = Path(cache) / "scan" / "D07" / "s001.png"
+    stamp = dest.stat().st_mtime_ns
+
+    assert main(argv + ["--recompute"]) == 0
+    assert dest.stat().st_mtime_ns == stamp          # metrics only
+    assert main(argv + ["--force"]) == 0
+    assert dest.stat().st_mtime_ns != stamp          # rebuilt
+
+
+def test_main_returns_non_zero_when_a_step_fails(tmp_path, capsys):
+    index = _scan_index(tmp_path, steps=(1,))
+    index[7].frames[FrameKey(7, 1, "scan")].aux["burst"] = [str(tmp_path / "gone" / "P_0.png")]
+    index_path = str(tmp_path / "index.json")
+    save_index(index, index_path)
+
+    code = main(["--index", index_path, "--cache", str(tmp_path / "cache"),
+                 "--first", "7", "--last", "7"])
+    assert code != 0
+    assert "failures=1" in capsys.readouterr().out

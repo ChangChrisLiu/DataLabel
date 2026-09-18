@@ -59,6 +59,11 @@ DIST_MAX = 20.0  # mean abs difference to the burst median above this gray level
 VIEW_EXT = {"scan": "png", "rs": "png", "oak1": "jpg", "oak2": "jpg"}
 MANIFEST_NAME = "manifest.json"
 MANIFEST_FLUSH_EVERY = 25  # flush mid-desktop so an interrupted run resumes
+METRICS_VERSION = 1  # bump whenever burst_metrics changes what it measures (a new
+#                      metric, another SAT_LEVEL or DOWNSCALE): records stamped
+#                      with an older version are measured again instead of being
+#                      re-decided from stale numbers.  A record written before the
+#                      stamp existed counts as version 1.
 SINGLE_REASON = "only"  # views without a burst have nothing to choose
 
 # --- ROI suggestion ------------------------------------------------------
@@ -105,6 +110,14 @@ def burst_metrics(paths: list[str]) -> list[dict]:
     copy), ``sat_frac`` (fraction of pixels saturated in all three channels) and
     ``dist_to_median`` (mean absolute difference to the pixel-wise median of the
     downscaled burst - this is what a hand or tool in one shot shows up as).
+
+    **Every number is measured on the 1/8 downscale**, never on the full frame,
+    and the thresholds in :func:`choose_scan_image` are calibrated against that:
+    area-averaging suppresses sensor noise and softens saturated edges, so
+    ``lap_var`` and ``sat_frac`` in particular are not comparable to values taken
+    at full resolution.  Changing :data:`DOWNSCALE`, :data:`SAT_LEVEL` or the set
+    of metrics therefore means bumping :data:`METRICS_VERSION`, which makes cached
+    steps measure themselves again.
 
     Raises ``ValueError`` on an empty burst and ``OSError`` on an image that
     cannot be decoded.  ``dist_to_median`` is left at 0 if the burst mixes image
@@ -321,8 +334,16 @@ def _select_source(frame: FrameFile, view: str) -> dict:
         metrics = burst_metrics(burst)
         chosen, reason = choose_scan_image(metrics)
         return {"chosen": chosen, "reason": reason, "metrics": metrics,
-                "src": metrics[chosen]["path"]}
-    return {"chosen": 0, "reason": SINGLE_REASON, "metrics": [], "src": _norm(frame.path)}
+                "src": metrics[chosen]["path"], "metrics_version": METRICS_VERSION}
+    return {"chosen": 0, "reason": SINGLE_REASON, "metrics": [],
+            "src": _norm(frame.path), "metrics_version": METRICS_VERSION}
+
+
+def _metrics_stale(record: Optional[dict], view: str) -> bool:
+    """True when ``record`` was measured by an older :func:`burst_metrics`."""
+    if not record or view != "scan":
+        return False
+    return int(record.get("metrics_version", 1)) != METRICS_VERSION
 
 
 def _redecide(record: dict, view: str) -> Optional[dict]:
@@ -360,7 +381,8 @@ def _copy(src: str, dest: str) -> None:
 
 
 def build_cache(index: dict[int, DesktopIndex], cache_dir: str, views=("scan",),
-                desktops=None, progress: Optional[Callable[[int, int, str], Any]] = None) -> dict:
+                desktops=None, progress: Optional[Callable[[int, int, str], Any]] = None,
+                force: bool = False, recompute: bool = False) -> dict:
     """Copy the image every step needs into the local cache; write the manifests.
 
     For each desktop in ``desktops`` (default: all of ``index``) and each view in
@@ -373,7 +395,11 @@ def build_cache(index: dict[int, DesktopIndex], cache_dir: str, views=("scan",),
     whose cached file already has the source's byte size is not read again, only
     *re-decided* from the metrics in its record - so a re-run after a change to
     :func:`choose_scan_image` replaces the cached file (``rechosen``) or just the
-    recorded reason (``relabelled``) without touching the source drive.  The
+    recorded reason (``relabelled``) without touching the source drive.  That
+    shortcut only holds while the stored metrics still mean what they say, so a
+    record stamped with an older :data:`METRICS_VERSION` is measured again;
+    ``recompute=True`` measures every step again regardless (copying only what
+    actually changed) and ``force=True`` additionally re-copies every file.  The
     manifest is flushed every :data:`MANIFEST_FLUSH_EVERY` copies as well as at
     the end of each desktop, so an interrupted run resumes instead of redoing the
     desktop it was in.  A step that cannot be read is recorded in ``failures``
@@ -416,7 +442,8 @@ def build_cache(index: dict[int, DesktopIndex], cache_dir: str, views=("scan",),
                 step = str(key.step)
                 try:
                     record = manifest.get(step)
-                    if record and _up_to_date(record.get("src", ""), dest):
+                    measure = force or recompute or _metrics_stale(record, view)
+                    if record and not measure and _up_to_date(record.get("src", ""), dest):
                         again = _redecide(record, view)
                         if again is None:
                             stats["skipped"] += 1
@@ -432,12 +459,17 @@ def build_cache(index: dict[int, DesktopIndex], cache_dir: str, views=("scan",),
                             dirty = True
                             stats["relabelled"] += 1
                     else:
-                        record = _select_source(frames[key], view)
-                        _copy(record["src"], dest)
-                        manifest[step] = record
+                        fresh = _select_source(frames[key], view)
+                        if force or not _up_to_date(fresh["src"], dest):
+                            _copy(fresh["src"], dest)
+                            stats["copied"] += 1
+                            stats["bytes_copied"] += os.path.getsize(dest)
+                            if record and record.get("src") != fresh["src"]:
+                                stats["rechosen"] += 1
+                        else:  # measured again, same image: only the record changes
+                            stats["relabelled"] += 1
+                        manifest[step] = record = fresh
                         dirty = True
-                        stats["copied"] += 1
-                        stats["bytes_copied"] += os.path.getsize(dest)
                     if record["metrics"] and record["reason"] != "p0":
                         where = ("non_p0"
                                  if record["metrics"][record["chosen"]]["p_index"] != 0
@@ -480,7 +512,11 @@ def _default_cache_dir(paths_path: str = DEFAULT_PATHS_PATH) -> str:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    """CLI: build the cache for a range of desktops, logging progress."""
+    """CLI: build the cache for a range of desktops, logging progress.
+
+    Returns 0, or 1 when any step could not be cached (the failures are listed
+    and counted in the log, so a shell or scheduler notices a partial run).
+    """
     import argparse
 
     ap = argparse.ArgumentParser(description="Build the local TDA image cache.")
@@ -490,6 +526,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--first", type=int, default=1)
     ap.add_argument("--last", type=int, default=66)
     ap.add_argument("--log", default=None, help="progress log file (default: stdout only)")
+    ap.add_argument("--recompute", action="store_true",
+                    help="measure every burst again instead of reusing the stored metrics")
+    ap.add_argument("--force", action="store_true",
+                    help="rebuild: measure again and re-copy every file")
     args = ap.parse_args(argv)
 
     cache_dir = args.cache or _default_cache_dir()
@@ -522,8 +562,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     emit(f"[{time.strftime('%H:%M:%S')}] start views={views} desktops={args.first}-{args.last} "
          f"steps={total} cache={cache_dir} index={index_path}")
+    code = 0
     try:
-        stats = build_cache(index, cache_dir, views=views, desktops=desktops, progress=on_step)
+        stats = build_cache(index, cache_dir, views=views, desktops=desktops, progress=on_step,
+                            force=args.force, recompute=args.recompute)
         emit(f"[{time.strftime('%H:%M:%S')}] done steps={stats['steps']} copied={stats['copied']} "
              f"skipped={stats['skipped']} rechosen={stats['rechosen']} "
              f"relabelled={stats['relabelled']} GB={stats['bytes_copied'] / 1e9:.2f} "
@@ -541,10 +583,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                  f"reason={item['reason']} (P_0 kept)")
         for item in stats["failures"]:
             emit(f"  FAIL D{item['desktop']:02d} s{item['step']:03d} {item['view']}: {item['error']}")
+        if stats["failures"]:
+            code = 1
+            emit(f"[{time.strftime('%H:%M:%S')}] {len(stats['failures'])} step(s) could not be "
+                 f"cached - see the FAIL lines above")
     finally:
         if log:
             log.close()
-    return 0
+    return code
 
 
 if __name__ == "__main__":  # pragma: no cover
