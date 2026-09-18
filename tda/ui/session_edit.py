@@ -36,8 +36,16 @@ import numpy as np
 from tda.core import masks
 from tda.core.compiler import CompiledFrame, select_keyframe
 from tda.core.db import Db
-from tda.core.model import FrameKey, FrameOverride, OccluderMask, PairOverride, ShapePart, ZOrderRec
-from tda.core.truth import TruthService
+from tda.core.model import (
+    FrameKey,
+    FrameOverride,
+    OccluderMask,
+    PairOverride,
+    ShapeKeyframe,
+    ShapePart,
+    ZOrderRec,
+)
+from tda.core.truth import VERIFIED, TruthService
 from tda.core.truth_inputs import InputCache, frame_hw, pose_segment_of
 from tda.ui import session_api as api
 from tda.ui.commands import Op
@@ -56,6 +64,7 @@ from tda.ui.session_ops import (
     apply_zorder,
     as_mask,
     chain_for,
+    chain_steps,
     default_anchor,
     keyframe_state,
     new_keyframe,
@@ -83,16 +92,32 @@ __all__ = [
     "commit_occluder",
     "commit_pair_override",
     "default_anchor",
+    "preview",
     "refresh_steps",
+    "require_instance",
+    "split_zorder_scope",
     "set_visibility",
     "set_zorder_move",
     "suggest_scope",
     "task_card_for",
 ]
 
-#: How much of an edit has to land inside another instance's amodal shape
-#: before the default scope becomes "change the layering" (spec 4.3).
-ZORDER_HINT_FRAC = 0.5
+#: How much of the *changed* pixels has to land inside another instance before
+#: the default scope becomes "change the layering" (spec 4.3).
+ZORDER_HINT_FRAC = 0.6
+
+#: ``suggest_scope`` answers, and what :meth:`AnnotationSession.commit_edit`
+#: accepts besides the three :data:`~tda.ui.session_api.COMMIT_SCOPES`.
+SCOPE_ZORDER_ABOVE = "zorder:above:"
+SCOPE_ZORDER_BELOW = "zorder:below:"
+
+
+def split_zorder_scope(scope: str) -> Optional[tuple[str, bool]]:
+    """``(other instance, this one goes above)`` for a layering scope, else ``None``."""
+    for prefix, above in ((SCOPE_ZORDER_ABOVE, True), (SCOPE_ZORDER_BELOW, False)):
+        if scope.startswith(prefix):
+            return scope[len(prefix):], above
+    return None
 
 
 def _result(db: Db, truth: TruthService, key: FrameKey, steps: Sequence[int], op: Op,
@@ -176,6 +201,11 @@ def _commit_shape(db: Db, truth: TruthService, key: FrameKey, instance: str,
     before: list[dict] = []
     after: list[dict] = []
 
+    if scope == api.SCOPE_SPLIT and _cannot_split(chosen, key.step, direction):
+        # there is nothing left to cut off: the keyframe in force already ends
+        # exactly here, so "split" means "re-trace this one" (see _cannot_split)
+        scope = api.SCOPE_KEYFRAME
+
     with db.transaction():
         if scope == api.SCOPE_SPLIT:
             anchor = key.step
@@ -186,6 +216,9 @@ def _commit_shape(db: Db, truth: TruthService, key: FrameKey, instance: str,
                 db.update_keyframe(chosen)
                 after.append(keyframe_state(chosen, old_ref))
             kf = new_keyframe(key, instance, seg, anchor, placement, parts, geom_type)
+            # a new version of the shape has to outrank the one it was cut from:
+            # select_keyframe breaks an anchor tie on the higher version
+            kf.version = 1 if chosen is None else int(chosen.version) + 1
             before.append(keyframe_state(None, ref, template=kf))
             ref["keyframe_id"] = db.add_keyframe(kf)
             after.append(keyframe_state(kf, ref))
@@ -220,7 +253,66 @@ def _commit_shape(db: Db, truth: TruthService, key: FrameKey, instance: str,
 
     op = Op(kind="commit_keyframe", payload=payload, inverse=inverse)
     return _result(db, truth, key, steps, op,
-                   {"keyframe_id": kf.id, "anchor_step": kf.anchor_step})
+                   {"keyframe_id": kf.id, "anchor_step": kf.anchor_step, "scope": scope,
+                    "changed": True})
+
+
+def preview(db: Db, truth: TruthService, key: FrameKey, instance: str, scope: str,
+            direction: str = REVERSE, geom_type: str = GEOM_MASK) -> dict:
+    """Which frames an edit *would* reach, without writing or compiling anything.
+
+    This is the "影响 N 帧 / 将产生 N 个冲突" strip of spec 4.3: the annotator has
+    to see how far a change carries -- and how many frozen frames it will
+    disturb -- **before** deciding on the scope.  The chain is simulated rather
+    than written, and no mask is touched, so the answer costs a few state
+    lookups.
+
+    Returns ``{"steps", "verified_steps"}``; the second is the subset already
+    confirmed by a human, i.e. the frames that would go to the conflict queue.
+    """
+    cache = InputCache()
+    seg = pose_segment_of(db, key, cache)
+    placement = placement_of(db, truth.tax, key, instance, cache)
+    chain = chain_for(db, key, instance, seg, placement)
+    chosen = select_keyframe(chain, key.step)
+
+    if scope == api.SCOPE_FRAME_OVERRIDE:
+        steps = annotatable_steps(db, key.desktop, key.view, [key.step])
+    else:
+        if scope == api.SCOPE_SPLIT and not _cannot_split(chosen, key.step, direction):
+            target = new_keyframe(key, instance, seg, key.step, placement, [], geom_type)
+            target.version = 1 if chosen is None else int(chosen.version) + 1
+            simulated = chain + [target]
+        elif chosen is not None and chosen.geom_type == geom_type:
+            target, simulated = chosen, chain
+        else:
+            anchor = default_anchor(db, truth.tax, key, instance, seg, placement, cache)
+            target = new_keyframe(key, instance, seg, anchor, placement, [], geom_type)
+            simulated = chain + [target]
+        steps = chain_steps(db, truth.tax, key, instance, seg, placement, simulated,
+                            target, cache)
+    verified = [
+        step for step in steps
+        if (db.get_frame(FrameKey(key.desktop, step, key.view)) or {}).get("review_status")
+        == VERIFIED
+    ]
+    return {"steps": steps, "verified_steps": verified}
+
+
+def _cannot_split(chosen: Optional[ShapeKeyframe], step: int, direction: str) -> bool:
+    """Would a split produce a keyframe covering no frame the old one kept?
+
+    Annotating in reverse a split anchors the new shape at the current step, so
+    it covers ``(previous anchor, step]`` and the old one keeps everything after
+    ``step``.  When the old keyframe's own anchor *is* ``step`` there is nothing
+    after it to keep: the two would share an anchor and the newer one would win
+    everywhere, which is a re-trace wearing a second row.  Going forward the same
+    thing happens at the other end -- the old keyframe would be pulled back to
+    ``step - 1`` and inherit nothing.
+    """
+    if chosen is None:
+        return False
+    return direction == REVERSE and int(chosen.anchor_step) == int(step)
 
 
 def _loggable(payload: dict) -> dict:
@@ -284,45 +376,103 @@ def _commit_frame_override(db: Db, truth: TruthService, key: FrameKey, instance:
 # --------------------------------------------------------------------------- #
 # layering, visibility, occluders
 # --------------------------------------------------------------------------- #
-def suggest_scope(compiled: CompiledFrame, instance: str, edited: np.ndarray) -> str:
+def suggest_scope(compiled: CompiledFrame, instance: str, before: np.ndarray,
+                  edited: np.ndarray) -> str:
     """The scope an edit defaults to (spec 4.3, 默认触发).
 
-    Pixels added to (or erased from) ``instance`` that mostly land inside
-    another instance's *amodal* shape are a statement about which of the two is
-    on top, not about the silhouette: the answer is then
-    ``"zorder:<other instance>"``.  Anything else edits the keyframe in force.
+    The question is about the pixels that actually *changed*, never about the
+    whole shape -- loading an instance into the editing layer and touching
+    nothing is not a statement about anything:
+
+    * pixels **added** where another instance ``B`` currently paints *over* this
+      one say "I want to see this one there instead" -- i.e. put it above ``B``;
+    * pixels **erased** exactly where ``B``'s shape lies under this one say the
+      opposite: ``B`` should have been on top all along;
+    * anything else is a change to the silhouette, so it edits the keyframe.
+
+    Both answers name the pair and the direction, ``zorder:above:<B>`` and
+    ``zorder:below:<B>``, because "change the layering" alone does not say which
+    way round.  A hint is only given when at least
+    :data:`ZORDER_HINT_FRAC` of the changed pixels fall inside ``B``.
     """
+    before = np.asarray(before, dtype=bool)
     edited = np.asarray(edited, dtype=bool)
-    total = int(edited.sum())
-    if total == 0:
-        return api.SCOPE_KEYFRAME
-    best, best_overlap = None, 0
-    for other, inst in compiled.instances.items():
-        if other == instance or inst.amodal is None:
-            continue
-        overlap = int(np.count_nonzero(edited & inst.amodal))
-        if overlap > best_overlap:
-            best, best_overlap = other, overlap
-    if best is not None and best_overlap >= ZORDER_HINT_FRAC * total:
-        return f"zorder:{best}"
+    added, erased = edited & ~before, before & ~edited
+
+    covering = _partner(compiled, instance, added, above=True)
+    if covering is not None:
+        return f"zorder:above:{covering}"
+    covered = _partner(compiled, instance, erased, above=False)
+    if covered is not None:
+        return f"zorder:below:{covered}"
     return api.SCOPE_KEYFRAME
 
 
+def _partner(compiled: CompiledFrame, instance: str, changed: np.ndarray,
+             above: bool) -> Optional[str]:
+    """The instance the changed pixels are a layering statement about, if any.
+
+    ``above=True`` looks for an instance painting *over* ``instance`` whose
+    visible pixels the edit reached into; ``above=False`` for one painting
+    *under* it, compared on the amodal shapes, since what lies under is by
+    definition not visible.
+    """
+    total = int(changed.sum())
+    if total == 0:
+        return None
+    best, best_overlap = None, 0
+    for other, inst in compiled.instances.items():
+        if other == instance or _paints_above(compiled, other, instance) is not above:
+            continue
+        region = inst.visible if above else inst.amodal
+        if region is None:
+            continue
+        overlap = int(np.count_nonzero(changed & region))
+        if overlap > best_overlap:
+            best, best_overlap = other, overlap
+    return best if best_overlap >= ZORDER_HINT_FRAC * total else None
+
+
+def _paints_above(compiled: CompiledFrame, other: str, instance: str) -> Optional[bool]:
+    """Is ``other`` painted over ``instance``? ``None`` when they never meet."""
+    for order in compiled.painted.values():
+        if other in order and instance in order:
+            return order.index(other) > order.index(instance)
+    return None
+
+
+def require_instance(known: Optional[set[str]], instance: str) -> None:
+    """Refuse a layering gesture that names something this frame does not have.
+
+    Silently treating an unknown neighbour as "the top of the stack" is how a
+    typo, or a stale panel row, turns into a z-order nobody asked for.
+    """
+    if known is not None and instance not in known:
+        raise ValueError(f"no such instance in this frame: {instance!r}")
+
+
 def set_zorder_move(db: Db, truth: TruthService, key: FrameKey, instance: str,
-                    above_of: str, annotator: str = "system") -> dict:
+                    above_of: str, annotator: str = "system",
+                    known: Optional[set[str]] = None) -> dict:
     """Move ``instance`` directly above ``above_of`` in the stored layer order.
 
     The order is a total order over ``(instance, part)`` pairs, bottom first, so
-    a multi-part instance moves as one block and keeps its internal order.  An
-    instance the order does not mention yet is inserted rather than rejected.
+    a multi-part instance moves as one block and keeps its internal order.  A
+    neighbour the order does not mention yet is first pinned at the top and the
+    instance placed above it, which fixes their relative order and leaves every
+    other pair where it was; a neighbour that is not in ``known`` -- the
+    instances this frame actually has -- is refused.
     """
+    require_instance(known, above_of)
     cache = InputCache()
     seg = pose_segment_of(db, key, cache)
     rec = db.zorder(key.desktop, key.view, seg)
     order = [tuple(entry) for entry in rec.order]
     moved = [entry for entry in order if entry[0] == instance] or [(instance, MAIN)]
     rest = [entry for entry in order if entry[0] != instance]
-    cut = max((i for i, entry in enumerate(rest) if entry[0] == above_of), default=len(rest) - 1)
+    if not any(entry[0] == above_of for entry in rest):
+        rest = rest + [(above_of, MAIN)]  # unordered so far: pin it, then go above it
+    cut = max(i for i, entry in enumerate(rest) if entry[0] == above_of)
     after = rest[: cut + 1] + moved + rest[cut + 1:]
     steps = segment_steps(db, truth.tax, key, instance, seg, cache)
 
@@ -336,12 +486,15 @@ def set_zorder_move(db: Db, truth: TruthService, key: FrameKey, instance: str,
 
 
 def commit_pair_override(db: Db, truth: TruthService, key: FrameKey, above: str,
-                         below: str, annotator: str = "system") -> dict:
+                         below: str, annotator: str = "system",
+                         known: Optional[set[str]] = None) -> dict:
     """Record "``above`` beats ``below``" for this pose segment (spec 4.3 改层级).
 
     A pairwise exception rather than a new global order: it says one thing about
     one pair and leaves every other relation where the annotator put it.
     """
+    require_instance(known, above)
+    require_instance(known, below)
     cache = InputCache()
     seg = pose_segment_of(db, key, cache)
     po = PairOverride(key.desktop, key.view, seg, above, below)

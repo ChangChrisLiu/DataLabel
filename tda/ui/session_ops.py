@@ -12,9 +12,9 @@ Each handler is registered as both the ``do`` and the ``undo`` direction of its
 op kind: an op's ``payload`` and its ``inverse`` are two states of the same
 rows, so redoing and undoing are the same call with a different argument.  A
 keyframe that did not exist yet is written as ``exists: False``, which the
-handler turns into a delete.  Re-creating a deleted keyframe yields a new row
-id, so both directions share one mutable ``ref`` dict holding it -- that is what
-lets a freshly drawn shape be undone and redone any number of times.
+handler turns into a delete.  Both directions share one mutable ``ref`` dict
+holding the row id, and a redo re-inserts under that same id: several ops may
+name one keyframe, so an id that changed on a redo would strand all the others.
 
 Nothing here is Qt-aware, and nothing here decides policy.
 """
@@ -36,6 +36,7 @@ from tda.core.model import (
     ShapePart,
     ZOrderRec,
 )
+from tda.core.compiler import select_keyframe
 from tda.core.states import needs_geom
 from tda.core.taxonomy import Taxonomy
 from tda.core.truth import TruthService
@@ -59,6 +60,7 @@ __all__ = [
     "apply_zorder",
     "as_mask",
     "chain_for",
+    "chain_steps",
     "default_anchor",
     "keyframe_state",
     "new_keyframe",
@@ -187,6 +189,32 @@ def default_anchor(db: Db, tax: Taxonomy, key: FrameKey, instance: str, seg: int
     return key.step if best is None else best
 
 
+def chain_steps(db: Db, tax: Taxonomy, key: FrameKey, instance: str, seg: int,
+                placement: str, chain: list[ShapeKeyframe], target: ShapeKeyframe,
+                cache: Optional[InputCache] = None) -> list[int]:
+    """Steps whose compilation would select ``target`` out of ``chain``.
+
+    The same rule as :meth:`tda.core.truth.TruthService.affected_steps`, but
+    over a chain the caller may have *simulated*: that is what lets the session
+    answer "影响 N 帧" (spec 4.3) before anything is written.
+    """
+    instances = instances_of(db, key.desktop, cache)
+    out: list[int] = []
+    for rec in db.steps(key.desktop):
+        step = rec.step
+        if pose_segment_of(db, FrameKey(key.desktop, step, key.view), cache) != seg:
+            continue
+        state = state_of(db, tax, key.desktop, step, cache)
+        held = state.get(instance)
+        if held is None or held.placement != placement:
+            continue
+        if instance not in needs_geom(instances, state, tax):
+            continue
+        if select_keyframe(chain, step) is target:
+            out.append(step)
+    return annotatable_steps(db, key.desktop, key.view, out)
+
+
 def segment_steps(db: Db, tax: Taxonomy, key: FrameKey, instance: str, seg: int,
                   cache: Optional[InputCache] = None) -> list[int]:
     """Annotatable steps of this pose segment where ``instance`` carries geometry."""
@@ -246,7 +274,7 @@ def keyframe_state(kf: Optional[ShapeKeyframe], ref: dict,
     return {
         "ref": ref, "exists": True, "instance": kf.instance, "desktop": kf.desktop,
         "view": kf.view, "pose_segment": kf.pose_segment, "anchor_step": kf.anchor_step,
-        "placement": kf.placement, "geom_type": kf.geom_type,
+        "placement": kf.placement, "geom_type": kf.geom_type, "version": kf.version,
         "parts": [_part_state(p) for p in kf.parts],
     }
 
@@ -266,14 +294,21 @@ def apply_keyframes(db: Db, truth: TruthService, payload: dict) -> dict:
 
 
 def _apply_keyframe(db: Db, state: dict) -> None:
-    """Make one keyframe row look like ``state``; ``exists: False`` removes it."""
+    """Make one keyframe row look like ``state``; ``exists: False`` removes it.
+
+    The row id in ``ref`` survives a delete: several ops can name the same
+    keyframe (a create and every re-trace after it), and each holds its own
+    ``ref``, so a redo that re-inserted under a *fresh* id would leave the other
+    ops pointing at a row that no longer exists -- they would each insert a
+    keyframe of their own and the instance would end up with duplicates that
+    nothing can undo. Re-inserting with ``keep_id`` keeps every op in agreement.
+    """
     ref = state["ref"]
     kid = ref.get("keyframe_id")
     if not state["exists"]:
         if kid is not None:
             db.delete_keyframe(kid)
-            ref["keyframe_id"] = None
-        return
+        return  # ... but the id is kept, so a redo can restore that very row
     existing = None
     if kid is not None:
         existing = next(
@@ -289,13 +324,13 @@ def _apply_keyframe(db: Db, state: dict) -> None:
         existing.parts = parts
         db.update_keyframe(existing)
         return
-    ref["keyframe_id"] = db.add_keyframe(
-        new_keyframe(
-            FrameKey(state["desktop"], state["anchor_step"], state["view"]),
-            state["instance"], state["pose_segment"], state["anchor_step"],
-            state["placement"], parts, state["geom_type"],
-        )
+    kf = new_keyframe(
+        FrameKey(state["desktop"], state["anchor_step"], state["view"]),
+        state["instance"], state["pose_segment"], state["anchor_step"],
+        state["placement"], parts, state["geom_type"],
     )
+    kf.version = int(state.get("version") or 1)
+    ref["keyframe_id"] = db.add_keyframe(kf, keep_id=kid)
 
 
 def write_zorder(db: Db, desktop: int, view: str, state: dict) -> None:

@@ -45,7 +45,7 @@ Problems reported in :attr:`CompiledFrame.problems`
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -113,12 +113,22 @@ class CompiledInstance:
 
 @dataclass
 class CompiledFrame:
-    """Everything the compiler derives for one frame."""
+    """Everything the compiler derives for one frame.
+
+    ``painted`` is the order the layers were actually composited in, as
+    ``placement -> instance keys, bottom-up``: the global z-order *after* the
+    pairwise overrides have been applied, with each placement group on its own
+    (spec 3.3 step 5). It is what the instance list and the canvas overlay have
+    to follow, since anything else would show an order the pixels contradict.
+    Instances with no mask layer -- a bench box, a missing shape -- appear in no
+    group.
+    """
 
     key: FrameKey
     instances: dict[str, CompiledInstance]
     problems: list[str]
     input_hash: str
+    painted: dict[str, list[str]] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -245,6 +255,21 @@ def _occlusion_ratio(visible: np.ndarray, amodal: np.ndarray) -> float:
         return 0.0
     ratio = 1.0 - masks.area(visible) / total
     return float(min(1.0, max(0.0, ratio)))
+
+
+
+def _instance_order(layers: list[LayerKey]) -> list[str]:
+    """The instance keys of a painted layer list, bottom-up, each one once.
+
+    A multi-part instance contributes several layers; it takes the position of
+    its bottom-most one, which is where the instance as a whole starts covering
+    anything.
+    """
+    out: list[str] = []
+    for instance, _part in layers:
+        if instance not in out:
+            out.append(instance)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -510,6 +535,7 @@ def compile_frame(
     return CompiledFrame(
         key=key,
         instances=compiled,
+        painted={group: _instance_order(layers) for group, layers in painted.items()},
         problems=problems,
         input_hash=input_hash(
             key=key,
