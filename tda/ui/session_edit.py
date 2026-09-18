@@ -45,7 +45,7 @@ from tda.core.model import (
     ShapePart,
     ZOrderRec,
 )
-from tda.core.truth import VERIFIED, TruthService
+from tda.core.truth import TruthService
 from tda.core.truth_inputs import InputCache, frame_hw, pose_segment_of
 from tda.ui import session_api as api
 from tda.ui.commands import Op
@@ -66,12 +66,14 @@ from tda.ui.session_ops import (
     chain_for,
     chain_steps,
     default_anchor,
+    is_verified,
     keyframe_state,
     new_keyframe,
     occluder_union,
     placement_of,
     refresh_steps,
     segment_steps,
+    settle,
     write_zorder,
 )
 from tda.ui.session_tasks import task_card_for
@@ -122,10 +124,27 @@ def split_zorder_scope(scope: str) -> Optional[tuple[str, bool]]:
 
 def _result(db: Db, truth: TruthService, key: FrameKey, steps: Sequence[int], op: Op,
             extra: Optional[dict] = None) -> dict:
-    """Recompile ``steps`` and package what the session reports to the panels."""
+    """Bring the truth table up to date with one edit, and report what it cost.
+
+    Only the frame the annotator is looking at is compiled here.  The compiled
+    rows of the *other* unverified frames in the interval are a cache of a pure
+    function (spec 3.4): leaving them stale costs nothing, because every reader
+    -- a visit, a batch refresh, an export -- recompiles what it needs, whereas
+    compiling them now costs the annotator 300 ms per frame at scanner
+    resolution and thirty times that on a chassis shape.
+
+    The **verified** frames are different: a frozen row is the one thing the
+    compiler may not overwrite, so a disagreement has to be found and queued.
+    That work is real, so it is handed to the background sweeper through the
+    persisted queue rather than skipped.
+
+    ``affected`` is the full reach of the edit (what "影响 N 帧" shows),
+    ``compiled`` what was actually done now, ``rechecks`` what was deferred.
+    """
     affected = annotatable_steps(db, key.desktop, key.view, steps)
-    stats = refresh_steps(db, truth, key.desktop, key.view, affected)
-    out = {"affected": affected, "conflicts": stats["conflicts"],
+    stats = settle(db, truth, key.desktop, key.view, affected, key.step)
+    out = {"affected": affected, "compiled": stats["compiled"],
+           "rechecks": stats["rechecks"], "conflicts": stats["conflicts"],
            "problems": stats["problems"], "op": op}
     out.update(extra or {})
     return out
@@ -293,8 +312,7 @@ def preview(db: Db, truth: TruthService, key: FrameKey, instance: str, scope: st
                             target, cache)
     verified = [
         step for step in steps
-        if (db.get_frame(FrameKey(key.desktop, step, key.view)) or {}).get("review_status")
-        == VERIFIED
+        if is_verified(db, key.desktop, key.view, step)
     ]
     return {"steps": steps, "verified_steps": verified}
 

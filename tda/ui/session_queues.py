@@ -9,7 +9,7 @@ which steps carry an open conflict.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 from tda.core.db import Db
 from tda.core.model import FrameKey
@@ -32,10 +32,15 @@ class ReviewState:
         self.problems: dict[int, list[str]] = {}
         #: step -> difference-map regions the window could not explain.
         self.unexplained: dict[int, list] = {}
+        #: ``() -> {step: FrameCoverage}``: what has been drawn, without pixels.
+        self.coverage: Callable[[], dict] = dict
         self._conflict_steps: Optional[set[int]] = None
+        self._pending: Optional[set[int]] = None
+        self._coverage: Optional[dict] = None
 
-    def open(self, desktop: int, view: str) -> None:
+    def open(self, desktop: int, view: str, coverage: Callable[[], dict]) -> None:
         self.desktop, self.view = desktop, view
+        self.coverage = coverage
         self.clear()
 
     def clear(self) -> None:
@@ -44,8 +49,27 @@ class ReviewState:
         self.invalidate()
 
     def invalidate(self) -> None:
-        """Forget the conflict memo; the next status query reads it again."""
+        """Forget every per-change memo; the next query builds it again."""
         self._conflict_steps = None
+        self._pending = None
+        self._coverage = None
+
+    def drawn(self) -> dict:
+        """``step -> FrameCoverage`` for the whole view, computed at most once.
+
+        Cheap enough to redo on every edit (no pixels are touched), which is
+        what lets the timeline and the review panel stop depending on stored
+        compiled rows.
+        """
+        if self._coverage is None:
+            self._coverage = self.coverage()
+        return self._coverage
+
+    def pending_rechecks(self) -> set[int]:
+        """Frozen frames of this view still waiting for the sweeper."""
+        if self._pending is None:
+            self._pending = set(self.db.rechecks(self.desktop, self.view))
+        return self._pending
 
     # -- status -------------------------------------------------------------
     def conflicted_steps(self) -> set[int]:
@@ -79,8 +103,16 @@ class ReviewState:
         if status == NEEDS_REVIEW:
             return api.STATUS_NEEDS_REVIEW
         if status == VERIFIED:
-            return api.STATUS_VERIFIED
-        return api.STATUS_AUTO if self.db.compiled(key) else api.STATUS_UNLABELED
+            # frozen, but its inputs moved and nobody has compared them yet: it
+            # may still turn into a conflict, so it is not settled (spec 3.4)
+            return (api.STATUS_RECHECK if int(step) in self.pending_rechecks()
+                    else api.STATUS_VERIFIED)
+        # an unverified frame's compiled rows are a cache that a commit leaves
+        # stale on purpose, so "has anything been drawn here" is asked of the
+        # keyframes instead of of the truth table
+        found = self.drawn().get(int(step))
+        return (api.STATUS_AUTO if found is not None and found.annotated
+                else api.STATUS_UNLABELED)
 
     # -- queues -------------------------------------------------------------
     def set_unexplained(self, step: int, boxes) -> None:
@@ -94,10 +126,11 @@ class ReviewState:
     def queues(self) -> dict[str, list[dict]]:
         """The four review queues of spec 4.4, keyed by :data:`QUEUE_NAMES`.
 
-        ``missing_shape`` is read from the problems of each frame's *last*
-        refresh, which the session keeps in memory: recompiling the whole view
-        to populate a list would make opening the review panel cost as much as a
-        full sweep.
+        ``missing_shape`` is derived from the state machine and the keyframe
+        chains (:mod:`tda.ui.session_coverage`), never from the compiled rows:
+        an unverified frame's rows are a cache a commit leaves stale on purpose,
+        and compiling the view to fill the list would cost exactly what the lazy
+        truth table exists to avoid.
         """
         return {
             api.QUEUE_CONFLICTS: [
@@ -111,10 +144,9 @@ class ReviewState:
                 if row.get("review_status") == NEEDS_REVIEW
             ],
             api.QUEUE_MISSING_SHAPE: [
-                {"step": step, "instance": problem[len(MISSING_SHAPE):]}
-                for step in sorted(self.problems)
-                for problem in self.problems[step]
-                if problem.startswith(MISSING_SHAPE)
+                {"step": step, "instance": instance}
+                for step, found in sorted(self.drawn().items())
+                for instance in found.missing
             ],
             api.QUEUE_UNEXPLAINED: [
                 {"step": step, "boxes": list(boxes)}

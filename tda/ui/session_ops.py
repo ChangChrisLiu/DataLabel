@@ -39,7 +39,7 @@ from tda.core.model import (
 from tda.core.compiler import select_keyframe
 from tda.core.states import needs_geom
 from tda.core.taxonomy import Taxonomy
-from tda.core.truth import TruthService
+from tda.core.truth import VERIFIED, TruthService
 from tda.core.truth_inputs import InputCache, instances_of, pose_segment_of, state_of
 
 __all__ = [
@@ -67,6 +67,7 @@ __all__ = [
     "occluder_union",
     "placement_of",
     "refresh_steps",
+    "settle",
     "segment_steps",
     "write_zorder",
 ]
@@ -107,22 +108,42 @@ def annotatable_steps(db: Db, desktop: int, view: str, steps: Iterable[int]) -> 
 
 def refresh_steps(db: Db, truth: TruthService, desktop: int, view: str,
                   steps: Iterable[int]) -> dict:
-    """Recompile every step of one view, keeping each step's problems apart.
+    """Recompile these steps, keeping each step's problems under its own key.
 
-    This is :meth:`~tda.core.truth.TruthService.refresh_range` unrolled: it
-    shares one :class:`~tda.core.truth_inputs.InputCache` across the sweep in
-    exactly the same way, but records ``problems`` per step instead of
-    concatenating them, which is what the session's ``missing_shape`` queue
-    needs (spec 4.4).
+    A thin alias for :meth:`~tda.core.truth.TruthService.refresh_range` with
+    ``per_step``: the session needs to know *where* a missing shape is in order
+    to fill the queue of spec 4.4, and there is one implementation of the sweep.
     """
-    cache = InputCache()
-    total: dict = {"updated": 0, "conflicts": 0, "skipped": 0, "problems": {}}
-    for step in steps:
-        one = truth.refresh(FrameKey(desktop, int(step), view), cache)
-        for counter in ("updated", "conflicts", "skipped"):
-            total[counter] += one[counter]
-        total["problems"][int(step)] = list(one["problems"])
-    return total
+    return truth.refresh_range(desktop, view, steps, per_step=True)
+
+
+def is_verified(db: Db, desktop: int, view: str, step: int) -> bool:
+    """Has a human frozen this frame? (spec 3.4)"""
+    frame = db.get_frame(FrameKey(desktop, int(step), view)) or {}
+    return frame.get("review_status") == VERIFIED
+
+
+def settle(db: Db, truth: TruthService, desktop: int, view: str, steps: Iterable[int],
+           current: Optional[int] = None) -> dict:
+    """Bring the frame in hand up to date; defer the rest of the interval.
+
+    The rule every write goes through (spec 3.4 read as "an unverified frame's
+    compiled rows are a cache of a pure function"): compile the frame the
+    annotator is looking at, leave the other unverified frames stale for
+    whoever visits them, and hand the **frozen** ones to the persisted re-check
+    queue, because a frozen row is the one thing the compiler may not overwrite
+    and a disagreement nobody looks for is a conflict that never gets raised.
+
+    Returns what :func:`refresh_steps` does plus ``rechecks``, the frames
+    queued, and ``compiled``, the ones actually done now.
+    """
+    wanted = sorted({int(s) for s in steps})
+    now = [int(current)] if current is not None and int(current) in wanted else wanted[:1]
+    stats = refresh_steps(db, truth, desktop, view, now)
+    deferred = [s for s in wanted if s not in now and is_verified(db, desktop, view, s)]
+    stats["rechecks"] = truth.queue_rechecks(desktop, view, deferred)
+    stats["compiled"] = now
+    return stats
 
 
 def as_mask(mask: np.ndarray, hw: tuple[int, int]) -> np.ndarray:
@@ -282,15 +303,16 @@ def keyframe_state(kf: Optional[ShapeKeyframe], ref: dict,
 # --------------------------------------------------------------------------- #
 # the five handlers -- one per op kind of tda.ui.commands.KINDS
 # --------------------------------------------------------------------------- #
-def apply_keyframes(db: Db, truth: TruthService, payload: dict) -> dict:
-    """Write back a list of keyframe states (and a layer order), then recompile."""
+def apply_keyframes(db: Db, truth: TruthService, payload: dict,
+                    current: Optional[int] = None) -> dict:
+    """Write back a list of keyframe states (and a layer order), then settle."""
     with db.transaction():
         for state in payload.get("keyframes", ()):
             _apply_keyframe(db, state)
         zorder = payload.get("zorder")
         if zorder is not None:
             write_zorder(db, payload["desktop"], payload["view"], zorder)
-    return refresh_steps(db, truth, payload["desktop"], payload["view"], payload["steps"])
+    return settle(db, truth, payload["desktop"], payload["view"], payload["steps"], current)
 
 
 def _apply_keyframe(db: Db, state: dict) -> None:
@@ -341,15 +363,17 @@ def write_zorder(db: Db, desktop: int, view: str, state: dict) -> None:
     )
 
 
-def apply_zorder(db: Db, truth: TruthService, payload: dict) -> dict:
-    """Write one stored layer order back and recompile the frames it reaches."""
+def apply_zorder(db: Db, truth: TruthService, payload: dict,
+                 current: Optional[int] = None) -> dict:
+    """Write one stored layer order back and settle the frames it reaches."""
     with db.transaction():
         write_zorder(db, payload["desktop"], payload["view"], payload)
-    return refresh_steps(db, truth, payload["desktop"], payload["view"], payload["steps"])
+    return settle(db, truth, payload["desktop"], payload["view"], payload["steps"], current)
 
 
-def apply_pair_override(db: Db, truth: TruthService, payload: dict) -> dict:
-    """Add or remove one "above beats below" exception, then recompile."""
+def apply_pair_override(db: Db, truth: TruthService, payload: dict,
+                        current: Optional[int] = None) -> dict:
+    """Add or remove one "above beats below" exception, then settle."""
     po = PairOverride(payload["desktop"], payload["view"], payload["pose_segment"],
                       payload["above"], payload["below"])
     with db.transaction():
@@ -357,11 +381,12 @@ def apply_pair_override(db: Db, truth: TruthService, payload: dict) -> dict:
             db.set_pair_override(po)
         else:
             db.delete_pair_override(po)
-    return refresh_steps(db, truth, payload["desktop"], payload["view"], payload["steps"])
+    return settle(db, truth, payload["desktop"], payload["view"], payload["steps"], current)
 
 
-def apply_frame_override(db: Db, truth: TruthService, payload: dict) -> dict:
-    """Write, or drop, one instance's single-frame override, then recompile."""
+def apply_frame_override(db: Db, truth: TruthService, payload: dict,
+                         current: Optional[int] = None) -> dict:
+    """Write, or drop, one instance's single-frame override, then settle."""
     key = FrameKey(payload["desktop"], payload["step"], payload["view"])
     with db.transaction():
         if payload["exists"]:
@@ -371,15 +396,16 @@ def apply_frame_override(db: Db, truth: TruthService, payload: dict) -> dict:
             )
         else:
             db.delete_frame_override(key, payload["instance"])
-    return refresh_steps(db, truth, key.desktop, key.view, payload["steps"])
+    return settle(db, truth, key.desktop, key.view, payload["steps"], current)
 
 
-def apply_occluder(db: Db, truth: TruthService, payload: dict) -> dict:
-    """Write, or drop, one occluder layer of one frame, then recompile."""
+def apply_occluder(db: Db, truth: TruthService, payload: dict,
+                   current: Optional[int] = None) -> dict:
+    """Write, or drop, one occluder layer of one frame, then settle."""
     key = FrameKey(payload["desktop"], payload["step"], payload["view"])
     with db.transaction():
         if payload["exists"]:
             db.set_occluder(OccluderMask(key, payload["occluder_type"], payload["rle"]))
         else:
             db.delete_occluder(key, payload["occluder_type"])
-    return refresh_steps(db, truth, key.desktop, key.view, payload["steps"])
+    return settle(db, truth, key.desktop, key.view, payload["steps"], current)

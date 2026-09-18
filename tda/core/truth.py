@@ -149,9 +149,11 @@ class TruthService:
     def refresh(self, key: FrameKey, cache: Optional[InputCache] = None) -> dict:
         """Bring one frame's truth rows up to date with the current inputs.
 
-        Returns ``{"updated", "conflicts", "skipped", "problems"}``: rows
-        written (a deleted row counts as written), frozen rows found in
-        disagreement, rows left alone, and the compiler's problem list.
+        Returns ``{"updated", "conflicts", "skipped", "problems", "compiled"}``:
+        rows written (a deleted row counts as written), frozen rows found in
+        disagreement, rows left alone, the compiler's problem list, and the
+        compilation the whole decision was made from -- handed back so that a
+        caller which also needs the frame does not compile it a second time.
 
         ``cache`` is :meth:`refresh_range`'s way of reading the step-independent
         inputs once; callers outside this module leave it out.
@@ -164,6 +166,7 @@ class TruthService:
             "conflicts": 0,
             "skipped": 0,
             "problems": list(compiled.problems),
+            "compiled": compiled,
         }
         self._mark_bench(key, compiled)
 
@@ -213,19 +216,63 @@ class TruthService:
             self.demote_frame(key, self._demotion_reason(fresh, known))
         return result
 
-    def refresh_range(self, desktop: int, view: str, steps: Iterable[int]) -> dict:
+    def refresh_range(self, desktop: int, view: str, steps: Iterable[int],
+                      per_step: bool = False) -> dict:
         """:meth:`refresh` every step of one view, with the totals summed up.
 
         ``problems`` is the concatenation of the per-step problem lists in the
-        order the steps were given.
+        order the steps were given -- or, with ``per_step``, a dict keyed by
+        step, which is what a caller needs to say *where* a missing shape is
+        (spec 4.4 queues).
         """
         cache = InputCache()
-        total: dict = {"updated": 0, "conflicts": 0, "skipped": 0, "problems": []}
+        total: dict = {"updated": 0, "conflicts": 0, "skipped": 0,
+                       "problems": {} if per_step else []}
         for step in steps:
             one = self.refresh(FrameKey(desktop, int(step), view), cache)
             for counter in ("updated", "conflicts", "skipped"):
                 total[counter] += one[counter]
-            total["problems"].extend(one["problems"])
+            if per_step:
+                total["problems"][int(step)] = list(one["problems"])
+            else:
+                total["problems"].extend(one["problems"])
+        return total
+
+    # ------------------------------------------------------- pending rechecks
+
+    def queue_rechecks(self, desktop: int, view: str, steps: Iterable[int]) -> list[int]:
+        """Remember that these frozen frames have to be compared again (spec 3.4).
+
+        Editing a shape changes the inputs of every frame it reaches, and a
+        ``verified`` frame among them may now disagree with what a human froze.
+        Compiling them all before the annotator can carry on is what made an
+        edit cost seconds, so the check is deferred -- and, because a conflict
+        that is never raised is worse than a slow tool, the *request* is stored
+        rather than kept in memory. Returns the steps queued.
+        """
+        wanted = [int(s) for s in steps]
+        if wanted:
+            self.db.add_rechecks(desktop, view, wanted)
+        return sorted(set(wanted))
+
+    def pending_rechecks(self, desktop: int, view: str) -> list[int]:
+        """Frozen frames of one view still waiting to be compared, ascending.
+
+        An export or a quality check must run these first: the truth table is
+        only trustworthy once nothing is outstanding.
+        """
+        return self.db.rechecks(desktop, view)
+
+    def run_pending_rechecks(self, desktop: int, view: str) -> dict:
+        """Work the queue off synchronously; same totals as :meth:`refresh_range`.
+
+        This is the batch path -- ``cli check`` and the exports -- next to the
+        background sweeper the GUI uses.
+        """
+        steps = self.pending_rechecks(desktop, view)
+        total = self.refresh_range(desktop, view, steps)
+        for step in steps:
+            self.db.clear_recheck(desktop, view, step)
         return total
 
     # ------------------------------------------------------- verify and demote

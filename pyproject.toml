@@ -28,3 +28,6 @@ tda = ["core/*.sql"]
 testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+  "slow: wall-clock budget checks at full scanner resolution (a few seconds each)",
+]

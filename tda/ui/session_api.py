@@ -42,6 +42,10 @@ STATUS_VERIFIED = "verified"
 STATUS_NEEDS_REVIEW = "needs_review"
 #: An edit contradicts an already frozen frame.
 STATUS_CONFLICT = "conflict"
+#: A frozen frame whose inputs changed and that the truth sweeper has not
+#: compared against them yet (spec 3.4): it may yet turn into a conflict, so it
+#: is not a frame anybody should treat as settled.
+STATUS_RECHECK = "recheck"
 #: The view has no image for this logical step; the state and the shape anchor
 #: still exist, the frame simply has nothing to draw on (spec 4.2, missing frames).
 STATUS_MISSING = "missing"
@@ -52,6 +56,7 @@ FRAME_STATUSES: tuple[str, ...] = (
     STATUS_VERIFIED,
     STATUS_NEEDS_REVIEW,
     STATUS_CONFLICT,
+    STATUS_RECHECK,
     STATUS_MISSING,
 )
 

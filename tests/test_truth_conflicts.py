@@ -222,7 +222,8 @@ def test_resolving_accept_new_writes_the_new_mask_into_the_frozen_row(scene: Sce
     assert masks.bbox(masks.decode_rle(row["visible_rle"])) == (10, 10, 50, 34)
     assert row["status"] == "verified" and row["verified_by"] == "lin"
     assert scene.db.conflicts(DESKTOP) == []
-    assert scene.svc.refresh(scene.key(2)) == {
+    again = scene.svc.refresh(scene.key(2))
+    assert {k: again[k] for k in ("updated", "conflicts", "skipped", "problems")} == {
         "updated": 0, "conflicts": 0, "skipped": 2, "problems": [],
     }
 
@@ -254,7 +255,8 @@ def test_accept_new_writes_the_geometry_the_inputs_say_now(scene: Scene):
     row = scene.row(2, PSU)
     assert masks.bbox(masks.decode_rle(row["visible_rle"])) == (11, 10, 51, 34)
     assert row["status"] == "verified"
-    assert scene.svc.refresh(scene.key(2)) == {
+    again = scene.svc.refresh(scene.key(2))
+    assert {k: again[k] for k in ("updated", "conflicts", "skipped", "problems")} == {
         "updated": 0, "conflicts": 0, "skipped": 2, "problems": [],
     }
 
