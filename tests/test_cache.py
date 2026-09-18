@@ -1,0 +1,664 @@
+"""Tests for the local image cache, burst selection and ROI suggestion.
+
+Synthetic bursts are written under ``tmp_path`` with the real ``P_k.png``
+naming; the only real images used are the checked-in scanner fixtures.  No test
+touches the read-only F: drive.
+"""
+from __future__ import annotations
+
+import json
+import os
+import statistics
+from pathlib import Path
+
+import cv2
+import numpy as np
+import pytest
+
+from tda.core.cache import (
+    build_cache,
+    burst_metrics,
+    cache_path,
+    choose_scan_image,
+    main,
+    suggest_roi,
+)
+from tda.core.index import DesktopIndex, FrameFile, save_index
+from tda.core.model import FrameKey
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCANNER_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "images" / "scanner.png"
+CROP_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "images" / "scanner_crop_native.png"
+# Ground truth measured on scanner.png: bbox of the largest dark component.
+CHASSIS = (349, 143, 790, 639)
+
+
+# --------------------------------------------------------------------------
+# helpers
+# --------------------------------------------------------------------------
+def _texture(seed: int = 0, size: int = 256, block: int = 16, amp: int = 30,
+             base: int = 120, noise: float = 4.0) -> np.ndarray:
+    """A checkerboard-textured BGR frame with sensor-like noise (so that a burst
+    has non-degenerate ``dist_to_median`` values, like the real scanner)."""
+    rng = np.random.default_rng(seed)
+    ys, xs = np.mgrid[0:size, 0:size]
+    img = np.full((size, size), float(base), np.float32)
+    img += amp * (((xs // block) + (ys // block)) % 2)
+    img += rng.normal(0.0, noise, img.shape)
+    gray = np.clip(img, 0, 255).astype(np.uint8)
+    return np.repeat(gray[:, :, None], 3, axis=2)
+
+
+def _write_burst(dirpath: Path, imgs: list[np.ndarray], start: int = 0) -> list[str]:
+    """Write ``imgs`` as ``P_<start+i>.png`` and return their paths."""
+    dirpath.mkdir(parents=True, exist_ok=True)
+    out = []
+    for i, img in enumerate(imgs):
+        p = dirpath / f"P_{start + i}.png"
+        assert cv2.imwrite(str(p), img)
+        out.append(str(p).replace("\\", "/"))
+    return out
+
+
+def _central_box_of(width: int, height: int) -> tuple[int, int, int, int]:
+    """The central 70% box the ROI suggestion falls back to."""
+    bw, bh = int(round(width * 0.7)), int(round(height * 0.7))
+    return ((width - bw) // 2, (height - bh) // 2,
+            (width - bw) // 2 + bw, (height - bh) // 2 + bh)
+
+
+def _m(p_index: int, mean: float = 120.0, sat: float = 0.0,
+       lap: float = 1000.0, dist: float = 0.5) -> dict:
+    """One hand-built metrics record, so selection can be tested as a pure rule."""
+    return {
+        "path": f"P_{p_index}.png",
+        "p_index": p_index,
+        "mean": mean,
+        "sat_frac": sat,
+        "lap_var": lap,
+        "dist_to_median": dist,
+    }
+
+
+def _scan_index(tmp_path: Path, desktop: int = 7, steps=(1, 2),
+                burst_len: int = 10, start: int = 0) -> dict[int, DesktopIndex]:
+    """A one-desktop index of real synthetic scanner bursts on disk."""
+    frames: dict[FrameKey, FrameFile] = {}
+    for s in steps:
+        imgs = [_texture(seed=s * 100 + i) for i in range(burst_len)]
+        paths = _write_burst(tmp_path / "src" / f"D{desktop}" / f"RGB{s}1", imgs, start=start)
+        key = FrameKey(desktop, s, "scan")
+        frames[key] = FrameFile(
+            key=key, path=paths[0], aux={"burst": paths}, src_step_dir=f"RGB{s}1"
+        )
+    return {desktop: DesktopIndex(desktop=desktop, n_steps=max(steps), frames=frames)}
+
+
+# --------------------------------------------------------------------------
+# cache_path
+# --------------------------------------------------------------------------
+def test_cache_path_uses_view_desktop_and_zero_padded_step():
+    assert (cache_path("D:/DataSet/cache", FrameKey(13, 42, "scan"), "png")
+            == "D:/DataSet/cache/scan/D13/s042.png")
+    assert cache_path("D:/c", FrameKey(1, 5, "oak1"), "jpg") == "D:/c/oak1/D01/s005.jpg"
+    assert cache_path("D:/c", FrameKey(66, 123, "rs"), "png") == "D:/c/rs/D66/s123.png"
+
+
+# --------------------------------------------------------------------------
+# burst_metrics
+# --------------------------------------------------------------------------
+def test_burst_metrics_reports_one_record_per_image(tmp_path):
+    imgs = [_texture(seed=i) for i in range(10)]
+    imgs[0] = np.full_like(imgs[0], 9)               # unexposed frame
+    imgs[3][0:120, :] = 255                          # blown-out band, ~47% of the frame
+    metrics = burst_metrics(_write_burst(tmp_path / "b", imgs))
+
+    assert len(metrics) == 10
+    assert {"mean", "sat_frac", "lap_var", "dist_to_median"} <= set(metrics[0])
+    assert [m["p_index"] for m in metrics] == list(range(10))
+    assert metrics[0]["mean"] < 20
+    assert metrics[3]["sat_frac"] > 0.2
+    assert all(m["sat_frac"] < 0.01 for i, m in enumerate(metrics) if i != 3)
+    assert metrics[0]["lap_var"] == 0.0                  # a flat frame has no detail
+    assert all(m["lap_var"] > 0 for m in metrics[1:])
+
+
+def test_burst_metrics_keeps_the_burst_order_and_p_index_of_a_partial_burst(tmp_path):
+    imgs = [_texture(seed=i) for i in range(5)]
+    metrics = burst_metrics(_write_burst(tmp_path / "b", imgs, start=2))
+    assert [m["p_index"] for m in metrics] == [2, 3, 4, 5, 6]
+    assert metrics[0]["path"].endswith("P_2.png")
+
+
+def test_burst_metrics_dist_to_median_spikes_for_a_hand_in_frame(tmp_path):
+    imgs = [_texture(seed=i) for i in range(10)]
+    imgs[6][60:200, 40:210] = 200                    # an arm reaching over the board
+    metrics = burst_metrics(_write_burst(tmp_path / "b", imgs))
+    dists = [m["dist_to_median"] for m in metrics]
+    assert dists[6] > 5 * statistics.median(dists)
+
+
+def test_burst_metrics_lap_var_drops_for_a_blurred_image(tmp_path):
+    imgs = [_texture(seed=i) for i in range(4)]
+    imgs[2] = cv2.GaussianBlur(imgs[2], (0, 0), 6)
+    metrics = burst_metrics(_write_burst(tmp_path / "b", imgs))
+    assert metrics[2]["lap_var"] < 0.5 * max(m["lap_var"] for m in metrics)
+
+
+def test_burst_metrics_rejects_an_empty_burst():
+    with pytest.raises(ValueError):
+        burst_metrics([])
+
+
+def test_burst_metrics_raises_on_an_unreadable_file(tmp_path):
+    with pytest.raises(OSError):
+        burst_metrics([str(tmp_path / "nope.png")])
+
+
+# --------------------------------------------------------------------------
+# choose_scan_image - the rule, on hand-built metrics
+# --------------------------------------------------------------------------
+def test_choose_scan_image_defaults_to_p0():
+    assert choose_scan_image([_m(i) for i in range(10)]) == (0, "p0")
+
+
+def test_choose_scan_image_skips_a_dark_p0_and_takes_the_sharpest():
+    metrics = [_m(i) for i in range(10)]
+    metrics[0]["mean"] = 8.0
+    metrics[7]["lap_var"] = 2500.0
+    assert choose_scan_image(metrics) == (7, "p0_dark")
+
+
+def test_choose_scan_image_skips_a_p0_darker_than_a_real_scan_ever_is():
+    # D01 step 7: the scanner lamp failed on P_0, which came out at mean 28
+    # while the rest of the burst sat at 156.
+    metrics = [_m(i, mean=156.0) for i in range(10)]
+    metrics[0]["mean"] = 28.0
+    metrics[8]["lap_var"] = 2500.0
+    assert choose_scan_image(metrics) == (8, "p0_dark")
+
+
+def test_choose_scan_image_skips_a_blown_out_p0():
+    metrics = [_m(i) for i in range(10)]
+    metrics[0]["sat_frac"] = 0.85
+    metrics[4]["lap_var"] = 3000.0
+    assert choose_scan_image(metrics) == (4, "p0_saturated")
+
+
+def test_choose_scan_image_skips_a_p0_with_a_gross_scene_difference():
+    metrics = [_m(i) for i in range(10)]
+    metrics[0]["dist_to_median"] = 30.0            # e.g. an arm over the board
+    metrics[6]["lap_var"] = 2000.0
+    assert choose_scan_image(metrics) == (6, "p0_outlier")
+
+
+def test_choose_scan_image_keeps_a_p0_that_only_drifts_from_the_burst_median():
+    """The scanner lamp drifts through a burst, so P_0 is routinely a couple of
+    gray levels off the median - decision C10 says that still means P_0."""
+    metrics = [_m(i, dist=0.5) for i in range(10)]
+    metrics[0]["dist_to_median"] = 2.0
+    metrics[7]["lap_var"] = 5000.0
+    assert choose_scan_image(metrics) == (0, "p0")
+
+
+def test_choose_scan_image_ignores_alternatives_that_fail_the_check():
+    metrics = [_m(i) for i in range(10)]
+    metrics[0]["mean"] = 5.0
+    metrics[9].update(lap_var=9999.0, sat_frac=0.8)   # sharpest but blown out
+    metrics[3]["lap_var"] = 3000.0
+    assert choose_scan_image(metrics) == (3, "p0_dark")
+
+
+def test_choose_scan_image_reports_p0_missing_for_a_burst_starting_at_p2():
+    # D49 / RGB261: the burst on disk starts at P_2 and holds 5 images.
+    metrics = [_m(i) for i in (2, 3, 4, 5, 6)]
+    assert choose_scan_image(metrics) == (0, "p0_missing")
+
+
+def test_choose_scan_image_p0_missing_skips_a_dark_first_image():
+    metrics = [_m(i) for i in (2, 3, 4, 5, 6)]
+    metrics[0]["mean"] = 6.0
+    assert choose_scan_image(metrics) == (1, "p0_missing")
+
+
+def test_choose_scan_image_keeps_p0_when_no_image_passes():
+    """A check that rejects the whole burst says nothing about which shot is
+    better, so the default wins and the step is flagged instead."""
+    metrics = [_m(i, mean=5.0) for i in range(10)]
+    metrics[4]["lap_var"] = 5000.0
+    assert choose_scan_image(metrics) == (0, "p0_dark_kept")
+
+
+def test_choose_scan_image_keeps_a_single_image_burst():
+    idx, reason = choose_scan_image([_m(0, mean=5.0)])
+    assert idx == 0
+    assert reason.startswith("p0_dark")
+
+
+def test_choose_scan_image_accepts_the_normal_brightness_of_the_white_board():
+    """The white reference board saturates a median of 29% of every real scanner
+    frame and 52-54% on the brightest six desktops (D02, D03, D18-D21), which is
+    the scene and not an exposure failure."""
+    normal = [_m(i, mean=156.0, sat=0.33 + 0.002 * i, dist=0.5 + 0.1 * i) for i in range(10)]
+    assert choose_scan_image(normal) == (0, "p0")
+    bright = [_m(i, mean=199.0, sat=0.54 - 0.002 * i, dist=0.5) for i in range(10)]
+    assert choose_scan_image(bright) == (0, "p0")
+
+
+def test_choose_scan_image_still_skips_a_p0_that_is_really_blown_out():
+    metrics = [_m(i, sat=0.33) for i in range(10)]
+    metrics[0]["sat_frac"] = 0.9
+    metrics[5]["lap_var"] = 2600.0
+    assert choose_scan_image(metrics) == (5, "p0_saturated")
+
+
+def test_choose_scan_image_rejects_empty_metrics():
+    with pytest.raises(ValueError):
+        choose_scan_image([])
+
+
+# --------------------------------------------------------------------------
+# choose_scan_image - end to end over real image files
+# --------------------------------------------------------------------------
+def test_choose_scan_image_on_a_normal_synthetic_burst(tmp_path):
+    imgs = [_texture(seed=i) for i in range(10)]
+    metrics = burst_metrics(_write_burst(tmp_path / "b", imgs))
+    assert choose_scan_image(metrics) == (0, "p0")
+
+
+def test_choose_scan_image_on_a_burst_whose_p0_is_dark(tmp_path):
+    imgs = [_texture(seed=i) for i in range(10)]
+    imgs[0] = np.full_like(imgs[0], 9)
+    metrics = burst_metrics(_write_burst(tmp_path / "b", imgs))
+    idx, reason = choose_scan_image(metrics)
+    assert reason == "p0_dark"
+    assert idx != 0
+    assert metrics[idx]["mean"] > 40
+
+
+def test_choose_scan_image_on_a_burst_with_an_arm_over_p0(tmp_path):
+    imgs = [_texture(seed=i) for i in range(10)]
+    imgs[0][40:220, 30:230] = 220                    # an arm reaching over the board
+    metrics = burst_metrics(_write_burst(tmp_path / "b", imgs))
+    idx, reason = choose_scan_image(metrics)
+    assert reason == "p0_outlier"
+    assert idx != 0
+
+
+def test_choose_scan_image_on_a_burst_with_no_p0(tmp_path):
+    imgs = [_texture(seed=i) for i in range(5)]
+    metrics = burst_metrics(_write_burst(tmp_path / "b", imgs, start=2))
+    assert choose_scan_image(metrics) == (0, "p0_missing")
+
+
+# --------------------------------------------------------------------------
+# suggest_roi
+# --------------------------------------------------------------------------
+def test_suggest_roi_finds_the_chassis_in_a_real_scanner_frame():
+    img = cv2.imread(str(SCANNER_FIXTURE))
+    x0, y0, x1, y1 = suggest_roi(img, "scan")
+    cx0, cy0, cx1, cy1 = CHASSIS
+
+    assert all(isinstance(v, int) for v in (x0, y0, x1, y1))
+    # contains the chassis (element-wise: a tuple compare would be lexicographic)
+    assert x0 <= cx0 and y0 <= cy0 and x1 >= cx1 and y1 >= cy1
+    assert x0 >= 60 and y0 >= 35 and x1 <= 845 and y1 <= 795    # inside the tape square
+    assert (x1 - x0) * (y1 - y0) <= 1.6 * (cx1 - cx0) * (cy1 - cy0)
+
+
+def test_suggest_roi_on_a_synthetic_tape_square():
+    img = np.full((400, 400, 3), 245, np.uint8)
+    cv2.rectangle(img, (40, 40), (360, 360), (40, 190, 230), 14)   # yellow tape band
+    cv2.rectangle(img, (140, 120), (280, 300), (60, 60, 60), -1)   # dark chassis
+    x0, y0, x1, y1 = suggest_roi(img, "scan")
+    assert x0 <= 140 and y0 <= 120 and x1 >= 280 and y1 >= 300
+    assert x0 >= 45 and y0 >= 45 and x1 <= 355 and y1 <= 355
+
+
+def test_suggest_roi_ignores_a_yellow_blob_that_does_not_frame_the_board():
+    """A label or cable inside the chassis is yellow too; only a square that
+    spans the frame is the tape (otherwise the box would be junk)."""
+    img = np.full((400, 400, 3), 245, np.uint8)
+    cv2.rectangle(img, (150, 150), (260, 250), (40, 190, 230), -1)   # yellow patch
+    cv2.rectangle(img, (170, 170), (240, 230), (60, 60, 60), -1)     # dark blob in it
+    assert suggest_roi(img, "scan") == _central_box_of(400, 400)
+
+
+def test_suggest_roi_falls_back_to_the_central_box_without_tape():
+    img = cv2.imread(str(CROP_FIXTURE))
+    assert suggest_roi(img, "scan") == (135, 135, 765, 765)
+
+
+def test_suggest_roi_uses_the_central_box_for_other_views():
+    img = np.zeros((720, 1280, 3), np.uint8)
+    assert suggest_roi(img, "oak1") == (192, 108, 1088, 612)
+    assert suggest_roi(img, "rs") == (192, 108, 1088, 612)
+
+
+def test_suggest_roi_accepts_a_grayscale_image():
+    img = cv2.imread(str(SCANNER_FIXTURE), cv2.IMREAD_GRAYSCALE)
+    x0, y0, x1, y1 = suggest_roi(img, "scan")
+    assert 0 <= x0 < x1 <= img.shape[1] and 0 <= y0 < y1 <= img.shape[0]
+
+
+# --------------------------------------------------------------------------
+# build_cache
+# --------------------------------------------------------------------------
+def test_build_cache_copies_the_chosen_image_and_writes_a_manifest(tmp_path):
+    index = _scan_index(tmp_path)
+    seen: list[tuple] = []
+    stats = build_cache(index, str(tmp_path / "cache"), progress=lambda d, s, v: seen.append((d, s, v)))
+
+    assert stats["copied"] == 2
+    assert stats["skipped"] == 0
+    assert stats["failures"] == []
+    assert seen == [(7, 1, "scan"), (7, 2, "scan")]
+
+    for step in (1, 2):
+        dest = tmp_path / "cache" / "scan" / "D07" / f"s{step:03d}.png"
+        assert dest.is_file()
+        src = index[7].frames[FrameKey(7, step, "scan")].aux["burst"][0]
+        assert dest.read_bytes() == Path(src).read_bytes()
+
+    manifest = json.loads((tmp_path / "cache" / "scan" / "D07" / "manifest.json").read_text("utf-8"))
+    assert sorted(manifest) == ["1", "2"]
+    rec = manifest["1"]
+    assert rec["chosen"] == 0
+    assert rec["reason"] == "p0"
+    assert len(rec["metrics"]) == 10
+    assert rec["src"].endswith("P_0.png")
+    assert {"mean", "sat_frac", "lap_var", "dist_to_median"} <= set(rec["metrics"][0])
+
+
+def test_build_cache_copies_the_chosen_non_p0_image(tmp_path):
+    index = _scan_index(tmp_path, steps=(4,))
+    burst = index[7].frames[FrameKey(7, 4, "scan")].aux["burst"]
+    dark = _texture(seed=1) * 0 + 9
+    assert cv2.imwrite(burst[0], dark)                     # blank out P_0 on disk
+
+    stats = build_cache(index, str(tmp_path / "cache"))
+    manifest = json.loads((tmp_path / "cache" / "scan" / "D07" / "manifest.json").read_text("utf-8"))
+    rec = manifest["4"]
+    assert rec["chosen"] != 0
+    assert rec["reason"] == "p0_dark"
+    assert rec["src"] == burst[rec["chosen"]]
+    dest = tmp_path / "cache" / "scan" / "D07" / "s004.png"
+    assert dest.read_bytes() == Path(rec["src"]).read_bytes()
+    assert len(stats["non_p0"]) == 1
+    assert stats["non_p0"][0]["desktop"] == 7
+
+
+def test_build_cache_separates_a_kept_p0_from_a_real_replacement(tmp_path):
+    """A burst that is saturated throughout keeps P_0, so it belongs in
+    ``flagged`` (review the burst), not in ``non_p0`` (the cache holds another
+    shot) - that is the difference the run report is read for."""
+    index = _scan_index(tmp_path, steps=(1,))
+    burst = index[7].frames[FrameKey(7, 1, "scan")].aux["burst"]
+    for path in burst:
+        img = _texture(seed=1)
+        img[:210] = 255                                  # 82% blown out in every shot
+        assert cv2.imwrite(path, img)
+
+    stats = build_cache(index, str(tmp_path / "cache"))
+    assert stats["non_p0"] == []
+    assert len(stats["flagged"]) == 1
+    assert stats["flagged"][0]["reason"] == "p0_saturated_kept"
+    manifest = json.loads((tmp_path / "cache" / "scan" / "D07" / "manifest.json").read_text("utf-8"))
+    assert manifest["1"]["chosen"] == 0
+    dest = tmp_path / "cache" / "scan" / "D07" / "s001.png"
+    assert dest.read_bytes() == Path(burst[0]).read_bytes()
+
+
+def test_build_cache_is_idempotent(tmp_path):
+    index = _scan_index(tmp_path)
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    dest = tmp_path / "cache" / "scan" / "D07" / "s001.png"
+    stamp = dest.stat().st_mtime_ns
+
+    stats = build_cache(index, cache)
+    assert stats["copied"] == 0
+    assert stats["skipped"] == 2
+    assert dest.stat().st_mtime_ns == stamp
+    manifest = json.loads((tmp_path / "cache" / "scan" / "D07" / "manifest.json").read_text("utf-8"))
+    assert sorted(manifest) == ["1", "2"]
+
+
+def test_build_cache_resumes_after_an_interrupted_desktop(tmp_path, monkeypatch):
+    """A run killed mid-desktop must not redo the bursts it already read."""
+    monkeypatch.setattr("tda.core.cache.MANIFEST_FLUSH_EVERY", 1)
+    index = _scan_index(tmp_path, steps=(1, 2, 3))
+    cache = str(tmp_path / "cache")
+
+    def die_on_step_2(desktop, step, view):
+        if step == 2:
+            raise KeyboardInterrupt("killed")
+
+    with pytest.raises(KeyboardInterrupt):
+        build_cache(index, cache, progress=die_on_step_2)
+
+    manifest = json.loads((tmp_path / "cache" / "scan" / "D07" / "manifest.json").read_text("utf-8"))
+    assert sorted(manifest) == ["1", "2"]
+
+    stats = build_cache(index, cache)
+    assert (stats["skipped"], stats["copied"]) == (2, 1)
+
+
+def test_build_cache_recheck_replaces_a_stale_choice(tmp_path):
+    """A re-run re-decides from the metrics already in the manifest (no source
+    reads), so a changed selection rule fixes the cached file and the record."""
+    index = _scan_index(tmp_path, steps=(1,))
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    mpath = tmp_path / "cache" / "scan" / "D07" / "manifest.json"
+    manifest = json.loads(mpath.read_text("utf-8"))
+    burst = index[7].frames[FrameKey(7, 1, "scan")].aux["burst"]
+    manifest["1"].update(chosen=4, reason="p0_outlier", src=burst[4])   # stale decision
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+    dest = tmp_path / "cache" / "scan" / "D07" / "s001.png"
+    dest.write_bytes(Path(burst[4]).read_bytes())
+
+    stats = build_cache(index, cache)
+    assert stats["rechosen"] == 1
+    assert stats["copied"] == 1
+    assert stats["skipped"] == 0
+    assert dest.read_bytes() == Path(burst[0]).read_bytes()
+    rec = json.loads(mpath.read_text("utf-8"))["1"]
+    assert (rec["chosen"], rec["reason"], rec["src"]) == (0, "p0", burst[0])
+
+
+def test_build_cache_recheck_relabels_without_recopying(tmp_path):
+    """Same image, different reason: only the manifest needs updating."""
+    index = _scan_index(tmp_path, steps=(1,))
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    mpath = tmp_path / "cache" / "scan" / "D07" / "manifest.json"
+    manifest = json.loads(mpath.read_text("utf-8"))
+    manifest["1"]["reason"] = "p0_saturated_kept"          # reason from an old rule
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+    dest = tmp_path / "cache" / "scan" / "D07" / "s001.png"
+    stamp = dest.stat().st_mtime_ns
+
+    stats = build_cache(index, cache)
+    assert (stats["copied"], stats["rechosen"], stats["relabelled"]) == (0, 0, 1)
+    assert dest.stat().st_mtime_ns == stamp
+    assert json.loads(mpath.read_text("utf-8"))["1"]["reason"] == "p0"
+
+
+def test_build_cache_recomputes_when_the_metrics_version_changed(tmp_path, monkeypatch):
+    """A change to burst_metrics itself (a new metric, another SAT_LEVEL) is not
+    visible in the stored records, so the version stamp forces a real recompute."""
+    index = _scan_index(tmp_path, steps=(1,))
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    mpath = tmp_path / "cache" / "scan" / "D07" / "manifest.json"
+    manifest = json.loads(mpath.read_text("utf-8"))
+    assert manifest["1"]["metrics_version"] == 1
+    manifest["1"]["metrics"][0]["mean"] = 999.0          # a stale stored metric
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setattr("tda.core.cache.METRICS_VERSION", 2)
+    stats = build_cache(index, cache)
+    assert stats["skipped"] == 0
+    rec = json.loads(mpath.read_text("utf-8"))["1"]
+    assert rec["metrics_version"] == 2
+    assert rec["metrics"][0]["mean"] != 999.0            # measured again from the images
+
+
+def test_build_cache_treats_a_record_without_a_version_as_the_current_one(tmp_path):
+    """Manifests written before the stamp existed must not trigger a rebuild."""
+    index = _scan_index(tmp_path, steps=(1, 2))
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    mpath = tmp_path / "cache" / "scan" / "D07" / "manifest.json"
+    manifest = json.loads(mpath.read_text("utf-8"))
+    for rec in manifest.values():
+        rec.pop("metrics_version")
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+
+    stats = build_cache(index, cache)
+    assert (stats["skipped"], stats["copied"], stats["relabelled"]) == (2, 0, 0)
+
+
+def test_build_cache_force_rebuilds_every_step(tmp_path):
+    index = _scan_index(tmp_path, steps=(1, 2))
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    dest = tmp_path / "cache" / "scan" / "D07" / "s001.png"
+    stamp = dest.stat().st_mtime_ns
+
+    stats = build_cache(index, cache, force=True)
+    assert (stats["copied"], stats["skipped"]) == (2, 0)
+    assert dest.stat().st_mtime_ns != stamp
+
+
+def test_build_cache_recompute_refreshes_the_stored_metrics(tmp_path):
+    index = _scan_index(tmp_path, steps=(1,))
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    mpath = tmp_path / "cache" / "scan" / "D07" / "manifest.json"
+    manifest = json.loads(mpath.read_text("utf-8"))
+    manifest["1"]["metrics"][0]["lap_var"] = -1.0
+    mpath.write_text(json.dumps(manifest), encoding="utf-8")
+    dest = tmp_path / "cache" / "scan" / "D07" / "s001.png"
+    stamp = dest.stat().st_mtime_ns
+
+    stats = build_cache(index, cache, recompute=True)
+    assert (stats["copied"], stats["relabelled"]) == (0, 1)   # same image, new metrics
+    assert dest.stat().st_mtime_ns == stamp
+    assert json.loads(mpath.read_text("utf-8"))["1"]["metrics"][0]["lap_var"] > 0
+
+
+def test_build_cache_recopies_a_truncated_file(tmp_path):
+    index = _scan_index(tmp_path, steps=(1,))
+    cache = str(tmp_path / "cache")
+    build_cache(index, cache)
+    dest = tmp_path / "cache" / "scan" / "D07" / "s001.png"
+    dest.write_bytes(b"truncated")
+
+    stats = build_cache(index, cache)
+    assert stats["copied"] == 1
+    assert dest.stat().st_size > 100
+
+
+def test_build_cache_records_failures_and_keeps_going(tmp_path):
+    index = _scan_index(tmp_path, steps=(1, 2))
+    bad = index[7].frames[FrameKey(7, 1, "scan")]
+    bad.aux["burst"] = [str(tmp_path / "missing" / "P_0.png")]
+
+    stats = build_cache(index, str(tmp_path / "cache"))
+    assert stats["copied"] == 1
+    assert len(stats["failures"]) == 1
+    assert stats["failures"][0]["desktop"] == 7 and stats["failures"][0]["step"] == 1
+    assert not (tmp_path / "cache" / "scan" / "D07" / "s001.png").exists()
+    assert (tmp_path / "cache" / "scan" / "D07" / "s002.png").is_file()
+    manifest = json.loads((tmp_path / "cache" / "scan" / "D07" / "manifest.json").read_text("utf-8"))
+    assert sorted(manifest) == ["2"]
+
+
+def test_build_cache_uses_the_right_extension_per_view(tmp_path):
+    oak = tmp_path / "src" / "oak.jpg"
+    rs = tmp_path / "src" / "rs.png"
+    oak.parent.mkdir(parents=True, exist_ok=True)
+    assert cv2.imwrite(str(oak), _texture(seed=1))
+    assert cv2.imwrite(str(rs), _texture(seed=2))
+    frames = {
+        FrameKey(3, 1, "oak1"): FrameFile(key=FrameKey(3, 1, "oak1"), path=str(oak)),
+        FrameKey(3, 1, "rs"): FrameFile(key=FrameKey(3, 1, "rs"), path=str(rs)),
+    }
+    index = {3: DesktopIndex(desktop=3, n_steps=1, frames=frames)}
+
+    stats = build_cache(index, str(tmp_path / "cache"), views=("oak1", "rs"))
+    assert stats["copied"] == 2
+    assert (tmp_path / "cache" / "oak1" / "D03" / "s001.jpg").is_file()
+    assert (tmp_path / "cache" / "rs" / "D03" / "s001.png").is_file()
+    manifest = json.loads((tmp_path / "cache" / "oak1" / "D03" / "manifest.json").read_text("utf-8"))
+    assert manifest["1"]["chosen"] == 0
+    assert manifest["1"]["metrics"] == []
+    assert manifest["1"]["src"] == str(oak).replace("\\", "/")
+
+
+def test_build_cache_only_touches_the_requested_views_and_desktops(tmp_path):
+    index = _scan_index(tmp_path, desktop=7, steps=(1,))
+    index.update(_scan_index(tmp_path, desktop=8, steps=(1,)))
+    oak_key = FrameKey(7, 1, "oak1")
+    index[7].frames[oak_key] = FrameFile(key=oak_key, path=str(tmp_path / "src" / "nope.jpg"))
+
+    stats = build_cache(index, str(tmp_path / "cache"), desktops=[7])
+    assert stats["copied"] == 1
+    assert stats["failures"] == []
+    assert (tmp_path / "cache" / "scan" / "D07" / "s001.png").is_file()
+    assert not (tmp_path / "cache" / "scan" / "D08").exists()
+    assert not (tmp_path / "cache" / "oak1").exists()
+
+
+def test_build_cache_never_writes_outside_the_cache_dir(tmp_path):
+    index = _scan_index(tmp_path, steps=(1,))
+    src_dir = tmp_path / "src" / "D7" / "RGB11"
+    before = {p.name: p.stat().st_mtime_ns for p in src_dir.iterdir()}
+    build_cache(index, str(tmp_path / "cache"))
+    after = {p.name: p.stat().st_mtime_ns for p in src_dir.iterdir()}
+    assert before == after
+    assert sorted(os.listdir(tmp_path)) == ["cache", "src"]
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+def _cli_index(tmp_path: Path, **kwargs) -> tuple[str, str]:
+    """Write a synthetic index to disk and return (index path, cache dir)."""
+    index = _scan_index(tmp_path, **kwargs)
+    path = str(tmp_path / "index.json")
+    save_index(index, path)
+    return path, str(tmp_path / "cache")
+
+
+def test_main_builds_a_range_and_reports_success(tmp_path):
+    index_path, cache = _cli_index(tmp_path, steps=(1, 2))
+    assert main(["--index", index_path, "--cache", cache, "--first", "7", "--last", "7"]) == 0
+    assert (Path(cache) / "scan" / "D07" / "s002.png").is_file()
+
+
+def test_main_passes_force_and_recompute_through(tmp_path):
+    index_path, cache = _cli_index(tmp_path, steps=(1,))
+    argv = ["--index", index_path, "--cache", cache, "--first", "7", "--last", "7"]
+    assert main(argv) == 0
+    dest = Path(cache) / "scan" / "D07" / "s001.png"
+    stamp = dest.stat().st_mtime_ns
+
+    assert main(argv + ["--recompute"]) == 0
+    assert dest.stat().st_mtime_ns == stamp          # metrics only
+    assert main(argv + ["--force"]) == 0
+    assert dest.stat().st_mtime_ns != stamp          # rebuilt
+
+
+def test_main_returns_non_zero_when_a_step_fails(tmp_path, capsys):
+    index = _scan_index(tmp_path, steps=(1,))
+    index[7].frames[FrameKey(7, 1, "scan")].aux["burst"] = [str(tmp_path / "gone" / "P_0.png")]
+    index_path = str(tmp_path / "index.json")
+    save_index(index, index_path)
+
+    code = main(["--index", index_path, "--cache", str(tmp_path / "cache"),
+                 "--first", "7", "--last", "7"])
+    assert code != 0
+    assert "failures=1" in capsys.readouterr().out
