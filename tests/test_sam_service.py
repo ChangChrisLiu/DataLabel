@@ -101,6 +101,15 @@ def test_blend_local_keeps_prior_outside_radius():
     assert np.array_equal(blend_local(prior, proposal, [], radius=48.0), prior)
 
 
+def test_sam_result_defaults_candidates_to_the_single_mask():
+    """Old two-field construction keeps working and still exposes a candidate."""
+    mask = np.zeros((4, 4), dtype=bool)
+    result = SamResult(mask=mask, score=0.5, ms=1.0)
+    assert len(result.candidates) == 1
+    assert result.candidates[0] is mask
+    assert result.scores == [0.5]
+
+
 def test_available_is_a_bool():
     assert isinstance(SamService.available(), bool)
     assert SamService.available(checkpoint="Z:/definitely/missing.pt") is False
@@ -205,6 +214,34 @@ def test_multimask_picks_the_best_candidate(service, crop):
 
 
 @requires_sam
+def test_multimask_returns_three_candidates_sorted_by_score(service, crop):
+    """One point is ambiguous (part vs assembly), so the annotator gets 3 offers."""
+    result = service.predict(
+        SamRequest(image_crop=crop, points=[(*FAN_POINT, 1)], multimask=True)
+    )
+    assert len(result.candidates) == 3
+    assert len(result.scores) == 3
+    assert result.scores == sorted(result.scores, reverse=True)
+    # The legacy fields still name the best candidate.
+    assert result.scores[0] == result.score
+    assert np.array_equal(result.candidates[0], result.mask)
+    for cand in result.candidates:
+        assert cand.dtype == np.bool_
+        assert cand.shape == crop.shape[:2]
+    # Cycling would be pointless if SAM returned the same mask three times.
+    assert not np.array_equal(result.candidates[0], result.candidates[1])
+    assert not np.array_equal(result.candidates[1], result.candidates[2])
+
+
+@requires_sam
+def test_single_mask_prediction_has_exactly_one_candidate(service, crop):
+    result = service.predict(SamRequest(image_crop=crop, box=FAN_BOX))
+    assert len(result.candidates) == 1
+    assert result.scores == [result.score]
+    assert np.array_equal(result.candidates[0], result.mask)
+
+
+@requires_sam
 def test_local_refinement_only_changes_pixels_near_the_new_point(service, crop, fan_mask):
     prior = fan_mask
     assert prior[int(FAN_NEG_POINT[1]), int(FAN_NEG_POINT[0])], "neg point must sit inside the prior"
@@ -228,6 +265,23 @@ def test_local_refinement_only_changes_pixels_near_the_new_point(service, crop, 
     kept = (refined & far_prior).sum() / far_prior.sum()
     assert kept >= 0.8, f"only {kept:.3f} of far prior pixels survived"
     assert np.array_equal(refined[~near], prior[~near])
+
+
+@requires_sam
+def test_local_refinement_offers_only_the_blended_result(service, crop, fan_mask):
+    """Cycling raw proposals after a refinement would undo the blend."""
+    result = service.predict(
+        SamRequest(
+            image_crop=crop,
+            points=[(*FAN_NEG_POINT, 0)],
+            mask_input=fan_mask,
+            multimask=True,
+        )
+    )
+    assert len(result.candidates) == 1
+    assert len(result.scores) == 1
+    assert np.array_equal(result.candidates[0], result.mask)
+    assert not np.array_equal(result.mask, fan_mask), "the blend must have changed it"
 
 
 @requires_sam

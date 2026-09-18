@@ -43,10 +43,12 @@ CSV_FIELDS = [
 class Sam2Backend:
     """Adapter over the production ``SamService``'s predictor.
 
-    ``SamService.predict`` collapses the candidates to the top-scoring one, but
-    the experiment needs all of them to report the oracle (see
-    :func:`run_one_frame`), so the underlying predictor is called directly. The
-    embedding cache and autocast behaviour are still the service's.
+    ``SamService.predict`` now returns every candidate, but it also returns them
+    *ranked by SAM's own score*, and the experiment needs the raw decoder order
+    to report both "what the tool would pick" and the oracle best (see
+    :func:`run_one_frame`) against the reference mask. So the underlying
+    predictor is called directly; the embedding cache and the autocast
+    behaviour are still the service's.
     """
 
     name = "sam2.1"
