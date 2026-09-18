@@ -123,6 +123,42 @@ def test_the_prompt_box_is_cleared_on_a_frame_change(window):
     assert window.sam_point.prompt_box is None
 
 
+def test_the_prompt_box_survives_a_detour_through_the_brush(window):
+    """``detach()`` clears the tool's box, so re-arming has to put it back."""
+    window.session.goto(LAST_STEP - 1)
+    payload = wait_for_assist(window)
+    if not payload["unexplained"]:
+        pytest.skip("the synthetic frames produced no unexplained change")
+    window.act_tool("sam_point")
+    window.begin_add_shape(payload["unexplained"][0])
+    box = window.sam_point.prompt_box
+    window.act_tool("brush")
+    assert window.sam_point.prompt_box is None      # the tool was detached
+    window.act_tool("sam_point")
+    assert window.sam_point.prompt_box == box
+
+
+def test_a_frame_without_an_image_unsets_the_frame_token(qapp, tmp_path):
+    """No token means the tools refuse to prompt, which is what we want there."""
+    session = make_session(tmp_path, missing=(LAST_STEP - 1,))
+    win = MainWindow(session, make_paths(tmp_path), "tester", sam_queue=StubSamQueue())
+    try:
+        win.session.goto(LAST_STEP - 1)
+        assert win.sam_point.frame_token is None
+        win.session.goto(LAST_STEP)
+        assert win.sam_point.frame_token == FrameKey(DESKTOP, LAST_STEP, VIEW)
+    finally:
+        win.shutdown()
+
+
+def test_the_sam_tools_always_know_which_instance_they_write(window):
+    instance = start_edit(window)
+    assert window.sam_point.instance == instance
+    assert window.sam_box.instance == instance
+    window.act_clear_edit()
+    assert window.sam_point.instance is None
+
+
 # --------------------------------------------------------------------------- #
 # SAM results
 # --------------------------------------------------------------------------- #

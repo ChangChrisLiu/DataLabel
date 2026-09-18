@@ -212,6 +212,10 @@ class AssistMixin:
         self.assist.sigFailed.connect(self.report_error)
         self.assist_result: Optional[dict] = None
         self._unexplained: dict[int, list[Box]] = {}
+        #: The diff-map box prompt of the frame, kept by the window because
+        #: ``SamToolBase.detach()`` clears the tool's own copy: switching to the
+        #: brush and back must not silently downgrade point+box to point-only.
+        self._prompt_box: Optional[tuple[float, float, float, float]] = None
 
         self.heat_visible = False
         self.heat_item = QGraphicsPixmapItem()
@@ -225,12 +229,54 @@ class AssistMixin:
     def _sam_tool(self):
         return self.sam_box if self._tool_name == "sam_box" else self.sam_point
 
+    def set_sam_instance(self, instance: Optional[str]) -> None:
+        """Name the instance an applied mask belongs to.
+
+        The tools have a ``"editing"`` fallback for when nothing says; relying
+        on it would stamp two different edits with the same identity, so the
+        window always answers explicitly.
+        """
+        for tool in (self.sam_point, self.sam_box):
+            tool.instance = instance
+
+    def clear_prompt_box(self) -> None:
+        """Forget the box prompt; the next frame's diff map proposes its own."""
+        self._prompt_box = None
+
+    def rearm_sam(self) -> None:
+        """Give a freshly attached SAM tool its frame token and prompt box back.
+
+        ``detach()`` cancels the in-flight prompt and clears the box, which is
+        what makes a tool switch safe; the cost is that re-arming has to be
+        explicit, or the next click would go out point-only.
+        """
+        tool = self._sam_tool()
+        if not self.sam_available or self._tool_name not in ("sam_point", "sam_box"):
+            return
+        from tda.ui import app_compat as compat
+
+        if compat.is_open(self.session) and self.session.image() is not None:
+            tool.set_frame_token(self.session.current())
+        if self._prompt_box is not None:
+            tool.set_prompt_box(self._prompt_box)
+
     # ------------------------------------------------------------ frame hook
     def on_frame_changed_assist(self, key) -> None:
-        """Re-stamp the SAM tools and start the comparison for the new frame."""
+        """Re-stamp the SAM tools and start the comparison for the new frame.
+
+        The token is **mandatory**: without one the tools refuse to prompt, so a
+        frame with no image gets ``None`` (prompting is meaningless there) and
+        every other frame gets its :class:`~tda.core.model.FrameKey`.
+        """
+        token = key if self.session.image() is not None else None
+        self.clear_prompt_box()
         for tool in (self.sam_point, self.sam_box):
             tool.overlay = self.overlay
-            tool.set_frame_token(key)
+            tool.set_frame_token(token)
+            # set_frame_token drops the box only when the token really changes,
+            # and re-arming an attached tool may already have set it: say it.
+            tool.set_prompt_box(None)
+        self.set_sam_instance(getattr(self.session, "editing_instance", None))
         if not self.roi_editing:
             self.canvas.set_rubber_band(None)
         self.assist_result = None
@@ -298,6 +344,7 @@ class AssistMixin:
     def begin_add_shape(self, blob: DiffBlob) -> None:
         """Feed a changed region's box to SAM as the box half of point+box."""
         box = tuple(float(v) for v in blob.box)
+        self._prompt_box = box
         for tool in (self.sam_point, self.sam_box):
             tool.set_prompt_box(box)
         if not self.roi_editing:

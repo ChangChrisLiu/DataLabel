@@ -127,6 +127,10 @@ class EditMixin:
 
         self.roi_editing = False
         self.roi_draft: Optional[tuple] = None
+        #: ``(desktop, view, segment)`` already proposed in this run.  Asking
+        #: again on every frame of a segment would steal the tool -- and with
+        #: it the pending SAM prompt -- from an annotator who declined once.
+        self._roi_asked: set[tuple] = set()
         self._pending_scope: Optional[str] = None
         self._restore_offer: Optional[dict] = None
 
@@ -165,10 +169,14 @@ class EditMixin:
         self.scope_bar.hide()
         self._sync_editing_layer()
         if self.session.image() is not None:
-            if self.roi() is None and not self.roi_editing:
+            segment = (int(key.desktop), str(key.view), self._pose_segment(key))
+            if self.roi() is not None:
+                self._roi_asked.add(segment)
+                if self.roi_editing:
+                    self.cancel_roi_edit()
+            elif segment not in self._roi_asked and not self.roi_editing:
+                self._roi_asked.add(segment)
                 self.start_roi_edit()
-            elif self.roi() is not None and self.roi_editing:
-                self.cancel_roi_edit()
         self._offer_restore(key)
 
     def _sync_editing_layer(self) -> None:
@@ -191,6 +199,7 @@ class EditMixin:
         if getattr(self.session, "editing_instance", None) != instance:
             self.session.begin_edit(instance)
         self._sync_editing_layer()
+        self.set_sam_instance(instance)
         self._attach_tool()
         self.report(f"editing {instance}")
 
@@ -298,6 +307,7 @@ class EditMixin:
         self.scope_bar.hide()
         self.session.clear_edit()
         self.sidecar.clear()
+        self.set_sam_instance(None)
         self._sync_editing_layer()
         self.refresh_overlay()
         self.report(f"committed ({scope}): {result.get('changed', '')}".strip())
@@ -310,6 +320,7 @@ class EditMixin:
             self.sidecar.clear()
             self._pending_scope = None
             self.scope_bar.hide()
+            self.set_sam_instance(None)
             self._sync_editing_layer()
             self.report("edit discarded")
             return
@@ -396,8 +407,10 @@ class EditMixin:
             stored if stored is not None else suggest_roi(image, self.session.view)
         ))
         self.roi_editing = True
-        self.canvas.set_rubber_band(self.roi_draft)
+        # Arm the tool first: detaching a SAM tool clears the rubber band, so
+        # painting the draft before the swap would erase it again.
         self._attach_tool()
+        self.canvas.set_rubber_band(self.roi_draft)
         self.report("拖动框选机箱范围，Enter 确认 / drag the chassis box, Enter to accept")
 
     def on_roi_box(self, box: object) -> None:
