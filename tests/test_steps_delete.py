@@ -75,7 +75,13 @@ def test_delete_instance_drops_the_row_and_the_references_to_it(db, orphaned):
 
     assert ORPHAN not in orphaned.instances
     assert orphaned.instances[NEIGHBOUR].parent is None
-    assert orphaned.orphans == []
+    # nothing points at the deleted key any more; what is left is the parent the
+    # edit above overwrote, which the S1 list now asks about in its own right
+    assert not any(ORPHAN in text for text in orphaned.orphans)
+    assert orphaned.orphans == [
+        f"captive screw without parent: {NEIGHBOUR} is captive but leaves the "
+        f"chassis with nothing - name the part it stays in"
+    ]
     assert ORPHAN not in db.instances(13)
 
 
@@ -96,7 +102,9 @@ def test_delete_instance_clears_the_reference_in_the_database_too(db, orphaned, 
         for field in ("parent", "mounted_on", "fastens", "socket_host")
         if getattr(inst, field) == ORPHAN
     ]
-    assert reloaded.issues == []
+    # the only question left is the parent this test itself overwrote
+    assert not any("is not an instance" in text for text in reloaded.issues)
+    assert all("captive screw without parent" in text for text in reloaded.issues)
 
 
 def test_delete_instance_does_not_flush_the_neighbours_other_unsaved_edits(db, orphaned, tax):
@@ -226,16 +234,26 @@ def test_a_reference_to_a_key_that_is_not_an_instance_is_reported(db, tax):
     )
 
 
-def test_a_bare_taxonomy_class_name_is_not_a_dangling_reference(data):
-    """The importer writes ``socket_host='motherboard'`` when the host is unresolved.
+def test_a_bare_taxonomy_class_name_is_not_a_dangling_reference(db, tax):
+    """A class name in ``socket_host`` is unfinished work, never a broken pointer.
 
-    That is a class name, not an instance key, and it is how every one of the
-    twelve motherboard-side connectors of D13 comes out of the import. It has
-    to stay silent or the real signal drowns.
+    ``logs.py`` writes ``socket_host='motherboard'`` for every motherboard-side
+    connector, and the heuristic of spec 7.3 narrows it to ``motherboard.01``
+    during the import -- but only while the desktop has exactly one motherboard.
+    When it cannot (two boards, or none), the class name stays, and the step
+    table must ask about it as *unresolved*, not report a dangling pointer.
     """
-    hosts = {i.socket_host for i in data.instances.values() if i.cls == "connector"}
-    assert "motherboard" in hosts
-    assert data.issues == []
+    stored = db.instances(13)["connector.03"]
+    assert stored.socket_host == "motherboard.01"  # the import resolved it
+    stored.socket_host = "motherboard"
+    db.upsert_instance(stored)
+
+    issues = StepTableData.load(db, 13, tax).issues
+    assert not any("is not an instance" in text for text in issues)
+    assert [text for text in issues if "unresolved socket host" in text] == [
+        "unresolved socket host: connector.03.socket_host is still the class "
+        "'motherboard' - name the instance it plugs into"
+    ]
 
 
 def test_an_instance_that_no_longer_exists_leaves_a_dangling_reference(db, tax):

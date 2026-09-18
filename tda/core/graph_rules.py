@@ -7,11 +7,12 @@ planner) and :mod:`tda.core.graph_templates` (the family templates) all import
 from here, which is what keeps the four modules acyclic;
 :mod:`tda.core.graph` re-exports everything a caller needs.
 
-Two functions matter:
+Three functions matter:
 
 * :func:`propose_edges`          -- the spec 7.3 attribute rules, ~90% coverage.
 * :func:`infer_relational_fields`-- fill the relational fields the log importer
   leaves empty, so the rules have something to chew on.
+* :func:`unresolved_relations`   -- what it deliberately did *not* guess.
 
 Everything is pure except :func:`infer_relational_fields`, which fills blanks on
 the :class:`~tda.core.model.InstanceRec` objects it is given (it never
@@ -29,6 +30,7 @@ from tda.core.taxonomy import Taxonomy
 __all__ = [
     "CABLE_DEFAULT_STATE",
     "CABLE_PREFIX",
+    "LS_PREFIX",
     "Edge",
     "HARD_TYPES",
     "REQUIRED_STATES",
@@ -39,7 +41,9 @@ __all__ = [
     "cable_owner",
     "connector_owner",
     "infer_relational_fields",
+    "is_provisional",
     "propose_edges",
+    "unresolved_relations",
     "verb_applies",
     "verb_effect",
 ]
@@ -61,6 +65,14 @@ REQUIRED_STATES: dict[str, frozenset[str]] = {
 BLOCKED_MODES = ("physical_path", "tool_access", "cable_tension")
 
 CABLE_PREFIX = "cable:"
+#: Prefix of the provisional keys :mod:`tda.core.ls_import` writes
+#: (``ls:Motherboard#1``). Those rows are *drafts*: they carry a real taxonomy
+#: class, so a desktop whose sheet named one motherboard can easily hold three
+#: more of them once the Label Studio export is in. They therefore take no part
+#: in "the one instance of class X" -- neither as the candidate nor as a
+#: competitor -- and the heuristics never write onto them (spec 3.2: S1 turns a
+#: draft into a real instance, and only then does it carry relations).
+LS_PREFIX = "ls:"
 REMOVED = "removed"
 REJECTED = "rejected"
 
@@ -245,9 +257,27 @@ def connector_owner(
     return cable_owner(rec.cable or "", instances)
 
 
+def is_provisional(key: str) -> bool:
+    """Is this a Label Studio draft key rather than a settled instance?
+
+    See :data:`LS_PREFIX`. Drafts are invisible to every class-uniqueness
+    question here, so ``motherboard.01`` stays "the motherboard" of a desktop
+    whose export also drew ``ls:Motherboard#1``.
+    """
+    return key.startswith(LS_PREFIX)
+
+
+def _real_instances(instances: dict[str, InstanceRec], cls: str) -> list[str]:
+    """Keys of the settled (non-draft) instances of ``cls``, sorted."""
+    return [
+        key for key, rec in sorted(instances.items())
+        if rec.cls == cls and not is_provisional(key)
+    ]
+
+
 def _unique_of_class(instances: dict[str, InstanceRec], cls: str) -> Optional[str]:
     """The key of the one instance of ``cls``, or ``None`` when it is not unique."""
-    found = [key for key, rec in sorted(instances.items()) if rec.cls == cls]
+    found = _real_instances(instances, cls)
     return found[0] if len(found) == 1 else None
 
 
@@ -447,7 +477,10 @@ def infer_relational_fields(
     * ``socket_host`` given as a class name -> that class's unique instance.
 
     Nothing already filled in is ever overwritten, so running this twice is a
-    no-op and a human correction survives a re-import. Returns one
+    no-op and a human correction survives a re-import. Provisional ``ls:*``
+    drafts are left alone entirely and never count towards "the one instance of
+    class X" (:data:`LS_PREFIX`), and an ambiguous reference is *reported* by
+    :func:`unresolved_relations` rather than guessed at. Returns one
     ``"<key>.<field> = <value>"`` line per field it filled; every one of them is
     a guess with source ``"heuristic"``, to be confirmed in the S1 UI.
     """
@@ -458,6 +491,8 @@ def infer_relational_fields(
         filled.append(f"{rec.key}.{field} = {value}")
 
     for key, rec in sorted(instances.items()):
+        if is_provisional(key):
+            continue
         if rec.cls == "screw":
             _infer_screw(instances, rec, put, filled)
         elif rec.cls == "connector":
@@ -488,10 +523,10 @@ def _infer_screw(instances, rec: InstanceRec, put, filled: list[str]) -> None:
 def _infer_ram_latches(instances: dict[str, InstanceRec], filled: list[str]) -> None:
     """Pair RAM latches with modules by ordinal: N latches spread over M modules."""
     latches = [
-        rec for _, rec in sorted(instances.items())
-        if rec.cls == "ram_latch" and not rec.attrs.get("of")
+        rec for key, rec in sorted(instances.items())
+        if rec.cls == "ram_latch" and not rec.attrs.get("of") and not is_provisional(key)
     ]
-    modules = [key for key, rec in sorted(instances.items()) if rec.cls == "ram_module"]
+    modules = _real_instances(instances, "ram_module")
     if not latches or not modules:
         return
     per = max(1, len(latches) // len(modules))
@@ -499,3 +534,64 @@ def _infer_ram_latches(instances: dict[str, InstanceRec], filled: list[str]) -> 
         module = modules[min(i // per, len(modules) - 1)]
         rec.attrs["of"] = module
         filled.append(f"{rec.key}.attrs.of = {module}")
+
+
+# --------------------------------------------------------------------------- #
+# unresolved_relations
+# --------------------------------------------------------------------------- #
+#: The four relational columns of spec 7.1 a class name may legitimately sit in
+#: until stage S1 narrows it down (mirrors ``steps_values.RELATION_FIELDS``).
+RELATION_FIELDS = ("parent", "mounted_on", "fastens", "socket_host")
+
+#: Prefix of every line this reports, so a caller can print them as they are.
+UNRESOLVED = "unresolved:"
+
+
+def unresolved_relations(
+    instances: dict[str, InstanceRec],
+    tax: Taxonomy,
+) -> list[str]:
+    """What :func:`infer_relational_fields` refused to guess, one line each.
+
+    Three questions are left to the annotator rather than answered by a coin
+    toss, and every one of them is reported here so it does not disappear:
+
+    * a relational field holding a taxonomy *class* the desktop has zero or two
+      or more real instances of -- the class name the importer wrote is all the
+      sheet said, and picking one of two motherboards is not a heuristic's job;
+    * a screw whose ``role`` names no unique part, so ``fastens`` stays empty;
+    * a *captive* screw that consequently has no ``parent``, which is what
+      makes it stay behind when its part leaves the chassis (spec 3.3).
+
+    Lines start with :data:`UNRESOLVED` and are sorted by instance key. A
+    reference to something that is neither an instance nor a class is *not*
+    reported here -- that is a dangling pointer, which the S1 step table
+    already asks about (:mod:`tda.ui.steps_issues`). Provisional ``ls:*``
+    drafts are skipped: they carry no relations yet by construction.
+    """
+    out: list[str] = []
+    for key, rec in sorted(instances.items()):
+        if is_provisional(key):
+            continue
+        for name in RELATION_FIELDS:
+            value = getattr(rec, name)
+            if value and value in tax.classes and _resolve(instances, value) is None:
+                n = len(_real_instances(instances, value))
+                out.append(
+                    f"{UNRESOLVED} {key}.{name} = {value!r} names a class the desktop "
+                    f"has {n} instances of - pick one in S1"
+                )
+        if rec.cls != "screw":
+            continue
+        if not rec.fastens:
+            role = str(rec.attrs.get("role") or "")
+            out.append(
+                f"{UNRESOLVED} {key}.fastens is empty - role {role or 'unset'!r} names "
+                f"no unique part of this desktop"
+            )
+        if rec.attrs.get("captive") and not rec.parent:
+            out.append(
+                f"{UNRESOLVED} {key} is captive but has no parent - it will not leave "
+                f"the chassis with the part it is screwed into"
+            )
+    return out

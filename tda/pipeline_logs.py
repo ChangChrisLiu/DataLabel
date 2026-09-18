@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from tda.core.db import Db
+from tda.core.graph_rules import infer_relational_fields, unresolved_relations
 from tda.core.index import DesktopIndex
 from tda.core.log_report import _expected_steps
 from tda.core.logs import LogImport, import_log, iter_desktop_csvs, read_desktop_csv
@@ -38,10 +39,13 @@ LS_NOTES_PREFIX = "LS: "
 #: A step whose two bracketing photographs are further apart than this is
 #: reported: it is more likely a break than a 30-minute operation.
 MAX_STEP_SECONDS = 1800.0
+#: Heading of the import report's per-desktop list of inferred relational
+#: fields. They are guesses, and every one of them is an S1 question.
+INFERRED_HEADING = "inferred relational fields (heuristic - confirm in S1)"
 
 __all__ = [
-    "DesktopRun", "LogsRun", "brand_model", "chassis_type", "desktop_fields",
-    "expected_steps", "import_logs_into_db",
+    "DesktopRun", "INFERRED_HEADING", "LogsRun", "brand_model", "chassis_type",
+    "desktop_fields", "expected_steps", "import_logs_into_db", "inferred_section",
 ]
 
 
@@ -132,6 +136,26 @@ class DesktopRun:
     ls_notes: int = 0  # steps whose Label Studio notes were carried over
     brand: str = ""
     issues: list[str] = field(default_factory=list)
+    #: ``"<key>.<field> = <value>"`` per relational field the heuristic filled.
+    fills: list[str] = field(default_factory=list)
+    #: ``"unresolved: ..."`` per reference it deliberately did not guess at.
+    unresolved: list[str] = field(default_factory=list)
+
+
+def inferred_section(run: DesktopRun) -> list[str]:
+    """The report block listing what the heuristic filled for one desktop.
+
+    Empty when it filled nothing, so a desktop whose sheet already said
+    everything adds no noise. Kept here rather than in :mod:`tda.cli` so the
+    heading and the bullet format live next to the run record that carries them.
+    """
+    if not (run.fills or run.unresolved):
+        return []
+    lines = [f"**{INFERRED_HEADING}**", ""]
+    lines.extend(f"- {text}" for text in run.fills)
+    lines.extend(f"- {text}" for text in run.unresolved)
+    lines.append("")
+    return lines
 
 
 @dataclass
@@ -257,18 +281,34 @@ def carry_ls_notes(steps: list[StepRec], previous: list[StepRec]) -> int:
     return kept
 
 
-def _write_import(db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec]) -> tuple[int, int]:
-    """Write one desktop's import atomically; returns ``(events, steps with LS notes)``."""
+def _write_import(
+    db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec]
+) -> tuple[int, int, list[str], list[str]]:
+    """Write one desktop's import atomically.
+
+    Returns ``(events, steps with LS notes, fills, unresolved)``.
+
+    The relational heuristic of spec 7.3 runs here, *before* the instances are
+    written and inside the same transaction: ``logs.py`` leaves ``fastens``,
+    ``parent``/``attached`` and a latch's ``of`` empty and may put a bare class
+    name in ``socket_host``, and the state machine reads those the moment the
+    annotator opens the desktop -- a captive cooler screw with no ``parent``
+    stays in the chassis after its cooler is gone (spec 3.3). Filling them
+    first also means ``events_from_actions`` below already emits the cascade,
+    so the stored automatic log and the one
+    :func:`tda.core.truth_inputs.events_of` re-derives on every read agree.
+    """
     with db.transaction():
         kept = carry_ls_notes(li.steps, previous)
         merge_desktop_meta(db, li.desktop, desktop_fields(li.meta))
         db.replace_steps(li.desktop, li.steps, li.actions)
+        fills = infer_relational_fields(li.instances, tax)
         for inst in li.instances.values():
             db.upsert_instance(inst)
         events = events_from_actions(li.instances, li.actions, tax)
         db.replace_events(li.desktop, events, auto_only=True)
         split_pose_segments(db, li.desktop)
-    return len(events), kept
+    return len(events), kept, fills, unresolved_relations(li.instances, tax)
 
 
 def _force_warning(db: Db, desktop: int, previous: list[StepRec]) -> str:
@@ -345,17 +385,18 @@ def _import_one(
             f"D{desktop:02d}: the sheet's own Desktop ID is {sheet_id}; "
             f"kept the file's number"
         )
-    events, kept = _write_import(db, li, tax, previous)
+    events, kept, fills, unresolved = _write_import(db, li, tax, previous)
     if log:
         log(f"[import-logs] D{desktop:02d}: {len(li.steps)} steps, {len(li.actions)} "
             f"actions, {len(li.instances)} instances, {events} events, "
-            f"{filled} durations, {len(li.issues) + len(issues)} issues")
+            f"{filled} durations, {len(fills)} inferred relational fields, "
+            f"{len(li.issues) + len(issues)} issues")
     return DesktopRun(
         desktop=desktop, source=str(path), status="imported", steps=len(li.steps),
         actions=len(li.actions), instances=len(li.instances), events=events,
         durations=filled, ls_notes=kept,
         brand=str(li.meta.get("brand_model_raw") or ""),
-        issues=list(li.issues) + issues,
+        issues=list(li.issues) + issues, fills=fills, unresolved=unresolved,
     )
 
 

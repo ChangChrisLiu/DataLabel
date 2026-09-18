@@ -38,7 +38,9 @@ from tda.core.graph_rules import (
     cable_owner,
     connector_owner,
     infer_relational_fields,
+    is_provisional,
     propose_edges,
+    unresolved_relations,
     verb_applies,
 )
 from tda.core.graph_templates import apply_template, save_template
@@ -59,11 +61,13 @@ __all__ = [
     "edges_to_db",
     "find_cycles",
     "infer_relational_fields",
+    "is_provisional",
     "legal_actions",
     "propose_edges",
     "remaining_plan",
     "save_template",
     "unmet",
+    "unresolved_relations",
     "validate_sequence",
 ]
 
