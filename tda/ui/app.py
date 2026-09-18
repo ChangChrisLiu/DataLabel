@@ -36,7 +36,13 @@ from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 from tda.ui.app_assist import AssistMixin
 from tda.ui.app_edit import EditMixin
-from tda.ui.app_shell import MODE_TITLES, ShellMixin, main, take_lock
+from tda.ui.app_shell import (
+    MODE_TITLES,
+    ShellMixin,
+    confirm_discard_dialog,
+    main,
+    take_lock,
+)
 from tda.ui.canvas.overlay import LabelOverlay
 
 __all__ = ["MainWindow", "main", "take_lock"]
@@ -181,6 +187,8 @@ class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
     # -------------------------------------------------------------- keyboard
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: D102
         kind = event.type()
+        if self.closed:
+            return False  # a window on its way out must not eat anybody's keys
         if kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             focus = QApplication.focusWidget()
             if focus is None or focus is self or self.isAncestorOf(focus):
@@ -189,20 +197,42 @@ class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
         return super().eventFilter(obj, event)
 
     def handle_key(self, event) -> bool:
-        """Run the action bound to ``event``; ``True`` when it was consumed."""
-        if event.isAutoRepeat():
+        """Run the action bound to ``event``; ``True`` when it was consumed.
+
+        An auto-repeat of a bound key is **consumed but not fired**: holding
+        ``Tab`` for the flash compare used to let the repeats through to Qt's
+        focus chain, which walked the focus into a combo box -- after which
+        :func:`~tda.ui.app_actions.blocks_shortcuts` switched the whole keyboard
+        off until the annotator clicked somewhere. An auto-repeat of a key that
+        is *not* bound is left alone, so ordinary widgets keep their repeats.
+        """
+        if not self._shortcut_context_ok():
             return False
         if A.blocks_shortcuts(self._focus_widget()):
             return False
         action = A.action_for(event.key(), event.modifiers(), self.mode)
         if action is None:
             return False
+        if event.isAutoRepeat():
+            return True
         pressed = event.type() == QEvent.Type.KeyPress
         if action.hold:
             self.dispatch(action, pressed)
         elif pressed:
             self.dispatch(action)
         return True
+
+    def _shortcut_context_ok(self) -> bool:
+        """Are the window's shortcuts live at all right now?
+
+        Not while a modal dialog is up, and not while the focus sits in another
+        window of ours -- the cheat sheet is a child dialog, so without this its
+        ``Esc`` would also discard the edit underneath it.
+        """
+        if QApplication.activeModalWidget() is not None:
+            return False
+        focus = QApplication.focusWidget()
+        return focus is None or focus.window() is self
 
     def _focus_widget(self) -> Optional[QWidget]:
         """The focused widget *of this window*, or ``None``.
@@ -230,6 +260,9 @@ class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
     def set_mode(self, mode: str) -> None:
         """Switch between Steps, Annotate and Review."""
         if mode == self.mode:
+            return
+        if not self.can_leave_edit():
+            self._sync_mode_tab()
             return
         if self.mode == A.MODE_STEPS and self._steps_dirty:
             if not self.confirm_discard("The step table has unsaved edits."):
@@ -262,12 +295,8 @@ class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
         self.set_mode(MODE_TITLES[index][1])
 
     def confirm_discard(self, why: str) -> bool:
-        """Ask before throwing unsaved S1 edits away (overridden in tests)."""
-        answer = QMessageBox.question(
-            self, "Unsaved changes", f"{why}\nLeave the step table anyway?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        return answer == QMessageBox.StandardButton.Yes
+        """Ask before throwing unsaved S1 edits away."""
+        return confirm_discard_dialog(self, why)
 
     def _mark_steps_dirty(self, *_args) -> None:
         self._steps_dirty = True
@@ -288,6 +317,9 @@ class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
         """Show another camera of the same machine."""
         if view == self.session.view:
             return
+        if not self.can_leave_edit():
+            self.view_buttons[self.session.view].setChecked(True)
+            return
         step = self.session.current().step if compat.is_open(self.session) else None
         self.session.open(int(self.session.desktop), view)
         if step is not None and step in self.session.steps():
@@ -306,6 +338,13 @@ class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
     @S.guard
     def act_set_desktop(self, desktop: int) -> None:
         """Open another machine in the current view."""
+        if not self.can_leave_edit():
+            index = self.desktop_combo.findData(int(self.session.desktop))
+            if index >= 0:
+                blocked = self.desktop_combo.blockSignals(True)
+                self.desktop_combo.setCurrentIndex(index)
+                self.desktop_combo.blockSignals(blocked)
+            return
         self.session.open(int(desktop), self.session.view)
         if self._steps_panel is not None:
             self._steps_panel.set_desktop(int(desktop))
@@ -316,18 +355,40 @@ class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
     @S.guard
     def act_step(self, delta: int) -> None:
         """``PgDn`` goes to k-1 (the reverse-order "forward"), ``PgUp`` to k+1."""
+        if not self.can_leave_edit():
+            return
         self.session.prev() if delta < 0 else self.session.next()
 
     @S.guard
     def act_step_edge(self, which: str) -> None:
+        if not self.can_leave_edit():
+            return
         steps = self.session.steps()
         if steps:
             self.session.goto(min(steps) if which == "first" else max(steps))
 
     @S.guard
-    def act_flash_compare(self, pressed: bool) -> None:
-        """Hold ``Tab`` to see step k-1 in place of k, without moving the view."""
-        image = self.session.flash_compare() if pressed else self.session.image()
+    def timeline_goto(self, step: int) -> None:
+        """A click in the timeline (or a review entry): one guarded ``goto``.
+
+        The panels call ``session.goto`` themselves, which would walk straight
+        past the uncommitted-edit rule, so the window takes their activation
+        signals over instead of letting them through.
+        """
+        if not self.can_leave_edit():
+            return
+        self.session.goto(int(step))
+
+    @S.guard
+    def act_flash_compare(self, pressed: bool, other: bool = False) -> None:
+        """Hold ``Tab`` to see the neighbour frame without moving the view.
+
+        The neighbour is the frame the task card is written against -- the one
+        the annotator came from, ``j + 1`` in reverse order.  ``Shift+Tab``
+        shows the other side instead.
+        """
+        image = (compat.flash_image(self.session, other=other) if pressed
+                 else self.session.image())
         if image is None:
             return
         zoom, centre = self.canvas.zoom_factor(), self._canvas_centre()
@@ -335,6 +396,11 @@ class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
         self.canvas.set_zoom(zoom)
         self.canvas.center_on(centre)
         self.canvas.refresh()
+
+    @S.guard
+    def act_flash_other(self, pressed: bool) -> None:
+        """``Shift+Tab``: flash the frame on the *other* side of this one."""
+        self.act_flash_compare(pressed, other=True)
 
     # ----------------------------------------------------------- tool slots
     def _all_tools(self) -> tuple:

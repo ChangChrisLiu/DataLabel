@@ -81,11 +81,23 @@ def test_the_difference_map_is_restricted_to_the_roi(window):
         assert x0 <= bx0 and by0 >= y0 and bx1 <= x1 and by1 <= y1
 
 
-def test_a_frame_without_a_predecessor_produces_no_blobs(window):
-    window.session.goto(min(window.session.steps()))
+def test_a_frame_without_a_neighbour_produces_no_blobs(window):
+    """The card is written against ``j + 1``; the newest frame has no such side."""
+    window.session.goto(max(window.session.steps()))
     assert window.assist.wait(5.0)
     QApplication.processEvents()
-    assert window.assist_result is None or not window.assist_result["unexplained"]
+    assert window.assist_result is None
+
+
+def test_the_comparison_is_against_the_task_card_neighbour(window):
+    """The blob must mark what re-appears in the frame on screen, not what left."""
+    from tda.ui import app_compat as compat
+
+    window.session.goto(LAST_STEP - 2)
+    payload = wait_for_assist(window)
+    neighbour = compat.task_neighbour(window.session)
+    assert neighbour == LAST_STEP - 1          # the frame the annotator came from
+    assert payload["key"].step == LAST_STEP - 2
 
 
 def test_assist_controller_runs_synchronously_when_asked(qapp):
@@ -235,10 +247,84 @@ def test_unexplained_blobs_are_handed_to_the_session_on_confirm(window, monkeypa
                         lambda step, boxes: handed.append((step, list(boxes))),
                         raising=False)
     seed_shapes(window.session, LAST_STEP)
-    window.session.goto(LAST_STEP)
+    window.session.goto(LAST_STEP - 1)
     wait_for_assist(window)
+    step = window.session.current().step
     window.act_confirm()
-    assert handed and handed[0][0] == LAST_STEP
+    assert handed and handed[0][0] == step
+    assert step not in window.unanalysed
+
+
+def test_a_frame_whose_comparison_never_finished_is_recorded_as_not_analysed(
+        window, monkeypatch):
+    """An empty list would claim a check that never happened."""
+    handed: list[tuple] = []
+    monkeypatch.setattr(window.session, "set_unexplained",
+                        lambda step, boxes: handed.append((step, list(boxes))),
+                        raising=False)
+    seed_shapes(window.session, LAST_STEP)
+    window.session.goto(LAST_STEP - 1)
+    window.assist_result = None
+    monkeypatch.setattr(window.assist, "wait", lambda timeout=1.0: False)
+    step = window.session.current().step
+    window.act_confirm()
+    assert handed == []
+    assert step in window.unanalysed
+    assert "not analysed" in window.last_error_message()
+
+
+def test_expected_boxes_come_from_the_masks_not_from_the_box_column(qapp):
+    """The old version read ``compiled.box``, which only bench rows ever fill."""
+    from tda.ui.app_assist import expected_boxes, expected_payload
+
+    mask = np.zeros((64, 64), dtype=bool)
+    mask[10:20, 30:44] = True
+    payload = expected_payload({"part.01": mask}, [(1, 2, 3, 4)])
+    assert sorted(expected_boxes(payload)) == [(1, 2, 3, 4), (30, 10, 44, 20)]
+    assert expected_boxes(()) == []
+
+
+def test_a_drawn_part_stops_being_an_unexplained_difference(window, monkeypatch):
+    """Before the shape exists the blob is unexplained; after it, explained.
+
+    The instance is named directly because the task card's own rule is being
+    changed in the session at the same time (it will list the work of the frame
+    on screen); what is under test here is the window's mask -> box -> explain
+    path, which is the same either way.
+    """
+    from tda.core import masks as _masks
+    from tda.core.model import ShapeKeyframe, ShapePart, ZOrderRec
+
+    session = window.session
+    session.goto(LAST_STEP - 1)
+    payload = wait_for_assist(window)
+    blobs = list(payload["blobs"])
+    assert blobs, "the synthetic frames must differ somewhere"
+    assert payload["unexplained"], "nothing is drawn yet, so nothing is explained"
+
+    target = "chassis"
+    x0, y0, x1, y1 = blobs[0].box
+    mask = np.zeros((64, 64), dtype=bool)
+    mask[y0:y1, x0:x1] = True
+    session.db.add_keyframe(ShapeKeyframe(
+        id=None, instance=target, desktop=DESKTOP, view=VIEW, pose_segment=1,
+        anchor_step=LAST_STEP, placement="in_chassis", geom_type="mask",
+        parts=[ShapePart("main", _masks.encode_rle(mask))],
+    ))
+    session.db.set_zorder(ZOrderRec(DESKTOP, VIEW, 1, [(target, "main")]))
+    session.refresh_all()
+    monkeypatch.setattr(window, "_card_instances", lambda: {target})
+
+    assert expected_covers(window, blobs[0].box)
+    after = window.re_explain()
+    assert any(b.box == blobs[0].box for b in after["explained"])
+    assert all(b.box != blobs[0].box for b in after["unexplained"])
+
+
+def expected_covers(win: MainWindow, box) -> bool:
+    from tda.ui.app_assist import expected_boxes
+
+    return any(tuple(b) == tuple(box) for b in expected_boxes(win.expected_now()))
 
 
 def test_the_diff_heat_toggle_paints_and_clears_an_overlay_item(window):

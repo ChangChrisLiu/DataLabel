@@ -463,13 +463,14 @@ def test_taskcard_shows_problems_when_confirm_fails(session: StubSession) -> Non
     assert panel.problems_visible() is False
 
 
-def test_taskcard_activation_begins_an_edit_and_emits(session: StubSession) -> None:
+def test_taskcard_activation_only_reports_the_request(session: StubSession) -> None:
+    """The window owns ``begin_edit``: it is the one that can refuse it."""
     panel = show(TaskCardPanel(session), 320, 320)
     seen: list[str] = []
     panel.sigRequestEdit.connect(seen.append)
     lw = panel.list_widget()
     click_item(lw, lw.item(1), double=True)
-    assert session.calls == [("begin_edit", "screw.cpu_cooler.03")]
+    assert session.calls == []
     assert seen == ["screw.cpu_cooler.03"]
 
 
@@ -620,13 +621,14 @@ def test_instances_ctrl_arrows_reorder(session: StubSession) -> None:
     assert session.calls == []
 
 
-def test_instances_double_click_begins_an_edit(session: StubSession) -> None:
+def test_instances_double_click_only_reports_the_request(session: StubSession) -> None:
+    """The window owns ``begin_edit``: it is the one that can refuse it."""
     panel = show(InstanceListPanel(session), 520, 320)
     seen: list[str] = []
     panel.sigRequestEdit.connect(seen.append)
     table = panel.table()
     click_item(table, table.item(2, 1), double=True)
-    assert session.calls == [("begin_edit", "chassis.01")]
+    assert session.calls == []
     assert seen == ["chassis.01"]
 
 

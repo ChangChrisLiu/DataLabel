@@ -319,12 +319,15 @@ class InstanceListPanel(QWidget):
         self.refresh()
 
     def _on_item_double_clicked(self, item: QTableWidgetItem) -> None:
+        """Report the request only; ``begin_edit`` belongs to the main window.
+
+        Starting the edit here made switching instance unrefusable -- the
+        previous instance's uncommitted pixels were dropped before anybody could
+        ask about them.
+        """
         instance = str(item.data(KEY_ROLE))
-        if not instance:
-            return
-        if self._session is not None:
-            self._session.begin_edit(instance)
-        self.sigRequestEdit.emit(instance)
+        if instance:
+            self.sigRequestEdit.emit(instance)
 
     def _on_frame_changed(self, _key: object) -> None:
         self.refresh()

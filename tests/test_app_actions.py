@@ -136,15 +136,21 @@ def test_shortcuts_do_not_fire_while_a_combo_has_focus(window):
     assert window.handle_key(key_event("B")) is False
 
 
-def test_tab_is_a_hold_action(window):
+def test_tab_and_shift_tab_are_the_hold_actions(window):
     held = [a for a in A.ACTIONS if a.hold]
-    assert [a.keys[0] for a in held] == ["Tab"]
+    assert [a.keys[0] for a in held] == ["Tab", "Shift+Tab"]
     seen: list[bool] = []
     window.act_flash_compare = lambda on: seen.append(on)
     window.set_mode(A.MODE_ANNOTATE)
     window.handle_key(key_event("Tab"))
     window.handle_key(key_event("Tab", press=False))
     assert seen == [True, False]
+
+    other: list[bool] = []
+    window.act_flash_other = lambda on: other.append(on)
+    window.handle_key(key_event("Shift+Tab"))
+    window.handle_key(key_event("Shift+Tab", press=False))
+    assert other == [True, False]
 
 
 # --------------------------------------------------------------------------- #

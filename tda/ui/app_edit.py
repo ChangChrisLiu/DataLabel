@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 from tda.core import masks as _masks
@@ -37,12 +37,27 @@ from tda.ui import app_support as S
 from tda.ui import session_api as api
 from tda.ui.canvas.tools import BrushTool, EraserTool, OccluderTool, Tool
 
-__all__ = ["BoxDragTool", "EditMixin", "DESPECKLE_MIN_PX"]
+#: Where the timeline and the review panel keep a row's step number.
+_STEP_ROLE = int(Qt.ItemDataRole.UserRole)
+
+__all__ = ["BLOCK_HINT", "BoxDragTool", "EditMixin", "DESPECKLE_MIN_PX",
+           "NO_INSTANCE_HINT"]
 
 #: Components smaller than this are specks (``Shift+D``); spec 9.1's floor.
 DESPECKLE_MIN_PX = 16
 #: A drag shorter than this on either side is a click, not a box.
 MIN_BOX_PX = 2.0
+#: How long the editing layer may sit unsaved before it reaches the sidecar.
+SIDECAR_DEBOUNCE_MS = 300
+#: Shown instead of losing an uncommitted edit.  Not a dialog: at six hours a
+#: day a modal box on every mis-press is worse than the mistake it prevents.
+BLOCK_HINT = ("未提交的修改：Enter 提交 / Esc 放弃  "
+              "(uncommitted edit: Enter to commit, Esc to discard)")
+#: Shown when a stroke lands with no instance to put it on.
+NO_INSTANCE_HINT = ("先在任务卡或实例表里选一个实例  "
+                    "(pick an instance in the task card or the instance list first)")
+#: Task kinds a stroke may adopt on its own: both of them mean "draw pixels".
+_DRAWABLE = (api.KIND_ADD_SHAPE, api.KIND_SPLIT_KEYFRAME)
 
 
 class BoxDragTool(Tool):
@@ -124,6 +139,19 @@ class EditMixin:
             tool.sigStroke.connect(self.on_stroke)
         self.roi_tool.sigBox.connect(self.on_roi_box)
         self.bench_tool.sigBox.connect(self.on_bench_box)
+        # Connected before any tool is attached, so the window sees a press
+        # first and can adopt an instance for it (or mark it as doomed).
+        self.canvas.sigMousePress.connect(self._on_canvas_press)
+        self._paint_blocked = False
+        self._blocked_layer: Optional[np.ndarray] = None
+
+        self.refusal = compat.session_refusal()
+        self.sidecar_writes = 0
+        self._sidecar_pending: Optional[tuple] = None
+        self._sidecar_timer = QTimer(self)
+        self._sidecar_timer.setSingleShot(True)
+        self._sidecar_timer.setInterval(SIDECAR_DEBOUNCE_MS)
+        self._sidecar_timer.timeout.connect(self.flush_sidecar)
 
         self.roi_editing = False
         self.roi_draft: Optional[tuple] = None
@@ -144,23 +172,45 @@ class EditMixin:
         self._central_layout.addWidget(self.scope_bar)
         self._central_layout.addWidget(self.restore_bar)
 
-    def _rewire_review_buttons(self) -> None:
-        """Route the review panel's two buttons through the window.
+    def _rewire_panels(self) -> None:
+        """Take over the panel gestures the window has to be able to refuse.
 
-        The panel calls ``session.resolve_conflict`` directly, which may raise;
-        the window has to tell "superseded and re-queued" from "refused", so it
-        takes the connection over rather than letting an exception out of a slot.
+        Three of them reach the session directly, and all three have an answer
+        only the window can give: a conflict resolution has three verdicts, a
+        timeline click may not leave an uncommitted edit behind, and a refused
+        reorder must not escape a Qt slot as an exception.  The panels keep
+        their logic; the window only intercepts the connection.
         """
         for button, resolution in ((self.review.keep_old_button, api.RESOLVE_KEEP_OLD),
                                    (self.review.accept_new_button,
                                     api.RESOLVE_ACCEPT_NEW)):
-            try:
-                button.clicked.disconnect()
-            except (RuntimeError, TypeError):  # pragma: no cover
-                pass
-            button.clicked.connect(
-                lambda _checked=False, r=resolution: self.resolve_selected(r)
-            )
+            self._reconnect(button.clicked,
+                            lambda _c=False, r=resolution: self.resolve_selected(r))
+        self._reconnect(self.timeline.list_widget().itemClicked,
+                        lambda item: self.timeline_goto(int(item.data(_STEP_ROLE))))
+        for queue in api.QUEUE_NAMES:
+            self._reconnect(self.review.list_for(queue).itemActivated,
+                            lambda item: self.timeline_goto(int(item.data(_STEP_ROLE))))
+        self._reconnect(self.instances.up_button.clicked,
+                        lambda _c=False: self.move_instance(-1))
+        self._reconnect(self.instances.down_button.clicked,
+                        lambda _c=False: self.move_instance(+1))
+        # The panel's key handler calls these by name, so shadow them on the
+        # instance: re-wiring the buttons alone would leave Ctrl+Up unguarded.
+        self._panel_move = lambda d: (self.instances.__class__.move_up(self.instances)
+                                      if d < 0 else
+                                      self.instances.__class__.move_down(self.instances))
+        self.instances.move_up = lambda: self.move_instance(-1)
+        self.instances.move_down = lambda: self.move_instance(+1)
+
+    @staticmethod
+    def _reconnect(signal, slot) -> None:
+        """Replace whatever a panel connected to one of its own signals."""
+        try:
+            signal.disconnect()
+        except (RuntimeError, TypeError):  # pragma: no cover - nothing was connected
+            pass
+        signal.connect(slot)
 
     # ------------------------------------------------------------ frame hook
     def on_frame_changed_edit(self, key) -> None:
@@ -191,33 +241,147 @@ class EditMixin:
         if repaint:
             self.canvas.refresh()
 
+    # --------------------------------------------------- never lose an edit
+    def has_uncommitted_edit(self) -> bool:
+        """Is there an editing layer whose pixels differ from what was loaded?"""
+        return compat.layer_changed(self.session)
+
+    def can_leave_edit(self) -> bool:
+        """``True`` when it is safe to change frame, instance, view or mode.
+
+        An uncommitted edit blocks *every* way out with one hint rather than a
+        dialog: the annotator is mid-gesture, ``Enter`` and ``Esc`` are both one
+        key away, and auto-committing something they never approved is the one
+        outcome that cannot be undone by reading the screen.
+        """
+        if not self.has_uncommitted_edit():
+            return True
+        self.report(BLOCK_HINT)
+        return False
+
+    @S.guard
+    def _on_canvas_press(self, x: float, y: float, ev: object) -> None:
+        """Runs before the armed tool sees the press (spec 4.3).
+
+        With no instance being edited a stroke has nowhere to go.  When the task
+        card is pointing at something to draw, that is adopted and the stroke
+        lands where the annotator meant it to; otherwise the press is marked and
+        :meth:`on_stroke` puts the layer back exactly as it was, so the canvas
+        never shows pixels that are about to be thrown away.
+        """
+        self._paint_blocked = False
+        self._blocked_layer = None
+        if self.roi_editing or self._tool_name not in (
+                "brush", "eraser", "sam_point", "sam_box"):
+            return
+        if getattr(self.session, "editing_instance", None) is not None:
+            return
+        adopted = self._adoptable_instance()
+        if adopted is not None:
+            self.on_request_edit(adopted)
+            return
+        self._paint_blocked = True
+        self._blocked_layer = (None if self.overlay is None
+                               else self.overlay.editing.copy())
+        self.report(NO_INSTANCE_HINT)
+
+    def _adoptable_instance(self) -> Optional[str]:
+        """The task-card item a stroke may adopt: an open ``add_shape``/split."""
+        rows = self.session.task_card()
+        index = self.task_card.current_index()
+        if 0 <= index < len(rows):
+            row = rows[index]
+            if not row.get("done") and row.get("kind") in _DRAWABLE and row.get("instance"):
+                return str(row["instance"])
+        for row in rows:
+            if not row.get("done") and row.get("kind") in _DRAWABLE and row.get("instance"):
+                return str(row["instance"])
+        return None
+
     # ----------------------------------------------------------------- edits
     @S.guard
     def on_request_edit(self, instance: str) -> None:
-        """A panel asked for an instance to be edited (task card / instance list)."""
+        """A panel asked for an instance to be edited (task card / instance list).
+
+        The window owns ``begin_edit``: the panels only report the gesture, so
+        that switching instance while pixels are uncommitted can be refused in
+        one place instead of three.
+        """
+        if getattr(self.session, "editing_instance", None) == instance:
+            return
+        if not self.can_leave_edit():
+            return
         self.cancel_roi_edit()
-        if getattr(self.session, "editing_instance", None) != instance:
+        try:
             self.session.begin_edit(instance)
+        except self.refusal as refused:
+            self.report_error(f"refused: {refused}")
+            return
         self._sync_editing_layer()
         self.set_sam_instance(instance)
         self._attach_tool()
+        self.arm_prompt_box_for(instance)
+        self._offer_restore(self.session.current(), instance)
         self.report(f"editing {instance}")
 
     @S.guard
     def on_stroke(self, rect: object) -> None:
-        """One finished pixel stroke: one undoable op, one sidecar write."""
+        """One finished pixel stroke: one undoable op, one debounced sidecar write."""
         tool = self.sender() or self.active_tool
         if tool is self.occluder:
             self.session.commit_occluder(self.overlay.occluder_layer(
                 self.occluder.occluder_type), self.occluder.occluder_type)
             return
         instance = getattr(self.session, "editing_instance", None)
-        if instance is None or self.overlay is None:
+        if self._paint_blocked or instance is None or self.overlay is None:
+            self._revert_blocked_stroke()
             return
         compat.push_stroke(self.session, instance,
                            getattr(tool, "stroke_before", None), self.overlay.editing)
-        self.sidecar.save(self.session.current(), instance, self.overlay.editing)
+        self.queue_sidecar(self.session.current(), instance, self.overlay.editing)
         self.update_status()
+
+    def _revert_blocked_stroke(self) -> None:
+        """Undo a stroke that had no instance to belong to."""
+        if not self._paint_blocked or self.overlay is None:
+            return
+        self._paint_blocked = False
+        layer, self._blocked_layer = self._blocked_layer, None
+        if layer is not None:
+            self.overlay.set_editing(self.overlay.editing_instance or "", layer)
+            self.overlay.clear_editing()
+            self.canvas.refresh()
+        self.report(NO_INSTANCE_HINT)
+
+    # -------------------------------------------------------- crash sidecar
+    def queue_sidecar(self, key, instance: str, mask: np.ndarray) -> None:
+        """Schedule a sidecar write; repeated strokes coalesce into one.
+
+        The reviewer measured 50-105 ms for one write at 4032x3040, which is a
+        visible stutter at the end of every stroke.  The mask is snapshotted
+        immediately (it is the window's buffer and the next stroke changes it)
+        and written once the annotator pauses.
+        """
+        self._sidecar_pending = (key, str(instance), np.array(mask, dtype=bool, copy=True))
+        self._sidecar_timer.start()
+
+    @S.guard
+    def flush_sidecar(self) -> None:
+        """Write the pending editing layer now (the debounce timer, or on close)."""
+        self._sidecar_timer.stop()
+        pending, self._sidecar_pending = self._sidecar_pending, None
+        if pending is None:
+            return
+        key, instance, mask = pending
+        self.sidecar.save(key, instance, mask)
+        self.sidecar_writes += 1
+
+    def drop_sidecar(self, key, instance: Optional[str]) -> None:
+        """Forget a layer that has been committed or abandoned."""
+        self._sidecar_timer.stop()
+        self._sidecar_pending = None
+        if instance is not None:
+            self.sidecar.clear(key, instance)
 
     def set_editing_mask(self, mask: np.ndarray, undoable: bool = False) -> None:
         """Replace the editing layer everywhere it is held at once."""
@@ -226,7 +390,7 @@ class EditMixin:
         mask = np.asarray(mask, dtype=bool)
         if undoable and instance is not None:
             compat.push_stroke(self.session, instance, before, mask)
-            self.sidecar.save(self.session.current(), instance, mask)
+            self.queue_sidecar(self.session.current(), instance, mask)
         else:
             self.session.set_editing_mask(mask)
         if self.overlay is not None and instance is not None:
@@ -290,7 +454,10 @@ class EditMixin:
     def _offer_scope(self, scope: str) -> None:
         """Show the suggestion and its alternatives without blocking the canvas."""
         self._pending_scope = scope
-        counts = compat.preview(self.session, scope)
+        # A zorder statement changes a pairwise constraint, not a run of frames,
+        # and the session cannot say how far it reaches: leave the count out
+        # rather than print a number that means something else.
+        counts = None if scope.startswith("zorder:") else compat.preview(self.session, scope)
         detail = ""
         if counts:
             detail = (f"，影响 {len(counts.get('steps', []))} 帧 / 将产生 "
@@ -307,9 +474,11 @@ class EditMixin:
         through the exception path, which would log a traceback for something
         the annotator simply has to read.
         """
-        if getattr(self.session, "editing_instance", None) is None:
+        instance = getattr(self.session, "editing_instance", None)
+        if instance is None:
             self.report("nothing is being edited")
             return
+        key = self.session.current()
         try:
             result = self.session.commit_edit(scope) or {}
         except ValueError as refused:
@@ -320,18 +489,23 @@ class EditMixin:
         self._pending_scope = None
         self.scope_bar.hide()
         self.session.clear_edit()
-        self.sidecar.clear()
+        self.drop_sidecar(key, instance)
         self.set_sam_instance(None)
         self._sync_editing_layer()
         self.refresh_overlay()
+        self.re_explain()          # the part is drawn now: its blob is explained
         self.report(f"committed ({scope}): {result.get('changed', '')}".strip())
 
     @S.guard
     def act_clear_edit(self) -> None:
         """``Esc``: drop the editing layer, or abandon the ROI rectangle."""
-        if getattr(self.session, "editing_instance", None) is not None:
+        instance = getattr(self.session, "editing_instance", None)
+        if instance is not None:
+            key = self.session.current()
             self.session.clear_edit()
-            self.sidecar.clear()
+            self.drop_sidecar(key, instance)
+            self._restore_offer = None
+            self.restore_bar.hide()
             self._pending_scope = None
             self.scope_bar.hide()
             self.set_sam_instance(None)
@@ -344,9 +518,17 @@ class EditMixin:
 
     @S.guard
     def act_confirm(self) -> bool:
-        """``Space``: verify the frame; on refusal the problems are shown, not a dialog."""
+        """``Space``: verify the frame; on refusal the problems are shown, not a dialog.
+
+        The unexplained differences are re-derived *here*, against what the frame
+        holds now, and only what is still unexplained goes to the review queue.
+        If the comparison has not come back yet it is finished synchronously
+        under a short cap; if even that fails the step is recorded as "not
+        analysed" rather than as "nothing unexplained", which would quietly
+        claim the frame had been checked.
+        """
         step = self.session.current().step
-        blobs = self.unexplained_boxes()
+        blobs = self.unexplained_at_confirm()
         ok = self.task_card.confirm()
         if ok:
             self.hand_over_unexplained(step, blobs)
@@ -468,9 +650,33 @@ class EditMixin:
         if not instance:
             self.report("select the instance the bench box belongs to first")
             return
-        self.session.commit_box(instance, [float(v) for v in box])  # type: ignore[misc]
         self.canvas.set_rubber_band(None)
+        try:
+            self.session.commit_box(instance, [float(v) for v in box])  # type: ignore[misc]
+        except ValueError as refused:
+            self.report_error(f"refused: {refused}")
+            return
+        self.refresh_overlay()
         self.report(f"bench box stored for {instance}")
+
+    def act_move_instance(self, direction: int) -> None:
+        """``Ctrl+Up`` / ``Ctrl+Down`` from the window's keyboard."""
+        self.move_instance(direction)
+
+    @S.guard
+    def move_instance(self, direction: int) -> None:
+        """``Ctrl+Up``/``Ctrl+Down``: one layer up or down, refusals included.
+
+        The panel's own slots are wrapped rather than only its buttons, because
+        its key handler calls them straight and a refused reorder would then
+        escape as an exception from a Qt slot.
+        """
+        try:
+            self._panel_move(direction)
+        except ValueError as refused:
+            self.report_error(f"refused: {refused}")
+            return
+        self.refresh_overlay()
 
     # ---------------------------------------------------------------- review
     @S.guard
@@ -509,18 +715,46 @@ class EditMixin:
         """The uncommitted layer a previous run left on this frame, or ``None``."""
         return self._restore_offer
 
-    def _offer_restore(self, key) -> None:
+    def _offer_restore(self, key, instance: Optional[str] = None) -> None:
+        """Offer a recovered layer for this frame (or for one instance of it).
+
+        Called on every frame change *and* on every ``begin_edit``: an edit
+        abandoned on an instance the annotator comes back to later is exactly
+        the case a frame-change-only offer never caught.  A sidecar naming an
+        instance the frame no longer has is deleted rather than offered.
+        """
         hw = None if self.overlay is None else self.overlay.hw
-        found = self.sidecar.pending_for(key, hw)
-        if found is None or getattr(self.session, "editing_instance", None) is not None:
+        if instance is not None:
+            candidates = [c for c in [self.sidecar.pending_for(key, instance, hw)]
+                          if c is not None]
+        else:
+            candidates = self.sidecar.entries_for(key, hw)
+        found = None
+        for entry in candidates:
+            # A sidecar for an instance this frame no longer has is not an offer
+            # anybody can accept: drop it rather than keep asking about it.
+            if not self._instance_exists(entry["instance"]):
+                self.sidecar.drop(entry)
+                continue
+            if found is None:
+                found = entry
+        if found is None or (instance is None
+                             and getattr(self.session, "editing_instance", None) is not None):
             self._restore_offer = None
             self.restore_bar.hide()
             return
-        self._restore_offer = {"instance": found["instance"], "mask": found["mask"]}
+        self._restore_offer = {"instance": found["instance"], "mask": found["mask"],
+                               "key": found["key"]}
         self.restore_bar.show_text(
             f"上次未提交的编辑（{found['instance']}）可以恢复 / "
             f"an uncommitted edit of {found['instance']} was found"
         )
+
+    def _instance_exists(self, instance: str) -> bool:
+        """Is this instance part of the frame at all (compiled or on the card)?"""
+        if instance in self.session.compiled().instances:
+            return True
+        return any(row.get("instance") == instance for row in self.session.task_card())
 
     @S.guard
     def restore_pending(self) -> None:
@@ -529,7 +763,12 @@ class EditMixin:
         self.restore_bar.hide()
         if offer is None:
             return
-        self.session.begin_edit(offer["instance"])
+        try:
+            self.session.begin_edit(offer["instance"])
+        except self.refusal as refused:
+            self.report_error(f"refused: {refused}")
+            return
+        self.set_sam_instance(offer["instance"])
         self.set_editing_mask(offer["mask"])
         self._attach_tool()
         self.report(f"restored the uncommitted edit of {offer['instance']}")
@@ -537,7 +776,8 @@ class EditMixin:
     @S.guard
     def discard_pending(self) -> None:
         """Throw the recovered layer away."""
-        self._restore_offer = None
+        offer, self._restore_offer = self._restore_offer, None
         self.restore_bar.hide()
-        self.sidecar.clear()
+        if offer is not None:
+            self.sidecar.clear(offer["key"], offer["instance"])
         self.report("the recovered edit was discarded")

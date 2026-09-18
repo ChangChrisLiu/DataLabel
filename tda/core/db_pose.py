@@ -14,11 +14,37 @@ throw it away.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from tda.core import dbrows as R
 
-__all__ = ["POSE_GEOMETRY_COLUMNS", "PoseSegmentMixin"]
+__all__ = ["POSE_GEOMETRY_COLUMNS", "PoseSegmentMixin", "clean_roi"]
+
+
+def _clean_roi(roi: Sequence[float],
+               hw: Optional[tuple[int, int]] = None) -> list[int]:
+    """Validate ``[x0, y0, x1, y1]`` and clamp it into a frame of size ``hw``."""
+    values = list(roi)
+    if len(values) != 4:
+        raise ValueError(f"an ROI is four numbers (x0, y0, x1, y1), got {roi!r}")
+    try:
+        x0, y0, x1, y1 = (int(round(float(v))) for v in values)
+    except (TypeError, ValueError):
+        raise ValueError(f"an ROI must be numeric, got {roi!r}") from None
+    if hw is not None:
+        height, width = int(hw[0]), int(hw[1])
+        x0, x1 = min(max(x0, 0), width), min(max(x1, 0), width)
+        y0, y1 = min(max(y0, 0), height), min(max(y1, 0), height)
+    else:
+        x0, y0 = max(x0, 0), max(y0, 0)
+        x1, y1 = max(x1, 0), max(y1, 0)
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(f"an ROI must be non-empty with x0 < x1 and y0 < y1, got {roi!r}")
+    return [x0, y0, x1, y1]
+
+
+#: Public name of the validator, so the window can check a draft before storing.
+clean_roi = _clean_roi
 
 #: The columns that only make sense relative to a segment's reference frame.
 POSE_GEOMETRY_COLUMNS = ("corners_json", "homography_json", "roi_json")
@@ -64,7 +90,9 @@ class PoseSegmentMixin:
             )
 
     def set_pose_segment_roi(self, desktop: int, view: str, seg: int,
-                             roi: Optional[list]) -> None:
+                             roi: Optional[Sequence[float]],
+                             annotator: str = "system",
+                             hw: Optional[tuple[int, int]] = None) -> Optional[list[int]]:
         """Store (or clear with ``None``) one segment's region of interest.
 
         The ROI is ``[x0, y0, x1, y1]`` in the reference frame's coordinates --
@@ -72,14 +100,44 @@ class PoseSegmentMixin:
         desktop/view (spec 2.4). :meth:`~tda.core.db.Db.set_pose_segment`
         rewrites the whole row and never wrote this column, so the window needs
         a setter that leaves the corners and the homography alone.
+
+        It is **validated and logged** rather than written blind, because the
+        ROI leaves the tool: ``export_coco(roi_crop=True)`` crops every mask to
+        it, so a transposed or degenerate rectangle silently truncates a
+        release, and "who decided this crop, and when" has to be answerable.
+        ``hw`` clamps the rectangle to a frame of that size when it is known.
+
+        Returns the rectangle as stored, or ``None`` when it was cleared.
+
+        Raises:
+            ValueError: ``roi`` is not four numbers, or is empty/inverted, or
+                the segment does not exist.
         """
-        payload = None if roi is None else [int(v) for v in roi]
+        payload = None if roi is None else _clean_roi(roi, hw)
+        before = self._roi_of(desktop, view, seg)
         with self._tx():
-            self.conn.execute(
+            cur = self.conn.execute(
                 "UPDATE pose_segment SET roi_json=? "
                 "WHERE desktop=? AND view=? AND seg=?",
                 (R.dumps(payload), desktop, view, seg),
             )
+            if not cur.rowcount:
+                raise ValueError(
+                    f"no pose segment {seg} for desktop {desktop} view {view!r}"
+                )
+        self.log_op(
+            desktop, view, "set_pose_roi",
+            {"seg": int(seg), "roi": payload}, {"seg": int(seg), "roi": before},
+            annotator,
+        )
+        return payload
+
+    def _roi_of(self, desktop: int, view: str, seg: int) -> Optional[list[int]]:
+        row = self.conn.execute(
+            "SELECT roi_json FROM pose_segment WHERE desktop=? AND view=? AND seg=?",
+            (desktop, view, seg),
+        ).fetchone()
+        return None if row is None else R.loads(row["roi_json"])
 
     def clear_pose_geometry(self, desktop: int, view: str, seg: int) -> None:
         """Drop the corners, homography and ROI of one segment (they are stale)."""

@@ -5,8 +5,10 @@ this part back into the chassis, split that keyframe, only flip this state --
 and this panel is their checklist: done items are struck through, the first
 open one is highlighted and is what the four buttons act on.
 
-The panel decides nothing.  Activating an item is ``begin_edit`` plus a
-:attr:`TaskCardPanel.sigRequestEdit` for the canvas; the buttons are the four
+The panel decides nothing.  Activating an item only emits
+:attr:`TaskCardPanel.sigRequestEdit`; the main window is what calls
+``begin_edit``, because it is the one that can refuse -- switching instance
+while pixels are uncommitted has to be answerable.  The buttons are the four
 commit/confirm calls of spec 4.3, with their keyboard equivalents handled here
 so they work while the list has focus.  When ``confirm_frame`` refuses, the
 problems that came with ``sigProblems`` are shown instead of any local check.
@@ -227,9 +229,13 @@ class TaskCardPanel(QWidget):
 
     # -- slots --------------------------------------------------------------
     def _on_item_activated(self, item: QListWidgetItem) -> None:
+        """Report the request; the window decides whether the edit may start.
+
+        The panel used to call ``begin_edit`` itself and then emit, which made
+        it impossible to refuse: by the time the window heard about it the
+        previous instance's uncommitted pixels were already gone.
+        """
         instance = str(item.data(INSTANCE_ROLE))
-        if self._session is not None and instance:
-            self._session.begin_edit(instance)
         if instance:
             self.sigRequestEdit.emit(instance)
 

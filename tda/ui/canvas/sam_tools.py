@@ -530,13 +530,30 @@ class SamPointTool(SamToolBase):
         self.points: list[Point] = []
 
     def on_press(self, x: float, y: float, ev: Any) -> None:
+        """Left click = foreground, right click **or ``Alt`` + click** = background.
+
+        The ``Alt`` spelling exists because a right click is also how a tablet
+        pen's barrel button and most trackpads raise a context menu, and because
+        "hold a modifier" is one hand on a keyboard the annotator already has.
+        """
         self._sync_identity()  # the box may belong to the previous target
-        label = 1
-        button = getattr(ev, "button", None)
-        if button is not None and button() == Qt.MouseButton.RightButton:
-            label = 0
-        self.points.append((float(x), float(y), label))
+        self.points.append((float(x), float(y), 0 if self._is_negative(ev) else 1))
         self._submit(self.points, box=self.prompt_box)
+
+    @staticmethod
+    def _is_negative(ev: Any) -> bool:
+        button = getattr(ev, "button", None)
+        try:
+            if button is not None and button() == Qt.MouseButton.RightButton:
+                return True
+        except TypeError:  # pragma: no cover - a stub without a callable button
+            return False
+        modifiers = getattr(ev, "modifiers", None)
+        try:
+            return (modifiers is not None
+                    and bool(modifiers() & Qt.KeyboardModifier.AltModifier))
+        except TypeError:  # pragma: no cover
+            return False
 
     def clear_points(self) -> None:
         """Forget the collected prompts (e.g. after accepting the mask)."""

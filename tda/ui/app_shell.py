@@ -21,6 +21,8 @@ from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QAbstractScrollArea,
     QApplication,
     QButtonGroup,
     QComboBox,
@@ -36,8 +38,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from tda.core.db import acquire_lock_file, release_lock_file
 from tda.core.model import VIEWS
 from tda.ui import app_compat as compat
+from tda.ui import app_support as S
 from tda.ui.canvas.overlay import LabelOverlay
 from tda.ui.canvas.view import ImageCanvas
 from tda.ui.panels.instances import InstanceListPanel
@@ -51,15 +55,38 @@ __all__ = ["MODE_TITLES", "ShellMixin", "main", "take_lock"]
 MODE_TITLES: tuple[tuple[str, str], ...] = (
     ("Steps", "steps"), ("Annotate", "annotate"), ("Review", "review")
 )
+#: Used when this annotator has never opened the window on this machine.
+DEFAULT_WINDOW_SIZE = (1600, 1000)
+#: Fractions of the window width the docks get by default; the canvas keeps the
+#: remaining ~67 %, which at 1920 px is 1280 px for a 12 MP frame.
+TIMELINE_FRACTION = 0.11
+RIGHT_FRACTION = 0.22
 
 
-def take_lock(db, annotator: str) -> Optional[str]:
-    """Take the single-user lock; returns a message when somebody else holds it."""
+def take_lock(target, annotator: str) -> Optional[str]:
+    """Take the single-user lock; returns a message when somebody else holds it.
+
+    ``target`` is a database **path** in the application (the lock has to be
+    taken before the file is opened, because opening it replays the schema) and
+    may still be a ``Db`` for callers that already have one.
+    """
     try:
-        db.acquire_lock(annotator)
+        if hasattr(target, "acquire_lock"):
+            target.acquire_lock(annotator)
+        else:
+            acquire_lock_file(str(target), annotator)
     except RuntimeError as exc:
         return str(exc)
     return None
+
+
+def confirm_discard_dialog(parent, why: str) -> bool:
+    """Ask before throwing unsaved S1 edits away."""
+    answer = QMessageBox.question(
+        parent, "Unsaved changes", f"{why}\nLeave the step table anyway?",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+    )
+    return answer == QMessageBox.StandardButton.Yes
 
 
 class ShellMixin:
@@ -131,6 +158,14 @@ class ShellMixin:
         self.task_card = TaskCardPanel(self.session)
         self.instances = InstanceListPanel(self.session)
         self.review = ReviewPanel(self.session)
+        # A seven-column table of instance keys will happily ask for 700 px of
+        # dock; the dock decides its own width, the table scrolls inside it.
+        self.instances.table().setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+        )
+        self.instances.table().setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
 
         self.timeline_dock = self._dock("Timeline", self.timeline,
                                         Qt.DockWidgetArea.LeftDockWidgetArea)
@@ -150,7 +185,7 @@ class ShellMixin:
         self.task_card.sigRequestEdit.connect(self.on_request_edit)
         self.instances.sigRequestEdit.connect(self.on_request_edit)
         self.review.sigRework.connect(self.on_rework)
-        self._rewire_review_buttons()
+        self._rewire_panels()
 
     def _dock(self, title: str, widget: QWidget, area) -> QDockWidget:
         dock = QDockWidget(title, self)
@@ -268,13 +303,32 @@ class ShellMixin:
         self.settings.sync()
 
     def restore_window_state(self) -> None:
-        """Put the window back where the annotator left it (if it was ever there)."""
+        """Put the window back where the annotator left it, or lay it out sensibly.
+
+        The default matters: with the docks at their natural sizes the canvas got
+        less than half the window, and the instance table (seven auto-sized
+        columns, one of them a full instance key) pushed its dock wider still.
+        """
         geometry = self.settings.value("geometry")
+        state = self.settings.value("state")
         if geometry is not None:
             self.restoreGeometry(geometry)
-        state = self.settings.value("state")
+        else:
+            self.resize(*DEFAULT_WINDOW_SIZE)
         if state is not None:
             self.restoreState(state)
+        else:
+            self.apply_default_layout()
+
+    def apply_default_layout(self) -> None:
+        """Timeline ~11 %, the right docks ~22 %, the canvas the rest."""
+        width = max(self.width(), DEFAULT_WINDOW_SIZE[0])
+        self.resizeDocks(
+            [self.timeline_dock, self.right_dock, self.review_dock],
+            [int(width * TIMELINE_FRACTION), int(width * RIGHT_FRACTION),
+             int(width * RIGHT_FRACTION)],
+            Qt.Orientation.Horizontal,
+        )
 
     def last_frame_for(self, annotator: str) -> dict:
         """The desktop/view/step this annotator last had open, as far as it is known."""
@@ -290,16 +344,22 @@ class ShellMixin:
         return out
 
     def shutdown(self) -> None:
-        """Stop the threads and detach; the database is the caller's business."""
+        """Stop every thread and detach; the database is the caller's business.
+
+        Order matters: the assist threads (the SAM queue, the SAM loader and the
+        difference worker) are stopped **first**, because each of them can
+        deliver into the window, and a result landing after the session has been
+        closed is an exception out of a Qt slot with nothing left to catch it.
+        """
         if self.closed:
             return
         self.closed = True
+        self.shutdown_assist()
+        self._detach_tool()
         try:
             QApplication.instance().removeEventFilter(self)
         except RuntimeError:  # pragma: no cover - the app is already gone
             pass
-        self.shutdown_assist()
-        self._detach_tool()
         for signal, slot in ((self.session.sigFrameChanged, self._on_frame_changed),
                              (self.session.sigProblems, self._on_problems),
                              (self.session.sigDirty, self._on_dirty)):
@@ -310,9 +370,15 @@ class ShellMixin:
         if self._cheat_sheet is not None:
             self._cheat_sheet.close()
         sys.excepthook = self._previous_hook
+        S.close_logger(self.logger)
 
     def closeEvent(self, event) -> None:  # noqa: D102 - Qt override
+        if not self._settle_uncommitted_edit():
+            event.ignore()
+            return
+        self.flush_sidecar()
         self.save_window_state()
+        self.shutdown()                       # threads first, then the database
         try:
             self.session.save()
             compat.close_session(self.session)  # joins the session's sweeper
@@ -323,8 +389,36 @@ class ShellMixin:
             self.db.release_lock()
         except Exception as exc:  # noqa: BLE001
             self.report_error(f"releasing the lock failed: {exc}")
-        self.shutdown()
         event.accept()
+
+    def _settle_uncommitted_edit(self) -> bool:
+        """Ask what to do with an edit in progress; ``False`` cancels the close.
+
+        The one place a modal question is right: the annotator is leaving, so
+        there is no gesture to interrupt, and the alternative is silently
+        throwing away work or silently writing something they never approved.
+        """
+        if not self.has_uncommitted_edit():
+            return True
+        answer = QMessageBox.question(
+            self, "Uncommitted edit",
+            f"{getattr(self.session, 'editing_instance', 'an instance')} has "
+            f"changes that were never committed.\n未提交的修改：提交、放弃，还是留下？",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if answer == QMessageBox.StandardButton.Cancel:
+            self.report("close cancelled: the edit is still open")
+            return False
+        if answer == QMessageBox.StandardButton.Save:
+            self.act_commit()
+            if self.has_uncommitted_edit():   # the session refused it
+                self.report_error("the edit could not be committed; close cancelled")
+                return False
+            return True
+        self.act_clear_edit()
+        return True
 
     def _backup_on_exit(self) -> None:
         """Back the database up and *verify* it; a failure warns, never blocks."""
@@ -345,46 +439,110 @@ class ShellMixin:
 # --------------------------------------------------------------------------- #
 # entry point
 # --------------------------------------------------------------------------- #
-def main(paths: str = "configs/paths.yaml", desktop: int = 13, view: str = "scan",
-         annotator: str = "", step: Optional[int] = None, db: Optional[str] = None,
+def resume_target(config: dict, annotator: str, desktop: Optional[int],
+                  view: Optional[str], step: Optional[int], db_path: str) -> dict:
+    """Which frame to open: what was asked for, else where this annotator left off.
+
+    ``--desktop``/``--view``/``--step`` are optional so that the usual launch is
+    ``python -m tda.cli app --annotator chang`` and it carries on where the last
+    session stopped.  Nothing here opens the database: the last frame comes from
+    the INI file, and the fallback (lowest desktop with frames, scanner view) is
+    read from the same file the caller already has.
+    """
+    settings = S.make_settings(config)
+    prefix = f"last/{annotator}"
+
+    def stored(name: str, cast):
+        value = settings.value(f"{prefix}/{name}")
+        if value in (None, ""):
+            return None
+        try:
+            return cast(value)
+        except (TypeError, ValueError):
+            return None
+
+    target = {
+        "desktop": desktop if desktop is not None else stored("desktop", int),
+        "view": view if view is not None else stored("view", str),
+        "step": step if step is not None else (
+            stored("step", int) if desktop is None else None
+        ),
+    }
+    if not target["view"]:
+        target["view"] = VIEWS[0]
+    if target["desktop"] is None:
+        target["desktop"] = _lowest_desktop_with_frames(db_path)
+    return target
+
+
+def _lowest_desktop_with_frames(db_path: str) -> int:
+    """The first machine that has any frames at all; 1 when nothing is loaded."""
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return 1
+    try:
+        row = conn.execute("SELECT MIN(desktop) FROM frame").fetchone()
+    except sqlite3.Error:
+        return 1
+    finally:
+        conn.close()
+    return int(row[0]) if row and row[0] is not None else 1
+
+
+def main(paths: str = "configs/paths.yaml", desktop: Optional[int] = None,
+         view: Optional[str] = None, annotator: str = "",
+         step: Optional[int] = None, db: Optional[str] = None,
          *, exec_: bool = True) -> int:
     """Open the annotator on one desktop/view; returns the process exit code.
 
     ``3`` means somebody else holds the single-user lock, and nothing at all was
-    touched -- not the database, not the cache, not the settings.  SAM is loaded
-    only after the window is on screen, so the first frame does not wait for it.
+    touched -- not the database, not the cache, not the settings.  The lock is
+    taken **before** the database is opened, because ``Db.__init__`` replays the
+    schema and the migrations: a refused launch has to leave the file byte for
+    byte as it was.  SAM is loaded only after the window is on screen, so the
+    first frame does not wait for it.
     """
     from tda import pipeline as P
     from tda.core.taxonomy import load_taxonomy
     from tda.core.truth import TruthService
-    from tda.ui.app import MainWindow
+    from tda.ui import app as app_module
     from tda.ui.session import AnnotationSession
 
     config = P.load_paths(paths)
+    who = annotator or "annotator"
+    db_path = db or P.require(config, "db_path")
     app = QApplication.instance() or QApplication(sys.argv[:1])
-    database = P.open_db(config, db)
-    held = take_lock(database, annotator or "annotator")
+
+    held = take_lock(db_path, who)
     if held is not None:
         if exec_:
             QMessageBox.critical(None, "Database locked", f"{held}\n\n"
                                  "Close the other annotator and try again.")
-        database.close()
         return 3
 
-    tax = load_taxonomy()
-    session = AnnotationSession(database, tax, TruthService(database, tax),
-                                config.get("cache_dir", ""), annotator or "annotator")
-    session.open(int(desktop), str(view))
-    if step is not None:
-        session.goto(int(step))
-    window = MainWindow(session, config, annotator or "annotator")
-    window.resize(1600, 1000)
-    window.show()
-    window.start_sam()
-    if not exec_:
-        window.close()
-        database.close()
-        return 0
-    code = int(app.exec())
-    database.close()
-    return code
+    database = None
+    try:
+        target = resume_target(config, who, desktop, view, step, db_path)
+        database = P.open_db(config, db_path)
+        tax = load_taxonomy()
+        session = AnnotationSession(database, tax, TruthService(database, tax),
+                                    config.get("cache_dir", ""), who)
+        session.open(int(target["desktop"]), str(target["view"]))
+        if target["step"] is not None:
+            session.goto(int(target["step"]))
+        window = app_module.MainWindow(session, config, who)
+        window.show()
+        window.start_sam()
+        if not exec_:
+            window.close()
+            return 0
+        return int(app.exec())
+    except BaseException:
+        release_lock_file(db_path)   # nothing was opened for this annotator to keep
+        raise
+    finally:
+        if database is not None:
+            database.close()

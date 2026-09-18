@@ -330,12 +330,16 @@ def test_a_session_that_returns_a_string_is_handled_without_raising(window,
 def test_an_uncommitted_stroke_is_written_to_a_sidecar_and_offered_back(qapp,
                                                                        tmp_path):
     win = open_window(tmp_path)
-    instance = first_task_instance(win)
-    win.task_card.sigRequestEdit.emit(instance)
-    paint(win)
-    painted = win.session.editing_mask().copy()
-    assert Path(win.sidecar.path()).exists()
-    win.shutdown()                            # the process "dies" here
+    try:
+        instance = first_task_instance(win)
+        win.task_card.sigRequestEdit.emit(instance)
+        paint(win)
+        painted = win.session.editing_mask().copy()
+        key = win.session.current()
+        win.flush_sidecar()
+        assert Path(win.sidecar.path_for(key, instance)).exists()
+    finally:
+        win.shutdown()                        # the process "dies" here
 
     session = make_session(tmp_path)
     again = MainWindow(session, make_paths(tmp_path), "tester",
@@ -356,19 +360,26 @@ def test_committing_clears_the_sidecar(window):
     instance = first_task_instance(window)
     window.task_card.sigRequestEdit.emit(instance)
     paint(window)
-    assert Path(window.sidecar.path()).exists()
+    key = window.session.current()
+    window.flush_sidecar()
+    assert Path(window.sidecar.path_for(key, instance)).exists()
     window.act_commit()
-    assert window.sidecar.load() is None
+    assert window.sidecar.pending_for(key, instance) is None
+    assert not Path(window.sidecar.path_for(key, instance)).exists()
 
 
 def test_a_sidecar_for_another_frame_is_not_offered(qapp, tmp_path):
     win = open_window(tmp_path)
-    instance = first_task_instance(win)
-    win.task_card.sigRequestEdit.emit(instance)
-    paint(win)
-    win.sidecar.save(FrameKey(DESKTOP, 2, VIEW), instance,
-                     np.ones((64, 64), dtype=bool))
-    win.shutdown()
+    try:
+        instance = first_task_instance(win)
+        win.task_card.sigRequestEdit.emit(instance)
+        paint(win)
+        win.flush_sidecar()
+        win.sidecar.clear(win.session.current(), instance)
+        win.sidecar.save(FrameKey(DESKTOP, 2, VIEW), instance,
+                         np.ones((64, 64), dtype=bool))
+    finally:
+        win.shutdown()
 
     session = make_session(tmp_path)
     again = MainWindow(session, make_paths(tmp_path), "tester",

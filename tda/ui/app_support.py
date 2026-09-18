@@ -40,6 +40,7 @@ __all__ = [
     "SETTINGS_NAME",
     "EditSidecar",
     "app_dir",
+    "close_logger",
     "get_logger",
     "guard",
     "install_excepthook",
@@ -93,15 +94,24 @@ def make_settings(paths: dict) -> QSettings:
 
 
 def get_logger(paths: dict) -> logging.Logger:
-    """The application logger, with one rotating handler per log file."""
+    """The application logger, with exactly one rotating handler.
+
+    Handlers pointing at any *other* file are closed and removed: a window
+    opened on a second workspace (or a test using ``tmp_path``) would otherwise
+    leave the previous run's file open for the life of the process, and every
+    later message would be written to both.
+    """
     target = Path(log_path(paths))
     target.parent.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("tda.app")
     logger.setLevel(logging.INFO)
+    logger.propagate = False  # the root logger is not ours to write to
     resolved = str(target.resolve())
-    for handler in logger.handlers:
+    for handler in list(logger.handlers):
         if getattr(handler, "_tda_target", None) == resolved:
             return logger
+        logger.removeHandler(handler)
+        handler.close()
     handler = RotatingFileHandler(
         str(target), maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS,
         encoding="utf-8",
@@ -112,6 +122,13 @@ def get_logger(paths: dict) -> logging.Logger:
     handler._tda_target = resolved  # type: ignore[attr-defined]
     logger.addHandler(handler)
     return logger
+
+
+def close_logger(logger: logging.Logger) -> None:
+    """Close and drop the handlers a window added (called from ``shutdown``)."""
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
 
 
 def install_excepthook(
@@ -168,29 +185,42 @@ def _slug(text: str) -> str:
 
 
 class EditSidecar:
-    """The uncommitted editing layer of one annotator, on disk.
+    """The uncommitted editing layers of one annotator, on disk.
 
-    One file per annotator rather than per frame: only one edit can be in
-    progress at a time, and a stale file for a frame nobody is on any more is
-    worse than none -- :meth:`pending_for` simply ignores it.
+    **One file per ``(desktop, view, step, instance)``**, all under one
+    directory per annotator.  A single shared file lost an edit as soon as the
+    annotator opened a second instance on the same frame -- the second
+    ``save()`` overwrote the first, and the first was never committed.
+
+    The files are small (a part silhouette's RLE is a few kB) and the window
+    debounces the writes, so the cost of a stroke is a memcpy, not I/O.
     """
 
     def __init__(self, paths: dict, annotator: str) -> None:
-        self._path = sidecar_dir(paths) / f"edit_{_slug(annotator)}.json"
+        self._dir = sidecar_dir(paths) / _slug(annotator)
 
-    def path(self) -> str:
-        """The sidecar file (it may not exist)."""
-        return str(self._path)
+    def directory(self) -> str:
+        """Where this annotator's sidecars live (it may not exist yet)."""
+        return str(self._dir)
+
+    def path_for(self, key: FrameKey, instance: str) -> str:
+        """The file one ``(frame, instance)`` pair is stored in."""
+        return str(self._file(key, instance))
+
+    def _file(self, key: FrameKey, instance: str) -> Path:
+        name = (f"d{int(key.desktop):02d}_{_slug(str(key.view))}"
+                f"_s{int(key.step):03d}_{_slug(str(instance))}.json")
+        return self._dir / name
 
     def save(self, key: FrameKey, instance: str, mask: Optional[np.ndarray]) -> None:
-        """Record ``mask`` as the layer being edited on ``key``.
+        """Record ``mask`` as the layer being edited on ``(key, instance)``.
 
-        An empty or missing mask clears the file instead of writing one: there
+        An empty or missing mask removes the file instead of writing one: there
         is nothing to offer back, and a stale file would make the next launch
         ask a pointless question.
         """
         if mask is None or not np.asarray(mask).any():
-            self.clear()
+            self.clear(key, instance)
             return
         payload = {
             "desktop": int(key.desktop),
@@ -199,43 +229,65 @@ class EditSidecar:
             "instance": str(instance),
             "rle": masks.encode_rle(np.asarray(mask, dtype=bool)),
         }
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
+        target = self._file(key, instance)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(self._path)
+        tmp.replace(target)
 
-    def clear(self) -> None:
-        """Forget the stored layer (the edit was committed or abandoned)."""
-        self._path.unlink(missing_ok=True)
+    def clear(self, key: Optional[FrameKey] = None,
+              instance: Optional[str] = None) -> None:
+        """Forget one stored layer, or every one of them when nothing is named."""
+        if key is None or instance is None:
+            for stored in self._dir.glob("*.json"):
+                stored.unlink(missing_ok=True)
+            return
+        self._file(key, instance).unlink(missing_ok=True)
 
-    def load(self) -> Optional[dict]:
-        """The stored layer as ``{"key", "instance", "mask"}``, or ``None``.
+    def _read(self, path: Path) -> Optional[dict]:
+        """One file as ``{"key", "instance", "mask"}``; ``None`` when unusable.
 
-        A file that cannot be read or decoded is treated as absent: a crash
-        during the write must not stop the next launch.
+        A file that cannot be read or decoded counts as absent: a crash during
+        the write must not stop the next launch.
         """
         try:
-            payload = json.loads(self._path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
             mask = masks.decode_rle(payload["rle"])
             key = FrameKey(int(payload["desktop"]), int(payload["step"]),
                            str(payload["view"]))
         except (OSError, ValueError, KeyError, TypeError):
             return None
-        return {"key": key, "instance": str(payload["instance"]), "mask": mask}
+        return {"key": key, "instance": str(payload["instance"]), "mask": mask,
+                "path": path}
 
-    def pending_for(self, key: FrameKey, hw: Optional[tuple] = None) -> Optional[dict]:
-        """The stored layer when it belongs to ``key`` (and fits ``hw``)."""
-        found = self.load()
-        if found is None or found["key"] != key:
-            return None
-        if hw is not None and tuple(found["mask"].shape) != tuple(hw):
-            return None
+    def entries_for(self, key: FrameKey,
+                    hw: Optional[tuple] = None) -> list[dict]:
+        """Every stored layer that belongs to ``key`` (and fits ``hw``)."""
+        found = []
+        for path in sorted(self._dir.glob("*.json")):
+            entry = self._read(path)
+            if entry is None or entry["key"] != key:
+                continue
+            if hw is not None and tuple(entry["mask"].shape) != tuple(hw):
+                continue
+            found.append(entry)
         return found
 
+    def pending_for(self, key: FrameKey, instance: Optional[str] = None,
+                    hw: Optional[tuple] = None) -> Optional[dict]:
+        """The stored layer of one frame (and instance), or ``None``."""
+        if instance is not None:
+            entry = self._read(self._file(key, instance))
+            if entry is None or entry["key"] != key:
+                return None
+            if hw is not None and tuple(entry["mask"].shape) != tuple(hw):
+                return None
+            return entry
+        entries = self.entries_for(key, hw)
+        return entries[0] if entries else None
 
-def describe_lock(held: Optional[dict[str, Any]]) -> str:
-    """A human sentence for a lock file's contents (used by the message box)."""
-    if not held:
-        return "another annotator holds the database lock"
-    return (f"another annotator holds the database lock: "
-            f"{held.get('annotator')!r} since {held.get('ts')}")
+    def drop(self, entry: dict) -> None:
+        """Delete the file an entry came from (its instance is gone, or it was used)."""
+        path = entry.get("path")
+        if isinstance(path, Path):
+            path.unlink(missing_ok=True)

@@ -26,12 +26,16 @@ __all__ = [
     "ADAPTED",
     "close_session",
     "editing_changed_signal",
+    "flash_image",
     "is_open",
+    "layer_changed",
     "overlay_layers",
     "preview",
     "push_stroke",
     "resolve_conflict",
+    "session_refusal",
     "set_unexplained",
+    "task_neighbour",
 ]
 
 #: ``method name -> why the fallback ran``; populated the first time each gap is
@@ -177,6 +181,77 @@ def set_unexplained(session: Any, step: int, boxes) -> bool:
 # --------------------------------------------------------------------------- #
 # lifecycle
 # --------------------------------------------------------------------------- #
+def session_refusal() -> type:
+    """``SessionRefusal`` once the session exports it, ``ValueError`` before.
+
+    Every refusal the session makes is a ``ValueError`` subclass either way, so
+    catching the result of this call is correct in both worlds.
+    """
+    from tda.ui import session_api
+
+    found = getattr(session_api, "SessionRefusal", None)
+    if isinstance(found, type) and issubclass(found, Exception):
+        return found
+    _note("SessionRefusal", "refusals caught as plain ValueError")
+    return ValueError
+
+
+def task_neighbour(session: Any) -> Optional[int]:
+    """The step the task card is diffed against -- ``j + 1`` in reverse order.
+
+    The card lists the work of the frame on screen, i.e. the transitions from
+    the state at the *neighbour* step to the state here.  Annotation runs
+    backwards, so the neighbour is the next **available** step above the current
+    one: the frame the annotator came from.
+    """
+    if _has(session, "task_neighbour"):
+        found = session.task_neighbour()
+        return None if found is None else int(found)
+    _note("task_neighbour", "next available step above the current one")
+    return _neighbour_step(session, above=True)
+
+
+def _neighbour_step(session: Any, above: bool) -> Optional[int]:
+    """The nearest step on one side that actually has an image."""
+    try:
+        here = int(session.current().step)
+    except Exception:  # noqa: BLE001 - no frame is open
+        return None
+    steps = sorted(int(s) for s in session.steps())
+    side = [s for s in steps if (s > here if above else s < here)]
+    if not above:
+        side.reverse()
+    for step in side:
+        if session.image_at(step) is not None:
+            return step
+    return None
+
+
+def flash_image(session: Any, other: bool = False):
+    """The frame ``Tab`` (or ``Shift+Tab``) flashes in place of the current one.
+
+    ``Tab`` shows the neighbour the task card is written against -- the frame
+    the annotator came from -- and ``Shift+Tab`` the opposite side.
+    """
+    if _has(session, "flash_compare"):
+        try:
+            return session.flash_compare(other=other)
+        except TypeError:
+            pass  # the old single-sided signature; fall through to the adapter
+    _note("flash_compare(other=...)", "image_at() on the neighbour step")
+    step = _neighbour_step(session, above=not other)
+    return None if step is None else session.image_at(step)
+
+
+def layer_changed(session: Any) -> bool:
+    """Whether the editing layer holds pixels that have not been committed."""
+    layer = getattr(session, "layer", None)
+    if layer is not None and callable(getattr(layer, "changed", None)):
+        return bool(layer.changed())
+    _note("layer.changed()", "assumed unchanged; navigation is never blocked")
+    return False
+
+
 def is_open(session: Any) -> bool:
     """Whether the session currently has a frame open."""
     flag = getattr(session, "is_open", None)
