@@ -94,7 +94,9 @@ class SamRequest:
             point in ``points``, the prior mask is kept everywhere else. With
             ``mask_input`` but no ``points`` there is no anchor for a local edit,
             so the prediction is returned unblended (mask-guided box refinement).
-        multimask: ask SAM for three candidates and keep the highest scoring one.
+        multimask: ask SAM for three candidates. All three come back in
+            :attr:`SamResult.candidates`, best first, for the UI to cycle
+            through; ``mask``/``score`` name the best one.
     """
 
     image_crop: np.ndarray
