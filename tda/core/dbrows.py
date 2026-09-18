@@ -119,8 +119,8 @@ def frame_row(row: sqlite3.Row) -> dict:
 
 
 def pose_row(row: sqlite3.Row) -> dict:
-    """Pose-segment row with decoded corners/homography/roi."""
-    return json_row(row, "corners", "homography", "roi")
+    """Pose-segment row with decoded corners/homography/roi/bench_roi."""
+    return json_row(row, "corners", "homography", "roi", "bench_roi")
 
 
 def step_row(row: sqlite3.Row) -> StepRec:

@@ -34,7 +34,7 @@ from typing import Optional, Sequence
 import numpy as np
 
 from tda.core import masks
-from tda.core.compiler import CompiledFrame, select_keyframe
+from tda.core.compiler import select_keyframe
 from tda.core.db import Db
 from tda.core.model import (
     FrameKey,
@@ -78,7 +78,16 @@ from tda.ui.session_ops import (
     settle,
     write_zorder,
 )
-from tda.ui.session_tasks import task_card_for
+# re-exported: the session and the tests reach the scope vocabulary through
+# this module, which is the one import site for everything an edit needs
+from tda.ui.session_scope import (  # noqa: F401
+    SCOPE_ZORDER_ABOVE,
+    SCOPE_ZORDER_BELOW,
+    ZORDER_HINT_FRAC,
+    split_zorder_scope,
+    suggest_scope,
+)
+from tda.ui.session_tasks import item_text, task_card_for
 
 __all__ = [
     "DIRECTIONS",
@@ -104,26 +113,9 @@ __all__ = [
     "set_visibility",
     "set_zorder_move",
     "suggest_scope",
+    "item_text",
     "task_card_for",
 ]
-
-#: How much of the *changed* pixels has to land inside another instance before
-#: the default scope becomes "change the layering" (spec 4.3).
-ZORDER_HINT_FRAC = 0.6
-
-#: ``suggest_scope`` answers, and what :meth:`AnnotationSession.commit_edit`
-#: accepts besides the three :data:`~tda.ui.session_api.COMMIT_SCOPES`.
-SCOPE_ZORDER_ABOVE = "zorder:above:"
-SCOPE_ZORDER_BELOW = "zorder:below:"
-
-
-def split_zorder_scope(scope: str) -> Optional[tuple[str, bool]]:
-    """``(other instance, this one goes above)`` for a layering scope, else ``None``."""
-    for prefix, above in ((SCOPE_ZORDER_ABOVE, True), (SCOPE_ZORDER_BELOW, False)):
-        if scope.startswith(prefix):
-            return scope[len(prefix):], above
-    return None
-
 
 def _result(db: Db, truth: TruthService, key: FrameKey, steps: Sequence[int], op: Op,
             extra: Optional[dict] = None) -> dict:
@@ -321,6 +313,18 @@ def preview(db: Db, truth: TruthService, key: FrameKey, instance: str, scope: st
     return {"steps": steps, "verified_steps": verified}
 
 
+def pair_steps(db: Db, tax, key: FrameKey, one: str, two: str, seg: int,
+               cache: Optional[InputCache] = None) -> list[int]:
+    """Steps where both instances are mask layers, so a pair override can bite.
+
+    The one definition, so what :func:`preview_pair` promises and what
+    :func:`commit_pair_override` recompiles cannot drift apart.
+    """
+    mine = set(mask_steps(db, tax, key, one, seg, cache))
+    theirs = set(mask_steps(db, tax, key, two, seg, cache))
+    return sorted(mine & theirs)
+
+
 def preview_pair(db: Db, truth: TruthService, key: FrameKey, instance: str,
                  other: str) -> dict:
     """Which frames a layering exception would reach (spec 4.3 改层级).
@@ -334,9 +338,7 @@ def preview_pair(db: Db, truth: TruthService, key: FrameKey, instance: str,
     """
     cache = InputCache()
     seg = pose_segment_of(db, key, cache)
-    mine = set(mask_steps(db, truth.tax, key, instance, seg, cache))
-    theirs = set(mask_steps(db, truth.tax, key, other, seg, cache))
-    steps = sorted(mine & theirs)
+    steps = pair_steps(db, truth.tax, key, instance, other, seg, cache)
     return {"steps": steps,
             "verified_steps": [s for s in steps
                                if is_verified(db, key.desktop, key.view, s)]}
@@ -419,72 +421,7 @@ def _commit_frame_override(db: Db, truth: TruthService, key: FrameKey, instance:
 # --------------------------------------------------------------------------- #
 # layering, visibility, occluders
 # --------------------------------------------------------------------------- #
-def suggest_scope(compiled: CompiledFrame, instance: str, before: np.ndarray,
-                  edited: np.ndarray) -> str:
-    """The scope an edit defaults to (spec 4.3, 默认触发).
-
-    The question is about the pixels that actually *changed*, never about the
-    whole shape -- loading an instance into the editing layer and touching
-    nothing is not a statement about anything:
-
-    * pixels **added** where another instance ``B`` currently paints *over* this
-      one say "I want to see this one there instead" -- i.e. put it above ``B``;
-    * pixels **erased** exactly where ``B``'s shape lies under this one say the
-      opposite: ``B`` should have been on top all along;
-    * anything else is a change to the silhouette, so it edits the keyframe.
-
-    Both answers name the pair and the direction, ``zorder:above:<B>`` and
-    ``zorder:below:<B>``, because "change the layering" alone does not say which
-    way round.  A hint is only given when at least
-    :data:`ZORDER_HINT_FRAC` of the changed pixels fall inside ``B``.
-    """
-    before = np.asarray(before, dtype=bool)
-    edited = np.asarray(edited, dtype=bool)
-    added, erased = edited & ~before, before & ~edited
-
-    covering = _partner(compiled, instance, added, above=True)
-    if covering is not None:
-        return f"zorder:above:{covering}"
-    covered = _partner(compiled, instance, erased, above=False)
-    if covered is not None:
-        return f"zorder:below:{covered}"
-    return api.SCOPE_KEYFRAME
-
-
-def _partner(compiled: CompiledFrame, instance: str, changed: np.ndarray,
-             above: bool) -> Optional[str]:
-    """The instance the changed pixels are a layering statement about, if any.
-
-    ``above=True`` looks for an instance painting *over* ``instance`` whose
-    visible pixels the edit reached into; ``above=False`` for one painting
-    *under* it, compared on the amodal shapes, since what lies under is by
-    definition not visible.
-    """
-    total = int(changed.sum())
-    if total == 0:
-        return None
-    best, best_overlap = None, 0
-    for other, inst in compiled.instances.items():
-        if other == instance or _paints_above(compiled, other, instance) is not above:
-            continue
-        region = inst.visible if above else inst.amodal
-        if region is None:
-            continue
-        overlap = int(np.count_nonzero(changed & region))
-        if overlap > best_overlap:
-            best, best_overlap = other, overlap
-    return best if best_overlap >= ZORDER_HINT_FRAC * total else None
-
-
-def _paints_above(compiled: CompiledFrame, other: str, instance: str) -> Optional[bool]:
-    """Is ``other`` painted over ``instance``? ``None`` when they never meet."""
-    for order in compiled.painted.values():
-        if other in order and instance in order:
-            return order.index(other) > order.index(instance)
-    return None
-
-
-def require_instance(known: Optional[set[str]], instance: str) -> None:
+def require_instance(known, instance: str) -> None:
     """Refuse a layering gesture that names something this frame does not have.
 
     Silently treating an unknown neighbour as "the top of the stack" is how a
@@ -542,7 +479,8 @@ def commit_pair_override(db: Db, truth: TruthService, key: FrameKey, above: str,
     seg = pose_segment_of(db, key, cache)
     po = PairOverride(key.desktop, key.view, seg, above, below)
     existed = any(p == po for p in db.pair_overrides(key.desktop, key.view, seg))
-    steps = segment_steps(db, truth.tax, key, above, seg, cache)
+    # exactly the frames preview_pair promised: where both are mask layers
+    steps = pair_steps(db, truth.tax, key, above, below, seg, cache)
 
     common = {"desktop": key.desktop, "view": key.view, "pose_segment": seg,
               "above": above, "below": below, "steps": steps}

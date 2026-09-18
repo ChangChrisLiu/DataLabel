@@ -62,14 +62,17 @@ FRAME_STATUSES: tuple[str, ...] = (
 )
 
 # --------------------------------------------------------------------------- #
-# task card -- the work implied by stepping from k to k-1 (spec 4.2)
+# task card -- the work that belongs to the frame on screen (spec 4.2)
 # --------------------------------------------------------------------------- #
-#: ``removed -> installed``: draw the part back into the chassis.
+#: The part is in the chassis on this frame and has no shape here yet.
 KIND_ADD_SHAPE = "add_shape"
 #: ``open -> closed`` / ``unplugged -> plugged`` / ``displaced -> installed``.
 KIND_SPLIT_KEYFRAME = "split_keyframe"
 #: ``loosened -> fastened``: the shape carries over, only the state changes.
 KIND_STATE_ONLY = "state_only"
+#: The part is out of the chassis and the view can see the staging area, so it
+#: needs a rectangle there -- box work, not brush work (spec 4.2 item 1).
+KIND_ADD_BENCH_BOX = "add_bench_box"
 #: The part is back in the chassis, so its bench box ends here.
 KIND_REMOVE_BENCH_BOX = "remove_bench_box"
 #: ``dupli`` / ``failed`` frames: nothing to draw, one keystroke.
@@ -79,6 +82,7 @@ TASK_KINDS: tuple[str, ...] = (
     KIND_ADD_SHAPE,
     KIND_SPLIT_KEYFRAME,
     KIND_STATE_ONLY,
+    KIND_ADD_BENCH_BOX,
     KIND_REMOVE_BENCH_BOX,
     KIND_CONFIRM,
 )

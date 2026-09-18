@@ -105,13 +105,6 @@ def test_a_screw_that_was_only_loosened_is_state_only(session):
     assert card(session)[SCREWS[0]]["kind"] == api.KIND_STATE_ONLY
 
 
-def test_a_bench_box_ends_on_the_frame_the_part_is_back_in(session):
-    session.commit_box(COOLER, (2.0, 2.0, 12.0, 12.0))  # drawn on the start frame
-    session.goto(12)
-    kinds = [item["kind"] for item in session.task_card() if item["instance"] == COOLER]
-    assert api.KIND_REMOVE_BENCH_BOX in kinds
-
-
 # --------------------------------------------------------------------------- #
 # the start frame
 # --------------------------------------------------------------------------- #
@@ -180,14 +173,6 @@ def test_flash_compare_shows_the_frame_the_card_is_about(session):
     assert np.array_equal(session.flash_compare(other=True), session.image_at(9))
 
 
-def test_browsing_forward_asks_for_the_bench_box_of_the_part_just_removed(session):
-    session.goto(13)  # step 13 removed the cooler; going forward we arrive here
-    session.browse_forward()
-    items = card(session)
-    assert items[COOLER]["kind"] == api.KIND_ADD_SHAPE
-    assert items[COOLER]["done"] is False
-
-
 # --------------------------------------------------------------------------- #
 # confirming names the item (controller ruling 4)
 # --------------------------------------------------------------------------- #
@@ -198,7 +183,8 @@ def test_a_refused_confirmation_names_the_shape_to_draw(session):
     session.sigProblems.connect(problems.append)
 
     assert session.confirm_frame() is False
-    assert any(f"draw {CHASSIS} on this frame" in text for text in problems[-1])
+    assert any(f"Draw {CHASSIS}" in text and "on this frame" in text
+               for text in problems[-1])
     assert f"missing_shape:{CHASSIS}" in problems[-1]  # the raw problem is still there
 
 
@@ -223,3 +209,54 @@ def test_a_refusal_is_a_session_refusal(session):
         session.begin_edit(COOLER)
         session.set_editing_mask(cell(0))
         session.commit_edit(api.SCOPE_KEYFRAME)
+
+
+# --------------------------------------------------------------------------- #
+# what the card says when there is nothing, or a gap (round 3 minors)
+# --------------------------------------------------------------------------- #
+def test_a_frame_whose_neighbour_changed_nothing_still_says_something(qapp, tmp_path):
+    session = make_session(tmp_path)
+    steps = session.db.steps(DESKTOP)
+    actions = [a for a in session.db.actions(DESKTOP) if a.step != 9]
+    session.db.replace_steps(DESKTOP, steps, actions)  # step 9 now does nothing
+    session.goto(8)
+
+    items = session.task_card()
+    assert [i["kind"] for i in items] == [api.KIND_CONFIRM]
+    assert "no change against step 9" in items[0]["text"]
+    session.close()
+
+
+def test_a_card_across_a_gap_says_which_steps_it_covers(qapp, tmp_path):
+    session = make_session(tmp_path, missing=(12,))
+    session.goto(11)
+
+    assert session.task_neighbour() == 13
+    assert session.task_span() == [12, 13]
+    assert any("step 12 has no image" in item["text"] for item in session.task_card())
+    session.close()
+
+
+def test_task_span_is_the_single_step_when_nothing_was_skipped(session):
+    session.goto(11)
+    assert session.task_span() == [12]
+
+
+def test_the_confirmation_text_matches_the_card_item(session):
+    session.goto(12)  # the cooler is back here, so the card does list it
+    seed_shapes(session, 12, skip=(COOLER,))
+    wanted = next(i for i in session.task_card() if i["instance"] == COOLER)
+    problems: list[list[str]] = []
+    session.sigProblems.connect(problems.append)
+
+    assert session.confirm_frame() is False
+    assert wanted["text"] in problems[-1]  # one formatter, so a panel can match
+
+
+def test_the_layer_ranks_cover_every_taxonomy_group():
+    from tda.core.taxonomy import load_taxonomy
+    from tda.ui.session_tasks import LAYER_RANK
+
+    tax = load_taxonomy()
+    groups = {defn.get("group") for defn in tax.classes.values() if defn.get("group")}
+    assert groups == set(LAYER_RANK)

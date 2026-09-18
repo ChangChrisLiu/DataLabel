@@ -327,6 +327,10 @@ class FrameInputs:
     transform: Similarity
     placements: dict[str, str]
     pose_segment: int
+    #: The staging area this view can see at this frame, or ``None``. Spec 4.2
+    #: only asks for a part on the bench to be boxed 若该视角有堆放区 ROI, so
+    #: without one a bench part is not annotated and not a problem either.
+    bench_roi: Optional[list] = None
 
 
 def gather(
@@ -349,4 +353,5 @@ def gather(
         transform=db.transform(key),
         placements={inst: st.placement for inst, st in state.items()},
         pose_segment=seg,
+        bench_roi=db.bench_roi(key.desktop, key.view, seg),
     )

@@ -19,6 +19,13 @@ The **start frame** has no neighbour.  Nothing has been annotated yet, so its
 card is one item per instance that needs geometry there and has none, ordered
 so the chassis is drawn before the things that sit on top of it, and a single
 ``confirm`` once they are all drawn.
+
+Bench work is asked for only where there is a bench to see.  Spec 4.2 says
+若该视角有堆放区 ROI -- *if this view has a staging-area ROI* -- and the scanner
+looks straight down at the board, so on it the parts that have been taken out
+are simply not in the picture.  ``add_bench_box`` and ``remove_bench_box`` are
+therefore emitted only when the frame's pose segment has one recorded, and they
+carry their own kind so the window arms the box tool rather than the brush.
 """
 from __future__ import annotations
 
@@ -41,7 +48,8 @@ from tda.ui.session_ops import (
     placement_of,
 )
 
-__all__ = ["LAYER_RANK", "SPLIT_TRANSITIONS", "STATE_ONLY_TRANSITIONS", "task_card_for"]
+__all__ = ["LAYER_RANK", "SPLIT_TRANSITIONS", "STATE_ONLY_TRANSITIONS", "has_bench_roi",
+           "item_text", "task_card_for"]
 
 REMOVED = "removed"
 _VERIFIED = "verified"
@@ -97,6 +105,17 @@ def _has_bench_chain(db: Db, desktop: int, view: str, instance: str) -> bool:
     return any(kf.placement == ON_BENCH for kf in db.keyframes(desktop, view, instance))
 
 
+def has_bench_roi(db: Db, key: FrameKey, cache: Optional[InputCache] = None) -> bool:
+    """Can this view see a staging area at this frame? (spec 4.2 item 1)
+
+    Without one there is nothing to box: a part that has been taken out is not
+    in the picture at all, and asking for thirty rectangles nobody can draw is
+    how a task card stops being read.
+    """
+    seg = pose_segment_of(db, key, cache)
+    return db.bench_roi(key.desktop, key.view, seg) is not None
+
+
 # --------------------------------------------------------------------------- #
 # one change -> one instruction
 # --------------------------------------------------------------------------- #
@@ -130,28 +149,49 @@ def _kind_for(changes: dict, needs_neighbour: bool, needs_here: bool) -> str:
     return api.KIND_STATE_ONLY
 
 
-def _text_for(kind: str, instance: str, changes: dict, rec: Optional[InstanceRec]) -> str:
-    """The one-line instruction the task card shows."""
+def item_text(kind: str, instance: str, changes: dict, rec: Optional[InstanceRec],
+              span: Optional[list[int]] = None) -> str:
+    """The one-line instruction the task card shows.
+
+    The one formatter: :meth:`AnnotationSession.confirm_frame` says a missing
+    shape in exactly these words too, so a panel can match a problem to the item
+    it belongs to instead of guessing.
+    """
     cls = "" if rec is None else f" ({rec.cls})"
     transition = changes.get("state")
     arrow = "" if transition is None else f": {transition[0]} -> {transition[1]}"
+    note = _span_note(span)
     if kind == api.KIND_ADD_SHAPE:
         with_parent = (f", back in with {rec.parent}"
                        if rec is not None and rec.attached and rec.parent else "")
-        return f"Draw {instance}{cls} on this frame{with_parent}"
+        return f"Draw {instance}{cls} on this frame{with_parent}{note}"
+    if kind == api.KIND_ADD_BENCH_BOX:
+        return f"Draw the staging-area box of {instance}{cls}{note}"
     if kind == api.KIND_SPLIT_KEYFRAME:
-        return f"Split the keyframe of {instance}{cls}{arrow}"
+        return f"Split the keyframe of {instance}{cls}{arrow}{note}"
     if kind == api.KIND_REMOVE_BENCH_BOX:
-        return f"The staging-area box of {instance}{cls} ends here"
+        return f"The staging-area box of {instance}{cls} ends here{note}"
     if kind == api.KIND_CONFIRM:
-        return f"Nothing to draw here{arrow} - confirm the frame"
-    return f"State only for {instance}{cls}{arrow}"
+        nothing = changes.get("nothing")
+        if nothing is not None:
+            return (f"Nothing to draw here: no change against step {nothing[0]}"
+                    f"{note} - confirm the frame")
+        return f"Nothing to draw here{arrow}{note} - confirm the frame"
+    return f"State only for {instance}{cls}{arrow}{note}"
+
+
+def _span_note(span: Optional[list[int]]) -> str:
+    """Say so when the card covers more than one action step (a missing frame)."""
+    if not span or len(span) < 2:
+        return ""
+    skipped = ", ".join(f"step {s} has no image" for s in span[:-1])
+    return f" (covers steps {span[0]}-{span[-1]}; {skipped})"
 
 
 def _item(instance: str, kind: str, changes: dict, done: bool,
-          rec: Optional[InstanceRec]) -> dict:
+          rec: Optional[InstanceRec], span: Optional[list[int]] = None) -> dict:
     return {"instance": instance, "kind": kind,
-            "text": _text_for(kind, instance, changes, rec), "done": bool(done)}
+            "text": item_text(kind, instance, changes, rec, span), "done": bool(done)}
 
 
 def _ordered(items: list[dict], instances: dict[str, InstanceRec]) -> list[dict]:
@@ -182,7 +222,8 @@ def _bottom_up(items: list[dict], instances: dict[str, InstanceRec],
 # the card
 # --------------------------------------------------------------------------- #
 def task_card_for(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
-                  neighbour: Optional[int] = None) -> list[dict]:
+                  neighbour: Optional[int] = None,
+                  span: Optional[list[int]] = None) -> list[dict]:
     """What has to be annotated on frame ``step`` (spec 4.2).
 
     ``neighbour`` is the already-annotated frame the card is diffed against --
@@ -206,10 +247,13 @@ def task_card_for(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
     confirmed = frame.get("review_status") == _VERIFIED
 
     if rec.dupli or rec.step_type in ("dupli", "failed"):
-        return [_item(rec.raw_name or f"step {step}", api.KIND_CONFIRM, {}, confirmed, None)]
+        return [_item(rec.raw_name or f"step {step}", api.KIND_CONFIRM, {}, confirmed,
+                      None, None)]
     if neighbour is None or neighbour not in records:
         return _start_card(db, tax, desktop, view, step, instances, cache, confirmed)
 
+    span = span or [neighbour]
+    bench = has_bench_roi(db, FrameKey(desktop, step, view), cache)
     state_here = state_of(db, tax, desktop, step, cache)
     state_there = state_of(db, tax, desktop, neighbour, cache)
     needs_here = needs_geom(instances, state_here, tax)
@@ -225,16 +269,27 @@ def task_card_for(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
             continue  # a virtual cable node: it never carries geometry
         rec_i = instances.get(instance)
         kind = _kind_for(changes, instance in needs_there, instance in needs_here)
+        wants_box = needs_here.get(instance) in BENCH_KINDS
+        if wants_box:
+            if not bench:
+                continue  # this view cannot see the staging area: not its work
+            if kind == api.KIND_ADD_SHAPE:
+                kind = api.KIND_ADD_BENCH_BOX
         done = (True if kind == api.KIND_STATE_ONLY
-                else _has_shape(db, tax, desktop, view, instance, step, cache))
-        items.append(_item(instance, kind, changes, done, rec_i))
-        if (changes.get("placement") == (ON_BENCH, IN_CHASSIS)
+                else _has_shape(db, tax, desktop, view, instance, step, cache,
+                                GEOM_BOX if wants_box else None))
+        items.append(_item(instance, kind, changes, done, rec_i, span))
+        if (bench and changes.get("placement") == (ON_BENCH, IN_CHASSIS)
                 and _has_bench_chain(db, desktop, view, instance)):
             # the part is back in the chassis here, so its on_bench chain ended
             # next door -- done exactly when no bench box reaches this frame
             retired = not _has_shape(db, tax, desktop, view, instance, step, cache,
                                      GEOM_BOX)
-            items.append(_item(instance, api.KIND_REMOVE_BENCH_BOX, changes, retired, rec_i))
+            items.append(_item(instance, api.KIND_REMOVE_BENCH_BOX, changes, retired,
+                               rec_i, span))
+    if not items:
+        return [_item(f"step {step}", api.KIND_CONFIRM,
+                      {"nothing": (str(neighbour), str(step))}, confirmed, None, span)]
     return _ordered(items, instances)
 
 
@@ -248,15 +303,17 @@ def _start_card(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
     confirmation.
     """
     state = state_of(db, tax, desktop, step, cache)
+    bench = has_bench_roi(db, FrameKey(desktop, step, view), cache)
     items = []
-    for instance, kind in sorted(needs_geom(instances, state, tax).items()):
-        geom = GEOM_BOX if kind in BENCH_KINDS else GEOM_MASK
+    for instance, geom_kind in sorted(needs_geom(instances, state, tax).items()):
+        on_bench = geom_kind in BENCH_KINDS
+        if on_bench and not bench:
+            continue  # this view cannot see the staging area
+        geom = GEOM_BOX if on_bench else GEOM_MASK
         if _has_shape(db, tax, desktop, view, instance, step, cache, geom):
             continue
-        item = _item(instance, api.KIND_ADD_SHAPE, {}, False, instances.get(instance))
-        item["text"] = (f"Draw the staging-area box of {instance}" if geom == GEOM_BOX
-                        else f"Draw {instance} on this frame")
-        items.append(item)
+        kind = api.KIND_ADD_BENCH_BOX if on_bench else api.KIND_ADD_SHAPE
+        items.append(_item(instance, kind, {}, False, instances.get(instance), None))
     if not items:
-        return [_item(f"step {step}", api.KIND_CONFIRM, {}, confirmed, None)]
+        return [_item(f"step {step}", api.KIND_CONFIRM, {}, confirmed, None, None)]
     return _bottom_up(items, instances, tax)

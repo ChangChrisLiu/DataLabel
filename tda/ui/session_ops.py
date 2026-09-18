@@ -136,7 +136,7 @@ def settle(db: Db, truth: TruthService, desktop: int, view: str, steps: Iterable
     stats: dict = {"updated": 0, "conflicts": 0, "skipped": 0, "problems": {},
                    "frame": None}
     for step in now:
-        one = truth.refresh(FrameKey(desktop, int(step), view))
+        one = truth.refresh(FrameKey(desktop, int(step), view), want_compiled=True)
         for counter in ("updated", "conflicts", "skipped"):
             stats[counter] += one[counter]
         stats["problems"][int(step)] = list(one["problems"])

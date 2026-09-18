@@ -37,6 +37,10 @@ MIGRATIONS: dict[str, dict[str, str]] = {
     "recheck_queue": {
         "gen": "INTEGER NOT NULL DEFAULT 0",
     },
+    # the staging-area ROI arrived with schema version 3 as well
+    "pose_segment": {
+        "bench_roi_json": "TEXT",
+    },
 }
 
 

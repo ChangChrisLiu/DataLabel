@@ -361,6 +361,7 @@ def format_status(rows: list[dict]) -> str:
             f"D{row['desktop']:02d}{'':<5}{row['steps']:>6}{row['instances']:>6} | "
             + " | ".join(_view_cell(row["views"][view]) for view in VIEWS)
         )
+    pending = sum(sum(r["views"][view].get("rechecks", 0) for view in VIEWS) for r in rows)
     total = {view: {k: sum(r["views"][view][k] for r in rows)
                     for k in ("frames", "missing", "keyframes", "verified")} for view in VIEWS}
     lines.append("-" * len(head))
@@ -369,6 +370,11 @@ def format_status(rows: list[dict]) -> str:
         f"{sum(r['instances'] for r in rows):>6} | "
         + " | ".join(_view_cell(total[view]) for view in VIEWS)
     )
+    if pending:
+        # status is read-only, so it reports the backlog rather than working it
+        # off: until it is zero the truth table of those views is not one to
+        # export (spec 3.4). `cli check` holds the lock and drains them.
+        lines.append(f"re-checks pending: {pending}")
     return "\n".join(lines)
 
 
@@ -387,6 +393,10 @@ def format_desktop(db: Db, row: dict) -> str:
             f"  {view:<6}{counts['frames']:>8}{counts['missing']:>9}"
             f"{counts['keyframes']:>11}{counts['verified']:>10}"
         )
+    for view in VIEWS:
+        waiting = row["views"][view].get("rechecks", 0)
+        if waiting:
+            lines.append(f"  re-checks pending: {view} {waiting}")
     for view in VIEWS:
         rendered = ", ".join(
             f"#{s['seg']} [{s['start_step']}-{s['end_step']}] ref {s['ref_step']}"
