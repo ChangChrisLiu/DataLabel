@@ -12,6 +12,7 @@ does not get that edge; the skipped slots are reported rather than guessed at.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,12 @@ from tda.core.graph_rules import CABLE_PREFIX, HARD_TYPES, Edge
 from tda.core.model import InstanceRec
 
 __all__ = ["apply_template", "load_template", "save_template"]
+
+#: A dropped edge is the one thing these two functions can get wrong, and two of
+#: the three callers pass no ``report`` list. Without a log line, a template
+#: that instantiates four edges instead of nine is noticed months later, in the
+#: constraint panel of the twentieth sibling.
+log = logging.getLogger(__name__)
 
 TEMPLATE_VERSION = 1
 
@@ -57,7 +64,8 @@ def save_template(
 
     An edge with an endpoint that is neither an instance of this desktop nor a
     virtual cable node is dropped -- it has no slot and could not be
-    instantiated anywhere -- and a line saying so is appended to ``report``.
+    instantiated anywhere -- and a line saying so is appended to ``report`` and
+    logged as a warning, so a caller passing no list still leaves a trace.
     """
     notes = report if report is not None else []
     rows = []
@@ -113,9 +121,10 @@ def apply_template(
     when its type is one of :data:`~tda.core.graph_rules.HARD_TYPES` and both
     ends resolve to exactly one node. A slot this machine does not have -- or
     one filled ambiguously by several instances -- is skipped, and a line saying
-    so is appended to ``report`` when the caller passes a list. The report is
-    per *slot*, not per edge: one missing screw slot that appears in four edges
-    is one line, because that is the one thing a human has to fix.
+    so is appended to ``report`` when the caller passes a list and logged as a
+    warning either way. The report is per *slot*, not per edge: one missing
+    screw slot that appears in four edges is one line, because that is the one
+    thing a human has to fix.
 
     The edges come back with ``source="template"`` and ``status="proposed"``:
     a template is a strong suggestion, not an observation, and the S1 panel is
@@ -165,6 +174,14 @@ def _one(index: dict[str, list[str]], slot: Optional[str], notes: list[str]) -> 
 
 
 def _note(notes: list[str], text: str) -> None:
-    """Append one report line, once -- a slot missing from four edges is one gap."""
-    if text not in notes:
-        notes.append(text)
+    """Record one dropped edge, once -- a slot missing from four edges is one gap.
+
+    The line goes into the caller's ``report`` list *and* into the log, because
+    the callers that pass no list still need the gap to leave a trace
+    somewhere. Deduplication covers both, so a run stays as readable as the
+    report is.
+    """
+    if text in notes:
+        return
+    notes.append(text)
+    log.warning("template: %s", text)

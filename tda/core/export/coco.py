@@ -25,7 +25,9 @@ name the same frame the same way.
 
 The export **writes**: it brings the truth table up to date first
 (:meth:`~tda.core.truth.TruthService.ensure_fresh`), so a caller needs the
-single-user lock of spec 3.5. What it never does is change an annotation and nothing imports Qt.
+single-user lock of spec 3.5. What it never writes is annotation *content* --
+it only reads out what the database already implies -- and nothing here imports
+Qt.
 """
 from __future__ import annotations
 
@@ -63,6 +65,7 @@ __all__ = [
     "export_coco",
     "frame_file_name",
     "frame_hw",
+    "frame_is_verified",
     "image_id",
     "load_ctx",
     "mask_bbox_xywh",
@@ -83,6 +86,7 @@ ANSWERABLE = (
 )
 
 QUALITY_GOLD = "gold"
+QUALITY_SILVER = "silver"
 QUALITY_AUTO = "auto"
 VERIFIED = "verified"
 GEOM_BOX = "box"
@@ -325,11 +329,28 @@ def _clip_box(box: list, roi: tuple[int, int, int, int]) -> Optional[list]:
 # --------------------------------------------------------------------------- #
 # annotations
 # --------------------------------------------------------------------------- #
+def frame_is_verified(db: Db, key: FrameKey, rows: dict[str, dict]) -> bool:
+    """Has a human signed this whole *frame* off? (spec 3.4)
+
+    The frame-level notion :meth:`tda.core.truth.TruthService._frame_is_verified`
+    works with, narrowed the safe way: the frame's own ``review_status``, or
+    **every** compiled row of it frozen. The truth service can settle for *any*
+    frozen row because it only needs to know whether a demotion is due; a
+    quality grade cannot, or one confirmed screw would make the whole image gold.
+    """
+    frame = db.get_frame(key)
+    if frame is not None and frame.get("review_status") == VERIFIED:
+        return True
+    return bool(rows) and all(row.get("status") == VERIFIED for row in rows.values())
+
+
 def _quality(row: dict) -> str:
     """Quality grade of one compiled row.
 
     Only ``gold`` (a human confirmed it) and ``auto`` exist so far; the
-    silver/bronze grades of spec 8.1 arrive with the review levels.
+    silver/bronze grades of spec 8.1 arrive with the review levels. The VLM
+    export grades whole *answers* rather than rows and has its own
+    :func:`tda.core.export.vlm._quality`.
     """
     return QUALITY_GOLD if row.get("status") == VERIFIED else QUALITY_AUTO
 

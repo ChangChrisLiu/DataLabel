@@ -337,11 +337,44 @@ def _recorded_step_boxes(record: dict) -> Optional[dict[int, Any]]:
     return out
 
 
+#: ``s042.jpg`` -- the only files in a thumbnail folder this module owns.
+_THUMB_RE = re.compile(r"^s(\d+)\.jpg$", re.IGNORECASE)
+
+
+def _drop_orphans(folder: str, steps: set[int]) -> int:
+    """Delete the ``sNNN.jpg`` of every step the manifest no longer lists.
+
+    The manifest is the authority on which steps a desktop has (see the module
+    docstring), so a thumbnail outside it is a picture of a step that does not
+    exist any more -- and the timeline will happily show it. Only files matching
+    :data:`_THUMB_RE` are touched: the sidecar, and anything a human dropped in
+    the folder, are not this function's business. A file that cannot be removed
+    is left where it is; an orphan is untidy, a crashed batch job is worse.
+    """
+    removed = 0
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return 0
+    for name in entries:
+        match = _THUMB_RE.match(name)
+        if match is None or int(match.group(1)) in steps:
+            continue
+        try:
+            os.remove(os.path.join(folder, name))
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def _write_sidecar(path: str, record: dict) -> None:
     """Record the plan next to the thumbnails it describes (atomically).
 
-    The directory may not exist yet: a plan whose every thumbnail failed, or a
-    membership change with nothing to rebuild, still has to be recorded.
+    The directory may not exist yet -- a membership change with nothing to
+    rebuild still has to be recorded -- but the caller does not ask for a
+    desktop that produced no thumbnail at all, because the folder alone would
+    read as a built desktop on the next run.
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.part"
@@ -398,16 +431,24 @@ def build_thumbs(cache_dir, views=("scan",), desktops=None, max_side: int = DEFA
     Nothing outside ``<cache_dir>/thumbs`` is ever written, and one unreadable
     frame cannot stop the run: it is counted and described instead.
 
-    Returns ``written``, ``skipped``, ``missing_source`` (a step in the manifest
-    whose cached frame is not on disk), ``failed``, the matching ``failures``
-    list of ``{"path", "error"}``, the ``rois`` that were used (``{"view",
-    "desktop", "groups"}`` per desktop+view), ``bytes`` written and ``elapsed_s``.
+    A thumbnail whose step is no longer in the manifest is **deleted** and
+    counted as ``removed``: a step dropped from the cache (a burst re-decided
+    away, a desktop re-indexed shorter) otherwise leaves a picture the timeline
+    can still open, of a step that does not exist. Only ``sNNN.jpg`` files are
+    ever considered; the sidecar and anything else in the folder are left alone.
+
+    Returns ``written``, ``skipped``, ``removed``, ``missing_source`` (a step in
+    the manifest whose cached frame is not on disk), ``failed``, the matching
+    ``failures`` list of ``{"path", "error"}``, the ``rois`` that were used
+    (``{"view", "desktop", "groups"}`` per desktop+view), ``bytes`` written and
+    ``elapsed_s``.
     """
     from tda.core.cache import VIEW_EXT, cache_path  # late: see the module docstring
 
     started = time.perf_counter()
-    stats: dict[str, Any] = {"written": 0, "skipped": 0, "missing_source": 0, "failed": 0,
-                             "failures": [], "rois": [], "bytes": 0, "elapsed_s": 0.0}
+    stats: dict[str, Any] = {"written": 0, "skipped": 0, "removed": 0,
+                             "missing_source": 0, "failed": 0, "failures": [],
+                             "rois": [], "bytes": 0, "elapsed_s": 0.0}
     wanted = None if desktops is None else {int(d) for d in desktops}
     root = _norm(cache_dir).rstrip("/")
 
@@ -448,6 +489,13 @@ def build_thumbs(cache_dir, views=("scan",), desktops=None, max_side: int = DEFA
                             {"path": src, "error": f"{type(exc).__name__}: {exc}"})
 
             stats["written"] += written_here
+            folder = os.path.dirname(sidecar)
+            if not os.path.isdir(folder):
+                # Nothing of this desktop is on disk. Writing the sidecar would
+                # create the folder for a plan describing no thumbnail at all,
+                # and the next run would read that as a built desktop.
+                continue
+            stats["removed"] += _drop_orphans(folder, {k.step for k in keys})
             # A membership change on its own leaves every thumbnail correct but the
             # record wrong, so it too has to land; an unchanged plan is left alone,
             # or every run would dirty every sidecar with a new built_at.
@@ -511,7 +559,8 @@ def run_thumb_cli(args, cache_dir, views, desktops, emit=None) -> int:
             for group in roi["groups"]:
                 sources[group["source"]] = sources.get(group["source"], 0) + 1
         say(f"[{time.strftime('%H:%M:%S')}] thumbs written={stats['written']} "
-            f"skipped={stats['skipped']} missing_source={stats['missing_source']} "
+            f"skipped={stats['skipped']} removed={stats['removed']} "
+            f"missing_source={stats['missing_source']} "
             f"failed={stats['failed']} MB={stats['bytes'] / 1e6:.1f} side={args.thumb_side} "
             f"roi={'/'.join(f'{k}:{v}' for k, v in sorted(sources.items())) or 'none'} "
             f"elapsed={stats['elapsed_s'] / 60:.1f}min")

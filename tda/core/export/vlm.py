@@ -48,11 +48,12 @@ from tda.core.db import Db
 from tda.core.export.coco import (
     ANSWERABLE,
     NO_CHANGE_STEP_TYPES,
-    QUALITY_AUTO,
     QUALITY_GOLD,
+    QUALITY_SILVER,
     VERIFIED,
     DesktopCtx,
     frame_file_name,
+    frame_is_verified,
     load_ctx,
     row_bbox_xywh,
 )
@@ -60,7 +61,7 @@ from tda.core.model import ActionRec, FrameKey, InstanceRec
 from tda.core.taxonomy import Taxonomy
 from tda.core.truth import TruthService
 
-__all__ = ["TASKS", "export_vlm", "instance_label"]
+__all__ = ["TASKS", "class_label", "export_vlm", "instance_label"]
 
 TASKS = ("V1", "V2", "V3")
 
@@ -89,17 +90,59 @@ CABLE_CLASS = "cable"
 # --------------------------------------------------------------------------- #
 # wording
 # --------------------------------------------------------------------------- #
-def instance_label(instance: str, rec: Optional[InstanceRec]) -> str:
-    """Human wording of an instance key: ``screw.motherboard.03`` -> "motherboard screw 3"."""
+#: Class-id and attribute words that are initialisms rather than words. A
+#: question reading "what state is the psu 1 in?" is a question about a typo;
+#: ``str.title()`` would make it "Psu", which is worse.
+INITIALISMS = frozenset({
+    "psu", "cpu", "gpu", "ram", "ssd", "hdd", "io", "atx", "sata", "usb",
+    "wlan", "pc", "pcb", "24pin", "ph1", "ph2", "ph3",
+})
+
+
+def _words(text: str) -> list[str]:
+    """``"cpu_cooler"`` -> ``["CPU", "cooler"]``: initialisms up, rest as written."""
+    return [
+        word.upper() if word.lower() in INITIALISMS else word
+        for word in str(text).replace("_", " ").split()
+    ]
+
+
+def class_label(cls: str, tax: Optional[Taxonomy] = None) -> str:
+    """How a person says a taxonomy class: ``ram_module`` -> "RAM module".
+
+    A class definition in ``configs/taxonomy.yaml`` may carry a ``label`` (or
+    ``name``) and that wins; none does today, so the id is spelled out instead.
+    The class *id* is what every structured field keeps -- this is only ever the
+    wording of a question or an answer a human reads.
+    """
+    defn = (tax.classes.get(cls) if tax is not None else None) or {}
+    given = defn.get("label") or defn.get("name")
+    return " ".join(_words(given if isinstance(given, str) and given else cls))
+
+
+def instance_label(
+    instance: str, rec: Optional[InstanceRec], tax: Optional[Taxonomy] = None
+) -> str:
+    """Human wording of an instance key: ``screw.motherboard.03`` -> "Motherboard screw 3".
+
+    The discriminator (a screw's ``role``, a card's ``kind``) leads, then the
+    class, then the ordinal; the whole label is capitalised once at the front,
+    so ``psu.01`` reads "PSU 1", ``cpu_cooler.01`` "CPU cooler 1" and
+    ``ram_module.02`` "RAM module 2". An instance with no record at all keeps
+    its raw key: an unnamed key is better than a pretty guess.
+    """
     if rec is None:
         return instance
     disc = rec.attrs.get("role") or rec.attrs.get("kind") or ""
-    words = [str(disc).replace("_", " ")] if disc else []
-    words.append(str(rec.cls).replace("_", " "))
+    words = _words(disc) if disc else []
+    words.extend(_words(class_label(str(rec.cls), tax)))
     ordinal = instance.rsplit(".", 1)[-1]
     if ordinal.isdigit():
         words.append(str(int(ordinal)))
-    return " ".join(w for w in words if w)
+    words = [w for w in words if w]
+    if words and not words[0].isupper():
+        words[0] = words[0][:1].upper() + words[0][1:]
+    return " ".join(words)
 
 
 def _pick(templates: Sequence[str], seed: str) -> str:
@@ -162,12 +205,21 @@ def _frame_id(key: FrameKey) -> str:
     return f"D{key.desktop:02d}-{key.view}-s{key.step:03d}"
 
 
-def _quality(rows: Iterable[dict]) -> str:
-    """``gold`` only when every compiled row behind the record is human-verified."""
+def _quality(rows: Iterable[dict], frame_verified: bool) -> str:
+    """``gold`` only when the whole *frame* is verified and so is every row cited.
+
+    Reading the grade off the cited rows alone was not enough: a V2 question
+    about the one screw a human happened to confirm came out ``gold`` on a frame
+    nobody had otherwise looked at, and a V1 record listing that screw claimed
+    the same about the whole image. Gold now needs both -- the frame
+    (:func:`tda.core.export.coco.frame_is_verified`) and every row the answer
+    was read off. Everything else is ``silver``: it came out of the compiled
+    truth table, which is derived and complete, just not signed off.
+    """
     used = list(rows)
-    if used and all(row.get("status") == VERIFIED for row in used):
+    if frame_verified and used and all(row.get("status") == VERIFIED for row in used):
         return QUALITY_GOLD
-    return QUALITY_AUTO
+    return QUALITY_SILVER
 
 
 def _pointable(ctx: DesktopCtx, rows: dict[str, dict],
@@ -196,7 +248,7 @@ def _pointable(ctx: DesktopCtx, rows: dict[str, dict],
 # V1 -- what is visible, and where
 # --------------------------------------------------------------------------- #
 def _v1(ctx: DesktopCtx, key: FrameKey, image: str,
-        pointable: dict[str, tuple[dict, list]]) -> Optional[dict]:
+        pointable: dict[str, tuple[dict, list]], verified: bool) -> Optional[dict]:
     components, bboxes, steps, used = [], {}, [], []
     for instance, (row, box) in pointable.items():
         cls = ctx.cls_of(instance)
@@ -212,14 +264,14 @@ def _v1(ctx: DesktopCtx, key: FrameKey, image: str,
     rec_id = f"V1-{_frame_id(key)}"
     return _record(rec_id, "V1", key, [image], _pick(V1_QUESTIONS, rec_id),
                    {"components": components}, _evidence(bboxes), _rationale(steps),
-                   _quality(used))
+                   _quality(used, verified))
 
 
 # --------------------------------------------------------------------------- #
 # V2 -- per-instance state and fastener counts
 # --------------------------------------------------------------------------- #
 def _v2_states(ctx: DesktopCtx, key: FrameKey, image: str,
-               pointable: dict[str, tuple[dict, list]]) -> list[dict]:
+               pointable: dict[str, tuple[dict, list]], verified: bool) -> list[dict]:
     """One state question per instance whose class has more than one state."""
     frame_state = ctx.state_at(key.step)
     records = []
@@ -228,7 +280,7 @@ def _v2_states(ctx: DesktopCtx, key: FrameKey, image: str,
         inst_state = frame_state.get(instance)
         if cls is None or inst_state is None or len(ctx.tax.states_of(cls)) < 2:
             continue
-        label = instance_label(instance, ctx.instances.get(instance))
+        label = instance_label(instance, ctx.instances.get(instance), ctx.tax)
         rec_id = f"V2-{_frame_id(key)}-state-{instance}"
         question = _pick(V2_STATE_QUESTIONS, rec_id).format(label=label)
         records.append(_record(
@@ -236,7 +288,7 @@ def _v2_states(ctx: DesktopCtx, key: FrameKey, image: str,
             _evidence({instance: box}),
             _rationale([_observe(instance, inst_state.state, key.view, box,
                                  row.get("visibility"))]),
-            _quality([row]),
+            _quality([row], verified),
         ))
     return records
 
@@ -252,7 +304,7 @@ def _screw_roles(ctx: DesktopCtx, pointable: dict[str, tuple[dict, list]]) -> li
 
 
 def _v2_counts(ctx: DesktopCtx, key: FrameKey, image: str,
-               pointable: dict[str, tuple[dict, list]]) -> list[dict]:
+               pointable: dict[str, tuple[dict, list]], verified: bool) -> list[dict]:
     """"How many <role> screws are still fastened?" -- counted on the state machine.
 
     The count covers every screw of that role on the machine, not only the ones
@@ -274,7 +326,7 @@ def _v2_counts(ctx: DesktopCtx, key: FrameKey, image: str,
             rec_id, "V2", key, [image],
             V2_COUNT_QUESTION.format(role=role.replace("_", " ")),
             {"count": len(fastened)}, _evidence(bboxes), _rationale(steps),
-            _quality([pointable[i][0] for i in fastened if i in pointable]),
+            _quality([pointable[i][0] for i in fastened if i in pointable], verified),
         ))
     return records
 
@@ -303,8 +355,8 @@ def _slots(ctx: DesktopCtx, action: ActionRec) -> dict:
 
 
 def _v3(ctx: DesktopCtx, key: FrameKey, images: list[str], actions: list[ActionRec],
-        before: dict[str, tuple[dict, list]],
-        after: dict[str, tuple[dict, list]]) -> Optional[dict]:
+        before: dict[str, tuple[dict, list]], after: dict[str, tuple[dict, list]],
+        verified: dict[int, bool]) -> Optional[dict]:
     named = [a for a in actions if _target_class(ctx, a.target) is not None]
     if not named or ctx.step_type(key.step) in NO_CHANGE_STEP_TYPES:
         return None
@@ -323,9 +375,12 @@ def _v3(ctx: DesktopCtx, key: FrameKey, images: list[str], actions: list[ActionR
         {"op": "compare_frames", "frames": [key.step - 1, key.step], "view": key.view},
         _step_for(target, answer["verb"], key.view, source, step=source_step),
     ]
+    # The grade follows the frame the answer was actually read off, which for a
+    # V3 pair is usually the *earlier* one: the part is gone from the later.
     return _record(rec_id, "V3", key, images, _pick(V3_QUESTIONS, rec_id), answer,
                    _evidence(bboxes, from_step=source_step), _rationale(steps),
-                   _quality([source[target][0]] if target in source else []))
+                   _quality([source[target][0]] if target in source else [],
+                            verified.get(source_step, False)))
 
 
 # --------------------------------------------------------------------------- #
@@ -372,23 +427,26 @@ def export_vlm(
         # as it was several edits ago -- or silently not at all
         service.ensure_fresh(desktop, view, only_verified)
         previous: Optional[tuple[int, dict[str, tuple[dict, list]], str]] = None
+        verified: dict[int, bool] = {}
         for frame in db.frames_for(desktop, view):
             key = FrameKey(desktop, frame["step"], view)
             if not ctx.exportable(key.step):
                 continue  # an `ignore` step is no moment of the teardown
             image = frame_file_name(frame, key)
-            pointable = _pointable(ctx, db.compiled(key), only_verified)
+            rows = db.compiled(key)
+            verified[key.step] = frame_is_verified(db, key, rows)
+            pointable = _pointable(ctx, rows, only_verified)
 
             if "V1" in wanted:
-                emit(_v1(ctx, key, image, pointable))
+                emit(_v1(ctx, key, image, pointable, verified[key.step]))
             if "V2" in wanted:
-                for record in _v2_states(ctx, key, image, pointable):
+                for record in _v2_states(ctx, key, image, pointable, verified[key.step]):
                     emit(record)
-                for record in _v2_counts(ctx, key, image, pointable):
+                for record in _v2_counts(ctx, key, image, pointable, verified[key.step]):
                     emit(record)
             if "V3" in wanted and previous is not None and previous[0] == key.step - 1:
                 emit(_v3(ctx, key, [previous[2], image], ctx.actions_at(key.step),
-                         previous[1], pointable))
+                         previous[1], pointable, verified))
             previous = (key.step, pointable, image)
 
     out = Path(out_jsonl)

@@ -398,3 +398,30 @@ def test_resolve_conflict_rejects_an_unknown_resolution(scene: Scene):
 
     assert scene.db.get_conflict(cid)["status"] == "open"
     assert scene.counts(2, PSU) == frozen_counts
+
+
+# --------------------------------------------------------------------------- #
+# what a superseding message may claim
+# --------------------------------------------------------------------------- #
+def test_a_superseded_conflict_says_the_disagreement_was_queued_again(scene: Scene):
+    cid = _conflicting_scene(scene)
+    replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 26)))])
+    with pytest.raises(StaleConflictError) as err:
+        scene.svc.resolve_conflict(cid, "accept_new", "lin")
+    assert "was queued again" in str(err.value)
+    assert len(scene.db.conflicts(DESKTOP)) == 1
+
+
+def test_a_disagreement_the_dedup_suppressed_says_it_is_already_queued(scene: Scene):
+    """The same disagreement is open twice over: nothing new was written."""
+    cid = _conflicting_scene(scene)
+    replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 26)))])
+    scene.svc.refresh(scene.key(2))  # queues the new disagreement by itself
+    open_before = len(scene.db.conflicts(DESKTOP, open_only=True))
+
+    with pytest.raises(StaleConflictError) as err:
+        scene.svc.resolve_conflict(cid, "accept_new", "lin")
+    assert "is already queued" in str(err.value)
+    assert "was queued again" not in str(err.value)
+    # ... and the message is true: no second copy was inserted
+    assert len(scene.db.conflicts(DESKTOP, open_only=True)) == open_before - 1

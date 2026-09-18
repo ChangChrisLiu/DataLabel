@@ -284,7 +284,7 @@ def test_vlm_writes_at_least_one_record_per_task(db, tax, tmp_path: Path):
         assert set(rec) >= {"id", "task", "desktop", "step", "view", "images",
                             "question", "answer", "evidence", "rationale", "quality",
                             "graph_version"}
-        assert rec["quality"] in ("gold", "auto")
+        assert rec["quality"] in ("gold", "silver")
         assert rec["desktop"] == DESKTOP and rec["view"] == VIEW
         assert rec["graph_version"] is None
         assert rec["question"] and isinstance(rec["question"], str)
@@ -321,7 +321,7 @@ def test_vlm_v2_asks_states_and_counts(db, tax, tmp_path: Path):
     screw = next(r for r in states if r["evidence"]["instances"] == [SCREW])
     assert screw["step"] == 1
     assert screw["answer"] == {"state": "fastened"}
-    assert "motherboard screw 3" in screw["question"]
+    assert "Motherboard screw 3" in screw["question"]
     assert len(counts) == 1 and counts[0]["step"] == 1
     assert counts[0]["answer"] == {"count": 1}
     assert counts[0]["question"] == "How many motherboard screws are still fastened?"

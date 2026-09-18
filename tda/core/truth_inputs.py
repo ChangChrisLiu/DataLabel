@@ -33,12 +33,12 @@ from tda.core.model import (
     InstanceRec,
     OccluderMask,
     PairOverride,
+    Placement,
     ShapeKeyframe,
     Similarity,
     StateEvent,
     ZOrderRec,
 )
-from tda.core.model import Placement
 from tda.core.states import (
     FrameState,
     events_from_actions,
@@ -321,7 +321,7 @@ def pose_segment_of(db: Db, key: FrameKey, cache: Optional[InputCache] = None) -
 # the whole bundle
 # --------------------------------------------------------------------------- #
 def _seen_here(needs: dict[str, str], state: FrameState,
-               bench_roi) -> dict[str, str]:
+               bench_roi: Optional[list]) -> dict[str, str]:
     """Drop what this view cannot see: the staging area, when it has none.
 
     A part lying on the bench is not annotated on a view without a bench ROI, so

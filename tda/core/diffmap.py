@@ -45,12 +45,18 @@ smallest thing that matters is a screw of ~15 px, so 1 px is free.
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
 import cv2
 import numpy as np
+
+#: Both guards below silently change what the caller gets back, so both say so.
+#: A run that keeps hitting them is a registration problem, not a diff problem,
+#: and without a line in the log there is nothing to notice it by.
+log = logging.getLogger(__name__)
 
 __all__ = [
     "DiffBlob",
@@ -398,6 +404,12 @@ def diff_blobs(
             keep, key=lambda i: (-int(stats[i, cv2.CC_STAT_AREA]), i)
         )[: int(max_components)]
         keep = sorted(largest)  # type: ignore[assignment]
+        log.warning(
+            "diff_blobs: %d components thresholded, max_components=%d - the %d "
+            "smallest were discarded before merging. A pair that does this is "
+            "usually badly registered rather than genuinely busy.",
+            count - 1, int(max_components), count - 1 - int(max_components),
+        )
     parts: list[tuple[Box, np.ndarray]] = []
     for i in keep:
         x = int(stats[i, cv2.CC_STAT_LEFT])
@@ -477,6 +489,15 @@ def _merge_parts(
                 fused_any = True
         if not fused_any:
             break
+    else:
+        # The loop ran out of rounds instead of settling, so the groups below
+        # are one iteration short of the fixed point: a part may still come out
+        # fragmented. Convergence normally takes a handful of rounds.
+        log.warning(
+            "_merge_parts: hit MAX_MERGE_ROUNDS=%d on %d components with gap=%d; "
+            "the merge did not converge and a part may stay fragmented.",
+            MAX_MERGE_ROUNDS, count, int(gap),
+        )
 
     groups: dict[int, list[int]] = {}
     for index in range(count):
