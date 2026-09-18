@@ -57,7 +57,6 @@ class TaskCardPanel(QWidget):
         super().__init__(parent)
         self._session: Optional[api.SessionLike] = None
         self._problems: list[str] = []
-        self._last_problems: list[str] = []
 
         self._list = QListWidget()
         self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
@@ -163,7 +162,13 @@ class TaskCardPanel(QWidget):
             self._session.commit_edit(scope)
 
     def confirm(self) -> bool:
-        """Confirm the frame; on refusal show the problems the session sent."""
+        """Confirm the frame; on refusal show the problems the session sent.
+
+        Only the problems that arrived during *this* call are shown: a refusal
+        always comes with a fresh ``sigProblems`` (see :class:`api.SessionLike`),
+        and showing an older list would attribute another frame's problems to
+        this one.
+        """
         if self._session is None:
             return False
         self._problems = []
@@ -171,7 +176,7 @@ class TaskCardPanel(QWidget):
         if ok:
             self._hide_problems()
         else:
-            self._show_problems(self._problems or self._last_problems)
+            self._show_problems(self._problems)
         return ok
 
     def problems(self) -> list[str]:
@@ -229,12 +234,12 @@ class TaskCardPanel(QWidget):
             self.sigRequestEdit.emit(instance)
 
     def _on_frame_changed(self, _key: object) -> None:
+        self._problems = []
         self._hide_problems()
         self.refresh()
 
     def _on_problems(self, problems: list) -> None:
         self._problems = [str(p) for p in problems]
-        self._last_problems = list(self._problems)
 
     def _show_problems(self, problems: list[str]) -> None:
         self._problems_list.clear()

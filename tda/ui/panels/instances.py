@@ -11,8 +11,13 @@ never holds an order of its own.  Buttons rather than drag-and-drop on purpose:
 a keyboard-reachable, single-call gesture is easier to undo and to test, and
 the pairwise constraint the session stores (spec 3.3) is exactly "A above B".
 
-Keys, on the table or on the panel: ``H`` toggles hidden, ``V`` cycles the
-visibility values and ``1``-``7`` set one of them directly.
+Keys, on the table or on the panel: ``Ctrl+Up``/``Ctrl+Down`` reorder (the bare
+arrows stay with the table's row navigation), ``H`` toggles hidden, ``V``
+cycles the visibility values and ``1``-``7`` set one of them directly.
+
+Every mutating gesture is followed by a re-read of ``instance_rows()``, so the
+table can never drift from the session's state -- hitting ``H`` after clicking
+the checkbox sends the value the session actually holds.
 """
 from __future__ import annotations
 
@@ -90,8 +95,8 @@ class InstanceListPanel(QWidget):
         self._table.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._table.installEventFilter(self)
 
-        self.up_button = QPushButton("Move up")
-        self.down_button = QPushButton("Move down")
+        self.up_button = QPushButton("Move up (Ctrl+Up)")
+        self.down_button = QPushButton("Move down (Ctrl+Down)")
         self.up_button.setToolTip("Put the selected instance above the one over it")
         self.down_button.setToolTip("Put the selected instance below the one under it")
         self.up_button.clicked.connect(self.move_up)
@@ -247,13 +252,23 @@ class InstanceListPanel(QWidget):
 
     # -- keys ---------------------------------------------------------------
     def handle_key(self, event: QKeyEvent) -> bool:
-        """``H`` / ``V`` / ``1``-``7``; ``True`` when the event was consumed."""
-        if event.modifiers() not in (
+        """``Ctrl+Up``/``Ctrl+Down``, ``H``, ``V``, ``1``-``7``; ``True`` when consumed."""
+        key = event.key()
+        mods = event.modifiers()
+        # Ctrl+arrows reorder; the bare arrows stay with the table's navigation.
+        if mods == Qt.KeyboardModifier.ControlModifier:
+            if key == Qt.Key.Key_Up:
+                self.move_up()
+                return True
+            if key == Qt.Key.Key_Down:
+                self.move_down()
+                return True
+            return False
+        if mods not in (
             Qt.KeyboardModifier.NoModifier,
             Qt.KeyboardModifier.KeypadModifier,
         ):
             return False
-        key = event.key()
         if key == Qt.Key.Key_H:
             self.toggle_hidden()
             return True
@@ -284,9 +299,11 @@ class InstanceListPanel(QWidget):
             return
         if item.column() != self.COLUMNS.index("Hidden"):
             return
-        self._session.set_hidden(
-            str(item.data(KEY_ROLE)), item.checkState() == Qt.CheckState.Checked
-        )
+        # Read the item *before* refreshing: the rebuild below deletes it.
+        key = str(item.data(KEY_ROLE))
+        hidden = item.checkState() == Qt.CheckState.Checked
+        self._session.set_hidden(key, hidden)
+        self.refresh()
 
     def _on_item_double_clicked(self, item: QTableWidgetItem) -> None:
         instance = str(item.data(KEY_ROLE))

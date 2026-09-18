@@ -22,6 +22,7 @@ from typing import Optional
 import pytest
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QColor, QKeyEvent, QPixmap
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from tda.core.compiler import CompiledFrame
@@ -60,14 +61,17 @@ class StubSession(QObject):
         self.thumb_calls: list[int] = []
         self.confirm_result = True
         self.problems = ["missing_shape:screw.cpu_cooler.03"]
-        self._thumbs: dict[int, Optional[str]] = {s: None for s in self._steps}
+        # Keyed like the panel's cache: the same step number is a different
+        # image in another view.  Step 11 deliberately has none.
+        self._thumbs: dict[tuple[str, int], str] = {}
         if thumb_dir is not None:
-            for step in (10, 12, 13):
-                path = thumb_dir / f"thumb_{step}.png"
-                pm = QPixmap(8, 8)
-                pm.fill(QColor(step, 40, 40))
-                pm.save(str(path), "PNG")
-                self._thumbs[step] = str(path)
+            for view_index, view in enumerate(("scan", "oak1")):
+                for step in (10, 12, 13):
+                    path = thumb_dir / f"thumb_{view}_{step}.png"
+                    pm = QPixmap(8, 8)
+                    pm.fill(QColor(step, 40 + 60 * view_index, 40))
+                    pm.save(str(path), "PNG")
+                    self._thumbs[(view, step)] = str(path)
         self._rows = [
             {
                 "key": "cpu_cooler.01",
@@ -136,7 +140,16 @@ class StubSession(QObject):
 
     def thumb_path(self, step: int) -> Optional[str]:
         self.thumb_calls.append(step)
-        return self._thumbs.get(step)
+        return self._thumbs.get((self.view, step))
+
+    def switch_view(self, view: str, steps: Optional[list[int]] = None) -> None:
+        """Open another view of the same machine, as the main window would."""
+        self.view = view
+        if steps is not None:
+            self._steps = list(steps)
+            self._status = {s: api.STATUS_AUTO for s in self._steps}
+        self._step = self._steps[-1]
+        self.sigFrameChanged.emit(self.current())
 
     def current(self) -> FrameKey:
         return FrameKey(self.desktop, self._step, self.view)
@@ -171,9 +184,17 @@ class StubSession(QObject):
 
     def set_visibility(self, instance: str, vis: str) -> None:
         self.calls.append(("set_visibility", instance, vis))
+        self._write(instance, "visibility", vis)
 
     def set_hidden(self, instance: str, hidden: bool) -> None:
         self.calls.append(("set_hidden", instance, hidden))
+        self._write(instance, "hidden", hidden)
+
+    def _write(self, instance: str, field: str, value) -> None:
+        """A real session persists these, so the stub must too."""
+        for row in self._rows:
+            if row["key"] == instance:
+                row[field] = value
 
     def set_zorder_move(self, instance: str, above_of: str) -> None:
         self.calls.append(("set_zorder_move", instance, above_of))
@@ -217,6 +238,38 @@ def send_key(widget, key, modifiers=Qt.KeyboardModifier.NoModifier, text: str = 
 
 def texts(list_widget) -> list[str]:
     return [list_widget.item(i).text() for i in range(list_widget.count())]
+
+
+def show(panel, width: int = 260, height: int = 520):
+    """Show a panel offscreen so that item rectangles are laid out."""
+    panel.resize(width, height)
+    panel.show()
+    QApplication.processEvents()
+    return panel
+
+
+def click_item(view, item, double: bool = False) -> None:
+    """Click an item through the real event path, at its centre in the viewport.
+
+    A double click is sent as a click followed by the double-click sequence,
+    which is both what Qt sees from a real mouse and what makes it reliable
+    here: the very first synthetic press on a freshly shown window is
+    swallowed, and ``mouseDClick`` needs a non-default delay or its two
+    presses share a timestamp and stop being a double click.
+    """
+    view.scrollToItem(item)
+    QApplication.processEvents()
+    center = view.visualItemRect(item).center()
+    target = view.viewport()
+    QTest.mouseClick(
+        target, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, center, 10
+    )
+    if double:
+        QTest.mouseDClick(
+            target, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+            center, 10,
+        )
+    QApplication.processEvents()
 
 
 # --------------------------------------------------------------------------- #
@@ -293,10 +346,11 @@ def test_timeline_colours_follow_the_status(session: StubSession) -> None:
 
 
 def test_timeline_click_goes_to_that_step(session: StubSession) -> None:
-    panel = TimelinePanel(session)
+    panel = show(TimelinePanel(session))
     lw = panel.list_widget()
-    lw.itemClicked.emit(lw.item(panel.item_steps().index(11)))
+    click_item(lw, lw.item(panel.item_steps().index(11)))
     assert ("goto", 11) in session.calls
+    assert panel.current_step() == 11
 
 
 def test_timeline_follows_frame_changes(session: StubSession) -> None:
@@ -325,11 +379,25 @@ def test_timeline_loads_thumbnails_lazily_and_caches_them(session: StubSession) 
 
 
 def test_timeline_loads_visible_thumbnails_when_shown(session: StubSession) -> None:
-    panel = TimelinePanel(session)
-    panel.resize(200, 400)
-    panel.show()
-    QApplication.processEvents()
+    panel = show(TimelinePanel(session), 200, 400)
     assert session.thumb_calls  # the visible rows were filled in
+
+
+def test_timeline_thumbnail_cache_is_scoped_to_the_view(session: StubSession) -> None:
+    panel = TimelinePanel(session)
+    scan_12 = panel.thumbnail(12)
+    assert session.thumb_calls == [12]
+
+    session.switch_view("oak1", [11, 12, 13])
+    assert panel.item_steps() == [13, 12, 11]  # the step list was rebuilt
+    oak_12 = panel.thumbnail(12)
+    assert oak_12 is not scan_12  # not the other view's image
+    assert session.thumb_calls == [12, 12]
+
+    session.switch_view("scan", [10, 11, 12, 13])
+    assert panel.item_steps() == [13, 12, 11, 10]
+    assert panel.thumbnail(12) is scan_12  # still cached under its own view
+    assert session.thumb_calls == [12, 12]
 
 
 # --------------------------------------------------------------------------- #
@@ -395,13 +463,29 @@ def test_taskcard_shows_problems_when_confirm_fails(session: StubSession) -> Non
 
 
 def test_taskcard_activation_begins_an_edit_and_emits(session: StubSession) -> None:
-    panel = TaskCardPanel(session)
+    panel = show(TaskCardPanel(session), 320, 320)
     seen: list[str] = []
     panel.sigRequestEdit.connect(seen.append)
     lw = panel.list_widget()
-    lw.itemActivated.emit(lw.item(1))
+    click_item(lw, lw.item(1), double=True)
     assert session.calls == [("begin_edit", "screw.cpu_cooler.03")]
     assert seen == ["screw.cpu_cooler.03"]
+
+
+def test_taskcard_problems_do_not_survive_a_frame_change(session: StubSession) -> None:
+    panel = TaskCardPanel(session)
+    session.confirm_result = False
+    panel.confirm_button.click()
+    assert panel.problems_visible() is True
+
+    session.sigFrameChanged.emit(session.current())  # next frame
+    assert panel.problems_visible() is False
+    assert panel.problems() == []
+
+    # a refusal that sends no problems must not resurrect the old list
+    session.problems = []
+    panel.confirm_button.click()
+    assert panel.problems() == []
 
 
 def test_taskcard_refreshes_on_frame_change(session: StubSession) -> None:
@@ -443,6 +527,21 @@ def test_instances_checkbox_writes_hidden(session: StubSession) -> None:
     assert session.calls == [("set_hidden", "cpu_cooler.01", True)]
 
 
+def test_instances_h_after_a_checkbox_click_sends_the_opposite_value(
+    session: StubSession,
+) -> None:
+    panel = InstanceListPanel(session)
+    panel.select_instance("cpu_cooler.01")
+    hidden_col = InstanceListPanel.COLUMNS.index("Hidden")
+    panel.table().item(0, hidden_col).setCheckState(Qt.CheckState.Checked)
+    send_key(panel.table(), Qt.Key.Key_H, text="h")
+    assert session.calls == [
+        ("set_hidden", "cpu_cooler.01", True),
+        ("set_hidden", "cpu_cooler.01", False),
+    ]
+    assert panel.table().item(0, hidden_col).checkState() == Qt.CheckState.Unchecked
+
+
 def test_instances_h_toggles_hidden_on_the_selected_row(session: StubSession) -> None:
     panel = InstanceListPanel(session)
     panel.select_instance("screw.cpu_cooler.03")
@@ -456,6 +555,11 @@ def test_instances_v_cycles_visibility(session: StubSession) -> None:
     send_key(panel.table(), Qt.Key.Key_V, text="v")
     assert session.calls == [
         ("set_visibility", "cpu_cooler.01", Visibility.OCCLUDED_PARTIAL.value)
+    ]
+    send_key(panel.table(), Qt.Key.Key_V, text="v")  # again: it must advance
+    assert session.calls == [
+        ("set_visibility", "cpu_cooler.01", Visibility.OCCLUDED_PARTIAL.value),
+        ("set_visibility", "cpu_cooler.01", Visibility.OCCLUDED_FULL.value),
     ]
     session.calls.clear()
     panel.select_instance("screw.cpu_cooler.03")  # "occluded_partial"
@@ -501,11 +605,26 @@ def test_instances_up_and_down_move_the_z_order(session: StubSession) -> None:
     assert session.calls == []
 
 
-def test_instances_double_click_begins_an_edit(session: StubSession) -> None:
+def test_instances_ctrl_arrows_reorder(session: StubSession) -> None:
     panel = InstanceListPanel(session)
+    panel.select_instance("screw.cpu_cooler.03")  # middle row
+    send_key(panel.table(), Qt.Key.Key_Up, Qt.KeyboardModifier.ControlModifier)
+    assert session.calls == [("set_zorder_move", "screw.cpu_cooler.03", "cpu_cooler.01")]
+    session.calls.clear()
+    send_key(panel.table(), Qt.Key.Key_Down, Qt.KeyboardModifier.ControlModifier)
+    assert session.calls == [("set_zorder_move", "chassis.01", "screw.cpu_cooler.03")]
+    session.calls.clear()
+    # the bare arrows stay with the table's own row navigation
+    send_key(panel.table(), Qt.Key.Key_Up)
+    assert session.calls == []
+
+
+def test_instances_double_click_begins_an_edit(session: StubSession) -> None:
+    panel = show(InstanceListPanel(session), 520, 320)
     seen: list[str] = []
     panel.sigRequestEdit.connect(seen.append)
-    panel.table().itemDoubleClicked.emit(panel.table().item(2, 1))
+    table = panel.table()
+    click_item(table, table.item(2, 1), double=True)
     assert session.calls == [("begin_edit", "chassis.01")]
     assert seen == ["chassis.01"]
 

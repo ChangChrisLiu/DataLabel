@@ -94,7 +94,10 @@ class TimelinePanel(QWidget):
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._session: Optional[api.SessionLike] = None
-        self._thumbs: dict[int, QPixmap] = {}
+        # Keyed by (desktop, view, step): step numbers repeat across machines
+        # and the four views show different images of the same step.
+        self._thumbs: dict[tuple[int, str, int], QPixmap] = {}
+        self._context: Optional[tuple[int, str]] = None
         self._placeholder_pm: Optional[QPixmap] = None
         self._descending = True
         self._syncing = False
@@ -136,6 +139,7 @@ class TimelinePanel(QWidget):
             self._session.sigFrameChanged.disconnect(self._on_frame_changed)
         self._session = session
         self._thumbs.clear()
+        self._context = None
         if session is not None:
             session.sigFrameChanged.connect(self._on_frame_changed)
         self.refresh()
@@ -147,6 +151,7 @@ class TimelinePanel(QWidget):
     # -- content ------------------------------------------------------------
     def refresh(self) -> None:
         """Rebuild every row from ``session.steps()``."""
+        self._context = self._current_context()
         self._syncing = True
         try:
             self._list.clear()
@@ -160,7 +165,7 @@ class TimelinePanel(QWidget):
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
                 )
-                pm = self._thumbs.get(step)
+                pm = self._thumbs.get(self._cache_key(step))
                 if pm is not None:
                     item.setIcon(QIcon(pm))
                 self._list.addItem(item)
@@ -209,10 +214,13 @@ class TimelinePanel(QWidget):
 
         A step with no cached image (or an unreadable one) gets the shared
         placeholder pixmap, which is stored under the step as well so the path
-        is never looked up twice.
+        is never looked up twice.  The cache is keyed by desktop and view, so
+        switching either one shows that view's images rather than the ones the
+        previous view had under the same step numbers.
         """
-        if step in self._thumbs:
-            return self._thumbs[step]
+        cache_key = self._cache_key(step)
+        if cache_key in self._thumbs:
+            return self._thumbs[cache_key]
         if self._session is None:
             return None
         path = self._session.thumb_path(step)
@@ -228,7 +236,7 @@ class TimelinePanel(QWidget):
                 )
         if pm is None:
             pm = self._placeholder()
-        self._thumbs[step] = pm
+        self._thumbs[cache_key] = pm
         item = self._item_for(step)
         if item is not None:
             item.setIcon(QIcon(pm))
@@ -262,6 +270,17 @@ class TimelinePanel(QWidget):
             return []
         steps = sorted(self._session.steps())
         return list(reversed(steps)) if self._descending else steps
+
+    def _current_context(self) -> Optional[tuple[int, str]]:
+        """``(desktop, view)`` of the open frame, which the cache is keyed by."""
+        if self._session is None:
+            return None
+        key = self._session.current()
+        return (key.desktop, key.view)
+
+    def _cache_key(self, step: int) -> tuple[int, str, int]:
+        desktop, view = self._context or (-1, "")
+        return (desktop, view, step)
 
     def _status(self, step: int) -> str:
         if self._session is None:
@@ -317,6 +336,11 @@ class TimelinePanel(QWidget):
         self._session.goto(int(item.data(STEP_ROLE)))
 
     def _on_frame_changed(self, _key: object) -> None:
+        if self._current_context() != self._context:
+            # Another machine or another view: the steps, their statuses and
+            # their thumbnails all belong to a different list.
+            self.refresh()
+            return
         self._syncing = True
         try:
             self._refresh_statuses()

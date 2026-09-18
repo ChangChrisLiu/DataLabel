@@ -42,7 +42,8 @@ STATUS_VERIFIED = "verified"
 STATUS_NEEDS_REVIEW = "needs_review"
 #: An edit contradicts an already frozen frame.
 STATUS_CONFLICT = "conflict"
-#: The view has no image for this logical step (spec 4.2, "缺帧处理").
+#: The view has no image for this logical step; the state and the shape anchor
+#: still exist, the frame simply has nothing to draw on (spec 4.2, missing frames).
 STATUS_MISSING = "missing"
 
 FRAME_STATUSES: tuple[str, ...] = (
