@@ -29,6 +29,33 @@ def _desktop_list(spec: str | None) -> list[int]:
     return sorted(wanted) if wanted else []
 
 
+def _count(stats: dict, key: str) -> int:
+    """How many of something an exporter reported, whether it gave a list or a number."""
+    value = stats.get(key, 0)
+    if isinstance(value, int):
+        return value
+    try:
+        return len(value)
+    except TypeError:
+        return 0
+
+
+def _runs(desktops: Sequence[int]) -> list[tuple[int, int]]:
+    """Contiguous ``(first, last)`` runs of a desktop list.
+
+    ``tda.core.cache.main`` only speaks first/last, so ``--desktops 1-3,13``
+    used to collapse into ``--first 1 --last 13`` and cache ten machines nobody
+    asked for -- hours of copying from ``F:``.  One call per run instead.
+    """
+    runs: list[tuple[int, int]] = []
+    for desktop in sorted(set(int(d) for d in desktops)):
+        if runs and desktop == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], desktop)
+        else:
+            runs.append((desktop, desktop))
+    return runs
+
+
 def _pending_rechecks(truth, desktop: int, view: str) -> list[int]:
     """Steps the truth service still owes a re-check, when it tracks them."""
     found = getattr(truth, "pending_rechecks", None)
@@ -41,7 +68,7 @@ def _pending_rechecks(truth, desktop: int, view: str) -> list[int]:
 
 
 def _prepare_truth(db, tax, desktops: Sequence[int], view: str,
-                   only_verified: bool) -> dict:
+                   refresh: bool = True) -> dict:
     """Bring the compiled truth of ``desktops`` up to date before it is read.
 
     Three commands read the truth table and all three were reading it raw:
@@ -52,8 +79,11 @@ def _prepare_truth(db, tax, desktops: Sequence[int], view: str,
 
     * the pending re-checks are drained first (a frozen frame the session
       queued but never got to);
-    * unless ``only_verified``, every step of the view is refreshed, so the
-      automatic rows are current too.
+    * unless ``refresh`` is off, every step of the view is recompiled, so the
+      automatic rows are current too.  ``refresh`` is **not**
+      ``only_verified``: that one is the exporter's filter over what to write,
+      and reading them as the same flag made ``--only-verified`` silently skip
+      the recompile.
 
     One :class:`~tda.core.truth.TruthService` is built and returned in
     ``truth``: the exports take it as a keyword argument and refresh lazily
@@ -72,7 +102,7 @@ def _prepare_truth(db, tax, desktops: Sequence[int], view: str,
         runner = getattr(truth, "run_pending_rechecks", None)
         if callable(runner):
             runner(int(desktop), str(view))
-        if not only_verified:
+        if refresh:
             steps = [int(row["step"]) for row in db.frames_for(int(desktop), str(view))
                      if not row.get("missing")]
             stats = truth.refresh_range(int(desktop), str(view), steps)
@@ -130,7 +160,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     with _session(args, lock=True) as (_paths, db):
         stats = _prepare_truth(db, load_taxonomy(), [int(args.desktop)],
-                               str(args.view), only_verified=False)
+                               str(args.view), refresh=True)
         problems = list(stats["problems"])
         print(f"[check] D{args.desktop:02d} {args.view}: {stats['steps']} steps, "
               f"{stats['updated']} rows written, {stats['conflicts']} conflicts")
@@ -167,20 +197,23 @@ def cmd_build_cache(args: argparse.Namespace) -> int:
 
     paths = P.load_paths(args.paths)
     wanted = _desktop_list(args.desktops)
-    first = min(wanted) if wanted else int(args.first)
-    last = max(wanted) if wanted else int(args.last)
-    argv = ["--cache", P.require(paths, "cache_dir"),
-            "--views", str(args.views),
-            "--first", str(first), "--last", str(last)]
+    runs = _runs(wanted) if wanted else [(int(args.first), int(args.last))]
+    extra: list[str] = []
     if args.index:
-        argv += ["--index", str(args.index)]
+        extra += ["--index", str(args.index)]
     if args.log:
-        argv += ["--log", str(args.log)]
+        extra += ["--log", str(args.log)]
     if args.recompute:
-        argv.append("--recompute")
+        extra.append("--recompute")
     if args.force:
-        argv.append("--force")
-    return int(cache.main(argv))
+        extra.append("--force")
+
+    worst = 0
+    for first, last in runs:
+        argv = ["--cache", P.require(paths, "cache_dir"), "--views", str(args.views),
+                "--first", str(first), "--last", str(last), *extra]
+        worst = max(worst, int(cache.main(argv)))
+    return worst
 
 
 def _add_build_cache(sub) -> None:
@@ -212,7 +245,7 @@ def _export_prologue(args, db, desktops: Sequence[int], command: str):
     from tda.cli import EXIT_ERROR
 
     stats = _prepare_truth(db, load_taxonomy(), desktops, str(args.view),
-                           only_verified=not getattr(args, "refresh", True))
+                           refresh=bool(getattr(args, "refresh", True)))
     if stats["pending"]:
         print(f"[{command}] refused: {len(stats['pending'])} frames are still "
               f"pending a re-check ({sorted(stats['pending'])[:10]}). Run "
@@ -238,8 +271,10 @@ def cmd_export_coco(args: argparse.Namespace) -> int:
         stats = export_coco(db, load_taxonomy(), desktops, str(args.view), str(out),
                             only_verified=bool(args.only_verified),
                             roi_crop=bool(args.roi_crop), truth=truth)
-        print(f"[export-coco] {stats.get('images', 0)} images, "
-              f"{stats.get('annotations', 0)} annotations -> {out}")
+        # ``images``/``annotations`` are the *lists*: printing them put the
+        # whole COCO document on the terminal.
+        print(f"[export-coco] {_count(stats, 'images')} images, "
+              f"{_count(stats, 'annotations')} annotations -> {out}")
         return EXIT_OK
 
 

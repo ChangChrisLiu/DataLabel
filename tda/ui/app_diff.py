@@ -57,7 +57,10 @@ def expected_payload(masks: dict, boxes: Sequence[Box] = ()) -> dict:
     thread keeps editing them) and turned into boxes on the worker.
     """
     return {
-        "masks": {str(k): np.asarray(v, dtype=bool) for k, v in dict(masks).items()},
+        # A real copy, not a view: these are the session's arrays and the GUI
+        # thread keeps editing them while the worker is measuring them.
+        "masks": {str(k): np.array(v, dtype=bool, copy=True)
+                  for k, v in dict(masks).items()},
         "boxes": [tuple(int(round(float(v))) for v in box) for box in boxes],
     }
 

@@ -25,14 +25,14 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import numpy as np
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
+from PySide6.QtCore import QTimer, Qt
 
 from tda.core import masks as _masks
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 from tda.ui import session_api as api
-from tda.ui.canvas.tools import BrushTool, EraserTool, OccluderTool, Tool
+from tda.ui.app_widgets import MIN_BOX_PX, Bar, BoxDragTool
+from tda.ui.canvas.tools import BrushTool, EraserTool, OccluderTool
 
 #: Where the timeline and the review panel keep a row's step number.
 _STEP_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -42,8 +42,6 @@ __all__ = ["BLOCK_HINT", "BoxDragTool", "EditMixin", "DESPECKLE_MIN_PX",
 
 #: Components smaller than this are specks (``Shift+D``); spec 9.1's floor.
 DESPECKLE_MIN_PX = 16
-#: A drag shorter than this on either side is a click, not a box.
-MIN_BOX_PX = 2.0
 #: How long the editing layer may sit unsaved before it reaches the sidecar.
 SIDECAR_DEBOUNCE_MS = 300
 #: Shown instead of losing an uncommitted edit.  Not a dialog: at six hours a
@@ -69,71 +67,6 @@ def _is_right(ev: Any) -> bool:
         return button is not None and button() == Qt.MouseButton.RightButton
     except TypeError:  # pragma: no cover - a stub without a callable button
         return False
-
-
-class BoxDragTool(Tool):
-    """Drag a rectangle on the canvas; used for the ROI and for bench boxes.
-
-    It writes nothing: the box is reported and whoever armed the tool decides
-    what it means -- the pose segment's ROI, or the staging-area box of a part
-    that is now on the bench (spec 4.2 S4).
-    """
-
-    sigBox = Signal(object)
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.box: Optional[tuple[float, float, float, float]] = None
-        self._start: Optional[tuple[float, float]] = None
-
-    def on_press(self, x: float, y: float, ev: Any) -> None:
-        self._start = (float(x), float(y))
-
-    def on_move(self, x: float, y: float, ev: Any) -> None:
-        if self._start is None:
-            return
-        self.box = self._norm(x, y)
-        if self.canvas is not None:
-            self.canvas.set_rubber_band(self.box)
-
-    def on_release(self, x: float, y: float, ev: Any) -> None:
-        if self._start is None:
-            return
-        box = self._norm(x, y)
-        self._start = None
-        if box[2] - box[0] < MIN_BOX_PX or box[3] - box[1] < MIN_BOX_PX:
-            return
-        self.box = box
-        self.sigBox.emit(box)
-
-    def _norm(self, x: float, y: float) -> tuple[float, float, float, float]:
-        sx, sy = self._start or (x, y)
-        return (min(sx, x), min(sy, y), max(sx, x), max(sy, y))
-
-
-class _Bar(QWidget):
-    """A one-line non-modal bar under the canvas (scope suggestion, restore offer)."""
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.label = QLabel("")
-        self.label.setWordWrap(True)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 2, 6, 2)
-        layout.addWidget(self.label, 1)
-        self.buttons = layout
-        self.hide()
-
-    def add_button(self, text: str, slot) -> QPushButton:
-        """A button whose ``clicked(bool)`` never reaches a no-argument slot."""
-        button = QPushButton(text, self)
-        button.clicked.connect(lambda _checked=False: slot())
-        self.buttons.addWidget(button)
-        return button
-
-    def show_text(self, text: str) -> None:
-        self.label.setText(text)
-        self.show()
 
 
 class EditMixin:
@@ -173,11 +106,11 @@ class EditMixin:
         self._pending_scope: Optional[str] = None
         self._restore_offer: Optional[dict] = None
 
-        self.scope_bar = _Bar(self)
+        self.scope_bar = Bar(self)
         self.scope_bar.add_button("Enter 接受", self.act_commit)
         self.scope_bar.add_button("Alt+Enter 仅本帧", self.act_commit_override)
         self.scope_bar.add_button("Ctrl+K 从此拆分", self.act_commit_split)
-        self.restore_bar = _Bar(self)
+        self.restore_bar = Bar(self)
         self.restore_bar.add_button("恢复 Restore", self.restore_pending)
         self.restore_bar.add_button("丢弃 Discard", self.discard_pending)
         self._central_layout.addWidget(self.scope_bar)
@@ -488,6 +421,19 @@ class EditMixin:
             self.accept_roi()
 
     @S.guard
+    def commit_with_suggested_scope(self) -> None:
+        """Commit straight away with whatever the session suggests, no bar.
+
+        The close dialog's "Save": there is no non-modal conversation left to
+        have, so a layering or split suggestion is written as suggested rather
+        than parked behind a bar nobody will read.
+        """
+        if getattr(self.session, "editing_instance", None) is None:
+            return
+        self._pending_scope = None
+        self._commit(self.session.suggest_scope())
+
+    @S.guard
     def act_commit_override(self) -> None:
         """``Alt+Enter``: this frame only."""
         self._commit(api.SCOPE_FRAME_OVERRIDE)
@@ -504,10 +450,10 @@ class EditMixin:
     def _offer_scope(self, scope: str) -> None:
         """Show the suggestion and its alternatives without blocking the canvas."""
         self._pending_scope = scope
-        # A zorder statement changes a pairwise constraint, not a run of frames,
-        # and the session cannot say how far it reaches: leave the count out
-        # rather than print a number that means something else.
-        counts = None if scope.startswith("zorder:") else compat.preview(self.session, scope)
+        # A layering statement reaches frames too -- the session answers for a
+        # pair override the same way it answers for pixels -- so the strip says
+        # so for every scope now.
+        counts = compat.preview(self.session, scope)
         detail = ""
         if counts:
             detail = (f"，影响 {len(counts.get('steps', []))} 帧 / 将产生 "
@@ -543,7 +489,9 @@ class EditMixin:
         self.set_sam_instance(None)
         self._sync_editing_layer()
         self.refresh_overlay()
-        self.re_explain()          # the part is drawn now: its blob is explained
+        # No re_explain() here: committing re-renders the frame, which clears
+        # assist_result, so a re-split would run against nothing.  The real one
+        # happens at confirm time, where the answer is actually used.
         self.report(f"committed ({scope}): {result.get('changed', '')}".strip())
 
     @S.guard

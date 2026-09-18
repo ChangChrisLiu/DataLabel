@@ -75,7 +75,15 @@ def _default_cache_dir() -> str:
 
 
 def app_dir(paths: dict) -> Path:
-    """``<cache_dir>/../.cache`` -- the only directory the app writes to."""
+    """``<cache_dir>/../.cache`` -- the only directory the app writes to.
+
+    An explicit ``app_dir`` in ``paths`` overrides it, which is how a tool that
+    drives the window (the smoke run) keeps its INI, log and sidecars out of the
+    annotator's own state instead of moving their last frame.
+    """
+    override = (paths or {}).get("app_dir")
+    if override:
+        return Path(str(override))
     cache = Path(str((paths or {}).get("cache_dir") or _default_cache_dir()))
     return cache.parent / APP_SUBDIR
 

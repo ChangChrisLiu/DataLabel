@@ -272,13 +272,18 @@ class ShellMixin:
         return self.db.count_per_view("verified"), self.db.count_per_view("frames")
 
     def _desktop_text(self, desktop: int, counts: Optional[tuple] = None) -> str:
-        """``D13 Dell Optiplex [12/38]`` -- the done/total counter of this view."""
+        """``D13 Dell OptiPlex 7020 [12/38]`` -- brand, model and this view's count.
+
+        The model matters on a bench with four Dells on it: the brand alone does
+        not tell two machines apart.
+        """
         meta = self.db.get_desktop(desktop) or {}
         verified, frames = counts if counts is not None else self._view_counts()
         done = verified.get((desktop, self.session.view), 0)
         total = frames.get((desktop, self.session.view), 0)
-        brand = str(meta.get("brand") or "")
-        return f"D{desktop} {brand} [{done}/{total}]".replace("  ", " ")
+        name = " ".join(str(meta.get(k) or "").strip()
+                        for k in ("brand", "model_family") if meta.get(k))
+        return " ".join(f"D{desktop} {name} [{done}/{total}]".split())
 
     def status_message(self) -> str:
         """The last transient line shown in the status bar."""
@@ -375,12 +380,22 @@ class ShellMixin:
             QApplication.instance().removeEventFilter(self)
         except RuntimeError:  # pragma: no cover - the app is already gone
             pass
-        for signal, slot in ((self.session.sigFrameChanged, self._on_frame_changed),
-                             (self.session.sigProblems, self._on_problems),
-                             (self.session.sigDirty, self._on_dirty)):
+        # Every signal _connect_session took, including the optional ones: a
+        # sweeper that is still running would otherwise deliver into a window
+        # that has let go of its session.
+        for name, slot in (("sigFrameChanged", self._on_frame_changed),
+                           ("sigProblems", self._on_problems),
+                           ("sigDirty", self._on_dirty),
+                           ("sigEditingChanged", self._on_editing_changed),
+                           ("sigQueuesChanged", self._on_queues_changed),
+                           ("sigSweepProgress", self._on_sweep_progress),
+                           ("sigSweepError", self._on_sweep_error)):
+            signal = getattr(self.session, name, None)
+            if signal is None:
+                continue
             try:
                 signal.disconnect(slot)
-            except (RuntimeError, TypeError):  # pragma: no cover
+            except (RuntimeError, TypeError):  # pragma: no cover - never connected
                 pass
         if self._cheat_sheet is not None:
             self._cheat_sheet.close()
@@ -427,7 +442,11 @@ class ShellMixin:
             self.report("close cancelled: the edit is still open")
             return False
         if answer == QMessageBox.StandardButton.Save:
-            self.act_commit()
+            # Commit with the session's own suggestion directly: the scope bar
+            # is a non-modal conversation and there is nobody left to have it
+            # with, so "Save" must be able to settle a layering or split
+            # suggestion too, not only a plain keyframe.
+            self.commit_with_suggested_scope()
             if self.has_uncommitted_edit():   # the session refused it
                 self.report_error("the edit could not be committed; close cancelled")
                 return False

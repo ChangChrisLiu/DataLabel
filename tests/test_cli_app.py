@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -94,6 +95,42 @@ def test_check_refuses_while_another_annotator_holds_the_lock(env, capsys):
 # --------------------------------------------------------------------------- #
 # exports
 # --------------------------------------------------------------------------- #
+def test_export_coco_prints_a_summary_not_the_document(env, capsys):
+    """``stats['images']`` is the image *list*: printing it dumped the whole COCO."""
+    out = Path(env["tmp"]) / "coco_summary.json"
+    assert run(env, "export-coco", "--desktops", str(DESKTOP), "--view", VIEW,
+               "--out", str(out)) == EXIT_OK
+    line = [l for l in capsys.readouterr().out.splitlines()
+            if l.startswith("[export-coco]")][-1]
+    assert len(line) < 200
+    assert re.fullmatch(r"\[export-coco\] \d+ images, \d+ annotations -> .+", line), line
+
+
+def test_export_vlm_prints_a_summary_not_the_records(env, capsys):
+    out = Path(env["tmp"]) / "vlm_summary.jsonl"
+    assert run(env, "export-vlm", "--desktops", str(DESKTOP), "--view", VIEW,
+               "--out", str(out)) == EXIT_OK
+    line = [l for l in capsys.readouterr().out.splitlines()
+            if l.startswith("[export-vlm]")][-1]
+    assert len(line) < 200 and "records" in line
+
+
+def test_build_cache_caches_exactly_the_desktops_asked_for(env, monkeypatch):
+    """``1-3,13`` used to collapse into ``--first 1 --last 13``: 13 machines."""
+    runs: list[tuple[int, int]] = []
+
+    def fake_main(argv):
+        argv = list(argv)
+        runs.append((int(argv[argv.index("--first") + 1]),
+                     int(argv[argv.index("--last") + 1])))
+        return 0
+
+    monkeypatch.setattr("tda.core.cache.main", fake_main)
+    assert run(env, "build-cache", "--desktops", "1-3,13") == EXIT_OK
+    covered = {d for first, last in runs for d in range(first, last + 1)}
+    assert covered == {1, 2, 3, 13}
+
+
 def test_export_coco_writes_a_file(env, capsys):
     out = Path(env["tmp"]) / "coco.json"
     code = run(env, "export-coco", "--desktops", str(DESKTOP), "--view", VIEW,
@@ -152,9 +189,9 @@ def test_check_export_and_vlm_all_drain_the_pending_rechecks(env, monkeypatch):
     calls: list[tuple] = []
     real = cli_app._prepare_truth
 
-    def spy(db, tax, desktops, view, only_verified):
-        calls.append((tuple(desktops), view, only_verified))
-        return real(db, tax, desktops, view, only_verified)
+    def spy(db, tax, desktops, view, refresh=True):
+        calls.append((tuple(desktops), view, refresh))
+        return real(db, tax, desktops, view, refresh)
 
     monkeypatch.setattr(cli_app, "_prepare_truth", spy)
     out = Path(env["tmp"]) / "coco_prep.json"

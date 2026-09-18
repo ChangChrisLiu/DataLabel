@@ -12,6 +12,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -217,6 +218,39 @@ def test_a_result_for_the_previous_frame_is_dropped(window):
     QApplication.processEvents()
     assert np.array_equal(window.overlay.editing, untouched)
     assert "dropped" in window.last_error_message().lower()
+
+
+def test_a_failed_inference_reaches_the_status_bar(qapp, tmp_path):
+    """The queue's on_error hook existed but nobody passed it."""
+    from tda.models.sam_service import SamQueue
+
+    class _Boom:
+        def predict(self, req):
+            raise RuntimeError("CUDA out of memory")
+
+    session = make_session(tmp_path)
+    queue = SamQueue(_Boom())
+    win = MainWindow(session, make_paths(tmp_path), "tester", sam_queue=queue)
+    try:
+        win.resize(900, 700)
+        win.show()
+        QApplication.processEvents()
+        win.set_mode(A.MODE_ANNOTATE)
+        if win.roi_editing:
+            win.act_commit()
+        start_edit(win)
+        win.act_tool("sam_point")
+        win.sam_point.on_press(32.0, 32.0, None)
+        deadline = time.perf_counter() + 10.0
+        while time.perf_counter() < deadline:
+            QApplication.processEvents()
+            if "out of memory" in win.last_error_message():
+                break
+            time.sleep(0.005)
+        assert "out of memory" in win.last_error_message()
+    finally:
+        queue.stop()
+        close_window(win)
 
 
 def test_sam_hints_and_errors_reach_the_status_bar(window):

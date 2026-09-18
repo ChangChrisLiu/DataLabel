@@ -522,13 +522,17 @@ def test_sequence_c_the_scope_bar_is_read_then_accepted(window, monkeypatch):
     start_edit(window)
     paint(window)
     monkeypatch.setattr(session, "suggest_scope", lambda *a, **k: "zorder:above:other")
+    monkeypatch.setattr(session, "preview",
+                        lambda scope, *a, **k: {"steps": [11, 12, 13],
+                                                "verified_steps": [12]})
     committed: list[str] = []
     monkeypatch.setattr(session, "commit_edit",
                         lambda scope, *a, **k: committed.append(scope) or {})
     window.act_commit()
     text = window.scope_bar_text()
     assert "zorder:above:other" in text
-    assert "影响" not in text          # a layering statement has no frame reach
+    # a layering statement reaches frames too, and the strip says how many
+    assert "影响 3 帧" in text and "1 个冲突" in text
     window.act_commit()
     assert committed == ["zorder:above:other"]
 

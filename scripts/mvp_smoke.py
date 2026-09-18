@@ -37,6 +37,9 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 DEFAULTS = {"desktop": 13, "view": "scan", "frames": 3, "leak_steps": 40}
+#: The part that proves the task card and the frame agree: on D13 the cooler is
+#: installed at step 12, so it must be drawable and committable there.
+DEFAULT_DRAW = ("12:cpu_cooler.fan.01",)
 SHOT_LIMIT_MB = 1.5
 #: A 1920x1200 grab of a 12 MP frame is ~2.5 MB of PNG; the documentation only
 #: needs to show the layout, so the images are scaled before they are saved.
@@ -57,10 +60,17 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--no-shots", dest="shots", action="store_false", default=True)
     ap.add_argument("--shot-width", type=int, default=SHOT_WIDTH,
                     help="screenshots are scaled to this width to stay under 1.5 MB")
-    ap.add_argument("--draw", action="append", default=[], metavar="STEP:INSTANCE",
-                    help="also draw one named instance on one step, e.g. 12:cpu_cooler.fan.01")
+    ap.add_argument("--draw", action="append", default=None, metavar="STEP:INSTANCE",
+                    help="draw one named instance on one step "
+                         f"(default for D13: {DEFAULT_DRAW[0]})")
+    ap.add_argument("--settings", default=None,
+                    help="INI file to use (default: a temporary one, so the run "
+                         "never touches the annotator's own window state)")
     ap.add_argument("--keep-db", action="store_true", help="leave the copy behind")
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    if args.draw is None:
+        args.draw = list(DEFAULT_DRAW) if int(args.desktop) == 13 else []
+    return args
 
 
 def copy_database(src: str, dst: Path) -> float:
@@ -112,7 +122,13 @@ class Smoke:
         tmp = Path(P.require(config, "cache_dir")).parent / ".cache" / "tmp"
         copy = tmp / "tda_smoke.sqlite"
         self.report["db_mb"] = copy_database(P.require(config, "db_path"), copy)
-        config = dict(config, db_path=str(copy), backup_dir=str(tmp / "backups"))
+        # The frames still come from the real cache, but the INI, the log and
+        # the sidecars go to a directory of their own: a smoke run must not
+        # move the annotator's last frame or their window layout.
+        state = Path(self.args.settings) if self.args.settings else tmp / "state"
+        config = dict(config, db_path=str(copy), backup_dir=str(tmp / "backups"),
+                      app_dir=str(state))
+        self.report["app_state_dir"] = str(state)
 
         app = QApplication.instance() or QApplication(sys.argv[:1])
         started = time.perf_counter()
@@ -176,6 +192,8 @@ class Smoke:
 
         self.report["drawn"] = [self.draw_named(window, spec)
                                 for spec in self.args.draw]
+        if self.args.shots:
+            self.report["cjk_shot"] = self.shoot_blocked_hint(window)
         self.note_peak()
 
         latencies = []
@@ -294,19 +312,55 @@ class Smoke:
         out["sam_candidates"] = window.sam_point.candidate_count
         return out
 
+    def shoot_blocked_hint(self, window) -> dict:
+        """One screenshot with Chinese on screen, so CJK rendering is evidenced.
+
+        The blocked-navigation hint is the natural candidate: it is the message
+        the annotator sees most often, it is bilingual, and producing it needs
+        nothing but an uncommitted stroke and a ``PgDn``.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        card = [row for row in window.session.task_card() if row.get("instance")]
+        if not card:
+            return {"skipped": "no task item to edit"}
+        window.on_request_edit(str(card[0]["instance"]))
+        mask = window.session.editing_mask()
+        if mask is None:
+            return {"skipped": "no editing layer"}
+        painted = mask.copy()
+        painted[:] = False
+        x0, y0, x1, y1 = window.roi() or (0, 0, mask.shape[1], mask.shape[0])
+        painted[(y0 + y1) // 2:(y0 + y1) // 2 + 40, (x0 + x1) // 2:(x0 + x1) // 2 + 40] = True
+        window.set_editing_mask(painted, undoable=True)
+        QApplication.processEvents()             # let the diff map settle first
+        window.act_step(-1)                      # refused: the hint appears
+        text = window.status_message()           # read it before anything else
+        out = Path(self.args.img_dir) / f"mvp_d{self.args.desktop}_hint.png"
+        self.shoot_to(window, out)
+        window.act_clear_edit()
+        return {"path": str(out), "status": text,
+                "has_cjk": any("一" <= ch <= "鿿" for ch in text)}
+
     def shoot(self, window, index: int) -> None:
         from PySide6.QtCore import Qt
 
         out = Path(self.args.img_dir) / f"mvp_d{self.args.desktop}_{index}.png"
+        size = self.shoot_to(window, out)
+        self.report["screenshots"].append({"path": str(out), "mb": round(size, 3),
+                                           "over_limit": size > SHOT_LIMIT_MB})
+
+    def shoot_to(self, window, out: Path) -> float:
+        """Grab the window, scale it down and save it; returns the size in MB."""
+        from PySide6.QtCore import Qt
+
         out.parent.mkdir(parents=True, exist_ok=True)
         shot = window.grab()
         if shot.width() > int(self.args.shot_width):
             shot = shot.scaledToWidth(int(self.args.shot_width),
                                       Qt.TransformationMode.SmoothTransformation)
         shot.save(str(out), "PNG")
-        size = out.stat().st_size / 1e6
-        self.report["screenshots"].append({"path": str(out), "mb": round(size, 3),
-                                           "over_limit": size > SHOT_LIMIT_MB})
+        return out.stat().st_size / 1e6
 
 
 def _thread_names() -> list[str]:

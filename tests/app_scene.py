@@ -214,9 +214,10 @@ class StubSamQueue:
         self.mask_factory = mask_factory
         self.stopped = False
 
-    def submit(self, req, cb) -> None:
+    def submit(self, req, cb, on_error=None) -> None:
         self.requests.append(req)
         self._pending.append((req, cb))
+        self.on_error = on_error
 
     def stop(self, timeout: float = 30.0) -> None:
         self.stopped = True

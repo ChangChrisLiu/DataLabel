@@ -511,7 +511,12 @@ def _default_cache_dir(paths_path: str = DEFAULT_PATHS_PATH) -> str:
     path = paths_path if (os.path.isabs(paths_path) or os.path.exists(paths_path)) \
         else os.path.join(REPO_ROOT, paths_path)
     with open(path, "r", encoding="utf-8") as fh:
-        return (yaml.safe_load(fh) or {}).get("cache_dir", "D:/DataSet/cache")
+        found = (yaml.safe_load(fh) or {}).get("cache_dir")
+    # No literal fallback: the configuration owns this path, and a default
+    # pointing at one machine's real cache is how a test writes to it.
+    if not found:
+        raise KeyError(f"{path} defines no cache_dir")
+    return str(found)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
