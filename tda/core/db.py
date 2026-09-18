@@ -205,6 +205,61 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin):
         self._upsert("instance", {"desktop": inst.desktop, "key": inst.key},
                      R.instance_data(inst), desktop=inst.desktop)
 
+    def delete_instance(self, desktop: int, key: str) -> None:
+        """Drop one instance identity row; unknown keys are a no-op.
+
+        Only the identity row goes: the caller decides what to do with the
+        geometry, events and relations that may still name the key (stage S1
+        refuses the deletion outright while any of them do, see
+        :meth:`instance_reference_counts`).
+        """
+        with self._tx():
+            self.conn.execute(
+                'DELETE FROM instance WHERE desktop=? AND "key"=?', (desktop, key)
+            )
+
+    def _count(self, sql: str, args: tuple) -> int:
+        return int(self.conn.execute(sql, args).fetchone()[0])
+
+    def instance_reference_counts(self, desktop: int, key: str) -> dict[str, int]:
+        """Rows still naming one instance, per table; empty when nothing does.
+
+        Covers the tables that have no per-instance query of their own, so a
+        caller about to delete an identity row can refuse in one call. Tables
+        left out on purpose: ``shape_keyframe`` and ``relation``, which
+        :meth:`keyframes` and :meth:`relations` already answer for a single
+        instance and with more to say (which view, which edge type), and
+        ``action``, which the step table owns. Only *manual* state events count
+        -- the automatic ones are derived and go with
+        :meth:`delete_auto_events`.
+        """
+        counts = {
+            "frame_override": self._count(
+                "SELECT COUNT(*) FROM frame_override WHERE desktop=? AND instance=?",
+                (desktop, key)),
+            "pair_override": self._count(
+                "SELECT COUNT(*) FROM pair_override WHERE desktop=? AND (above=? OR below=?)",
+                (desktop, key, key)),
+            "compiled_mask": self._count(
+                "SELECT COUNT(*) FROM compiled_mask WHERE desktop=? AND instance=?",
+                (desktop, key)),
+            "conflict": self._count(
+                "SELECT COUNT(*) FROM conflict WHERE desktop=? AND instance=? AND status='open'",
+                (desktop, key)),
+            "state_event": self._count(
+                "SELECT COUNT(*) FROM state_event WHERE desktop=? AND target=? AND auto=0",
+                (desktop, key)),
+        }
+        return {table: n for table, n in counts.items() if n}
+
+    def delete_auto_events(self, desktop: int, target: str) -> None:
+        """Drop the derived state events of one target; hand-written ones stay."""
+        with self._tx():
+            self.conn.execute(
+                "DELETE FROM state_event WHERE desktop=? AND target=? AND auto=1",
+                (desktop, target),
+            )
+
     def instances(self, desktop: int) -> dict[str, InstanceRec]:
         """All instances of one desktop keyed by ``instance_key``."""
         rows = self.conn.execute(
