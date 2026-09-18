@@ -22,13 +22,7 @@ from tda.core.db import Db
 from tda.core.model import FrameKey, ShapeKeyframe
 from tda.core.states import needs_geom
 from tda.core.taxonomy import Taxonomy
-from tda.core.truth_inputs import (
-    InputCache,
-    frame_hw as hw_of,
-    instances_of,
-    pose_segment_of,
-    state_of,
-)
+from tda.core.truth_inputs import InputCache, instances_of, pose_segment_of, state_of
 
 __all__ = ["FrameCoverage", "coverage"]
 
@@ -67,14 +61,16 @@ def coverage(db: Db, tax: Taxonomy, desktop: int, view: str, steps: Iterable[int
     out: dict[int, FrameCoverage] = {}
     for step in steps:
         step = int(step)
-        seg = pose_segment_of(db, FrameKey(desktop, step, view), cache)
+        key = FrameKey(desktop, step, view)
+        seg = pose_segment_of(db, key, cache)
         state = state_of(db, tax, desktop, step, cache)
+        hw = _known_hw(db, key)  # once per frame, and never off the image file
         found = FrameCoverage(step=step)
         for instance, kind in sorted(needs_geom(instances, state, tax).items()):
             placement = state[instance].placement
             found.needed += 1
             chosen = select_keyframe(chains.get((instance, seg, placement), []), step)
-            if chosen is not None and _usable(chosen, hw_of(db, FrameKey(desktop, step, view))):
+            if chosen is not None and _usable(chosen, hw):
                 found.drawn += 1
             elif kind == "box":
                 found.bench_missing.append(instance)
@@ -84,7 +80,25 @@ def coverage(db: Db, tax: Taxonomy, desktop: int, view: str, steps: Iterable[int
     return out
 
 
-def _usable(kf: ShapeKeyframe, hw: tuple[int, int]) -> bool:
+def _known_hw(db: Db, key: FrameKey) -> Optional[tuple[int, int]]:
+    """The frame's recorded size, or ``None`` -- read only, and never decoded.
+
+    This runs on the timeline's repaint path, so it may not read an image off
+    the disk (:func:`tda.core.truth_inputs.frame_hw` does, and writes the answer
+    back).  An unknown size simply means the size check passes and the compiler
+    reports any mismatch itself.
+    """
+    aux = ((db.get_frame(key) or {}).get("aux") or {}).get("hw")
+    if not aux:
+        return None
+    try:
+        height, width = (int(v) for v in aux)
+    except (TypeError, ValueError):
+        return None
+    return (height, width) if height > 0 and width > 0 else None
+
+
+def _usable(kf: ShapeKeyframe, hw: Optional[tuple[int, int]]) -> bool:
     """Would the compiler get geometry out of this keyframe on this canvas?
 
     A part whose RLE was traced on a different canvas is reported as
@@ -95,7 +109,7 @@ def _usable(kf: ShapeKeyframe, hw: tuple[int, int]) -> bool:
         if part.box is not None:
             return True
         size = (part.rle or {}).get("size")
-        if size is not None and (int(size[0]), int(size[1])) == hw:
+        if size is None or hw is None or (int(size[0]), int(size[1])) == hw:
             return True
     return False
 

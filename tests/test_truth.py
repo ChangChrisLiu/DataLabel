@@ -188,7 +188,9 @@ def test_refresh_skips_every_row_when_the_input_hash_is_unchanged(scene: Scene, 
     assert {k: out[k] for k in ("updated", "conflicts", "skipped", "problems")} == {
         "updated": 0, "conflicts": 0, "skipped": 2, "problems": [],
     }
-    assert out["compiled"].key == scene.key(1)  # handed back so callers need not recompile
+    # a frame whose digest still matches is not compiled at all any more
+    assert out["compiled"] is None
+    assert scene.svc.refresh(scene.key(1), want_compiled=True)["compiled"].key == scene.key(1)
     assert calls == []
 
 

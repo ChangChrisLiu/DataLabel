@@ -47,9 +47,21 @@ def _clean_roi(roi: Sequence[float],
 clean_roi = _clean_roi
 
 #: The columns that only make sense relative to a segment's reference frame.
-POSE_GEOMETRY_COLUMNS = ("corners_json", "homography_json", "roi_json")
+POSE_GEOMETRY_COLUMNS = ("corners_json", "homography_json", "roi_json",
+                         "bench_roi_json")
 #: What :meth:`PoseSegmentMixin.update_pose_segment` accepts.
 POSE_UPDATABLE = ("start_step", "end_step", "ref_step")
+
+
+def _valid_roi(roi) -> list[int]:
+    """``[x0, y0, x1, y1]`` with a positive area, or ``ValueError``."""
+    try:
+        x0, y0, x1, y1 = (int(v) for v in roi)
+    except (TypeError, ValueError):
+        raise ValueError(f"an ROI is four numbers (x0, y0, x1, y1), got {roi!r}") from None
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(f"an ROI must have a positive area, got {roi!r}")
+    return [x0, y0, x1, y1]
 
 
 class PoseSegmentMixin:
@@ -148,6 +160,32 @@ class PoseSegmentMixin:
                 "WHERE desktop=? AND view=? AND seg=?",
                 (desktop, view, seg),
             )
+
+    def set_pose_segment_bench_roi(self, desktop: int, view: str, seg: int,
+                                   roi) -> None:
+        """Record (or clear with ``None``) the staging area this view can see.
+
+        Spec 4.2 asks for a part on the bench to be boxed only 若该视角有堆放区
+        ROI -- *if this view has a staging area*. The scanner looks straight down
+        at the board and never will, so this stays NULL on most views, and the
+        task card asks for no bench work until somebody draws one.
+        """
+        if roi is not None:
+            roi = _valid_roi(roi)
+        with self._tx():
+            self.conn.execute(
+                "UPDATE pose_segment SET bench_roi_json=? WHERE desktop=? AND view=? "
+                "AND seg=?",
+                (R.dumps(roi), desktop, view, seg),
+            )
+
+    def bench_roi(self, desktop: int, view: str, seg: int) -> Optional[list]:
+        """The staging area of one pose segment, or ``None`` when it has none."""
+        row = self.conn.execute(
+            "SELECT bench_roi_json FROM pose_segment WHERE desktop=? AND view=? AND seg=?",
+            (desktop, view, seg),
+        ).fetchone()
+        return None if row is None else R.loads(row["bench_roi_json"])
 
     def delete_pose_segments_from(self, desktop: int, view: str, first_seg: int) -> int:
         """Delete segment ``first_seg`` and every segment after it; returns the count."""

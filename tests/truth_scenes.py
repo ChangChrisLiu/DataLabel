@@ -37,6 +37,9 @@ PSU_RECT = (10, 10, 50, 50)
 SCREW_RECT = (14, 14, 22, 22)
 FAN_RECT = (52, 52, 62, 62)
 BENCH_BOX = (2.0, 2.0, 12.0, 12.0)
+#: The staging area of the scene's view, which is what makes a bench part
+#: something this view is expected to annotate at all.
+BENCH_ROI_BOX = (0, 0, 32, 32)
 
 
 # --------------------------------------------------------------------------- #
@@ -149,6 +152,11 @@ def build_scene(db: Db) -> Scene:
     for kf in (scene.psu_kf, scene.screw_kf, scene.bench_kf):
         db.add_keyframe(kf)
     db.set_zorder(ZOrderRec(DESKTOP, VIEW, 1, [(PSU, "main"), (SCREW, "main")]))
+    # this scene is about bench geometry, so the view has to be one that can see
+    # the staging area: without an ROI a bench part is not annotated at all and
+    # never reported as missing (spec 4.2 item 1)
+    db.set_pose_segment(DESKTOP, VIEW, 1, 1, 3, 3, None, None)
+    db.set_pose_segment_bench_roi(DESKTOP, VIEW, 1, BENCH_ROI_BOX)
     return scene
 
 

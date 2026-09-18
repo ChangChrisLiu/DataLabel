@@ -14,13 +14,10 @@ of them run on the worker's thread; Qt queues them here.
 """
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 from PySide6.QtCore import QCoreApplication
 
 from tda.core.compiler import CompiledFrame
-from tda.core.model import FrameKey
 
 __all__ = ["COMPILED_CACHE_SIZE", "TruthCacheMixin"]
 
@@ -68,13 +65,15 @@ class TruthCacheMixin:
         # one compilation for the whole visit: the refresh hands back the frame
         # it made its decisions from, which is the one the panels are about to
         # ask for -- compiling it twice is what made arriving cost 0.9 s
-        stats = self.truth.refresh(key)
+        stats = self.truth.refresh(key, want_compiled=True)
         self.review.problems[key.step] = list(stats["problems"])
         self.review.invalidate()
         self._keep_compiled(key.step, self._epoch, stats["compiled"])
 
     def _keep_compiled(self, step: int, epoch: int, compiled: CompiledFrame) -> None:
         """Remember one compilation, and what the truth table owes because of it."""
+        if compiled is None:  # the refresh found nothing to do and made no frame
+            return
         self._compiled[int(step)] = (int(epoch), compiled)
         self.review.problems[int(step)] = list(compiled.problems)
         while len(self._compiled) > COMPILED_CACHE_SIZE:

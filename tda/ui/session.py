@@ -27,26 +27,24 @@ from tda.core.compiler import CompiledFrame
 from tda.core.db import Db
 from tda.core.model import FrameKey
 from tda.core.taxonomy import Taxonomy
-from tda.core.truth import StaleConflictError, TruthService
+from tda.core.truth import TruthService
 from tda.core.truth_inputs import instances_of, state_of
 from tda.ui import session_edit as edit
 from tda.ui.commands import Op, UndoStack
 from tda.ui.session_commits import CommitMixin
-from tda.ui.session_coverage import coverage
 from tda.ui.session_images import ImageCache
 from tda.ui.session_layer import EditingLayer
 from tda.ui import session_rows as rows
 from tda.ui.session_queues import ReviewState
+from tda.ui.session_review import ReviewMixin
 from tda.ui.session_truth import TruthCacheMixin
 from tda.ui.session_sweep import TruthSweeper
 
 __all__ = ["AnnotationSession"]
 
-_MISSING_SHAPE = "missing_shape:"
-
 log = logging.getLogger("tda.session")
 
-class AnnotationSession(CommitMixin, TruthCacheMixin, QObject):
+class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
     """One annotator's working set: a desktop, a view, and the frame in hand."""
 
     #: The current frame changed; payload is a :class:`~tda.core.model.FrameKey`.
@@ -180,6 +178,7 @@ class AnnotationSession(CommitMixin, TruthCacheMixin, QObject):
         self.view = str(view)
         self._steps = [int(row["step"]) for row in self.db.frames_for(self.desktop, self.view)]
         self._available = edit.annotatable_steps(self.db, self.desktop, self.view, self._steps)
+        self.browsing = edit.REVERSE  # every view is annotated backwards first
         self.review.open(self.desktop, self.view, self._coverage)
         self._step = self._available[-1] if self._available else (
             self._steps[-1] if self._steps else None
@@ -366,7 +365,7 @@ class AnnotationSession(CommitMixin, TruthCacheMixin, QObject):
         """
         key = self.current()
         return edit.task_card_for(self.db, self.tax, key.desktop, key.view, key.step,
-                                  neighbour=self.task_neighbour())
+                                  neighbour=self.task_neighbour(), span=self.task_span())
 
     def task_neighbour(self) -> Optional[int]:
         """The annotated frame :meth:`task_card` is diffed against, or ``None``.
@@ -378,6 +377,21 @@ class AnnotationSession(CommitMixin, TruthCacheMixin, QObject):
         ``Tab`` flash, so that all three agree on what is being compared.
         """
         return self._neighbour(self.browsing)
+
+    def task_span(self) -> list[int]:
+        """The action steps the card covers, ascending.
+
+        Usually one -- the neighbour's -- but a missing frame is skipped rather
+        than annotated, so the card can describe two steps of work at once and
+        the window has to be able to say which.
+        """
+        if self._step is None:
+            return []
+        neighbour = self.task_neighbour()
+        if neighbour is None:
+            return []
+        low, high = sorted((self._step, neighbour))
+        return [s for s in self._steps if low < s <= high]
 
     def _neighbour(self, direction: str) -> Optional[int]:
         if self._step is None:
@@ -445,120 +459,6 @@ class AnnotationSession(CommitMixin, TruthCacheMixin, QObject):
         if op.kind == "edit_editing_mask":
             self._announce()  # no database change, but the panels still repaint
         return True
-
-    # --------------------------------------------------------- confirm/review
-    def confirm_frame(self) -> bool:
-        """Freeze the frame and step back (spec 4.2 step 5).
-
-        ``False`` means the compilation still has a blocking problem -- a
-        chassis instance without a shape, a contradictory layer order; the
-        problem list is emitted on :attr:`sigProblems` first, so a panel can
-        show exactly what the annotator has to fix.
-        """
-        key = self.current()
-        try:
-            self.truth.verify_frame(key, self.annotator)
-        except ValueError:
-            self._invalidate()
-            problems = list(self.compiled().problems)
-            self.review.problems[key.step] = problems
-            self.sigProblems.emit(problems + self._how_to_fix(problems))
-            return False
-        self._invalidate()
-        # exactly one frame change: the step back is the change, and a panel
-        # that reloads on every emit must not reload the frame being left
-        if not self._step_to([s for s in self._available if s < key.step], last=True):
-            self._announce()
-        return True
-
-    def _coverage(self) -> dict:
-        """What has been drawn in every frame of this view, without compiling."""
-        if self.desktop is None:
-            return {}
-        return coverage(self.db, self.tax, self.desktop, self.view, self._available)
-
-    @staticmethod
-    def _how_to_fix(problems: list[str]) -> list[str]:
-        """Say a blocking problem the way the task card says it.
-
-        ``missing_shape:cpu_cooler.01`` is what the compiler calls it; what the
-        annotator needs to read is which card item to act on, on which frame.
-        """
-        return [f"draw {p.split(':', 1)[1]} on this frame"
-                for p in problems if p.startswith(_MISSING_SHAPE)]
-
-    def refresh_all(self) -> dict:
-        """Recompile every frame of the open view (spec 3.4).
-
-        The queues of :meth:`queues` are fed by whatever has been compiled so
-        far, so this is what a session calls to fill them in one sweep -- after
-        a bulk import, or when the review panel is opened on a view nobody has
-        visited in this session.
-        """
-        running = self.sweeper.is_running
-        self.sweeper.stop()  # one drain, not two racing over the same rows
-        try:
-            self.truth.run_pending_rechecks(self.desktop, self.view)
-            stats = edit.refresh_steps(self.db, self.truth, self.desktop, self.view,
-                                       self._available)
-        finally:
-            if running and self.sweeper_enabled:
-                self.sweeper.open(self.desktop, self.view)
-                self.sweeper.enqueue(self.db.rechecks(self.desktop, self.view))
-        self.review.problems.update(stats["problems"])
-        self._invalidate()
-        return stats
-
-    def queues(self) -> dict[str, list[dict]]:
-        """The four review queues of spec 4.4, keyed by :data:`QUEUE_NAMES`."""
-        return self.review.queues()
-
-    def set_unexplained(self, step: int, boxes) -> None:
-        """Record the difference-map regions of one frame that nothing explains.
-
-        The diff map itself belongs to the window (spec 4.2 step 4); the session
-        only carries the result into the fourth review queue.  An empty list
-        clears the step.
-        """
-        self.review.set_unexplained(step, boxes)
-
-    def resolve_conflict(self, cid: int, resolution: str) -> str:
-        """Settle one queued disagreement; never raises (spec 3.4, 4.4).
-
-        Returns what happened, because all three outcomes are ordinary:
-
-        ``"resolved"``
-            the decision was applied and the frame recompiled;
-        ``"superseded"``
-            the inputs had moved on since the conflict was queued, so nothing
-            was confirmed -- the current disagreement is in the queue instead
-            and the panel has to show that one;
-        ``"refused"``
-            the conflict is gone, already settled, or the decision cannot be
-            applied to it.
-
-        The reason is emitted on :attr:`sigProblems` for the last two.
-        """
-        if not self.is_open:
-            self.sigProblems.emit([f"conflict {cid} not resolved: no view is open"])
-            return "refused"
-        conflict = self.db.get_conflict(int(cid))
-        outcome = "resolved"
-        try:
-            self.truth.resolve_conflict(int(cid), resolution, self.annotator)
-        except StaleConflictError as stale:
-            outcome = "superseded"
-            self.sigProblems.emit([f"conflict {cid} superseded: {stale}"])
-        except (KeyError, ValueError) as refused:
-            outcome = "refused"
-            self.sigProblems.emit([f"conflict {cid} not resolved: {refused}"])
-        if conflict is not None:
-            stats = edit.refresh_steps(self.db, self.truth, self.desktop, self.view,
-                                       [conflict["step"]])
-            self.review.problems.update(stats["problems"])
-        self._invalidate()
-        self.sigFrameChanged.emit(self.current())
-        return outcome
 
     # --------------------------------------------------------------- internals
 

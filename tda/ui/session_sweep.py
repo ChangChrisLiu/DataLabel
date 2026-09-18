@@ -47,7 +47,8 @@ from tda.core.taxonomy import Taxonomy
 from tda.core.truth import TruthService
 from tda.ui.session_images import ImageCache
 
-__all__ = ["QUEUE_SIGNAL_INTERVAL", "RETRY_DELAYS", "TruthSweeper"]
+__all__ = ["IDLE_WAIT", "QUEUE_SIGNAL_INTERVAL", "RETRY_DELAYS",
+           "STALE_QUIET_PERIOD", "TruthSweeper"]
 
 log = logging.getLogger("tda.sweeper")
 
@@ -60,6 +61,15 @@ RETRY_DELAYS: tuple[float, ...] = (2.0, 10.0)
 #: (plus one when it drains): a fifty-frame sweep must not make the review panel
 #: rebuild fifty times.
 QUEUE_SIGNAL_INTERVAL = 0.25
+
+#: How long the worker blocks when it has nothing to do. Every request notifies
+#: the condition, so this is only the ceiling on noticing a backoff coming due.
+IDLE_WAIT = 0.25
+
+#: How long a frame that was edited *while* being re-checked waits before the
+#: next attempt: re-queueing it at the front would spin against an annotator who
+#: is still drawing on it.
+STALE_QUIET_PERIOD = 1.0
 
 #: The step a worker-level failure (its database, not one frame) is reported as.
 NO_STEP = -1
@@ -192,6 +202,11 @@ class TruthSweeper(QObject):
         with self._lock:
             return len(self._rechecks)
 
+    def parked(self) -> list[int]:
+        """Steps that failed their retries and are waiting to be asked again."""
+        with self._lock:
+            return sorted(self._parked)
+
     # -- the worker ---------------------------------------------------------
     def _run(self) -> None:
         try:
@@ -245,7 +260,12 @@ class TruthSweeper(QObject):
                     return ("prefetch", job)
                 if not self._retry_at:
                     self._idle.set()
-                self._lock.wait(0.02)
+                    self._lock.wait(IDLE_WAIT)
+                else:
+                    # something is waiting out its backoff: look again when the
+                    # earliest one is due rather than poll
+                    due = min(self._retry_at.values()) - time.monotonic()
+                    self._lock.wait(max(0.01, min(IDLE_WAIT, due)))
             self._flush_queue_signal(force=False)
 
     def _next_recheck(self) -> Optional[int]:
@@ -258,6 +278,20 @@ class TruthSweeper(QObject):
                 return step
             self._rechecks.append(step)  # not due yet: look at the others
         return None
+
+    def _requeue_quietly(self, step: int) -> None:
+        """Put an overtaken frame back, but not before the annotator has stopped.
+
+        A re-check abandoned because the inputs moved says the frame is being
+        worked on right now; trying again immediately would burn a compilation
+        per brush stroke.
+        """
+        with self._lock:
+            self._retry_at[step] = time.monotonic() + STALE_QUIET_PERIOD
+            if step not in self._rechecks:
+                self._rechecks.append(step)
+            self._idle.clear()
+            self._lock.notify_all()
 
     def _schedule_retry(self, step: int) -> None:
         """Try a failed frame again later, or park it after the last attempt."""
@@ -326,7 +360,7 @@ class TruthSweeper(QObject):
             # comparison describes inputs nobody has any more, so nothing was
             # written and the frame goes back on the queue
             db.add_rechecks(self.desktop, self.view, [step])
-            self.enqueue([step])
+            self._requeue_quietly(step)
             return
         if stamp is not None:
             db.clear_recheck(self.desktop, self.view, step, stamp)
@@ -341,7 +375,7 @@ class TruthSweeper(QObject):
         """
         step, epoch = job
         key = FrameKey(self.desktop, step, self.view)
-        stats = truth.refresh(key)
+        stats = truth.refresh(key, want_compiled=True)
         self.sigPrefetched.emit(step, epoch, stats["compiled"])
         rgb = images.get(key)
         if rgb is not None:

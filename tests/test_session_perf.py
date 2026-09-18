@@ -80,6 +80,8 @@ def test_a_commit_compiles_only_the_frame_in_front_of_the_annotator(session):
 
 def test_a_commit_undo_and_redo_each_compile_the_frame_once(session, monkeypatch):
     """The refresh already made the frame; nothing may make it a second time."""
+    session.sweeper_enabled = False  # the prefetch of k-1 is not GUI-thread work
+    session.sweeper.stop()
     session.goto(10)
     draw(session, COOLER, cell(0), api.SCOPE_KEYFRAME)
 

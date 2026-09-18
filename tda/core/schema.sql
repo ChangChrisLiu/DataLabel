@@ -108,6 +108,10 @@ CREATE TABLE IF NOT EXISTS pose_segment (
     corners_json    TEXT,
     homography_json TEXT,
     roi_json        TEXT,
+    -- the staging area this view can see, if any: spec 4.2 only asks for a
+    -- part on the bench to be boxed 若该视角有堆放区 ROI, and the scanner looks
+    -- straight down at the board, so on most views this stays NULL for ever
+    bench_roi_json  TEXT,
     PRIMARY KEY (desktop, view, seg)
 );
 
@@ -214,6 +218,22 @@ CREATE TABLE IF NOT EXISTS compiled_mask (
     geom_type        TEXT    NOT NULL DEFAULT 'mask',
     box_json         TEXT,
     PRIMARY KEY (desktop, step, view, instance)
+);
+
+-- The cheap fingerprint of one frame's compiler inputs, written in the SAME
+-- transaction as the compiled_mask rows it describes (spec 3.4). A batch pass
+-- -- an export, cli check -- compares it BEFORE doing any pixel work, so a view
+-- nobody has touched since the last pass costs a few SELECTs instead of one
+-- compilation per frame. `n_rows` guards against rows that went away underneath
+-- it, and `compiler_version` against a digest this build did not write.
+CREATE TABLE IF NOT EXISTS frame_digest (
+    desktop          INTEGER NOT NULL REFERENCES desktop(id) ON DELETE CASCADE,
+    step             INTEGER NOT NULL,
+    view             TEXT    NOT NULL,
+    digest           TEXT    NOT NULL,
+    compiler_version TEXT    NOT NULL,
+    n_rows           INTEGER NOT NULL,
+    PRIMARY KEY (desktop, step, view)
 );
 
 CREATE TABLE IF NOT EXISTS conflict (

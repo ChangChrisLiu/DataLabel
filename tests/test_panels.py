@@ -324,6 +324,7 @@ def test_constants_cover_the_spec_domains() -> None:
         "add_shape",
         "split_keyframe",
         "state_only",
+        "add_bench_box",
         "remove_bench_box",
         "confirm",
     )
