@@ -10,12 +10,16 @@ into whatever is on screen now:
 
 * every submission is stamped with a monotonically increasing **token**, and
   only the newest token may apply -- a superseded result is dropped silently;
-* it also carries a **frame identity** (:meth:`SamToolBase.set_frame_token` plus
-  the instance being edited); a result whose identity no longer matches is
-  dropped with :attr:`~SamToolBase.sigError`, because applying it would write
-  the mask of frame k into frame k-1;
+* it also carries a **frame identity**: the token from
+  :meth:`SamToolBase.set_frame_token`, which the session **must** set on every
+  frame change, plus the instance the mask will be written to. A result whose
+  identity no longer matches is dropped with :attr:`~SamToolBase.sigError`,
+  because applying it would write the mask of frame k into frame k-1. Prompting
+  without a frame token is refused outright rather than guessed at;
 * the crop rectangle is bounds-checked against the overlay before any write, so
-  a stale rectangle can never raise out of a Qt slot.
+  a stale rectangle can never raise out of a Qt slot;
+* :meth:`SamToolBase.detach` cancels whatever is in flight, so switching tool
+  cannot be undone by an answer that arrives afterwards.
 
 Threading: :class:`~tda.models.sam_service.SamQueue` invokes its callback on the
 worker thread.  :class:`SamResultBridge` is the only thing that touches it
@@ -37,6 +41,10 @@ from tda.ui.canvas.tools import Box, Point, Rect, Tool
 __all__ = [
     "MAX_SAM_SIDE",
     "HINT_EDITED",
+    "ERR_FRAME_CHANGED",
+    "ERR_NO_FRAME_TOKEN",
+    "ERR_OUT_OF_BOUNDS",
+    "FALLBACK_INSTANCE",
     "SamResultBridge",
     "SamToolBase",
     "SamPointTool",
@@ -54,6 +62,11 @@ HINT_EDITED = "candidates discarded: the mask was edited"
 #: Emitted on :attr:`SamToolBase.sigError` for a result that arrived too late.
 ERR_FRAME_CHANGED = "SAM result dropped: the frame or instance changed"
 ERR_OUT_OF_BOUNDS = "SAM result dropped: the crop no longer fits the frame"
+#: Emitted on :attr:`SamToolBase.sigError` when the tool has not been told which
+#: frame it is on, which makes every later staleness check meaningless.
+ERR_NO_FRAME_TOKEN = "frame token not set: call set_frame_token(...) on frame change"
+#: Instance key used when neither the tool nor the overlay names one yet.
+FALLBACK_INSTANCE = "editing"
 
 
 def _norm_box(a: tuple[float, float], b: tuple[float, float]) -> Box:
@@ -174,30 +187,52 @@ class SamToolBase(Tool):
             self._on_result, Qt.ConnectionType.QueuedConnection
         )
 
+    # -- lifecycle ----------------------------------------------------------
+    def detach(self) -> None:
+        """Stop listening to the canvas and cancel whatever was in flight.
+
+        Switching tool must not let the previous one paint a second later, so
+        the pending prompt is invalidated here rather than allowed to land on a
+        canvas its tool no longer owns. Re-:meth:`attach` starts clean.
+        """
+        super().detach()
+        self._cancel()
+
+    def _cancel(self) -> None:
+        """Invalidate the in-flight prompt and forget the per-prompt state."""
+        self._token += 1  # nothing already submitted can match again
+        self._reset_candidates()
+        self.prompt_box = None
+        rubber_band = getattr(self.canvas, "set_rubber_band", None)
+        if rubber_band is not None:
+            rubber_band(None)
+
     # -- frame identity -----------------------------------------------------
     @property
     def frame_token(self) -> Any:
-        """Identity of the frame being prompted on.
+        """The frame the tool was told it is on, or ``None`` while unset.
 
-        The explicit token when the session set one, otherwise a fallback built
-        from the overlay object and its size. The fallback is enough to notice
-        that the canvas moved to another frame *object*, but a session that
-        reuses one overlay across frames must call :meth:`set_frame_token`.
+        There is deliberately **no fallback**. An earlier version derived one
+        from ``(id(overlay), hw)``; CPython reuses the address of a dropped
+        overlay for the next same-sized one often enough (measured: 200/200 for
+        a drop-then-create cycle) that it silently matched for every consecutive
+        scanner pair -- exactly the case the check exists for.
         """
-        if self._frame_token is not None:
-            return self._frame_token
-        if self.overlay is None:
-            return None
-        return (id(self.overlay), self.overlay.hw)
+        return self._frame_token
 
     def set_frame_token(self, token: Any) -> None:
-        """Declare which frame the tool is on; call this on every frame change.
+        """Declare which frame the tool is on; **required** before prompting.
 
         ``token`` is any hashable identity -- a
-        :class:`~tda.core.model.FrameKey` is the obvious choice. Changing it
-        invalidates the pending prompt (a result stamped with the old identity
-        is dropped instead of applied), drops the candidates and clears the
-        prompt box, since the box came from the previous frame's difference map.
+        :class:`~tda.core.model.FrameKey` is the obvious choice. Call it on
+        every frame change: it invalidates the pending prompt (a result stamped
+        with the old identity is dropped instead of applied), drops the
+        candidates and clears the prompt box, since the box came from the
+        previous frame's difference map.
+
+        ``None`` un-sets it, which disables prompting -- :meth:`_submit` then
+        refuses with :data:`ERR_NO_FRAME_TOKEN` rather than issuing a request it
+        could not later validate.
         """
         if token == self._frame_token:
             return
@@ -205,11 +240,27 @@ class SamToolBase(Tool):
         self._reset_candidates()
         self.prompt_box = None
 
+    def _target_instance(self) -> Optional[str]:
+        """The instance key an applied mask will be written to.
+
+        Resolved the same way in the identity stamp and in the write, fallback
+        included. Reading ``overlay.editing_instance`` raw in one place and
+        applying the ``FALLBACK_INSTANCE`` default in the other made the tool
+        invalidate its own first result on a fresh overlay: the stamp said
+        ``None``, the write said ``"editing"``, and the next check called that a
+        frame change.
+        """
+        if self.instance is not None:
+            return self.instance
+        if self.overlay is None:
+            return None
+        return self.overlay.editing_instance or FALLBACK_INSTANCE
+
     def _identity(self) -> Any:
         """What a result must still match to be safe to apply."""
         if self.overlay is None:
             return None
-        return (self.frame_token, self.instance or self.overlay.editing_instance)
+        return (self.frame_token, self._target_instance())
 
     def _sync_identity(self) -> None:
         """Drop state belonging to another frame or instance, once we notice.
@@ -311,6 +362,11 @@ class SamToolBase(Tool):
     # -- submission ---------------------------------------------------------
     def _submit(self, points: Sequence[Point], box: Optional[Box] = None) -> None:
         if self.queue is None or self.canvas is None or self.overlay is None:
+            return
+        if self._frame_token is None:
+            # Without an identity a late result could not be told apart from a
+            # fresh one, so refuse to create one rather than accept it blindly.
+            self.sigError.emit(ERR_NO_FRAME_TOKEN)
             return
         prepared = viewport_crop(self.canvas)
         if prepared is None:
@@ -449,7 +505,7 @@ class SamToolBase(Tool):
         # Same contract as PaintTool: the pre-edit layer is available when
         # sigStroke fires, so one applied mask is one undoable op.
         self.stroke_before = self.overlay.editing.copy()
-        instance = self.instance or self.overlay.editing_instance or "editing"
+        instance = self._target_instance() or FALLBACK_INSTANCE
         self.overlay.set_editing(instance, layer)
         if self.canvas is not None:
             self.canvas.refresh(self._candidate_rect)
@@ -486,6 +542,10 @@ class SamPointTool(SamToolBase):
         """Forget the collected prompts (e.g. after accepting the mask)."""
         self.points = []
 
+    def _cancel(self) -> None:
+        super()._cancel()
+        self.clear_points()
+
 
 class SamBoxTool(SamToolBase):
     """Box prompt dragged over the part; shows a rubber band while dragging."""
@@ -497,6 +557,12 @@ class SamBoxTool(SamToolBase):
         super().__init__(*args, **kwargs)
         self.box: Optional[Box] = None
         self._start: Optional[tuple[float, float]] = None
+        self._dragging = False
+
+    def _cancel(self) -> None:
+        super()._cancel()  # also takes the rubber band off the canvas
+        self.box = None
+        self._start = None
         self._dragging = False
 
     def on_press(self, x: float, y: float, ev: Any) -> None:
