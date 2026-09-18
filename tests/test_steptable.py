@@ -10,16 +10,13 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from pathlib import Path
-
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QComboBox, QSpinBox
 
+from steps_fixtures import seeded_db
 from tda.core.db import Db
-from tda.core.logs import import_log, read_desktop_csv
-from tda.core.states import events_from_actions
 from tda.core.taxonomy import load_taxonomy
 from tda.ui.panels.steptable import (
     INSTANCE_COLUMNS,
@@ -28,8 +25,6 @@ from tda.ui.panels.steptable import (
     StepTableModel,
     StepTablePanel,
 )
-
-FIXTURES = Path(__file__).resolve().parent / "fixtures" / "logs"
 
 
 # --------------------------------------------------------------------------- #
@@ -48,15 +43,9 @@ def tax():
 
 @pytest.fixture
 def db(tmp_db_path, tax) -> Db:
-    conn = Db(tmp_db_path)
-    for desktop in (13, 63):
-        rows, meta = read_desktop_csv(FIXTURES / f"desktop_{desktop:02d}.csv")
-        imp = import_log(desktop, rows, meta, tax)
-        conn.upsert_desktop(desktop, {"brand": meta.get("brand_model_raw") or ""})
-        conn.replace_steps(desktop, imp.steps, imp.actions)
-        for inst in imp.instances.values():
-            conn.upsert_instance(inst)
-        conn.replace_events(desktop, events_from_actions(imp.instances, imp.actions, tax))
+    # the same stage-S0 seeding the Qt-free step-table tests use, relational
+    # heuristic included -- a panel must open on what an import really writes
+    conn = seeded_db(tmp_db_path, tax)
     yield conn
     conn.close()
 

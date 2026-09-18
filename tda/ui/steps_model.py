@@ -35,7 +35,12 @@ from tda.core.states import (
 )
 from tda.core.taxonomy import Taxonomy, load_taxonomy, parse_raw_name
 from tda.ui.steps_delete import delete_instance
-from tda.ui.steps_issues import dangling_issues, orphan_issues, row_issues
+from tda.ui.steps_issues import (
+    dangling_issues,
+    orphan_issues,
+    row_issues,
+    unresolved_issues,
+)
 from tda.ui.steps_values import (
     DISCRIMINATORS,
     FAILURE_REASONS,
@@ -432,8 +437,10 @@ class StepTableData:
         """
         for row in self.rows:
             row.issues = list(row_issues(row, self.tax, self.class_of))
-        self.orphans = list(orphan_issues(self.instances, self.actions)) + list(
-            dangling_issues(self.instances, self.tax)
+        self.orphans = (
+            list(orphan_issues(self.instances, self.actions))
+            + list(dangling_issues(self.instances, self.tax))
+            + list(unresolved_issues(self.instances, self.tax))
         )
 
     # -- helpers ----------------------------------------------------------- #

@@ -18,18 +18,26 @@ What is asked about:
   instance behind, and nothing else would ever mention it again;
 * an instance whose ``parent`` / ``mounted_on`` / ``fastens`` / ``socket_host``
   names something that is not an instance, so a stale pointer can never sit in
-  the table unnoticed.
+  the table unnoticed;
+* last, and lowest priority, what the relational heuristic of spec 7.3
+  (:func:`tda.core.graph_rules.infer_relational_fields`) could not settle by
+  itself -- a connector still pointing at a bare class name and a captive screw
+  with no parent to leave the chassis with.
 """
 from __future__ import annotations
 
 from typing import Callable, Iterable, Iterator, Optional
 
+from tda.core.graph_infer import is_provisional, real_instances
 from tda.core.logs import CHASSIS_KEY, NO_ACTION_TYPES, UNRESOLVED
 from tda.core.model import ActionRec, InstanceRec, StepType
 from tda.core.taxonomy import Taxonomy
 from tda.ui.steps_values import DIFFICULTY_MAX, DIFFICULTY_MIN, RELATION_FIELDS
 
-__all__ = ["action_issues", "dangling_issues", "orphan_issues", "row_issues"]
+__all__ = [
+    "action_issues", "dangling_issues", "orphan_issues", "row_issues",
+    "unresolved_issues",
+]
 
 #: ``StepTableData.class_of``: the taxonomy class of a target, when knowable.
 ClassOf = Callable[[str], Optional[str]]
@@ -96,3 +104,56 @@ def dangling_issues(instances: dict[str, InstanceRec], tax: Taxonomy) -> Iterato
                     f"{key}.{name} points at {value}, which is not an instance "
                     f"- clear it or recreate the instance"
                 )
+
+
+def unresolved_issues(
+    instances: dict[str, InstanceRec], tax: Taxonomy
+) -> Iterator[str]:
+    """What the relational heuristic left open -- the lowest-priority questions.
+
+    :func:`tda.core.graph_rules.infer_relational_fields` fills what it can and
+    guesses at nothing, so two gaps survive it and would otherwise be invisible
+    until an export or the constraint panel went wrong:
+
+    * **unresolved socket host** -- ``connector.socket_host`` is still the bare
+      taxonomy class the importer wrote, because the desktop has no unique
+      instance of it. Rule 7.2 (the connector gates the part it plugs into)
+      cannot fire on a class name. Two different jobs hide behind that, so they
+      are two different lines: when the desktop has *several* instances one has
+      to be picked, and when it has *none* one has to be created first -- which
+      is a decision about what this desktop tracks at all (user decision C7),
+      never something to invent automatically.
+    * **captive screw without parent** -- a captive screw stays in its part when
+      the part comes out (spec 7.1), which only happens if ``parent`` names it;
+      without one the screw is left behind ``loosened`` and in the chassis, and
+      the annotator is asked for its shape on every later frame.
+
+    Deliberately yielded *after* :func:`orphan_issues` and
+    :func:`dangling_issues`: neither is a broken record, only work still to do.
+    Provisional ``ls:*`` drafts carry no relations yet and are skipped.
+    """
+    for key in sorted(instances):
+        inst = instances[key]
+        if is_provisional(key):
+            continue
+        host = inst.socket_host
+        if inst.cls == "connector" and host and host not in instances and host in tax.classes:
+            yield _socket_host_issue(instances, key, host)
+        if inst.cls == "screw" and inst.attrs.get("captive") and not inst.parent:
+            yield (
+                f"captive screw without parent: {key} is captive but leaves the "
+                f"chassis with nothing - name the part it stays in"
+            )
+
+
+def _socket_host_issue(instances: dict[str, InstanceRec], key: str, host: str) -> str:
+    """The socket-host question, worded for the work it actually needs."""
+    if real_instances(instances, host):
+        return (
+            f"unresolved socket host: {key}.socket_host is still the class "
+            f"{host!r} - name the instance it plugs into"
+        )
+    return (
+        f"unresolved socket host: class {host!r} has no instance on this desktop "
+        f"- add the instance in the Instances tab or leave it unresolved"
+    )
