@@ -663,7 +663,8 @@ def test_force_says_per_desktop_what_it_replaces(env, capsys):
     assert run(env, "import-logs", "--desktops", "13", "--force") == EXIT_OK
     out = capsys.readouterr().out
     assert f"D13: --force, replacing {env['n_steps_13']} steps" in out
-    assert "2 steps carry Label Studio notes (carried over)" in out
+    assert "2 steps carry Label Studio notes (carried over where the step number " \
+           "and name still match)" in out
     assert "every other manual edit to the step table is lost" in out
     assert "run 'python -m tda.cli import-ls'" in out
 

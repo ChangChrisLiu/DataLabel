@@ -191,6 +191,7 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
         "",
         f"- desktops imported: {len(imported)}",
         f"- desktops skipped (already had steps): {len(run.skipped)}",
+        f"- desktops refused (verified frames, no --force-verified): {len(run.refused)}",
         f"- desktops that failed to import: {len(run.failed)}",
         f"- steps: {sum(r.steps for r in imported)}",
         f"- actions: {sum(r.actions for r in imported)}",
@@ -216,8 +217,8 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
             f"| {len(r.issues)} |"
         )
     lines.append("")
-    for r in run.failed:
-        lines.append(f"## D{r.desktop:02d} - FAILED")
+    for r in run.failed + run.refused:
+        lines.append(f"## D{r.desktop:02d} - {r.status.upper()}")
         lines.append("")
         lines.extend(f"- {text}" for text in r.issues)
         lines.append("")
@@ -244,32 +245,42 @@ def cmd_import_logs(args: argparse.Namespace) -> int:
                 paths, db, "import-logs", "--force rewrites the step tables"):
             return EXIT_ERROR
         run = L.import_logs_into_db(
-            db, directory, load_taxonomy(), index, _desktops(args), args.force, log=print
+            db, directory, load_taxonomy(), index, _desktops(args), args.force,
+            log=print, force_verified=args.force_verified,
         )
         imported = run.imported
         print(f"[import-logs] {len(imported)} desktops imported, {len(run.skipped)} skipped, "
-              f"{len(run.failed)} failed; {sum(r.steps for r in imported)} steps, "
+              f"{len(run.refused)} refused, {len(run.failed)} failed; "
+              f"{sum(r.steps for r in imported)} steps, "
               f"{sum(r.actions for r in imported)} actions, "
               f"{sum(r.instances for r in imported)} instances, "
               f"{sum(r.events for r in imported)} events, "
               f"{sum(len(r.issues) for r in imported)} issues")
+        for r in run.dropped_ls_notes:
+            print(f"[import-logs] {L.dropped_notes_line(r.desktop, r.ls_notes_dropped)}")
         carried = run.with_ls_notes
         if carried:
             listed = ", ".join(f"D{d:02d}" for d in carried)
-            print(f"[import-logs] Label Studio notes were carried over on {listed}; "
+            print(f"[import-logs] {listed} had Label Studio notes; "
                   f"run 'python -m tda.cli import-ls' to rebuild them from the export "
                   f"if anything looks wrong")
+        if run.refused:
+            listed = ", ".join(f"D{r.desktop:02d}" for r in run.refused)
+            print(f"[import-logs] refused: {listed} carry verified frames, which were "
+                  f"compiled from the step table this would replace. Re-run with "
+                  f"--force-verified to re-import them anyway, or select the other "
+                  f"desktops with --desktops.")
         # A run that imported nothing has nothing to report, and overwriting the
         # file would throw away the issue list of the run that did the work.
         if not imported and not run.failed:
             print("[import-logs] nothing imported, kept the previous report")
-            return EXIT_OK
+            return EXIT_ERROR if run.refused else EXIT_OK
         report = args.report or P.cache_file(paths, P.LOGS_REPORT_NAME)
         with open(report, "w", encoding="utf-8") as fh:
             fh.write(logs_report(run, L.expected_steps(directory)))
         run.report_path = report
         print(f"[import-logs] wrote {report}")
-        return EXIT_ERROR if run.failed else EXIT_OK
+        return EXIT_ERROR if (run.failed or run.refused) else EXIT_OK
 
 
 def _add_import_logs(sub) -> None:
@@ -280,8 +291,13 @@ def _add_import_logs(sub) -> None:
     p.add_argument("--report", default=None, help="issue report Markdown")
     p.add_argument("--force", action="store_true",
                    help="re-import desktops that already have steps: the database is "
-                        "backed up first and the Label Studio notes are kept, but every "
-                        "other manual edit to the step table is lost")
+                        "backed up first and the Label Studio notes are kept where the "
+                        "step number and name still match, but every other manual edit "
+                        "to the step table is lost")
+    p.add_argument("--force-verified", action="store_true",
+                   help="with --force, also re-import desktops that carry verified "
+                        "frames. Those frames were compiled from the step table this "
+                        "replaces, so they are refused without it")
     p.set_defaults(func=cmd_import_logs)
 
 

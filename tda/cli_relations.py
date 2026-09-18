@@ -228,14 +228,18 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
 # the run
 # --------------------------------------------------------------------------- #
 def verified_frames(db: Db, desktop: int) -> int:
-    """How many compiled rows of this desktop a human has frozen (spec 3.4)."""
-    return int(db.conn.execute(
-        "SELECT COUNT(*) FROM compiled_mask WHERE desktop=? AND status='verified'",
-        (desktop,),
-    ).fetchone()[0])
+    """How many *frames* of this desktop a human has frozen (spec 3.4).
+
+    One frame is one ``(view, step)``. Counting ``compiled_mask`` rows instead
+    -- one per instance of the frame -- is what made this report "43 verified
+    frames" for a desktop with two, which reads like a reason to stop rather
+    than like the truth. :meth:`tda.core.db.Db.verified_frame_count` owns the
+    query now, so the guard and the re-check queue cannot drift apart.
+    """
+    return db.verified_frame_count(desktop)
 
 
-def _queue_rechecks(db: Db, desktop: int, log) -> None:
+def _queue_rechecks(db: Db, desktop: int, log=None) -> int:
     """Queue this desktop's verified frames for a re-check by the truth service.
 
     The relational fills can change which instances a later frame needs, so
@@ -243,15 +247,14 @@ def _queue_rechecks(db: Db, desktop: int, log) -> None:
     (one request per view). Nothing frozen is lost either way: the truth
     service raises a conflict when a verified row disappears from a recompiled
     frame; queueing only makes the annotator meet it now rather than later.
+
+    The queueing happens whether or not there is anywhere to report it: a
+    ``log`` of ``None`` is a caller that prints nothing, not a caller that wants
+    the frozen frames left unchecked. Returns how many were queued.
     """
-    rows = db.conn.execute(
-        "SELECT DISTINCT view, step FROM compiled_mask "
-        "WHERE desktop=? AND status='verified' ORDER BY view, step",
-        (desktop,),
-    ).fetchall()
     by_view: dict[str, list[int]] = {}
-    for view, step in rows:
-        by_view.setdefault(str(view), []).append(int(step))
+    for view, step in db.verified_frames(desktop):
+        by_view.setdefault(view, []).append(step)
     queued = 0
     for view, steps in by_view.items():
         queued += len(db.add_rechecks(desktop, view, steps))
@@ -259,6 +262,7 @@ def _queue_rechecks(db: Db, desktop: int, log) -> None:
         log(f"[infer-relations] D{desktop:02d}: queued {queued} verified frames for "
             f"re-check (open the desktop in the app, or run `python -m tda.cli check "
             f"--desktop {desktop}`)")
+    return queued
 
 
 def _selected(db: Db, desktops: Optional[set[int]], log) -> list[int]:
