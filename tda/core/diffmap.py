@@ -84,6 +84,13 @@ MIN_SCALE_DELTA_E = 3.0
 ROBUST_PCT = 99.5
 #: Side of the structuring element that closes 1-2 px gaps inside a blob.
 CLOSE_KSIZE = 5
+#: Default cap on how many raw components :func:`diff_blobs` merges. Merging is
+#: quadratic in the component count and a misregistered pair can produce
+#: thousands of specks, none of which is the answer anyway.
+MAX_COMPONENTS = 400
+#: Safety cap on :func:`_merge_parts`' fixed-point iteration. Each round merges
+#: every currently adjacent pair, so real inputs converge in a few.
+MAX_MERGE_ROUNDS = 64
 #: Heat at which :func:`heat_to_rgba` starts mixing red towards yellow.
 YELLOW_FROM = 0.5
 #: Median estimation subsamples the ROI down to about this many pixels.
@@ -343,6 +350,7 @@ def diff_blobs(
     min_area: int = 80,
     max_blobs: int = 8,
     merge_gap_px: int = 12,
+    max_components: int = MAX_COMPONENTS,
 ) -> list[DiffBlob]:
     """Regions of change from an **absolute** dE map, strongest first.
 
@@ -360,6 +368,11 @@ def diff_blobs(
             into one component -- a cooler breaks into a body plus satellites --
             and without merging those satellites eat every slot and hand SAM a
             box smaller than the part. ``0`` disables merging.
+        max_components: only the this many largest raw components take part in
+            the merge; the rest are discarded first. A badly registered pair can
+            threshold into thousands of specks, and merging is quadratic in the
+            component count, so this is the guard that keeps a pathological pair
+            from stalling the worker thread.
 
     Returns:
         Up to ``max_blobs`` :class:`DiffBlob`, sorted by ``score`` descending.
@@ -378,8 +391,15 @@ def diff_blobs(
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
     count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    keep = range(1, count)  # 0 is the background component
+    if count - 1 > int(max_components):
+        # Largest first, then back into label order so the output stays stable.
+        largest = sorted(
+            keep, key=lambda i: (-int(stats[i, cv2.CC_STAT_AREA]), i)
+        )[: int(max_components)]
+        keep = sorted(largest)  # type: ignore[assignment]
     parts: list[tuple[Box, np.ndarray]] = []
-    for i in range(1, count):  # 0 is the background component
+    for i in keep:
         x = int(stats[i, cv2.CC_STAT_LEFT])
         y = int(stats[i, cv2.CC_STAT_TOP])
         bw = int(stats[i, cv2.CC_STAT_WIDTH])
@@ -409,24 +429,92 @@ def diff_blobs(
 def _merge_parts(
     parts: list[tuple[Box, np.ndarray]], gap: int
 ) -> list[tuple[Box, np.ndarray]]:
-    """Fuse components whose boxes are within ``gap`` px; deterministic order."""
+    """Fuse components whose boxes are within ``gap`` px; deterministic order.
+
+    Union-find over a vectorised pairwise gap test, iterated on the *group*
+    boxes until nothing more merges. The two halves of that matter separately:
+
+    * union-find replaces the first implementation, which re-scanned from the
+      start after every fusion -- O(n^3), 9 ms at 65 components but 897 ms at
+      537, enough to stall the worker thread on a badly registered pair;
+    * iterating on the group boxes rather than settling for one pass over the
+      original boxes keeps the *result* identical. A merged group's box reaches
+      further than either part's, and on the real D13 cooler two satellites sit
+      inside the assembled box while being near no single original component:
+      one pass leaves them as separate blobs and the part fragments again.
+
+    Each round is one O(g^2) numpy comparison and the group count falls fast, so
+    convergence takes a handful of rounds; :data:`MAX_MERGE_ROUNDS` caps it.
+
+    Output order follows the smallest original index in each group, so it does
+    not depend on the input order beyond that.
+    """
     if gap <= 0 or len(parts) < 2:
         return list(parts)
-    items = list(parts)
-    fused = True
-    while fused:
-        fused = False
-        for i in range(len(items)):
-            for j in range(i + 1, len(items)):
-                if _gap(items[i][0], items[j][0]) > gap:
-                    continue
-                items[i] = _fuse(items[i], items[j])
-                del items[j]
-                fused = True
-                break
-            if fused:
-                break
-    return items
+
+    count = len(parts)
+    boxes = np.asarray([part[0] for part in parts], dtype=np.int64)
+    parent = list(range(count))
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]  # path halving
+            node = parent[node]
+        return node
+
+    for _ in range(MAX_MERGE_ROUNDS):
+        roots = np.fromiter((find(i) for i in range(count)), dtype=np.int64, count=count)
+        labels, inverse = np.unique(roots, return_inverse=True)
+        if labels.size < 2:
+            break
+        group = _group_boxes(boxes, inverse, labels.size)
+        pairs = _adjacent_pairs(group, int(gap))
+        fused_any = False
+        for left, right in pairs:
+            root_l, root_r = find(int(labels[left])), find(int(labels[right]))
+            if root_l != root_r:
+                parent[max(root_l, root_r)] = min(root_l, root_r)
+                fused_any = True
+        if not fused_any:
+            break
+
+    groups: dict[int, list[int]] = {}
+    for index in range(count):
+        groups.setdefault(find(index), []).append(index)
+
+    merged: list[tuple[Box, np.ndarray]] = []
+    for root in sorted(groups):
+        members = groups[root]
+        item = parts[members[0]]
+        for index in members[1:]:
+            item = _fuse(item, parts[index])
+        merged.append(item)
+    return merged
+
+
+def _group_boxes(boxes: np.ndarray, inverse: np.ndarray, size: int) -> np.ndarray:
+    """Bounding box of each group, as a ``(size, 4)`` int array."""
+    big = np.iinfo(np.int64).max
+    out = np.empty((size, 4), dtype=np.int64)
+    out[:, 0] = big
+    out[:, 1] = big
+    out[:, 2] = -big
+    out[:, 3] = -big
+    np.minimum.at(out[:, 0], inverse, boxes[:, 0])
+    np.minimum.at(out[:, 1], inverse, boxes[:, 1])
+    np.maximum.at(out[:, 2], inverse, boxes[:, 2])
+    np.maximum.at(out[:, 3], inverse, boxes[:, 3])
+    return out
+
+
+def _adjacent_pairs(boxes: np.ndarray, gap: int) -> np.ndarray:
+    """Index pairs ``(i, j)``, ``i < j``, of boxes within ``gap`` px on both axes."""
+    x0, y0, x1, y1 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    # Gap on each axis: 0 when the projections overlap, the distance otherwise.
+    dx = np.maximum(0, np.maximum(x0[:, None] - x1[None, :], x0[None, :] - x1[:, None]))
+    dy = np.maximum(0, np.maximum(y0[:, None] - y1[None, :], y0[None, :] - y1[:, None]))
+    adjacent = np.triu(np.maximum(dx, dy) <= gap, k=1)
+    return np.argwhere(adjacent)
 
 
 def _fuse(

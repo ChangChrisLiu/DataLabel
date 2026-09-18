@@ -26,6 +26,7 @@ from tda.models.sam_service import SamRequest, SamResult
 from tda.ui.canvas.overlay import LabelOverlay
 from tda.ui.canvas.sam_tools import (
     ERR_FRAME_CHANGED,
+    ERR_NO_FRAME_TOKEN,
     ERR_OUT_OF_BOUNDS,
     HINT_EDITED,
     SamBoxTool,
@@ -92,12 +93,25 @@ def _drain(rounds: int = 6) -> None:
         time.sleep(0.005)
 
 
-@pytest.fixture
-def rig(qapp):
+#: The frame every tool in this file is told it is prompting on.
+FRAME_K = FrameKey(13, 12, "scan")
+
+
+@pytest.fixture(params=["preset-instance", "fresh-overlay"])
+def rig(request, qapp):
+    """Canvas + overlay, with and without an editing instance already chosen.
+
+    ``fresh-overlay`` is the production state before the first mask of a frame:
+    ``editing_instance`` is still ``None`` and the tool's own fallback is what
+    names the instance. Every core test runs under both, because a tool that
+    only works once somebody else has called ``set_editing`` is a tool that
+    never works on the first part of a frame.
+    """
     canvas = _shown(ImageCanvas(), 300, 300)
     canvas.set_image(_rgb(60, 80))
     ov = LabelOverlay((60, 80))
-    ov.set_editing("inst-x", np.zeros((60, 80), dtype=bool))
+    if request.param == "preset-instance":
+        ov.set_editing("inst-x", np.zeros((60, 80), dtype=bool))
     canvas.set_overlay(ov)
     return canvas, ov
 
@@ -109,6 +123,21 @@ def zoomed(rig):
     canvas.set_zoom(0.1)
     QApplication.processEvents()
     return canvas, ov
+
+
+def _point_tool(canvas, ov, queue=None, *, token=FRAME_K, cls=None, **kwargs):
+    """A point tool that has been told which frame it is on (see fix round 2)."""
+    tool = (cls or SamPointTool)(canvas, ov, queue, **kwargs)
+    if token is not None:
+        tool.set_frame_token(token)
+    return tool
+
+
+def _box_tool(canvas, ov, queue=None, *, token=FRAME_K, **kwargs) -> SamBoxTool:
+    tool = SamBoxTool(canvas, ov, queue, **kwargs)
+    if token is not None:
+        tool.set_frame_token(token)
+    return tool
 
 
 class StubQueue:
@@ -229,7 +258,7 @@ def _wire_undo(tool, overlay) -> UndoStack:
 def test_sam_point_tool_submits_a_viewport_crop_with_crop_coords(zoomed):
     canvas, ov = zoomed
     queue = StubQueue()
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
 
     tool.on_press(20.0, 30.0, _press(0, 0, Qt.MouseButton.LeftButton))
     req = queue.last
@@ -243,7 +272,7 @@ def test_sam_point_tool_submits_a_viewport_crop_with_crop_coords(zoomed):
 def test_sam_point_tool_right_click_is_a_negative_point(zoomed):
     canvas, ov = zoomed
     queue = StubQueue()
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     tool.on_press(20.0, 30.0, _press(0, 0, Qt.MouseButton.LeftButton))
     tool.on_press(40.0, 30.0, _press(0, 0, Qt.MouseButton.RightButton))
     assert queue.last.points == [(20.0, 30.0, 1), (40.0, 30.0, 0)]
@@ -258,7 +287,7 @@ def test_sam_point_tool_downscales_a_large_crop_and_scales_points(qapp):
     canvas.set_zoom(0.05)  # everything visible => crop is the whole image
     QApplication.processEvents()
     queue = StubQueue()
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
 
     tool.on_press(1000.0, 1000.0, None)
     req = queue.last
@@ -277,7 +306,7 @@ def test_sam_point_tool_refine_mode_passes_the_cropped_editing_mask(zoomed):
     prior[10:20, 10:20] = True
     ov.set_editing("inst-x", prior)
     queue = StubQueue()
-    tool = SamPointTool(canvas, ov, queue, refine=True)
+    tool = _point_tool(canvas, ov, queue, refine=True)
 
     tool.on_press(15.0, 15.0, None)
     req = queue.last
@@ -293,7 +322,7 @@ def test_sam_point_tool_refine_does_not_ask_for_candidates(zoomed):
     prior[10:20, 10:20] = True
     ov.set_editing("inst-x", prior)
     queue = StubQueue()
-    tool = SamPointTool(canvas, ov, queue, refine=True)
+    tool = _point_tool(canvas, ov, queue, refine=True)
 
     tool.on_press(15.0, 15.0, None)
     assert queue.last.mask_input is not None
@@ -304,7 +333,7 @@ def test_sam_point_tool_sends_point_plus_box_when_a_prompt_box_is_set(zoomed):
     """The diff map (or the box tool) supplies the box; the click supplies the point."""
     canvas, ov = zoomed
     queue = StubQueue()
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
 
     tool.set_prompt_box((10.0, 12.0, 50.0, 52.0))
     tool.on_press(20.0, 30.0, None)
@@ -329,7 +358,7 @@ def test_a_prompt_box_outside_the_viewport_is_dropped(qapp):
     canvas.zoom_to((0, 0, 60, 60))
     QApplication.processEvents()
     queue = StubQueue()
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
 
     tool.set_prompt_box((150.0, 150.0, 190.0, 190.0))  # far outside the viewport
     tool.on_press(20.0, 20.0, None)
@@ -340,7 +369,7 @@ def test_a_prompt_box_outside_the_viewport_is_dropped(qapp):
 def test_sam_point_tool_clear_points(zoomed):
     canvas, ov = zoomed
     queue = StubQueue()
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     tool.on_press(20.0, 30.0, None)
     tool.clear_points()
     assert tool.points == []
@@ -351,7 +380,7 @@ def test_sam_point_tool_clear_points(zoomed):
 def test_sam_box_tool_submits_the_dragged_box(zoomed):
     canvas, ov = zoomed
     queue = StubQueue()
-    tool = SamBoxTool(canvas, ov, queue)
+    tool = _box_tool(canvas, ov, queue)
 
     tool.on_press(40.0, 45.0, None)
     tool.on_move(10.0, 15.0, None)  # dragged backwards: must be normalised
@@ -367,7 +396,7 @@ def test_sam_box_tool_submits_the_dragged_box(zoomed):
 def test_sam_box_tool_ignores_a_degenerate_drag(rig):
     canvas, ov = rig
     queue = StubQueue()
-    tool = SamBoxTool(canvas, ov, queue)
+    tool = _box_tool(canvas, ov, queue)
     tool.on_press(20.0, 20.0, None)
     tool.on_release(20.0, 20.0, None)
     assert queue.requests == []
@@ -375,7 +404,7 @@ def test_sam_box_tool_ignores_a_degenerate_drag(rig):
 
 def test_sam_tools_without_a_queue_do_not_crash(rig):
     canvas, ov = rig
-    tool = SamPointTool(canvas, ov, None)
+    tool = _point_tool(canvas, ov, None)
     tool.on_press(10.0, 10.0, None)  # no queue: collects the point, submits nothing
     assert tool.points == [(10.0, 10.0, 1)]
 
@@ -387,7 +416,7 @@ def test_sam_point_tool_result_replaces_the_editing_layer(zoomed):
     canvas, ov = zoomed
     ov.editing[0:5, 0:5] = True
     queue = StubQueue(_blob_result)
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     strokes: list[object] = []
     tool.sigStroke.connect(strokes.append)
 
@@ -410,7 +439,7 @@ def test_sam_point_tool_refine_keeps_the_mask_outside_the_crop(qapp):
     QApplication.processEvents()
 
     queue = StubQueue(_blob_result)
-    tool = SamPointTool(canvas, ov, queue, refine=True)
+    tool = _point_tool(canvas, ov, queue, refine=True)
     strokes: list[object] = []
     tool.sigStroke.connect(strokes.append)
     tool.on_press(20.0, 20.0, None)
@@ -433,7 +462,7 @@ class ThreadRecordingSamTool(SamPointTool):
 def test_sam_result_is_applied_on_the_gui_thread(zoomed):
     canvas, ov = zoomed
     queue = ThreadedQueue(_blob_result)
-    tool = ThreadRecordingSamTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue, cls=ThreadRecordingSamTool)
 
     tool.on_press(20.0, 30.0, None)
     queue.join()
@@ -454,7 +483,7 @@ def test_only_the_newest_request_is_applied(zoomed):
     """Two clicks in flight: the first answer must not reach the overlay."""
     canvas, ov = zoomed
     queue = HoldingQueue(_tagged_result)
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     strokes: list[object] = []
     tool.sigStroke.connect(strokes.append)
 
@@ -475,7 +504,7 @@ def test_a_stale_result_delivered_last_is_still_dropped(zoomed):
     """A non-FIFO executor may answer the old prompt after the new one."""
     canvas, ov = zoomed
     queue = HoldingQueue(_tagged_result)
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     strokes: list[object] = []
     tool.sigStroke.connect(strokes.append)
 
@@ -495,7 +524,7 @@ def test_a_result_for_the_previous_frame_is_dropped(zoomed):
     """Silent annotation corruption: frame k's mask written into frame k-1."""
     canvas, ov = zoomed
     queue = HoldingQueue(_blob_result)
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     tool.set_frame_token(FrameKey(13, 12, "scan"))
     tool.set_prompt_box((5.0, 5.0, 50.0, 50.0))
     errors: list[str] = []
@@ -518,7 +547,7 @@ def test_a_result_for_the_previous_frame_is_dropped(zoomed):
 def test_a_result_for_another_instance_is_dropped(zoomed):
     canvas, ov = zoomed
     queue = HoldingQueue(_blob_result)
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     errors: list[str] = []
     tool.sigError.connect(errors.append)
 
@@ -534,8 +563,10 @@ def test_a_result_whose_crop_no_longer_fits_is_dropped_not_raised(zoomed):
     """A smaller frame must not blow up inside the Qt slot."""
     canvas, ov = zoomed
     queue = HoldingQueue(_blob_result)
-    tool = SamPointTool(canvas, ov, queue)
-    tool.set_frame_token("frame-k")  # identity survives the overlay swap
+    # The instance is pinned so that only the *size* differs after the swap;
+    # otherwise the identity check would catch it first and the bounds check
+    # would never be exercised.
+    tool = _point_tool(canvas, ov, queue, instance="inst-x")
     errors: list[str] = []
     tool.sigError.connect(errors.append)
 
@@ -553,7 +584,7 @@ def test_a_result_whose_crop_no_longer_fits_is_dropped_not_raised(zoomed):
 def test_changing_the_frame_token_resets_candidates_and_the_prompt_box(zoomed):
     canvas, ov = zoomed
     queue = StubQueue(_multi_result)
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     tool.set_frame_token(FrameKey(13, 12, "scan"))
     tool.set_prompt_box((5.0, 5.0, 50.0, 50.0))
 
@@ -570,11 +601,165 @@ def test_changing_the_frame_token_resets_candidates_and_the_prompt_box(zoomed):
     assert tool.cycle_candidate() == 0
 
 
+def test_a_fresh_overlay_can_click_once_and_press_c(qapp):
+    """The tool names the instance itself; that must not read as a drift.
+
+    On a fresh overlay ``editing_instance`` is ``None`` at submit and becomes
+    the tool's own fallback once the first mask lands. If the identity is
+    stamped before the fallback and compared after it, the tool invalidates its
+    own result: candidates vanish and the headline gesture stops working.
+    """
+    canvas = _shown(ImageCanvas(), 300, 300)
+    canvas.set_image(_rgb(60, 80))
+    ov = LabelOverlay((60, 80))
+    canvas.set_overlay(ov)
+    canvas.set_zoom(0.1)
+    QApplication.processEvents()
+    assert ov.editing_instance is None, "this test is about the fresh state"
+
+    queue = StubQueue(_multi_result)
+    tool = _point_tool(canvas, ov, queue)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(20.0, 30.0, None)
+    assert _spin(lambda: bool(strokes))
+    assert tool.candidate_count == 3
+
+    assert tool.cycle_candidate() == 1, "click once, press C: nothing happened"
+    assert tool.candidate_count == 3, "the tool discarded its own candidates"
+    assert ov.editing[32, 25], "candidate 1 was not applied"
+    assert tool.cycle_candidate() == 2
+    assert ov.editing[40, 25]
+
+
+def test_the_prompt_box_survives_consecutive_clicks(zoomed):
+    """The box describes the frame's changed region, not one click."""
+    canvas, ov = zoomed
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue)
+    box = (5.0, 5.0, 50.0, 50.0)
+    tool.set_prompt_box(box)
+
+    tool.on_press(20.0, 30.0, None)
+    assert _spin(lambda: ov.editing.any())
+    assert tool.prompt_box == box, "the box was cleared by the tool's own result"
+
+    tool.clear_points()
+    tool.on_press(25.0, 35.0, None)
+    assert len(queue.requests) == 2
+    assert queue.requests[0].box == box
+    assert queue.requests[1].box == box, "the second click lost the box"
+
+
+# ---------------------------------------------------------------------------
+# the frame token is mandatory
+# ---------------------------------------------------------------------------
+def test_submitting_without_a_frame_token_is_refused(zoomed):
+    """No identity means no way to tell a stale result from a fresh one."""
+    canvas, ov = zoomed
+    queue = StubQueue(_blob_result)
+    tool = SamPointTool(canvas, ov, queue)  # deliberately not told the frame
+    errors: list[str] = []
+    strokes: list[object] = []
+    tool.sigError.connect(errors.append)
+    tool.sigStroke.connect(strokes.append)
+
+    assert tool.frame_token is None
+    tool.on_press(20.0, 30.0, None)
+    assert queue.requests == [], "a prompt was sent without a frame token"
+    assert errors == [ERR_NO_FRAME_TOKEN]
+    _drain()
+    assert strokes == []
+    assert not ov.editing.any()
+
+
+def test_unsetting_the_frame_token_disables_the_tool(zoomed):
+    canvas, ov = zoomed
+    queue = StubQueue(_multi_result)
+    tool = _point_tool(canvas, ov, queue)
+    errors: list[str] = []
+    tool.sigError.connect(errors.append)
+
+    tool.on_press(20.0, 30.0, None)
+    assert _spin(lambda: tool.candidate_count == 3)
+
+    tool.set_frame_token(None)  # e.g. the session closed the frame
+    assert tool.frame_token is None
+    assert tool.candidate_count == 0
+    assert tool.prompt_box is None
+
+    tool.clear_points()
+    tool.on_press(30.0, 30.0, None)
+    assert len(queue.requests) == 1, "a prompt was sent while disabled"
+    assert errors == [ERR_NO_FRAME_TOKEN]
+
+
+def test_one_overlay_reused_for_two_frames_drops_the_stale_result(zoomed):
+    """The session repaints one overlay per frame, so object identity is useless."""
+    canvas, ov = zoomed
+    queue = HoldingQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue, token=FrameKey(13, 12, "scan"))
+    errors: list[str] = []
+    tool.sigError.connect(errors.append)
+
+    tool.on_press(20.0, 30.0, None)
+    # ... the annotator steps back: same overlay object, same size, new frame.
+    tool.set_frame_token(FrameKey(13, 11, "scan"))
+
+    queue.flush()
+    assert _spin(lambda: bool(errors))
+    assert errors == [ERR_FRAME_CHANGED]
+    assert not ov.editing.any()
+
+
+# ---------------------------------------------------------------------------
+# cancelling
+# ---------------------------------------------------------------------------
+def test_detach_cancels_the_in_flight_prompt(zoomed):
+    """Switching tool must not let the old tool paint a second later."""
+    canvas, ov = zoomed
+    queue = HoldingQueue(_multi_result)
+    tool = _point_tool(canvas, ov, queue)
+    tool.set_prompt_box((5.0, 5.0, 50.0, 50.0))
+    strokes: list[object] = []
+    errors: list[str] = []
+    tool.sigStroke.connect(strokes.append)
+    tool.sigError.connect(errors.append)
+
+    tool.on_press(20.0, 30.0, None)
+    tool.detach()
+
+    queue.flush()
+    _drain()
+    assert strokes == [], "a late result was applied after the tool was switched away"
+    assert errors == [], "cancelling is not an error"
+    assert not ov.editing.any()
+    assert tool.candidate_count == 0
+    assert tool.prompt_box is None
+    assert tool.points == [], "re-attaching must start from a clean prompt"
+
+
+def test_a_detached_box_tool_forgets_its_drag(zoomed):
+    canvas, ov = zoomed
+    queue = StubQueue()
+    tool = _box_tool(canvas, ov, queue)
+
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(40.0, 40.0, None)
+    assert tool.box is not None
+
+    tool.detach()
+    assert tool.box is None
+    tool.on_release(40.0, 40.0, None)
+    assert queue.requests == [], "a drag that was cancelled still submitted"
+
+
 def test_switching_instance_resets_candidates_and_the_prompt_box(zoomed):
     """The overlay changes instance behind the tool's back; it must notice."""
     canvas, ov = zoomed
     queue = StubQueue(_multi_result)
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     tool.set_prompt_box((5.0, 5.0, 50.0, 50.0))
 
     tool.on_press(20.0, 30.0, None)
@@ -598,7 +783,7 @@ def test_switching_instance_resets_candidates_and_the_prompt_box(zoomed):
 def test_sam_point_tool_cycles_through_the_candidates(zoomed):
     canvas, ov = zoomed
     queue = StubQueue(_multi_result)
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     strokes: list[object] = []
     tool.sigStroke.connect(strokes.append)
 
@@ -630,7 +815,7 @@ def test_sam_point_tool_cycles_through_the_candidates(zoomed):
 def test_sam_point_tool_resets_the_candidates_on_a_new_request(zoomed):
     canvas, ov = zoomed
     queue = StubQueue(_multi_result)
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     strokes: list[object] = []
     tool.sigStroke.connect(strokes.append)
 
@@ -649,7 +834,7 @@ def test_sam_point_tool_resets_the_candidates_on_a_new_request(zoomed):
 
 def test_cycle_candidate_without_a_result_is_a_no_op(rig):
     canvas, ov = rig
-    tool = SamPointTool(canvas, ov, StubQueue())
+    tool = _point_tool(canvas, ov, StubQueue())
     assert tool.candidate_count == 0
     assert tool.cycle_candidate() == 0
     assert not ov.editing.any()
@@ -658,7 +843,7 @@ def test_cycle_candidate_without_a_result_is_a_no_op(rig):
 def test_cycle_candidate_does_nothing_when_sam_offered_only_one_mask(zoomed):
     canvas, ov = zoomed
     queue = StubQueue(_blob_result)  # a single-candidate result
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     strokes: list[object] = []
     tool.sigStroke.connect(strokes.append)
 
@@ -673,7 +858,7 @@ def test_a_manual_edit_cancels_cycling_and_is_never_discarded(zoomed):
     """A brush stroke on top of the proposal outranks the candidate list."""
     canvas, ov = zoomed
     queue = StubQueue(_multi_result)
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     strokes: list[object] = []
     tool.sigStroke.connect(strokes.append)
     hints: list[str] = []
@@ -698,7 +883,7 @@ def test_cycle_candidate_follows_the_layer_after_undo(zoomed):
     """Undo moves the layer behind the tool's back; the index must follow it."""
     canvas, ov = zoomed
     queue = StubQueue(_multi_result)
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     stack = _wire_undo(tool, ov)
 
     tool.on_press(20.0, 30.0, None)
@@ -721,7 +906,7 @@ def test_candidate_switches_are_undoable_through_a_real_undo_stack(zoomed):
     ov.set_editing("inst-x", pre_sam)
 
     queue = StubQueue(_multi_result)
-    tool = SamPointTool(canvas, ov, queue)
+    tool = _point_tool(canvas, ov, queue)
     stack = _wire_undo(tool, ov)
 
     tool.on_press(20.0, 30.0, None)

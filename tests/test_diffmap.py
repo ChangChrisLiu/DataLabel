@@ -7,6 +7,7 @@ eyeballs are produced by ``experiments/diffmap_calibrate.py``.
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +19,9 @@ from tda.core.cache import cache_path, suggest_roi
 from tda.core.diffmap import (
     BLOB_DELTA_E,
     DiffBlob,
+    _fuse,
+    _gap,
+    _merge_parts,
     diff_blobs,
     diff_delta_e,
     diff_heat,
@@ -313,6 +317,123 @@ def test_a_blob_carries_its_own_mask():
 def test_diff_blobs_validates_its_input():
     with pytest.raises(ValueError):
         diff_blobs(np.zeros((4, 4, 3), dtype=np.float32))
+
+
+def test_diff_blobs_caps_the_components_it_considers():
+    """A pathological pair must not be able to stall the worker thread."""
+    delta = np.zeros((600, 600), dtype=np.float32)
+    sides = []
+    for i in range(20):
+        side = 10 + i
+        x, y = (i % 5) * 120, (i // 5) * 120
+        delta[y : y + side, x : x + side] = 30.0
+        sides.append(side)
+
+    everything = diff_blobs(delta, merge_gap_px=0, max_blobs=50)
+    assert len(everything) == 20
+
+    capped = diff_blobs(delta, merge_gap_px=0, max_blobs=50, max_components=5)
+    assert len(capped) == 5, "the cap must drop components before merging"
+    kept = sorted(b.area for b in capped)
+    assert kept == sorted(s * s for s in sides[-5:]), "the cap must keep the largest"
+
+
+# ---------------------------------------------------------------------------
+# merging (fix round 2: union-find instead of restart-on-every-fusion)
+# ---------------------------------------------------------------------------
+def _oracle_merge(
+    parts: list[tuple[tuple[int, int, int, int], np.ndarray]], gap: int
+) -> list[tuple[tuple[int, int, int, int], np.ndarray]]:
+    """The round-1 implementation, kept here as the reference result."""
+    if gap <= 0 or len(parts) < 2:
+        return list(parts)
+    items = list(parts)
+    fused = True
+    while fused:
+        fused = False
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                if _gap(items[i][0], items[j][0]) > gap:
+                    continue
+                items[i] = _fuse(items[i], items[j])
+                del items[j]
+                fused = True
+                break
+            if fused:
+                break
+    return items
+
+
+def _components(delta: np.ndarray, thresh: float = BLOB_DELTA_E) -> list:
+    """The connected components ``diff_blobs`` would merge, before merging."""
+    import cv2
+
+    binary = (delta >= thresh).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    parts = []
+    for i in range(1, count):
+        x = int(stats[i, cv2.CC_STAT_LEFT])
+        y = int(stats[i, cv2.CC_STAT_TOP])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        parts.append(((x, y, x + bw, y + bh), labels[y : y + bh, x : x + bw] == i))
+    return parts
+
+
+def _merge_fixtures() -> list[np.ndarray]:
+    """The dE maps the other tests in this file merge."""
+    after = _base()
+    maps = [
+        diff_delta_e(_with_rect(after, RECT), after),
+        diff_delta_e(_with_rect(_with_rect(after, RECT), RECT2), after),
+    ]
+    fragments = np.zeros((100, 200), dtype=np.float32)
+    fragments[20:40, 20:40] = 30.0
+    fragments[20:40, 48:60] = 30.0
+    fragments[20:40, 150:170] = 30.0
+    maps.append(fragments)
+    patches = np.zeros((100, 200), dtype=np.float32)
+    for i in range(5):
+        patches[10:30, 10 + i * 35 : 30 + i * 35] = 20.0 + 4.0 * i
+    maps.append(patches)
+    return maps
+
+
+def test_merging_matches_the_previous_implementation_on_the_fixtures():
+    for index, delta in enumerate(_merge_fixtures()):
+        parts = _components(delta)
+        new = _merge_parts(parts, 12)
+        old = _oracle_merge(parts, 12)
+        assert [box for box, _ in new] == [box for box, _ in old], f"map {index}"
+        for (_, mask_new), (_, mask_old) in zip(new, old):
+            assert np.array_equal(mask_new, mask_old), f"map {index}"
+
+
+def test_merging_500_components_is_fast():
+    """The old version restarted the scan after every fusion: O(n^3)."""
+    rng = np.random.default_rng(5)
+    parts = []
+    for _ in range(500):
+        x = int(rng.integers(0, 2000))
+        y = int(rng.integers(0, 2000))
+        parts.append(((x, y, x + 6, y + 6), np.ones((6, 6), dtype=bool)))
+
+    start = time.perf_counter()
+    merged = _merge_parts(parts, 12)
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    assert elapsed_ms < 100.0, f"merging 500 components took {elapsed_ms:.0f} ms"
+    assert 0 < len(merged) <= len(parts)
+
+
+def test_merging_is_transitive_and_deterministic():
+    chain = [((i * 20, 0, i * 20 + 10, 10), np.ones((10, 10), dtype=bool))
+             for i in range(6)]  # each 10 px from the next
+    merged = _merge_parts(chain, 12)
+    assert len(merged) == 1, "a chain of neighbours is one blob"
+    assert merged[0][0] == (0, 0, 110, 10)
+    assert _merge_parts(list(reversed(chain)), 12)[0][0] == (0, 0, 110, 10)
 
 
 # ---------------------------------------------------------------------------
