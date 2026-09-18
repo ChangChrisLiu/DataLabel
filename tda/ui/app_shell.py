@@ -210,7 +210,8 @@ class ShellMixin:
         if signal is not None:
             signal.connect(self._on_editing_changed)
         for name, slot in (("sigQueuesChanged", self._on_queues_changed),
-                           ("sigSweepProgress", self._on_sweep_progress)):
+                           ("sigSweepProgress", self._on_sweep_progress),
+                           ("sigSweepError", self._on_sweep_error)):
             found = getattr(self.session, name, None)
             if found is not None:
                 found.connect(slot)

@@ -13,7 +13,7 @@ view writes the ``compiled_mask`` rows it finds stale.
 from __future__ import annotations
 
 import argparse
-from typing import Callable, Optional, Sequence
+from typing import Callable, Sequence
 
 from tda import pipeline as P
 from tda.core.model import VIEWS
@@ -55,15 +55,19 @@ def _prepare_truth(db, tax, desktops: Sequence[int], view: str,
     * unless ``only_verified``, every step of the view is refreshed, so the
       automatic rows are current too.
 
-    Returns ``{"desktops", "view", "steps", "updated", "conflicts", "problems",
-    "pending"}``; ``pending`` is what is *still* queued afterwards, which is
-    what the exports refuse on.
+    One :class:`~tda.core.truth.TruthService` is built and returned in
+    ``truth``: the exports take it as a keyword argument and refresh lazily
+    through the same object, so a frame is never compiled twice per run.
+
+    Returns ``{"truth", "desktops", "view", "steps", "updated", "conflicts",
+    "problems", "pending"}``; ``pending`` is what is *still* queued afterwards,
+    which is what the exports refuse on.
     """
     from tda.core.truth import TruthService
 
     truth = TruthService(db, tax)
-    total = {"desktops": list(desktops), "view": str(view), "steps": 0,
-             "updated": 0, "conflicts": 0, "problems": [], "pending": []}
+    total = {"truth": truth, "desktops": list(desktops), "view": str(view),
+             "steps": 0, "updated": 0, "conflicts": 0, "problems": [], "pending": []}
     for desktop in desktops:
         runner = getattr(truth, "run_pending_rechecks", None)
         if callable(runner):
@@ -197,12 +201,13 @@ def _add_build_cache(sub) -> None:
 # --------------------------------------------------------------------------- #
 # exports
 # --------------------------------------------------------------------------- #
-def _export_prologue(args, db, desktops: Sequence[int], command: str) -> Optional[int]:
-    """Bring the truth up to date and refuse while re-checks are still queued.
+def _export_prologue(args, db, desktops: Sequence[int], command: str):
+    """``(exit code, truth)``: refuse while re-checks are still queued, else go.
 
     An export is a release artefact: shipping a frame whose stored geometry the
     session had already marked stale is worse than not shipping at all, so the
-    command stops and says which frames to run ``check`` on.
+    command stops and says which frames to run ``check`` on.  The service it
+    built is handed back so the exporter refreshes through the same one.
     """
     from tda.cli import EXIT_ERROR
 
@@ -212,8 +217,8 @@ def _export_prologue(args, db, desktops: Sequence[int], command: str) -> Optiona
         print(f"[{command}] refused: {len(stats['pending'])} frames are still "
               f"pending a re-check ({sorted(stats['pending'])[:10]}). Run "
               f"'python -m tda.cli check --desktop N --view {args.view}' first.")
-        return EXIT_ERROR
-    return None
+        return EXIT_ERROR, stats["truth"]
+    return None, stats["truth"]
 
 
 def cmd_export_coco(args: argparse.Namespace) -> int:
@@ -227,12 +232,12 @@ def cmd_export_coco(args: argparse.Namespace) -> int:
         if not desktops:
             print("[export-coco] nothing to export: pass --desktops")
             return EXIT_ERROR
-        refused = _export_prologue(args, db, desktops, "export-coco")
+        refused, truth = _export_prologue(args, db, desktops, "export-coco")
         if refused is not None:
             return refused
         stats = export_coco(db, load_taxonomy(), desktops, str(args.view), str(out),
                             only_verified=bool(args.only_verified),
-                            roi_crop=bool(args.roi_crop))
+                            roi_crop=bool(args.roi_crop), truth=truth)
         print(f"[export-coco] {stats.get('images', 0)} images, "
               f"{stats.get('annotations', 0)} annotations -> {out}")
         return EXIT_OK
@@ -271,12 +276,13 @@ def cmd_export_vlm(args: argparse.Namespace) -> int:
         if not desktops:
             print("[export-vlm] nothing to export: pass --desktops")
             return EXIT_ERROR
-        refused = _export_prologue(args, db, desktops, "export-vlm")
+        refused, truth = _export_prologue(args, db, desktops, "export-vlm")
         if refused is not None:
             return refused
         tasks = [t.strip() for t in str(args.tasks).split(",") if t.strip()] or list(TASKS)
         stats = export_vlm(db, load_taxonomy(), desktops, str(args.view), str(out),
-                           tasks=tasks, only_verified=bool(args.only_verified))
+                           tasks=tasks, only_verified=bool(args.only_verified),
+                           truth=truth)
         print(f"[export-vlm] {stats.get('records', 0)} records "
               f"({stats.get('by_task', {})}) -> {out}")
         return EXIT_OK

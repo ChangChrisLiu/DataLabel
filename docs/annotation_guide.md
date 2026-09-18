@@ -12,13 +12,13 @@ D:\Anaconda\envs\tda\python.exe -m tda.cli app --annotator chang
 D:\Anaconda\envs\tda\python.exe -m tda.cli app --annotator chang --desktop 13 --view scan --step 42
 ```
 
-- 只有 `--annotator` 必填（它同时是锁的持有人）。`--desktop` / `--view` / `--step` 省略时，
-  按 `tda_app.ini` 里记的**你上次的机器、视图、步骤**打开；第一次用则打开有帧的最小编号机器的
+- 只有 `--annotator` 必填（它同时是锁的持有人）。`--desktop` / `--view` / `--step` 省略时按
+  `tda_app.ini` 里记的**你上次的机器、视图、步骤**打开；第一次用则打开有帧的最小编号机器的
   `scan` 视图，落在**最后一张有图像的帧**上（倒序标注从这里开始）。
 - 启动时先取**单人锁**，再打开数据库 —— 顺序就是这个顺序。别人正开着时会弹框写明持有人和时间，
   以退出码 3 退出，而数据库文件根本没有被打开过（只读了一次锁文件 `<db>.lock`）。
-- SAM 在窗口显示**之后**才在后台线程里加载，第一帧 0.7 秒左右就能看到。没有模型
-  （缺权重、没有 CUDA）不影响别的功能：状态栏写明原因，只是 `S` / `X` 两个工具不可用。
+- SAM 在窗口显示**之后**才在后台线程里加载，第一帧 0.7 秒左右就能看到。没有模型（缺权重、
+  没有 CUDA）不影响别的功能：状态栏写明原因，只是 `S` / `X` 两个工具不可用。
 - 窗口大小、面板布局、上次的机器/视图/步骤存在 `D:\DataSet\.cache\tda_app.ini`，不写注册表、
   不写 C 盘；日志在 `D:\DataSet\.cache\logs\tda_app.log`。
 
@@ -35,12 +35,9 @@ D:\Anaconda\envs\tda\python.exe -m tda.cli app --annotator chang --desktop 13 --
 
 | 模式 | 中间显示 | 什么时候用 |
 |---|---|---|
-| **Steps（S1 步骤核对）** | 步骤表 + 实例表 | 新机器第一步：核对日志解析出来的步骤、动作、目标实例，拆分复合行，删掉没人引用的实例。改完按 `Apply`。 |
+| **Steps（S1 步骤核对）** | 步骤表 + 实例表 | 新机器第一步：核对日志解析出来的步骤、动作、目标实例，拆分复合行，删掉没人引用的实例。改完按 `Apply`；`Apply` 之后会话会在**同一帧**上重新打开。有未保存修改时切走会先问一句。 |
 | **Annotate（标注）** | 画布 | 主战场。倒序一帧一帧往前画。 |
 | **Review（复查）** | 画布 + 右侧复查队列 | 冲突、待复查、缺形状、未解释差异四个队列。 |
-
-- 在 Steps 模式里 `Apply` 之后，会话会在**同一帧**上重新打开（实例和状态事件都变了）。
-- Steps 模式有未保存的修改时切走会先问一句。
 
 ---
 
@@ -245,9 +242,8 @@ D:\Anaconda\envs\tda\python.exe -m tda.cli check --desktop 13 --view scan
 如果那个实例在这一帧已经不存在了（S1 里删掉了），这条记录会被自动清理，不会再来烦你。
 已提交的内容本来就每次操作即时落盘，不会丢。
 
-**SAM 用不了。**
-状态栏会写明原因（缺权重文件 / 没有 CUDA / 没装 `sam2`）。
-权重路径来自 `configs/paths.yaml` 的 `weights_dir`。其余功能不受影响，用画笔照样能标。
+**SAM 用不了。** 状态栏会写明原因（缺权重文件 / 没有 CUDA / 没装 `sam2`）；权重路径来自
+`configs/paths.yaml` 的 `weights_dir`。其余功能不受影响，用画笔照样能标。
 
 **想知道这台机器还差多少。**
 顶部机器下拉框里写着 `D13 <品牌> [已确认/总帧数]`；命令行 `python -m tda.cli status --desktop 13`

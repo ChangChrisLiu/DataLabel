@@ -36,6 +36,7 @@ from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 from tda.ui.app_assist import AssistMixin
 from tda.ui.app_edit import EditMixin
+from tda.ui.app_roi import RoiMixin
 from tda.ui.app_shell import (
     MODE_TITLES,
     ShellMixin,
@@ -53,7 +54,7 @@ OPACITY_STEP = 20
 GRID_OFF = 1e9
 
 
-class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
+class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
     """One annotator, one desktop/view, three modes."""
 
     def __init__(self, session, paths: dict, annotator: str, *,
@@ -74,6 +75,8 @@ class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
         self.tools_enabled = True
         self._tool_name = "brush"
         self.review_refreshes = 0
+        #: Steps whose background re-check gave up; ``F5`` retries them.
+        self.sweep_failures: set[int] = set()
 
         self.logger = S.get_logger(self.paths)
         self.settings = S.make_settings(self.paths)
@@ -533,23 +536,42 @@ class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
         on one database for a convenience nobody asked for.
         """
         key = self.session.current()
+        retried = sorted(self.sweep_failures)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
+            # Draining the queue here is also the retry for the frames the
+            # background sweeper parked after three failures: the rows are still
+            # in the database, only the sweeper had stopped picking them up.
             self.session.truth.run_pending_rechecks(self.session.desktop,
                                                     self.session.view)
             stats = self.session.truth.refresh(key) or {}
         finally:
             QApplication.restoreOverrideCursor()
+        self.sweep_failures.clear()
         self.session.goto(key.step)   # re-read the frame the recompile changed
         self.review.refresh()
+        retry = f", retried {len(retried)} parked re-check(s)" if retried else ""
         self.report(f"step {key.step} recompiled: {stats.get('updated', 0)} rows, "
-                    f"{stats.get('conflicts', 0)} conflicts — use "
+                    f"{stats.get('conflicts', 0)} conflicts{retry} — use "
                     f"'python -m tda.cli check' for the whole view")
 
     @S.guard
-    def _on_sweep_progress(self, done: int, total: int) -> None:
+    def _on_sweep_progress(self, done: int, total: int, failed: int = 0) -> None:
         """The session's background re-check of frozen frames is making headway."""
-        self.report(f"re-checking verified frames: {done}/{total}")
+        suffix = f", {failed} failed — F5 retries" if failed else ""
+        self.report(f"re-checking verified frames: {done}/{total}{suffix}")
+
+    @S.guard
+    def _on_sweep_error(self, step: int, text: str) -> None:
+        """A background re-check gave up on a frame; it stays queued.
+
+        The sweeper parks a frame after three failures rather than spinning on
+        it, so without this the annotator would never learn that one frame of
+        the machine is quietly out of date.
+        """
+        self.sweep_failures.add(int(step))
+        self.report_error(f"re-check of step {step} failed: {text} — press F5 "
+                          f"(or run 'python -m tda.cli check') to try again")
 
     @S.guard
     def _on_queues_changed(self) -> None:

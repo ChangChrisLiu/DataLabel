@@ -83,6 +83,19 @@ def card_instances(win: MainWindow) -> list[str]:
     return [str(r["instance"]) for r in win.session.task_card() if r.get("instance")]
 
 
+def drawable_instances(win: MainWindow) -> list[str]:
+    """Instances that are painted rather than boxed: in the chassis, on the card.
+
+    Falls back to the frame's chassis instances when the card happens to ask
+    only for bench boxes, which is what the start frame of a torn-down machine
+    looks like.
+    """
+    in_chassis = [str(r.get("key")) for r in win.session.instance_rows()
+                  if r.get("placement") == "in_chassis"]
+    wanted = [i for i in card_instances(win) if i in in_chassis]
+    return wanted or in_chassis
+
+
 def start_edit(win: MainWindow, index: int = 0) -> str:
     instance = card_instances(win)[index]
     win.task_card.sigRequestEdit.emit(instance)
@@ -434,7 +447,8 @@ def test_sequence_b_sam_then_brush_then_commit_then_confirm(window):
     session = window.session
     seed_shapes(session, LAST_STEP)
     session.goto(LAST_STEP)
-    instance = start_edit(window)
+    instance = drawable_instances(window)[0]
+    window.task_card.sigRequestEdit.emit(instance)
     window.act_tool("sam_point")
     window.sam_point.on_press(32.0, 32.0, None)
     window.sam_queue.flush()
