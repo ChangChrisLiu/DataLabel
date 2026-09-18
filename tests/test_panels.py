@@ -612,6 +612,21 @@ def test_instances_v_cycles_visibility(session: StubSession) -> None:
     ]
 
 
+def test_instances_forget_a_selection_that_left_the_frame(session: StubSession) -> None:
+    """Removed parts drop out of the table; H / V / 1-7 must not chase them."""
+    panel = InstanceListPanel(session)
+    panel.select_instance("screw.cpu_cooler.03")
+    assert panel.selected_instance() == "screw.cpu_cooler.03"
+    session._rows = [r for r in session._rows if r["key"] != "screw.cpu_cooler.03"]
+    panel.refresh()
+    assert panel.selected_instance() is None
+    session.calls.clear()
+    panel.toggle_hidden()
+    panel.cycle_visibility()
+    panel.set_visibility(api.VISIBILITY_VALUES[0])
+    assert session.calls == []   # nothing acted on the key that is gone
+
+
 def test_instances_set_visibility_covers_the_seven_values(session: StubSession) -> None:
     """``1``-``7`` are bound by the window's table; the panel takes a value."""
     panel = InstanceListPanel(session)

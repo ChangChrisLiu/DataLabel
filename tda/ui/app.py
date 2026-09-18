@@ -576,7 +576,9 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
         self.sweep_failures.clear()
         self.session.goto(key.step, force=True)   # re-read what the recompile changed
         self.review.refresh()
-        retry = f", {queued} re-check(s) queued" if queued else ""
+        # "queued" is only true when something is going to drain the queue.
+        draining = bool(getattr(self.session, "sweeper_enabled", True))
+        retry = f", {queued} re-check(s) queued" if queued and draining else ""
         self.report(f"step {key.step} recompiled: {stats.get('updated', 0)} rows, "
                     f"{stats.get('conflicts', 0)} conflicts{retry} — use "
                     f"'python -m tda.cli check' for the whole view")

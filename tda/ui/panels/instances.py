@@ -200,8 +200,11 @@ class InstanceListPanel(QWidget):
             self._loading = False
             self._apply_column_widths()
             self._table.setUpdatesEnabled(True)
-        if keep is not None:
-            self.select_instance(keep)
+        # A removed part has no compiled row any more, so the table shrinks as
+        # the teardown proceeds: a selection that is gone must clear rather than
+        # leave H / V / 1-7 acting on a key this frame no longer has.
+        if keep is None or not self.select_instance(keep):
+            self._table.setCurrentCell(-1, -1)
 
     #: Column widths in pixels; ``None`` means "take what is left" (the key).
     WIDTHS: tuple[Optional[int], ...] = (22, None, 78, 46, 46)

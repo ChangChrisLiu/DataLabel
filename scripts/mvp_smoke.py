@@ -379,7 +379,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     text = json.dumps(report, indent=1, ensure_ascii=False, default=str)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
-    print(text)
+    # A Windows console is cp1252 by default and the report quotes the Chinese
+    # status line: print it in the console's encoding rather than exit 1 on it.
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    sys.stdout.write(text.encode(encoding, "replace").decode(encoding) + "\n")
     return 0
 
 
