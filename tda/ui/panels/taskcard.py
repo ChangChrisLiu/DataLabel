@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -65,12 +66,23 @@ class TaskCardPanel(QWidget):
         self._list = QListWidget()
         self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self._list.setAlternatingRowColors(True)
+        # An instruction is a sentence; the dock's width is not negotiable by it
+        self._list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._list.setMinimumWidth(160)
         self._list.itemActivated.connect(self._on_item_activated)
 
-        self.commit_button = QPushButton("Commit edit (Enter)")
-        self.override_button = QPushButton("Commit as frame override (Alt+Enter)")
-        self.split_button = QPushButton("Split keyframe (Ctrl+K)")
-        self.confirm_button = QPushButton("Confirm frame (Space)")
+        # Short captions in a 2x2 grid, full sentences in the tooltips: laid out
+        # in a row with their long names the four buttons asked for 747 px of
+        # dock width -- "Commit as frame override (Alt+Enter)" alone is 446 --
+        # and the canvas was left with less than half the window.
+        self.commit_button = self._button("Commit  ⏎", "Commit the edit (Enter)")
+        self.override_button = self._button(
+            "This frame  Alt+⏎", "Commit as a frame override (Alt+Enter)")
+        self.split_button = self._button(
+            "Split  Ctrl+K", "Split the keyframe here (Ctrl+K)")
+        self.confirm_button = self._button(
+            "Confirm  Space", "Confirm the frame and step back (Space)")
         self.commit_button.clicked.connect(lambda: self.commit(api.SCOPE_KEYFRAME))
         self.override_button.clicked.connect(
             lambda: self.commit(api.SCOPE_FRAME_OVERRIDE)
@@ -103,6 +115,16 @@ class TaskCardPanel(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         if session is not None:
             self.set_session(session)
+
+    @staticmethod
+    def _button(caption: str, tooltip: str) -> QPushButton:
+        """A button that shows its key, explains itself, and stays narrow."""
+        button = QPushButton(caption)
+        button.setToolTip(tooltip)
+        button.setMinimumWidth(1)
+        button.setSizePolicy(QSizePolicy.Policy.Ignored,
+                             QSizePolicy.Policy.Fixed)
+        return button
 
     # -- wiring -------------------------------------------------------------
     def set_session(self, session: Optional[api.SessionLike]) -> None:

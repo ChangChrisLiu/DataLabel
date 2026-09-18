@@ -21,6 +21,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app_scene import (
+    close_window,
     DESKTOP,
     LAST_STEP,
     VIEW,
@@ -65,7 +66,7 @@ def open_window(tmp_path: Path, roi: bool = True, **kwargs) -> MainWindow:
 def window(qapp, tmp_path):
     win = open_window(tmp_path)
     yield win
-    win.shutdown()
+    close_window(win)
 
 
 def paint(win: MainWindow, dx: int = 8) -> None:
@@ -309,7 +310,7 @@ def test_beginning_the_same_edit_again_offers_the_sidecar_back(qapp, tmp_path):
     paint(win)
     win.flush_sidecar()
     painted = win.session.editing_mask().copy()
-    win.shutdown()
+    close_window(win)
 
     again = MainWindow(make_session(tmp_path), make_paths(tmp_path), "tester",
                        sam_queue=StubSamQueue())
@@ -322,7 +323,7 @@ def test_beginning_the_same_edit_again_offers_the_sidecar_back(qapp, tmp_path):
         again.restore_pending()
         assert np.array_equal(again.session.editing_mask(), painted)
     finally:
-        again.shutdown()
+        close_window(again)
 
 
 def test_a_sidecar_for_an_instance_that_is_gone_is_dropped(qapp, tmp_path):
@@ -331,7 +332,7 @@ def test_a_sidecar_for_an_instance_that_is_gone_is_dropped(qapp, tmp_path):
     paint(win)
     win.flush_sidecar()
     win.sidecar.save(win.session.current(), "ghost.99", np.ones((64, 64), dtype=bool))
-    win.shutdown()
+    close_window(win)
 
     again = MainWindow(make_session(tmp_path), make_paths(tmp_path), "tester",
                        sam_queue=StubSamQueue())
@@ -340,7 +341,7 @@ def test_a_sidecar_for_an_instance_that_is_gone_is_dropped(qapp, tmp_path):
         assert offer is None or offer["instance"] != "ghost.99"
         assert again.sidecar.pending_for(again.session.current(), "ghost.99") is None
     finally:
-        again.shutdown()
+        close_window(again)
 
 
 # --------------------------------------------------------------------------- #
@@ -457,7 +458,7 @@ def test_the_window_state_survives_a_restart(qapp, tmp_path):
     win.session.goto(LAST_STEP - 3)
     win.save_window_state()
     geometry = bytes(win.saveGeometry())
-    win.shutdown()
+    close_window(win)
 
     again = MainWindow(make_session(tmp_path), make_paths(tmp_path), "tester",
                        sam_queue=StubSamQueue())
@@ -469,7 +470,7 @@ def test_the_window_state_survives_a_restart(qapp, tmp_path):
             "desktop": DESKTOP, "view": VIEW, "step": LAST_STEP - 3
         }
     finally:
-        again.shutdown()
+        close_window(again)
 
 
 # --------------------------------------------------------------------------- #

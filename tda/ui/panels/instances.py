@@ -44,6 +44,16 @@ __all__ = ["InstanceListPanel"]
 
 KEY_ROLE = int(Qt.ItemDataRole.UserRole)
 
+#: Visibility values are long (``occluded_partial``); the column shows the
+#: initials and the row's tooltip spells the value out.
+_SHORT_VIS = {"visible": "vis", "occluded_partial": "occ-p", "occluded_full": "occ-f",
+              "out_of_view": "out", "too_small": "tiny", "visible_tiny": "v-tiny",
+              "motion_blur": "blur"}
+
+
+def _short(value: str) -> str:
+    return _SHORT_VIS.get(value, value[:5])
+
 #: Number keys ``1``-``7`` (spec 6.2 order, see :data:`api.VISIBILITY_VALUES`).
 _NUMBER_KEYS = (
     Qt.Key.Key_1,
@@ -62,15 +72,11 @@ class InstanceListPanel(QWidget):
     #: An instance was double-clicked: the canvas should start editing it.
     sigRequestEdit = Signal(str)
 
-    COLUMNS: tuple[str, ...] = (
-        "Color",
-        "Instance",
-        "Class",
-        "State",
-        "Placement",
-        "Visibility",
-        "Hidden",
-    )
+    #: Four columns, not seven.  Class and placement are in every row's tooltip
+    #: instead: the instance key already names the class (``screw.cpu_cooler.01``)
+    #: and a 90-part machine needs the dock narrow far more than it needs them
+    #: spelled out -- with all seven the table demanded 495 px of dock width.
+    COLUMNS: tuple[str, ...] = ("Color", "Instance", "State", "Vis", "Hidden")
 
     def __init__(self, session: Optional[api.SessionLike] = None,
                  parent: Optional[QWidget] = None) -> None:
@@ -92,15 +98,19 @@ class InstanceListPanel(QWidget):
         self._table.setHorizontalScrollMode(
             QAbstractItemView.ScrollMode.ScrollPerPixel
         )
-        self._table.setMinimumWidth(240)
+        self._table.setMinimumWidth(180)
+        self._table.setWordWrap(False)
+        self._table.setTextElideMode(Qt.TextElideMode.ElideLeft)  # keep the ordinal
         self._apply_column_widths()
         self._table.itemChanged.connect(self._on_item_changed)
         self._table.itemDoubleClicked.connect(self._on_item_double_clicked)
 
-        self.up_button = QPushButton("Move up (Ctrl+Up)")
-        self.down_button = QPushButton("Move down (Ctrl+Down)")
-        self.up_button.setToolTip("Put the selected instance above the one over it")
-        self.down_button.setToolTip("Put the selected instance below the one under it")
+        self.up_button = QPushButton("▲ Ctrl+↑")
+        self.down_button = QPushButton("▼ Ctrl+↓")
+        self.up_button.setToolTip("Move up: put the selected instance above the one over it")
+        self.down_button.setToolTip("Move down: put it below the one under it")
+        for button in (self.up_button, self.down_button):
+            button.setMinimumWidth(1)
         self.up_button.clicked.connect(self.move_up)
         self.down_button.clicked.connect(self.move_down)
 
@@ -113,7 +123,10 @@ class InstanceListPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(3)
-        layout.addWidget(QLabel("Instances (top layer first)"))
+        heading = QLabel("Instances — top layer first")
+        heading.setToolTip("The frame's instances, top-most layer at the top")
+        heading.setMinimumWidth(1)   # a caption must not set the dock's width
+        layout.addWidget(heading)
         layout.addWidget(self._table, 1)
         layout.addLayout(buttons)
 
@@ -156,16 +169,16 @@ class InstanceListPanel(QWidget):
             self._table.setRowCount(len(self._rows))
             for row, data in enumerate(self._rows):
                 key = str(data.get("key", ""))
+                tooltip = (f"{key}\nclass: {data.get('cls', '')}\n"
+                           f"placement: {data.get('placement', '')}\n"
+                           f"visibility: {data.get('visibility', '')}\nz {data.get('z', '')}")
                 swatch = QTableWidgetItem("")
                 swatch.setBackground(QBrush(QColor(*palette_color(key))))
-                swatch.setToolTip(f"z {data.get('z', '')}")
                 cells = [
                     swatch,
                     QTableWidgetItem(key),
-                    QTableWidgetItem(str(data.get("cls", ""))),
                     QTableWidgetItem(str(data.get("state", ""))),
-                    QTableWidgetItem(str(data.get("placement", ""))),
-                    QTableWidgetItem(str(data.get("visibility", ""))),
+                    QTableWidgetItem(_short(str(data.get("visibility", "")))),
                 ]
                 hidden = QTableWidgetItem("")
                 hidden.setFlags(
@@ -181,6 +194,7 @@ class InstanceListPanel(QWidget):
                 cells.append(hidden)
                 for col, item in enumerate(cells):
                     item.setData(KEY_ROLE, key)
+                    item.setToolTip(tooltip)
                     self._table.setItem(row, col, item)
         finally:
             self._loading = False
@@ -190,7 +204,7 @@ class InstanceListPanel(QWidget):
             self.select_instance(keep)
 
     #: Column widths in pixels; ``None`` means "take what is left" (the key).
-    WIDTHS: tuple[Optional[int], ...] = (26, None, 96, 84, 92, 96, 52)
+    WIDTHS: tuple[Optional[int], ...] = (22, None, 78, 46, 46)
 
     def _apply_column_widths(self) -> None:
         """Fixed widths, not "resize to contents".

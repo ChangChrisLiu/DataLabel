@@ -56,10 +56,38 @@ MODE_TITLES: tuple[tuple[str, str], ...] = (
 )
 #: Used when this annotator has never opened the window on this machine.
 DEFAULT_WINDOW_SIZE = (1600, 1000)
-#: Fractions of the window width the docks get by default; the canvas keeps the
-#: remaining ~67 %, which at 1920 px is 1280 px for a 12 MP frame.
+#: Fractions of the window width the docks are *asked* for by default.  Qt
+#: clamps ``resizeDocks`` to each dock's minimum size hint, so these are only
+#: honoured because the panels inside them are built to shrink -- short button
+#: captions, four columns, elided rows.  The acceptance test in
+#: ``tests/test_app.py`` measures what actually comes out, not what is asked.
 TIMELINE_FRACTION = 0.11
-RIGHT_FRACTION = 0.22
+RIGHT_FRACTION = 0.20
+
+
+def _read_last_frame(settings, annotator: str) -> dict:
+    """``{"desktop", "view", "step"}`` of one annotator's last frame, as stored.
+
+    One reader for the INI, used both by the running window
+    (:meth:`ShellMixin.last_frame_for`) and by :func:`resume_target` before a
+    window exists -- two copies of this is how they would drift.
+    """
+    prefix = f"last/{annotator}"
+    out: dict = {}
+    for name, cast in (("desktop", int), ("view", str), ("step", int)):
+        value = settings.value(f"{prefix}/{name}")
+        if value in (None, ""):
+            continue
+        try:
+            out[name] = cast(value)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def last_frame_in(paths: dict, annotator: str) -> dict:
+    """:func:`_read_last_frame` for callers that have paths but no window."""
+    return _read_last_frame(S.make_settings(paths), annotator)
 
 
 def take_lock(target, annotator: str) -> Optional[str]:
@@ -328,16 +356,7 @@ class ShellMixin:
 
     def last_frame_for(self, annotator: str) -> dict:
         """The desktop/view/step this annotator last had open, as far as it is known."""
-        prefix = f"last/{annotator}"
-        out: dict = {}
-        for name, cast in (("desktop", int), ("view", str), ("step", int)):
-            value = self.settings.value(f"{prefix}/{name}")
-            if value not in (None, ""):
-                try:
-                    out[name] = cast(value)
-                except (TypeError, ValueError):
-                    pass
-        return out
+        return _read_last_frame(self.settings, annotator)
 
     def shutdown(self) -> None:
         """Stop every thread and detach; the database is the caller's business.
@@ -445,23 +464,12 @@ def resume_target(config: dict, annotator: str, desktop: Optional[int],
     the INI file, and the fallback (lowest desktop with frames, scanner view) is
     read from the same file the caller already has.
     """
-    settings = S.make_settings(config)
-    prefix = f"last/{annotator}"
-
-    def stored(name: str, cast):
-        value = settings.value(f"{prefix}/{name}")
-        if value in (None, ""):
-            return None
-        try:
-            return cast(value)
-        except (TypeError, ValueError):
-            return None
-
+    last = last_frame_in(config, annotator)   # the one reader of the INI
     target = {
-        "desktop": desktop if desktop is not None else stored("desktop", int),
-        "view": view if view is not None else stored("view", str),
+        "desktop": desktop if desktop is not None else last.get("desktop"),
+        "view": view if view is not None else last.get("view"),
         "step": step if step is not None else (
-            stored("step", int) if desktop is None else None
+            last.get("step") if desktop is None else None
         ),
     }
     if not target["view"]:

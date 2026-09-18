@@ -19,6 +19,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from app_scene import (
+    close_window,
     DESKTOP,
     LAST_STEP,
     VIEW,
@@ -49,7 +50,7 @@ def window(qapp, tmp_path):
     win.set_mode(A.MODE_ANNOTATE)
     win.sam_queue = queue
     yield win
-    win.shutdown()
+    close_window(win)
 
 
 def wait_for_assist(win: MainWindow, timeout: float = 5.0) -> dict:
@@ -160,7 +161,7 @@ def test_a_frame_without_an_image_unsets_the_frame_token(qapp, tmp_path):
         win.session.goto(LAST_STEP)
         assert win.sam_point.frame_token == FrameKey(DESKTOP, LAST_STEP, VIEW)
     finally:
-        win.shutdown()
+        close_window(win)
 
 
 def test_the_sam_tools_always_know_which_instance_they_write(window):
@@ -235,7 +236,7 @@ def test_an_unavailable_sam_disables_the_sam_tools_with_a_reason(qapp, tmp_path)
         win.act_tool("sam_point")
         assert win.active_tool is not win.sam_point   # the tool refuses to arm
     finally:
-        win.shutdown()
+        close_window(win)
 
 
 # --------------------------------------------------------------------------- #

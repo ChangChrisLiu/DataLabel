@@ -233,13 +233,22 @@ class MainWindow(EditMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
         """Are the window's shortcuts live at all right now?
 
         Not while a modal dialog is up, and not while the focus sits in another
-        window of ours -- the cheat sheet is a child dialog, so without this its
-        ``Esc`` would also discard the edit underneath it.
+        **visible** window of ours -- the cheat sheet is a child dialog, so
+        without this its ``Esc`` would also discard the edit underneath it.
+
+        The visibility check matters: Qt keeps the application focus on a widget
+        of a window that has been closed but not yet deleted, so a torn-down
+        window would otherwise switch off the keyboard of the one that replaced
+        it -- which is exactly what made a whole suite fail when another suite
+        had run first.
         """
         if QApplication.activeModalWidget() is not None:
             return False
         focus = QApplication.focusWidget()
-        return focus is None or focus.window() is self
+        if focus is None:
+            return True
+        other = focus.window()
+        return other is self or not other.isVisible()
 
     def _focus_widget(self) -> Optional[QWidget]:
         """The focused widget *of this window*, or ``None``.

@@ -19,6 +19,7 @@ from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from app_scene import (
+    close_window,
     DESKTOP,
     LAST_STEP,
     SEGMENT_CUT,
@@ -52,7 +53,7 @@ def open_window(tmp_path: Path, **kwargs) -> MainWindow:
 def window(qapp, tmp_path):
     win = open_window(tmp_path)
     yield win
-    win.shutdown()
+    close_window(win)
 
 
 # --------------------------------------------------------------------------- #
@@ -95,6 +96,33 @@ def test_mode_switch_moves_the_central_widget(window):
     window.set_mode(A.MODE_REVIEW)
     assert window.stack.currentWidget() is window.canvas
     assert window.review_dock.isVisibleTo(window) or window.review_dock.isVisible()
+
+
+@pytest.mark.parametrize("width,share", [(1920, 0.65), (1600, 0.60)])
+def test_the_canvas_gets_most_of_the_window_by_default(qapp, tmp_path, width, share):
+    """With no saved state the docks must not crowd out the frame."""
+    win = open_window(tmp_path)
+    try:
+        win.resize(width, 1080)
+        win.show()
+        QApplication.processEvents()
+        canvas = win.canvas.width()
+        assert canvas >= share * win.width(), (
+            f"canvas {canvas} px of {win.width()}; "
+            f"timeline {win.timeline_dock.width()}, right {win.right_dock.width()}"
+        )
+    finally:
+        close_window(win)
+
+
+def test_the_right_dock_panels_can_be_narrow(qapp, tmp_path):
+    """Their minimum width is what clamped ``resizeDocks`` to 747 px."""
+    win = open_window(tmp_path)
+    try:
+        for panel in (win.task_card, win.instances):
+            assert panel.minimumSizeHint().width() <= 320, type(panel).__name__
+    finally:
+        close_window(win)
 
 
 def test_settings_live_in_an_ini_file_under_the_cache_parent(window, tmp_path):
@@ -198,7 +226,7 @@ def test_zoom_is_kept_inside_a_pose_segment_and_reset_across_one(qapp, tmp_path)
         win.session.goto(SEGMENT_CUT - 1)  # the other segment
         assert win.canvas.zoom_factor() != pytest.approx(4.0, rel=1e-3)
     finally:
-        win.shutdown()
+        close_window(win)
 
 
 def test_a_missing_frame_shows_a_placeholder_and_disables_the_tools(qapp, tmp_path):
@@ -211,7 +239,7 @@ def test_a_missing_frame_shows_a_placeholder_and_disables_the_tools(qapp, tmp_pa
         win.session.goto(LAST_STEP - 1)
         assert win.tools_enabled is True
     finally:
-        win.shutdown()
+        close_window(win)
 
 
 def test_paging_walks_backwards_in_annotation_order(window):
@@ -321,7 +349,7 @@ def test_a_missing_frame_does_not_replace_the_step_table(qapp, tmp_path):
         assert win.tools_enabled is False
         assert win.stack.currentWidget() is win.steps_panel
     finally:
-        win.shutdown()
+        close_window(win)
 
 
 def test_the_desktop_combo_names_the_brand_and_the_model(window):
@@ -393,5 +421,5 @@ def test_a_second_window_on_the_same_database_shares_its_session(qapp, tmp_path)
         assert win.canvas.image_rgb() is not None
         assert win.frame_label.text().endswith(win.session.frame_status(LAST_STEP))
     finally:
-        win.shutdown()
+        close_window(win)
         db.close()

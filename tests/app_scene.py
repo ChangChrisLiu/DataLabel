@@ -185,6 +185,22 @@ def seed_shapes(session: AnnotationSession, step: int, skip=(), seg: int = 1) ->
 # --------------------------------------------------------------------------- #
 # a SAM queue that answers on demand
 # --------------------------------------------------------------------------- #
+def close_window(win) -> None:
+    """Tear a window down completely: shut it, hide it, delete it, drain Qt.
+
+    ``shutdown()`` alone leaves the object alive, and Qt keeps the application
+    focus on a widget inside it -- which switches the keyboard off in whatever
+    window a later test opens.  Every fixture goes through here.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    win.shutdown()
+    win.hide()
+    win.setParent(None)
+    win.deleteLater()
+    QApplication.processEvents()
+
+
 class StubSamQueue:
     """``submit``/``stop`` compatible stand-in that never starts a thread.
 

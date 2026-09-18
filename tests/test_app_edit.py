@@ -19,6 +19,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from app_scene import (
+    close_window,
     DESKTOP,
     LAST_STEP,
     VIEW,
@@ -57,7 +58,7 @@ def open_window(tmp_path: Path, **kwargs) -> MainWindow:
 def window(qapp, tmp_path):
     win = open_window(tmp_path)
     yield win
-    win.shutdown()
+    close_window(win)
 
 
 def paint(win: MainWindow, dx: int = 8) -> None:
@@ -250,13 +251,13 @@ def test_first_open_proposes_an_roi_and_enter_stores_it(qapp, tmp_path):
         stored = session.db.pose_segment_for(key)["roi"]
         assert tuple(stored) == tuple(expected)
     finally:
-        win.shutdown()
+        close_window(win)
 
 
 def test_a_second_open_does_not_ask_for_the_roi_again(qapp, tmp_path):
     win = open_window(tmp_path)
     win.act_commit()
-    win.shutdown()
+    close_window(win)
 
     session = make_session(tmp_path)          # same tmp database on disk
     again = MainWindow(session, make_paths(tmp_path), "tester",
@@ -265,7 +266,7 @@ def test_a_second_open_does_not_ask_for_the_roi_again(qapp, tmp_path):
         assert again.roi_editing is False
         assert again.roi() is not None
     finally:
-        again.shutdown()
+        close_window(again)
 
 
 def test_shift_r_re_edits_the_roi_and_escape_keeps_the_old_one(qapp, tmp_path):
@@ -280,7 +281,7 @@ def test_shift_r_re_edits_the_roi_and_escape_keeps_the_old_one(qapp, tmp_path):
         assert win.roi_editing is False
         assert tuple(win.roi()) == stored
     finally:
-        win.shutdown()
+        close_window(win)
 
 
 def test_fit_roi_zooms_to_the_stored_rectangle(window):
@@ -339,7 +340,7 @@ def test_an_uncommitted_stroke_is_written_to_a_sidecar_and_offered_back(qapp,
         win.flush_sidecar()
         assert Path(win.sidecar.path_for(key, instance)).exists()
     finally:
-        win.shutdown()                        # the process "dies" here
+        close_window(win)                        # the process "dies" here
 
     session = make_session(tmp_path)
     again = MainWindow(session, make_paths(tmp_path), "tester",
@@ -353,7 +354,7 @@ def test_an_uncommitted_stroke_is_written_to_a_sidecar_and_offered_back(qapp,
         assert np.array_equal(again.session.editing_mask(), painted)
         assert again.pending_restore() is None
     finally:
-        again.shutdown()
+        close_window(again)
 
 
 def test_committing_clears_the_sidecar(window):
@@ -379,7 +380,7 @@ def test_a_sidecar_for_another_frame_is_not_offered(qapp, tmp_path):
         win.sidecar.save(FrameKey(DESKTOP, 2, VIEW), instance,
                          np.ones((64, 64), dtype=bool))
     finally:
-        win.shutdown()
+        close_window(win)
 
     session = make_session(tmp_path)
     again = MainWindow(session, make_paths(tmp_path), "tester",
@@ -388,4 +389,4 @@ def test_a_sidecar_for_another_frame_is_not_offered(qapp, tmp_path):
         assert again.session.current().step == LAST_STEP
         assert again.pending_restore() is None
     finally:
-        again.shutdown()
+        close_window(again)

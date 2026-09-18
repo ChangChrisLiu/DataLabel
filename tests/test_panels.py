@@ -451,10 +451,13 @@ def test_taskcard_lists_items_with_icons_and_highlights_the_first_open_one(
 
 def test_taskcard_buttons_call_the_session(session: StubSession) -> None:
     panel = TaskCardPanel(session)
-    assert "Enter" in panel.commit_button.text()
-    assert "Alt+Enter" in panel.override_button.text()
-    assert "Ctrl+K" in panel.split_button.text()
-    assert "Space" in panel.confirm_button.text()
+    # Short captions keep the dock narrow; the full sentence is the tooltip.
+    for button, key in ((panel.commit_button, "Enter"),
+                        (panel.override_button, "Alt+Enter"),
+                        (panel.split_button, "Ctrl+K"),
+                        (panel.confirm_button, "Space")):
+        assert key in button.toolTip()
+        assert len(button.text()) <= 20
     panel.commit_button.click()
     panel.override_button.click()
     panel.split_button.click()
@@ -536,7 +539,9 @@ def test_taskcard_refreshes_on_frame_change(session: StubSession) -> None:
 # --------------------------------------------------------------------------- #
 # InstanceListPanel
 # --------------------------------------------------------------------------- #
-def test_instances_table_shows_every_column(session: StubSession) -> None:
+def test_instances_table_shows_its_four_columns_and_tells_the_rest(
+        session: StubSession) -> None:
+    """Class and placement moved into the tooltip so the dock can be narrow."""
     panel = InstanceListPanel(session)
     table = panel.table()
     assert table.rowCount() == 3
@@ -544,10 +549,10 @@ def test_instances_table_shows_every_column(session: StubSession) -> None:
     swatch = table.item(0, 0)
     assert swatch.background().color() == QColor(*palette_color("cpu_cooler.01"))
     assert table.item(0, 1).text() == "cpu_cooler.01"
-    assert table.item(0, 2).text() == "cooler"
-    assert table.item(0, 3).text() == "installed"
-    assert table.item(0, 4).text() == "in_chassis"
-    assert table.item(0, 5).text() == Visibility.VISIBLE.value
+    assert table.item(0, 2).text() == "installed"
+    tooltip = table.item(0, 1).toolTip()
+    assert "cooler" in tooltip and "in_chassis" in tooltip
+    assert Visibility.VISIBLE.value in tooltip
     hidden_col = InstanceListPanel.COLUMNS.index("Hidden")
     assert table.item(0, hidden_col).checkState() == Qt.CheckState.Unchecked
     assert table.item(1, hidden_col).checkState() == Qt.CheckState.Checked

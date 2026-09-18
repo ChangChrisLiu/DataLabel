@@ -19,7 +19,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeyEvent, QKeySequence
 from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit
 
-from app_scene import StubSamQueue, make_paths, make_session
+from app_scene import close_window, StubSamQueue, make_paths, make_session
 from tda.ui import app_actions as A
 from tda.ui.app import MainWindow
 
@@ -40,7 +40,7 @@ def window(qapp, tmp_path):
     win = MainWindow(session, make_paths(tmp_path), "tester",
                      sam_queue=StubSamQueue())
     yield win
-    win.shutdown()
+    close_window(win)
 
 
 def key_event(spec: str, press: bool = True) -> QKeyEvent:
