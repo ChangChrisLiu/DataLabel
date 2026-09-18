@@ -609,9 +609,19 @@ class EditMixin:
         self.canvas.set_rubber_band(self.roi_draft)
         self.report("拖动框选机箱范围，Enter 确认 / drag the chassis box, Enter to accept")
 
+    @S.guard
     def on_roi_box(self, box: object) -> None:
-        """The ROI tool finished a drag."""
-        self.roi_draft = tuple(int(round(float(v))) for v in box)  # type: ignore[misc]
+        """The ROI tool finished a drag; the rectangle is checked, not trusted."""
+        from tda.core.db_pose import clean_roi
+
+        hw = None if self.overlay is None else self.overlay.hw
+        try:
+            self.roi_draft = tuple(clean_roi(list(box), hw))  # type: ignore[arg-type]
+        except ValueError as refused:
+            self.report(f"that rectangle is not usable: {refused}")
+            self.canvas.set_rubber_band(self.roi_draft)
+            return
+        self.canvas.set_rubber_band(self.roi_draft)
 
     @S.guard
     def accept_roi(self) -> None:
@@ -621,9 +631,12 @@ class EditMixin:
         if self.roi_draft is None or segment is None:
             self.cancel_roi_edit()
             return
-        self.db.set_pose_segment_roi(int(key.desktop), str(key.view), int(segment),
-                                     list(self.roi_draft))
-        accepted = self.roi_draft
+        hw = None if self.overlay is None else self.overlay.hw
+        accepted = tuple(self.db.set_pose_segment_roi(
+            int(key.desktop), str(key.view), int(segment), list(self.roi_draft),
+            annotator=self.annotator, hw=hw,
+        ))
+        self.roi_draft = accepted
         self.roi_editing = False
         self.canvas.set_rubber_band(None)
         self._attach_tool()

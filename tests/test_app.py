@@ -255,13 +255,29 @@ def test_overlay_display_toggles_do_not_touch_the_data(window):
 
 
 def test_no_exception_escapes_a_guarded_slot(window, monkeypatch):
-    def boom() -> None:
+    def boom(*_args, **_kwargs) -> None:
         raise RuntimeError("kaboom")
 
-    monkeypatch.setattr(window.session, "refresh_all", boom)
+    monkeypatch.setattr(window.session.truth, "refresh", boom)
     window.act_refresh_all()  # must not raise
     assert "kaboom" in window.status_message()
     assert window.session.db.conn.in_transaction is False
+
+
+def test_f5_recompiles_this_frame_only(window, monkeypatch):
+    """The batch belongs to ``cli check``; F5 has to stay instant."""
+    swept: list[int] = []
+    refreshed: list[object] = []
+    truth = window.session.truth
+    real = truth.refresh
+    monkeypatch.setattr(window.session, "refresh_all", lambda: swept.append(1) or {})
+    monkeypatch.setattr(truth, "refresh",
+                        lambda key, *a, **k: (refreshed.append(key), real(key, *a, **k))[1])
+    key = window.session.current()
+    window.act_refresh_all()
+    assert swept == []
+    assert refreshed and set(refreshed) == {key}    # this frame, nothing else
+    assert "cli check" in window.status_message()
 
 
 # --------------------------------------------------------------------------- #
@@ -276,14 +292,44 @@ def test_saving_the_step_table_reopens_the_session_on_the_same_frame(window):
 
 
 def test_leaving_steps_mode_with_unsaved_edits_asks_first(window, monkeypatch):
+    """The question goes through a real ``QMessageBox``, which used to raise.
+
+    ``confirm_discard`` referred to a name its module did not import, so the
+    annotator was trapped in Steps mode by a ``NameError`` inside a guarded
+    slot; patching the dialog instead of the method is what catches that.
+    """
+    from PySide6.QtWidgets import QMessageBox
+
     window.set_mode(A.MODE_STEPS)
     window._steps_dirty = True
-    answers = iter([False, True])
-    monkeypatch.setattr(window, "confirm_discard", lambda *a: next(answers))
+    answers = iter([QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes])
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: next(answers)))
     window.set_mode(A.MODE_ANNOTATE)
     assert window.mode == A.MODE_STEPS  # refused
     window.set_mode(A.MODE_ANNOTATE)
     assert window.mode == A.MODE_ANNOTATE
+
+
+def test_a_missing_frame_does_not_replace_the_step_table(qapp, tmp_path):
+    """Steps mode is about the log, not about the image: it stays put."""
+    win = open_window(tmp_path, missing=(LAST_STEP,))
+    try:
+        win.set_mode(A.MODE_STEPS)
+        assert win.stack.currentWidget() is win.steps_panel
+        win.session.goto(LAST_STEP)
+        assert win.tools_enabled is False
+        assert win.stack.currentWidget() is win.steps_panel
+    finally:
+        win.shutdown()
+
+
+def test_the_desktop_combo_names_the_brand_and_the_model(window):
+    text = window.desktop_combo.currentText()
+    meta = window.session.db.get_desktop(DESKTOP) or {}
+    for part in str(meta.get("brand") or "").split()[:1]:
+        assert part in text
+    assert f"D{DESKTOP}" in text and "/" in text     # the done/total counter
 
 
 # --------------------------------------------------------------------------- #
@@ -295,29 +341,57 @@ def test_review_mode_does_not_sweep_implicitly(window, monkeypatch):
     window.set_mode(A.MODE_REVIEW)
     assert calls == []
     window.act_refresh_all()
-    assert calls == [1]
+    assert calls == []      # F5 is this frame only; the sweep is cli check's job
 
 
 def test_review_item_activation_opens_that_frame(window):
+    """Activating a queue entry really moves the canvas -- through the window."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QListWidgetItem
+
     session = window.session
     seed_shapes(session, LAST_STEP)
-    session.goto(LAST_STEP)
     window.set_mode(A.MODE_REVIEW)
-    window.review.list_for("missing_shape")
     target = LAST_STEP - 2
-    session.goto(target)
+    queue = window.review.list_for("needs_review")
+    item = QListWidgetItem(f"Step {target}")
+    item.setData(int(Qt.ItemDataRole.UserRole), target)
+    queue.addItem(item)
+    queue.setCurrentItem(item)
+    queue.itemActivated.emit(item)
     assert window.session.current().step == target
 
 
-def test_second_session_reuses_the_same_database_without_a_second_lock(qapp, tmp_path):
-    """Two windows in one test process must not fight over the lock file."""
+def test_an_uncommitted_edit_blocks_a_review_activation_too(window):
+    """The queue is a navigation gesture like any other."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QListWidgetItem
+
+    window.act_commit()                      # accept the ROI, arm the brush
+    instance = [r["instance"] for r in window.session.task_card() if r.get("instance")][0]
+    window.task_card.sigRequestEdit.emit(instance)
+    window.set_editing_mask(np.ones((64, 64), dtype=bool))
+    step = window.session.current().step
+    window.set_mode(A.MODE_REVIEW)
+    queue = window.review.list_for("needs_review")
+    item = QListWidgetItem("Step 3")
+    item.setData(int(Qt.ItemDataRole.UserRole), 3)
+    queue.addItem(item)
+    queue.itemActivated.emit(item)
+    assert window.session.current().step == step
+
+
+def test_a_second_window_on_the_same_database_shares_its_session(qapp, tmp_path):
+    """Two windows in one process: the second one opens on the same frame."""
     db, paths, tax = make_db(tmp_path)
     session = AnnotationSession(db, tax, TruthService(db, tax), paths["cache_dir"],
                                 "tester")
     session.open(DESKTOP, VIEW)
     win = MainWindow(session, paths, "tester", sam_queue=StubSamQueue())
     try:
-        assert win.session.is_open if hasattr(win.session, "is_open") else True
+        assert win.session.current() == FrameKey(DESKTOP, LAST_STEP, VIEW)
+        assert win.canvas.image_rgb() is not None
+        assert win.frame_label.text().endswith(win.session.frame_status(LAST_STEP))
     finally:
         win.shutdown()
         db.close()

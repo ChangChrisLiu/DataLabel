@@ -201,8 +201,8 @@ ACTIONS: tuple[Action, ...] = (
     # -- session ------------------------------------------------------------
     Action("save", ("Ctrl+S",), "act_save", "Save", "保存（清除未保存标记）",
            "session", (), _ALL),
-    Action("refresh_all", ("F5",), "act_refresh_all", "Recompile the whole view",
-           "重新编译整个视图（较慢）", "session", (), _ALL),
+    Action("refresh_all", ("F5",), "act_refresh_all", "Recompile this frame",
+           "重新编译当前帧（整视图请用命令行 cli check）", "session", (), _ALL),
     Action("cheat_sheet", ("?", "F12"), "act_cheat_sheet", "Shortcut cheat sheet",
            "快捷键速查表", "session", (), _ALL),
 )

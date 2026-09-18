@@ -57,12 +57,26 @@ SETTINGS_NAME = "tda_app.ini"
 LOG_NAME = "tda_app.log"
 LOG_MAX_BYTES = 2_000_000
 LOG_BACKUPS = 3
-_DEFAULT_CACHE = "D:/DataSet/cache"
+
+
+def _default_cache_dir() -> str:
+    """``cache_dir`` from ``configs/paths.yaml``; the repo is the only fallback.
+
+    A literal ``D:/DataSet/cache`` in library code would be a second, silent
+    source of truth for a path the configuration already owns -- and it would
+    write to this machine's real cache from a test that forgot its ``paths``.
+    """
+    from tda import pipeline as P
+
+    try:
+        return str(P.require(P.load_paths(P.DEFAULT_PATHS_PATH), "cache_dir"))
+    except Exception:  # noqa: BLE001 - no config: stay inside the checkout
+        return str(Path(__file__).resolve().parents[2] / "cache")
 
 
 def app_dir(paths: dict) -> Path:
     """``<cache_dir>/../.cache`` -- the only directory the app writes to."""
-    cache = Path(str((paths or {}).get("cache_dir") or _DEFAULT_CACHE))
+    cache = Path(str((paths or {}).get("cache_dir") or _default_cache_dir()))
     return cache.parent / APP_SUBDIR
 
 

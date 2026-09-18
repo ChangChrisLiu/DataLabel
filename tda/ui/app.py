@@ -129,7 +129,10 @@ class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
         self.tools_enabled = image is not None
         self.clear_prompt_box()  # before _attach_tool re-arms a SAM tool
         if image is None:
-            self.stack.setCurrentWidget(self.placeholder_label)
+            # Steps mode is about the imported log, not about the picture: a
+            # view with no image for this step must not take the table away.
+            if self.mode != A.MODE_STEPS:
+                self.stack.setCurrentWidget(self.placeholder_label)
             self._detach_tool()
         else:
             self.stack.setCurrentWidget(
@@ -517,20 +520,38 @@ class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
 
     @S.guard
     def act_refresh_all(self) -> None:
-        """Recompile the whole view (seconds); the cursor says so meanwhile."""
+        """``F5``: recompile **this frame** and drain the re-check queue.
+
+        It used to recompile the whole view, which on a 120-step machine froze
+        the window for tens of seconds inside a Qt slot.  The choice made here
+        is to keep ``F5`` instant and leave the batch to the command line --
+        ``python -m tda.cli check --desktop N --view V`` does exactly that, with
+        a lock, a progress line and an exit code.  A worker thread was the other
+        option and was rejected: the session, its truth service and its
+        ``sqlite3`` connection all belong to the GUI thread, and handing a
+        second connection to a background recompile would have put two writers
+        on one database for a convenience nobody asked for.
+        """
+        key = self.session.current()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            stats = self.session.refresh_all() or {}
-            QApplication.processEvents()
+            self.session.truth.run_pending_rechecks(self.session.desktop,
+                                                    self.session.view)
+            stats = self.session.truth.refresh(key) or {}
         finally:
             QApplication.restoreOverrideCursor()
+        self.session.goto(key.step)   # re-read the frame the recompile changed
         self.review.refresh()
-        self.report(f"recompiled: {stats.get('updated', 0)} rows, "
-                    f"{stats.get('conflicts', 0)} conflicts")
+        self.report(f"step {key.step} recompiled: {stats.get('updated', 0)} rows, "
+                    f"{stats.get('conflicts', 0)} conflicts — use "
+                    f"'python -m tda.cli check' for the whole view")
 
+    @S.guard
     def _on_sweep_progress(self, done: int, total: int) -> None:
+        """The session's background re-check of frozen frames is making headway."""
         self.report(f"re-checking verified frames: {done}/{total}")
 
+    @S.guard
     def _on_queues_changed(self) -> None:
         self.review.refresh()
 

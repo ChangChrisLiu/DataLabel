@@ -19,7 +19,6 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
-from tda.core.masks import decode_rle
 from tda.ui.commands import edit_editing_mask_op
 
 __all__ = [
@@ -273,6 +272,3 @@ def close_session(session: Any) -> None:
         closer()
 
 
-def restore_mask(payload: dict) -> np.ndarray:
-    """Decode a crash sidecar's mask (kept here so the codec lives in one place)."""
-    return decode_rle(payload["rle"]) if "rle" in payload else payload["mask"]

@@ -124,13 +124,74 @@ def test_export_vlm_writes_a_jsonl(env):
 # --------------------------------------------------------------------------- #
 # build-cache
 # --------------------------------------------------------------------------- #
-def test_build_cache_delegates_to_the_cache_module(env, monkeypatch):
+def test_build_cache_takes_the_same_desktop_spec_as_everything_else(env, monkeypatch):
     seen: list[list[str]] = []
     monkeypatch.setattr("tda.core.cache.main", lambda argv: seen.append(list(argv)) or 0)
-    code = run(env, "build-cache", "--views", "scan", "--first", "13", "--last", "13")
+    code = run(env, "build-cache", "--views", "scan", "--desktops", "13-15")
     assert code == EXIT_OK
-    assert seen and "--views" in seen[0] and "scan" in seen[0]
-    assert "--cache" in seen[0]
+    argv = seen[0]
+    assert "--views" in argv and "scan" in argv and "--cache" in argv
+    assert argv[argv.index("--first") + 1] == "13"
+    assert argv[argv.index("--last") + 1] == "15"
+
+
+def test_build_cache_still_accepts_first_and_last(env, monkeypatch):
+    seen: list[list[str]] = []
+    monkeypatch.setattr("tda.core.cache.main", lambda argv: seen.append(list(argv)) or 0)
+    assert run(env, "build-cache", "--first", "13", "--last", "13") == EXIT_OK
+    assert seen[0][seen[0].index("--last") + 1] == "13"
+
+
+# --------------------------------------------------------------------------- #
+# the truth is brought up to date before it is read
+# --------------------------------------------------------------------------- #
+def test_check_export_and_vlm_all_drain_the_pending_rechecks(env, monkeypatch):
+    """One helper, three callers: a stale re-check must not reach an export."""
+    from tda import cli_app
+
+    calls: list[tuple] = []
+    real = cli_app._prepare_truth
+
+    def spy(db, tax, desktops, view, only_verified):
+        calls.append((tuple(desktops), view, only_verified))
+        return real(db, tax, desktops, view, only_verified)
+
+    monkeypatch.setattr(cli_app, "_prepare_truth", spy)
+    out = Path(env["tmp"]) / "coco_prep.json"
+    run(env, "check", "--desktop", str(DESKTOP), "--view", VIEW)
+    run(env, "export-coco", "--desktops", str(DESKTOP), "--view", VIEW,
+        "--out", str(out))
+    run(env, "export-vlm", "--desktops", str(DESKTOP), "--view", VIEW,
+        "--out", str(Path(env["tmp"]) / "vlm_prep.jsonl"))
+    assert [c[0] for c in calls] == [(DESKTOP,), (DESKTOP,), (DESKTOP,)]
+
+
+def test_an_export_refuses_while_re_checks_are_pending(env, monkeypatch, capsys):
+    from tda import cli_app
+
+    monkeypatch.setattr(cli_app, "_pending_rechecks", lambda truth, d, v: [3, 4])
+    out = Path(env["tmp"]) / "coco_blocked.json"
+    code = run(env, "export-coco", "--desktops", str(DESKTOP), "--view", VIEW,
+               "--out", str(out), "--no-refresh")
+    assert code == EXIT_ERROR
+    assert "pending" in capsys.readouterr().out
+    assert not out.exists()
+
+
+def test_the_exports_take_the_lock(env):
+    db = Db(env["cfg"]["db_path"])
+    db.acquire_lock("someone_else")
+    db.close()
+    try:
+        out = Path(env["tmp"]) / "coco_locked.json"
+        assert run(env, "export-coco", "--desktops", str(DESKTOP), "--view", VIEW,
+                   "--out", str(out)) == EXIT_LOCKED
+        assert run(env, "export-vlm", "--desktops", str(DESKTOP), "--view", VIEW,
+                   "--out", str(Path(env["tmp"]) / "v.jsonl")) == EXIT_LOCKED
+    finally:
+        db = Db(env["cfg"]["db_path"])
+        db.release_lock()
+        db.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -150,6 +211,44 @@ def test_app_passes_its_arguments_to_the_window_entry_point(env, monkeypatch):
     assert seen["desktop"] == DESKTOP and seen["view"] == VIEW
     assert seen["annotator"] == "chang" and seen["step"] == LAST_STEP
     assert seen["paths"] == env["paths"]
+
+
+def test_app_defaults_to_the_last_frame_of_that_annotator(env, monkeypatch):
+    """``--desktop``/``--view``/``--step`` are optional: resume where you were."""
+    seen: dict = {}
+    monkeypatch.setattr("tda.ui.app.main", lambda **kw: seen.update(kw) or 0)
+    assert run(env, "app", "--annotator", "chang") == EXIT_OK
+    assert seen["desktop"] is None and seen["view"] is None and seen["step"] is None
+
+
+def test_resume_target_reads_the_ini_then_falls_back(qapp_or_none, tmp_path):
+    from app_scene import make_paths
+    from tda.ui import app_support as S
+    from tda.ui.app_shell import resume_target
+
+    db, paths, _tax = make_db(tmp_path)
+    db.close()
+    settings = S.make_settings(paths)
+    settings.setValue("last/chang/desktop", DESKTOP)
+    settings.setValue("last/chang/view", VIEW)
+    settings.setValue("last/chang/step", 7)
+    settings.sync()
+
+    resumed = resume_target(paths, "chang", None, None, None, paths["db_path"])
+    assert resumed == {"desktop": DESKTOP, "view": VIEW, "step": 7}
+    fresh = resume_target(make_paths(tmp_path), "nobody", None, None, None,
+                          paths["db_path"])
+    assert fresh["desktop"] == DESKTOP and fresh["view"] == "scan"
+    assert fresh["step"] is None
+    explicit = resume_target(paths, "chang", 42, "rs", None, paths["db_path"])
+    assert explicit == {"desktop": 42, "view": "rs", "step": None}
+
+
+@pytest.fixture(scope="module")
+def qapp_or_none():
+    from PySide6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
 
 
 def test_app_passes_the_exit_code_through(env, monkeypatch):

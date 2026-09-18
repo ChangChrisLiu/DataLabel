@@ -13,7 +13,7 @@ view writes the ``compiled_mask`` rows it finds stale.
 from __future__ import annotations
 
 import argparse
-from typing import Callable
+from typing import Callable, Optional, Sequence
 
 from tda import pipeline as P
 from tda.core.model import VIEWS
@@ -23,11 +23,61 @@ __all__ = ["SUBCOMMANDS", "cmd_app", "cmd_build_cache", "cmd_check",
            "cmd_export_coco", "cmd_export_vlm"]
 
 
-def _desktop_list(spec: str | None, fallback: int | None = None) -> list[int]:
+def _desktop_list(spec: str | None) -> list[int]:
+    """``--desktops 1-3,13`` -> ``[1, 2, 3, 13]``; nothing given -> ``[]``."""
     wanted = P.parse_desktops(spec) if spec else None
-    if wanted:
-        return sorted(wanted)
-    return [] if fallback is None else [int(fallback)]
+    return sorted(wanted) if wanted else []
+
+
+def _pending_rechecks(truth, desktop: int, view: str) -> list[int]:
+    """Steps the truth service still owes a re-check, when it tracks them."""
+    found = getattr(truth, "pending_rechecks", None)
+    if not callable(found):
+        return []
+    try:
+        return [int(s) for s in found(desktop, view)]
+    except Exception:  # noqa: BLE001 - a missing table is "nothing pending"
+        return []
+
+
+def _prepare_truth(db, tax, desktops: Sequence[int], view: str,
+                   only_verified: bool) -> dict:
+    """Bring the compiled truth of ``desktops`` up to date before it is read.
+
+    Three commands read the truth table and all three were reading it raw:
+    ``check`` recompiled but ignored the re-check queue the session fills in the
+    background, and the two exports read whatever happened to be stored.  A
+    frame whose inputs changed after it was frozen therefore exported its *old*
+    geometry.  This is the one place that fixes it:
+
+    * the pending re-checks are drained first (a frozen frame the session
+      queued but never got to);
+    * unless ``only_verified``, every step of the view is refreshed, so the
+      automatic rows are current too.
+
+    Returns ``{"desktops", "view", "steps", "updated", "conflicts", "problems",
+    "pending"}``; ``pending`` is what is *still* queued afterwards, which is
+    what the exports refuse on.
+    """
+    from tda.core.truth import TruthService
+
+    truth = TruthService(db, tax)
+    total = {"desktops": list(desktops), "view": str(view), "steps": 0,
+             "updated": 0, "conflicts": 0, "problems": [], "pending": []}
+    for desktop in desktops:
+        runner = getattr(truth, "run_pending_rechecks", None)
+        if callable(runner):
+            runner(int(desktop), str(view))
+        if not only_verified:
+            steps = [int(row["step"]) for row in db.frames_for(int(desktop), str(view))
+                     if not row.get("missing")]
+            stats = truth.refresh_range(int(desktop), str(view), steps)
+            total["steps"] += len(steps)
+            total["updated"] += int(stats.get("updated", 0))
+            total["conflicts"] += int(stats.get("conflicts", 0))
+            total["problems"].extend(stats.get("problems") or [])
+        total["pending"].extend(_pending_rechecks(truth, int(desktop), str(view)))
+    return total
 
 
 # --------------------------------------------------------------------------- #
@@ -43,16 +93,21 @@ def cmd_app(args: argparse.Namespace) -> int:
     from tda.ui import app as app_module
 
     return int(app_module.main(
-        paths=args.paths, desktop=int(args.desktop), view=str(args.view),
-        annotator=str(args.annotator), step=None if args.step is None else int(args.step),
+        paths=args.paths,
+        desktop=None if args.desktop is None else int(args.desktop),
+        view=None if args.view is None else str(args.view),
+        annotator=str(args.annotator),
+        step=None if args.step is None else int(args.step),
         db=args.db,
     ))
 
 
 def _add_app(sub) -> None:
-    p = sub.add_parser("app", help="open the annotator on one desktop/view")
-    p.add_argument("--desktop", type=int, required=True)
-    p.add_argument("--view", default="scan", choices=list(VIEWS))
+    p = sub.add_parser("app", help="open the annotator (resumes the last frame)")
+    p.add_argument("--desktop", type=int, default=None,
+                   help="machine to open (default: where this annotator left off)")
+    p.add_argument("--view", default=None, choices=list(VIEWS),
+                   help="view to open (default: the last one, else scan)")
     p.add_argument("--annotator", required=True, help="who is annotating (the lock holder)")
     p.add_argument("--step", type=int, default=None, help="open this logical step")
     p.set_defaults(func=cmd_app)
@@ -68,17 +123,16 @@ def cmd_check(args: argparse.Namespace) -> int:
     can stop on the first machine that needs attention.
     """
     from tda.cli import EXIT_ERROR, EXIT_OK, _session
-    from tda.core.truth import TruthService
 
     with _session(args, lock=True) as (_paths, db):
-        steps = [int(row["step"]) for row in db.frames_for(args.desktop, args.view)
-                 if not row.get("missing")]
-        truth = TruthService(db, load_taxonomy())
-        stats = truth.refresh_range(int(args.desktop), str(args.view), steps)
-        problems = list(stats.get("problems") or [])
-        print(f"[check] D{args.desktop:02d} {args.view}: {len(steps)} steps, "
-              f"{stats.get('updated', 0)} rows written, "
-              f"{stats.get('conflicts', 0)} conflicts")
+        stats = _prepare_truth(db, load_taxonomy(), [int(args.desktop)],
+                               str(args.view), only_verified=False)
+        problems = list(stats["problems"])
+        print(f"[check] D{args.desktop:02d} {args.view}: {stats['steps']} steps, "
+              f"{stats['updated']} rows written, {stats['conflicts']} conflicts")
+        if stats["pending"]:
+            print(f"[check] {len(stats['pending'])} frames are still queued for "
+                  f"a re-check: {sorted(stats['pending'])[:10]}")
         for text in problems[: int(args.limit)]:
             print(f"  - {text}")
         if len(problems) > int(args.limit):
@@ -108,9 +162,12 @@ def cmd_build_cache(args: argparse.Namespace) -> int:
     from tda.core import cache
 
     paths = P.load_paths(args.paths)
+    wanted = _desktop_list(args.desktops)
+    first = min(wanted) if wanted else int(args.first)
+    last = max(wanted) if wanted else int(args.last)
     argv = ["--cache", P.require(paths, "cache_dir"),
             "--views", str(args.views),
-            "--first", str(args.first), "--last", str(args.last)]
+            "--first", str(first), "--last", str(last)]
     if args.index:
         argv += ["--index", str(args.index)]
     if args.log:
@@ -125,8 +182,11 @@ def cmd_build_cache(args: argparse.Namespace) -> int:
 def _add_build_cache(sub) -> None:
     p = sub.add_parser("build-cache", help="copy the chosen frames into the local cache")
     p.add_argument("--views", default="scan", help="comma separated views")
-    p.add_argument("--first", type=int, default=1)
-    p.add_argument("--last", type=int, default=66)
+    p.add_argument("--desktops", default=None, help="e.g. 13 or 1-66 or 1-3,13")
+    # Kept because tda.core.cache.main speaks this and scripts already use it;
+    # --desktops wins when both are given.
+    p.add_argument("--first", type=int, default=1, help=argparse.SUPPRESS)
+    p.add_argument("--last", type=int, default=66, help=argparse.SUPPRESS)
     p.add_argument("--index", default=None)
     p.add_argument("--log", default=None)
     p.add_argument("--recompute", action="store_true")
@@ -137,17 +197,39 @@ def _add_build_cache(sub) -> None:
 # --------------------------------------------------------------------------- #
 # exports
 # --------------------------------------------------------------------------- #
+def _export_prologue(args, db, desktops: Sequence[int], command: str) -> Optional[int]:
+    """Bring the truth up to date and refuse while re-checks are still queued.
+
+    An export is a release artefact: shipping a frame whose stored geometry the
+    session had already marked stale is worse than not shipping at all, so the
+    command stops and says which frames to run ``check`` on.
+    """
+    from tda.cli import EXIT_ERROR
+
+    stats = _prepare_truth(db, load_taxonomy(), desktops, str(args.view),
+                           only_verified=not getattr(args, "refresh", True))
+    if stats["pending"]:
+        print(f"[{command}] refused: {len(stats['pending'])} frames are still "
+              f"pending a re-check ({sorted(stats['pending'])[:10]}). Run "
+              f"'python -m tda.cli check --desktop N --view {args.view}' first.")
+        return EXIT_ERROR
+    return None
+
+
 def cmd_export_coco(args: argparse.Namespace) -> int:
     """Write the compiled truth of one view as a COCO file."""
     from tda.cli import EXIT_ERROR, EXIT_OK, _session
     from tda.core.export.coco import export_coco
 
-    with _session(args) as (paths, db):
+    with _session(args, lock=True) as (paths, db):
         out = args.out or P.cache_file(paths, f"coco_{args.view}.json")
         desktops = _desktop_list(args.desktops)
         if not desktops:
             print("[export-coco] nothing to export: pass --desktops")
             return EXIT_ERROR
+        refused = _export_prologue(args, db, desktops, "export-coco")
+        if refused is not None:
+            return refused
         stats = export_coco(db, load_taxonomy(), desktops, str(args.view), str(out),
                             only_verified=bool(args.only_verified),
                             roi_crop=bool(args.roi_crop))
@@ -166,7 +248,16 @@ def _add_export_coco(sub) -> None:
                    default=True, help="export confirmed rows only (the default)")
     p.add_argument("--no-only-verified", dest="only_verified", action="store_false",
                    help="export the automatic rows as well")
+    _add_refresh_flags(p)
     p.set_defaults(func=cmd_export_coco)
+
+
+def _add_refresh_flags(p) -> None:
+    """Whether the export recompiles first (it does; ``--no-refresh`` skips it)."""
+    p.add_argument("--refresh", dest="refresh", action="store_true", default=True,
+                   help="recompile the requested frames first (the default)")
+    p.add_argument("--no-refresh", dest="refresh", action="store_false",
+                   help="export what is stored, only draining the re-check queue")
 
 
 def cmd_export_vlm(args: argparse.Namespace) -> int:
@@ -174,12 +265,15 @@ def cmd_export_vlm(args: argparse.Namespace) -> int:
     from tda.cli import EXIT_ERROR, EXIT_OK, _session
     from tda.core.export.vlm import TASKS, export_vlm
 
-    with _session(args) as (paths, db):
+    with _session(args, lock=True) as (paths, db):
         out = args.out or P.cache_file(paths, f"vlm_{args.view}.jsonl")
         desktops = _desktop_list(args.desktops)
         if not desktops:
             print("[export-vlm] nothing to export: pass --desktops")
             return EXIT_ERROR
+        refused = _export_prologue(args, db, desktops, "export-vlm")
+        if refused is not None:
+            return refused
         tasks = [t.strip() for t in str(args.tasks).split(",") if t.strip()] or list(TASKS)
         stats = export_vlm(db, load_taxonomy(), desktops, str(args.view), str(out),
                            tasks=tasks, only_verified=bool(args.only_verified))
@@ -197,6 +291,7 @@ def _add_export_vlm(sub) -> None:
     p.add_argument("--only-verified", dest="only_verified", action="store_true",
                    default=False, help="ask only about confirmed rows")
     p.add_argument("--no-only-verified", dest="only_verified", action="store_false")
+    _add_refresh_flags(p)
     p.set_defaults(func=cmd_export_vlm)
 
 
