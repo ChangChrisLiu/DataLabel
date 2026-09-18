@@ -23,8 +23,11 @@ from typing import Any, Iterable, Optional
 
 from tda.core import dbrows as R
 from tda.core.db_pose import PoseSegmentMixin
+from tda.core.db_recheck import RecheckMixin
 from tda.core.db_status import StatusMixin
 from tda.core.dbconn import ConnectionMixin
+from tda.core.dbdelete import DeleteMixin
+from tda.core.db_digest import DigestMixin
 from tda.core.model import (
     ActionRec,
     FrameKey,
@@ -40,7 +43,7 @@ from tda.core.model import (
     ZOrderRec,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 LOCK_TTL = timedelta(hours=12)
 #: How a conflict may be closed. The first three are a human's decision;
 #: ``superseded`` is what the truth service records when the inputs moved on
@@ -48,10 +51,14 @@ LOCK_TTL = timedelta(hours=12)
 RESOLUTIONS = ("keep_old", "accept_new", "edited", "superseded")
 
 
-class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin):
+class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
+         RecheckMixin, DigestMixin):
     """Repository over the TDA SQLite file. Every write commits immediately --
     unless it runs inside :meth:`~tda.core.dbconn.ConnectionMixin.transaction`;
-    :mod:`tda.core.db_pose` and :mod:`tda.core.db_status` mix in more readers."""
+    :mod:`tda.core.db_pose` and :mod:`tda.core.db_status` mix in more readers,
+    :mod:`tda.core.dbdelete` the undo-side row removals,
+    :mod:`tda.core.db_recheck` the queue of frames awaiting a truth re-check and
+    :mod:`tda.core.db_digest` the per-frame input digests."""
 
     def __init__(self, path: str):
         self.path = str(path)
@@ -63,6 +70,9 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin):
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        # the truth sweeper writes through a second connection to this same
+        # file, so a writer must wait rather than fail (spec 3.5, WAL)
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self._lock_path = Path(self.path + ".lock")
         self._lock_annotator: Optional[str] = None
         self._tx_depth = 0
@@ -299,9 +309,18 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin):
              for i, p in enumerate(parts)],
         )
 
-    def add_keyframe(self, kf: ShapeKeyframe) -> int:
-        """Insert a new shape keyframe with its parts; returns (and sets) its id."""
-        sql, params = R.insert_sql("shape_keyframe", R.keyframe_data(kf))
+    def add_keyframe(self, kf: ShapeKeyframe, keep_id: int | None = None) -> int:
+        """Insert a new shape keyframe with its parts; returns (and sets) its id.
+
+        ``keep_id`` re-inserts a row under the id it had before: redoing an
+        operation that an undo removed must bring the *same* keyframe back, or
+        every other operation naming it would find nothing and insert a
+        duplicate of its own (spec 4.6).
+        """
+        data = R.keyframe_data(kf)
+        if keep_id is not None:
+            data = {"id": int(keep_id)} | data
+        sql, params = R.insert_sql("shape_keyframe", data)
         with self._tx():
             self._ensure_desktop(kf.desktop)
             kf.id = int(self.conn.execute(sql, params).lastrowid)

@@ -31,6 +31,11 @@ table records an action for it.
 
 ``graph_version`` is ``None`` until the constraint graph exists (it is a Plan-B
 module); the field is written now so the JSONL schema does not change later.
+
+The export **writes**: like the COCO one it calls
+:meth:`~tda.core.truth.TruthService.ensure_fresh` per desktop, so the
+compiled rows it reads are complete. A caller therefore needs the
+single-user lock of spec 3.5.
 """
 from __future__ import annotations
 
@@ -53,6 +58,7 @@ from tda.core.export.coco import (
 )
 from tda.core.model import ActionRec, FrameKey, InstanceRec
 from tda.core.taxonomy import Taxonomy
+from tda.core.truth import TruthService
 
 __all__ = ["TASKS", "export_vlm", "instance_label"]
 
@@ -333,6 +339,8 @@ def export_vlm(
     out_jsonl: str,
     tasks: Iterable[str] = TASKS,
     only_verified: bool = False,
+    *,
+    truth: Optional[TruthService] = None,
 ) -> dict:
     """Write the V1/V2/V3 question set of ``desktops`` in ``view`` as JSONL.
 
@@ -354,8 +362,15 @@ def export_vlm(
             return
         records.append(record)
 
+    service = truth or TruthService(db, tax)
+
     for desktop in desktops:
         ctx = load_ctx(db, tax, desktop, view)
+        # the compiled rows of an unverified frame are a cache the
+        # annotator's commits leave stale (spec 3.4): fill it before
+        # reading the view out, or a frame nobody visited is exported
+        # as it was several edits ago -- or silently not at all
+        service.ensure_fresh(desktop, view, only_verified)
         previous: Optional[tuple[int, dict[str, tuple[dict, list]], str]] = None
         for frame in db.frames_for(desktop, view):
             key = FrameKey(desktop, frame["step"], view)

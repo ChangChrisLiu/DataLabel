@@ -1,4 +1,4 @@
--- TDA SQLite schema (schema_version = 2).
+-- TDA SQLite schema (schema_version = 3).
 -- One table per entity of design spec section 3.1. Every JSON column is TEXT
 -- holding json.dumps(..., ensure_ascii=False); RLE dicts are stored as JSON.
 -- All statements are IF NOT EXISTS so that Db.__init__ stays idempotent -- which
@@ -108,6 +108,10 @@ CREATE TABLE IF NOT EXISTS pose_segment (
     corners_json    TEXT,
     homography_json TEXT,
     roi_json        TEXT,
+    -- the staging area this view can see, if any: spec 4.2 only asks for a
+    -- part on the bench to be boxed 若该视角有堆放区 ROI, and the scanner looks
+    -- straight down at the board, so on most views this stays NULL for ever
+    bench_roi_json  TEXT,
     PRIMARY KEY (desktop, view, seg)
 );
 
@@ -216,6 +220,22 @@ CREATE TABLE IF NOT EXISTS compiled_mask (
     PRIMARY KEY (desktop, step, view, instance)
 );
 
+-- The cheap fingerprint of one frame's compiler inputs, written in the SAME
+-- transaction as the compiled_mask rows it describes (spec 3.4). A batch pass
+-- -- an export, cli check -- compares it BEFORE doing any pixel work, so a view
+-- nobody has touched since the last pass costs a few SELECTs instead of one
+-- compilation per frame. `n_rows` guards against rows that went away underneath
+-- it, and `compiler_version` against a digest this build did not write.
+CREATE TABLE IF NOT EXISTS frame_digest (
+    desktop          INTEGER NOT NULL REFERENCES desktop(id) ON DELETE CASCADE,
+    step             INTEGER NOT NULL,
+    view             TEXT    NOT NULL,
+    digest           TEXT    NOT NULL,
+    compiler_version TEXT    NOT NULL,
+    n_rows           INTEGER NOT NULL,
+    PRIMARY KEY (desktop, step, view)
+);
+
 CREATE TABLE IF NOT EXISTS conflict (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     desktop      INTEGER NOT NULL REFERENCES desktop(id) ON DELETE CASCADE,
@@ -231,6 +251,25 @@ CREATE TABLE IF NOT EXISTS conflict (
     resolved_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_conflict_open ON conflict(desktop, view, status);
+
+-- Frozen frames whose inputs changed and that still have to be compared
+-- against their frozen rows (spec 3.4). The work is done off the GUI thread, so
+-- the request is persisted: a crash or a restart must not lose a re-check, or a
+-- conflict would silently never be raised -- which is also why schema_version
+-- went to 3 for this table, rather than adding it quietly: a build that does
+-- not know about the queue would skip the re-checks instead of reporting them.
+--
+-- `gen` counts how often the frame has been asked for. The sweeper reads it
+-- with the request and clears the row only if it is still the same, so a second
+-- request arriving while the first is being worked on is never cleared away.
+CREATE TABLE IF NOT EXISTS recheck_queue (
+    desktop      INTEGER NOT NULL REFERENCES desktop(id) ON DELETE CASCADE,
+    step         INTEGER NOT NULL,
+    view         TEXT    NOT NULL,
+    requested_at TEXT,
+    gen          INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (desktop, step, view)
+);
 
 CREATE TABLE IF NOT EXISTS relation (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,

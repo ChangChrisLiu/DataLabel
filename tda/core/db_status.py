@@ -25,6 +25,9 @@ VIEW_COUNTERS: dict[str, str] = {
     "missing": "FROM frame WHERE missing=1",
     "keyframes": "FROM shape_keyframe",
     "verified": "FROM frame WHERE review_status='verified'",
+    # frozen frames whose inputs moved and that nobody has compared yet: until
+    # this is zero the truth table of that view is not one to export (spec 3.4)
+    "rechecks": "FROM recheck_queue",
 }
 
 

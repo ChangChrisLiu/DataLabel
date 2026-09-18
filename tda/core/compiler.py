@@ -45,7 +45,7 @@ Problems reported in :attr:`CompiledFrame.problems`
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -113,12 +113,22 @@ class CompiledInstance:
 
 @dataclass
 class CompiledFrame:
-    """Everything the compiler derives for one frame."""
+    """Everything the compiler derives for one frame.
+
+    ``painted`` is the order the layers were actually composited in, as
+    ``placement -> instance keys, bottom-up``: the global z-order *after* the
+    pairwise overrides have been applied, with each placement group on its own
+    (spec 3.3 step 5). It is what the instance list and the canvas overlay have
+    to follow, since anything else would show an order the pixels contradict.
+    Instances with no mask layer -- a bench box, a missing shape -- appear in no
+    group.
+    """
 
     key: FrameKey
     instances: dict[str, CompiledInstance]
     problems: list[str]
     input_hash: str
+    painted: dict[str, list[str]] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -247,6 +257,21 @@ def _occlusion_ratio(visible: np.ndarray, amodal: np.ndarray) -> float:
     return float(min(1.0, max(0.0, ratio)))
 
 
+
+def _instance_order(layers: list[LayerKey]) -> list[str]:
+    """The instance keys of a painted layer list, bottom-up, each one once.
+
+    A multi-part instance contributes several layers; it takes the position of
+    its bottom-most one, which is where the instance as a whole starts covering
+    anything.
+    """
+    out: list[str] = []
+    for instance, _part in layers:
+        if instance not in out:
+            out.append(instance)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # the compiler
 # --------------------------------------------------------------------------- #
@@ -279,6 +304,7 @@ def compile_frame(
     *,
     placements: Optional[dict[str, str]] = None,
     pose_segment: Optional[int] = None,
+    bench_roi: Optional[list] = None,
 ) -> CompiledFrame:
     """Compile one frame: steps 3-7 of spec 3.3.
 
@@ -321,6 +347,10 @@ def compile_frame(
         chain and the occlusion group. ``None`` (the default) means
         ``in_chassis`` for every instance except the ones ``needs`` marks as
         ``"box"``.
+    bench_roi:
+        The staging area this view can see, or ``None``. A part lying on the
+        bench is only reported as ``bench_missing`` when there is one: spec 4.2
+        asks for a bench box 若该视角有堆放区 ROI, and the scanner never sees one.
     pose_segment:
         The pose segment this frame belongs to. Shapes of two segments are
         drawn in different reference frames and are not comparable, so when
@@ -373,11 +403,12 @@ def compile_frame(
         kf = selected[inst]
         if kf is None:
             kinds[inst] = _MISSING
-            problems.append(
-                f"bench_missing:{inst}"
-                if placement_of[inst] == ON_BENCH
-                else f"missing_shape:{inst}"
-            )
+            if placement_of[inst] != ON_BENCH:
+                problems.append(f"missing_shape:{inst}")
+            elif bench_roi is not None:
+                # a part on the bench is only annotated -- and only missing --
+                # where the view has a staging area to see it in (spec 4.2)
+                problems.append(f"bench_missing:{inst}")
             continue
         if kf.geom_type == GEOM_BOX:
             kinds[inst] = GEOM_BOX
@@ -510,6 +541,7 @@ def compile_frame(
     return CompiledFrame(
         key=key,
         instances=compiled,
+        painted={group: _instance_order(layers) for group, layers in painted.items()},
         problems=problems,
         input_hash=input_hash(
             key=key,

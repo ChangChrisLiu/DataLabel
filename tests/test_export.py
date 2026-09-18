@@ -31,6 +31,8 @@ SCREW = "screw.motherboard.03"
 GHOST = "ls:mystery#1"  # a provisional draft key with no instance record
 #: The pose segment `truth_inputs.pose_segment_of` reports when none is recorded.
 SEGMENT = 1
+#: The staging area this view can see, without which no bench row exists.
+BENCH_ROI = (0, 0, 64, 64)
 #: The psu's rectangle once it lies on the bench: x0, y0, x1, y1.
 BENCH_BOX = [2.0, 3.0, 12.0, 15.0]
 
@@ -115,6 +117,11 @@ def db(tmp_db_path: str, tax):
         anchor_step=3, placement="on_bench", geom_type="box",
         parts=[ShapePart("main", box=tuple(BENCH_BOX))], amodal_complete=True,
     ))
+    # this scene is about the bench row at step 3, so its view is one that can
+    # see the staging area: without an ROI an on_bench instance is not part of
+    # the frame at all (spec 3.3 step 2)
+    d.set_pose_segment(DESKTOP, VIEW, SEGMENT, 1, 3, 1, None, None)
+    d.set_pose_segment_bench_roi(DESKTOP, VIEW, SEGMENT, BENCH_ROI)
     yield d
     d.close()
 
@@ -457,3 +464,34 @@ def test_step_types_gate_both_exports(db, tax, tmp_path: Path):
     export_vlm(db, tax, [DESKTOP], VIEW, str(out))
     assert {r["step"] for r in _records(out)} == {1, 2}
     assert not [r for r in _records(out) if r["task"] == "V3"]
+
+
+def test_an_empty_mask_measures_as_no_box_at_all():
+    """An instance with nothing visible is not a detection.
+
+    The bbox is read straight off the run lengths now, and pycocotools measures
+    an empty RLE as ``[0, 0, 0, 0]`` rather than refusing -- which is a box of
+    zero size, not the absence of one, and COCO must not be told otherwise.
+    """
+    from tda.core.export.coco import mask_bbox_xywh
+
+    assert mask_bbox_xywh(encode_rle(np.zeros(HW, dtype=bool))) is None
+    assert mask_bbox_xywh(None) is None
+
+    real = np.zeros(HW, dtype=bool)
+    real[4:9, 2:8] = True
+    assert mask_bbox_xywh(encode_rle(real)) == [2, 4, 6, 5]
+
+
+def test_the_measurements_match_a_decoded_mask():
+    """Reading them off the run lengths has to give the same numbers as before."""
+    from tda.core import masks
+    from tda.core.export.coco import bbox_xywh, mask_bbox_xywh
+
+    shape = np.zeros(HW, dtype=bool)
+    shape[10:30, 5:25] = True
+    shape[12:14, 40:44] = True  # a second blob, so the box is not the first one
+    rle = encode_rle(shape)
+
+    assert mask_bbox_xywh(rle) == bbox_xywh(masks.bbox(masks.decode_rle(rle)))
+    assert masks.rle_area(rle) == masks.area(masks.decode_rle(rle))

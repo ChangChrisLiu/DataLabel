@@ -21,6 +21,7 @@ from tda.core.model import FrameKey, Visibility
 
 __all__ = [
     "SessionLike",
+    "SessionRefusal",
     "COMMIT_SCOPES",
     "FRAME_STATUSES",
     "QUEUE_NAMES",
@@ -42,6 +43,10 @@ STATUS_VERIFIED = "verified"
 STATUS_NEEDS_REVIEW = "needs_review"
 #: An edit contradicts an already frozen frame.
 STATUS_CONFLICT = "conflict"
+#: A frozen frame whose inputs changed and that the truth sweeper has not
+#: compared against them yet (spec 3.4): it may yet turn into a conflict, so it
+#: is not a frame anybody should treat as settled.
+STATUS_RECHECK = "recheck"
 #: The view has no image for this logical step; the state and the shape anchor
 #: still exist, the frame simply has nothing to draw on (spec 4.2, missing frames).
 STATUS_MISSING = "missing"
@@ -52,18 +57,22 @@ FRAME_STATUSES: tuple[str, ...] = (
     STATUS_VERIFIED,
     STATUS_NEEDS_REVIEW,
     STATUS_CONFLICT,
+    STATUS_RECHECK,
     STATUS_MISSING,
 )
 
 # --------------------------------------------------------------------------- #
-# task card -- the work implied by stepping from k to k-1 (spec 4.2)
+# task card -- the work that belongs to the frame on screen (spec 4.2)
 # --------------------------------------------------------------------------- #
-#: ``removed -> installed``: draw the part back into the chassis.
+#: The part is in the chassis on this frame and has no shape here yet.
 KIND_ADD_SHAPE = "add_shape"
 #: ``open -> closed`` / ``unplugged -> plugged`` / ``displaced -> installed``.
 KIND_SPLIT_KEYFRAME = "split_keyframe"
 #: ``loosened -> fastened``: the shape carries over, only the state changes.
 KIND_STATE_ONLY = "state_only"
+#: The part is out of the chassis and the view can see the staging area, so it
+#: needs a rectangle there -- box work, not brush work (spec 4.2 item 1).
+KIND_ADD_BENCH_BOX = "add_bench_box"
 #: The part is back in the chassis, so its bench box ends here.
 KIND_REMOVE_BENCH_BOX = "remove_bench_box"
 #: ``dupli`` / ``failed`` frames: nothing to draw, one keystroke.
@@ -73,6 +82,7 @@ TASK_KINDS: tuple[str, ...] = (
     KIND_ADD_SHAPE,
     KIND_SPLIT_KEYFRAME,
     KIND_STATE_ONLY,
+    KIND_ADD_BENCH_BOX,
     KIND_REMOVE_BENCH_BOX,
     KIND_CONFIRM,
 )
@@ -116,6 +126,16 @@ RESOLUTIONS: tuple[str, ...] = (RESOLVE_KEEP_OLD, RESOLVE_ACCEPT_NEW)
 VISIBILITY_VALUES: tuple[str, ...] = tuple(v.value for v in Visibility)
 
 
+class SessionRefusal(ValueError):
+    """A gesture the session declines, with a sentence the annotator can act on.
+
+    Refusals are ordinary: drawing on a frame that has no image, painting a mask
+    on a part lying on the bench, naming an instance this frame does not have.
+    They are told apart from real errors so the window can show the text next to
+    the canvas instead of logging a traceback at somebody who did nothing wrong.
+    """
+
+
 @runtime_checkable
 class SessionLike(Protocol):
     """What the dock panels require of an annotation session.
@@ -142,8 +162,23 @@ class SessionLike(Protocol):
     sigDirty: Signal
     #: Problems of the current frame, as ``list[str]``.
     sigProblems: Signal
+    #: The editing layer was replaced from the outside (an undone stroke);
+    #: payload is the new mask, or ``None``.
+    sigEditingChanged: Signal
+    #: The session let go of its desktop/view; the panels must detach.
+    sigClosed: Signal
+    #: ``(done, total, failed)`` of the background re-check of frozen frames.
+    sigSweepProgress: Signal
+    #: ``(step, text)`` -- a background re-check failed; the frame stays pending.
+    sigSweepError: Signal
+    #: Something the review queues show has changed (coalesced).
+    sigQueuesChanged: Signal
 
     # -- frames -------------------------------------------------------------
+    @property
+    def is_open(self) -> bool:
+        """Is a desktop/view open? Everything below needs one."""
+
     def steps(self) -> list[int]:
         """Logical steps of the open desktop/view, ascending."""
 
@@ -168,19 +203,41 @@ class SessionLike(Protocol):
     def compiled(self) -> CompiledFrame:
         """Compiler output for the current frame."""
 
+    def overlay_layers(self):
+        """``({instance: visible mask}, bottom-up order)`` for the canvas overlay."""
+
+    def task_neighbour(self) -> int | None:
+        """The annotated frame :meth:`task_card` is diffed against, or ``None``."""
+
     # -- content ------------------------------------------------------------
     def instance_rows(self) -> list[dict]:
         """``{"key","cls","state","placement","visibility","z","hidden"}``, top first."""
 
     def task_card(self) -> list[dict]:
-        """``{"instance","kind","text","done"}`` with ``kind`` in :data:`TASK_KINDS`."""
+        """``{"instance","kind","text","done"}`` with ``kind`` in :data:`TASK_KINDS`.
+
+        The work of the frame on screen, diffed against :meth:`task_neighbour`.
+        """
 
     # -- edits --------------------------------------------------------------
     def begin_edit(self, instance: str) -> None:
         """Load the instance's shape into the editing layer."""
 
-    def commit_edit(self, scope: str) -> None:
-        """Write the editing layer back; ``scope`` is one of :data:`COMMIT_SCOPES`."""
+    def set_editing_mask(self, mask) -> None:
+        """Hand over the layer the window has been painting into."""
+
+    def push_stroke(self, before, after) -> None:
+        """Record one brush/eraser stroke on the undo stack."""
+
+    def commit_edit(self, scope: str) -> dict:
+        """Write the editing layer back; ``scope`` is one of :data:`COMMIT_SCOPES`.
+
+        Also accepts ``zorder:above:<B>`` / ``zorder:below:<B>``, which write a
+        layering exception rather than pixels (spec 4.3).
+        """
+
+    def preview(self, scope: str) -> dict:
+        """``{"steps", "verified_steps"}`` an edit would reach, writing nothing."""
 
     def set_visibility(self, instance: str, vis: str) -> None:
         """Override the frame-level visibility; ``vis`` in :data:`VISIBILITY_VALUES`."""
@@ -198,5 +255,11 @@ class SessionLike(Protocol):
     def queues(self) -> dict[str, list[dict]]:
         """The four review queues, keyed by :data:`QUEUE_NAMES`."""
 
-    def resolve_conflict(self, cid: int, resolution: str) -> None:
-        """Resolve conflict ``cid`` with one of :data:`RESOLUTIONS`."""
+    def resolve_conflict(self, cid: int, resolution: str) -> str:
+        """Resolve conflict ``cid``; ``"resolved"`` / ``"superseded"`` / ``"refused"``."""
+
+    def set_unexplained(self, step: int, boxes) -> None:
+        """Record the difference-map regions of one frame that nothing explains."""
+
+    def retry_rechecks(self) -> int:
+        """Re-arm every outstanding truth re-check; returns how many."""

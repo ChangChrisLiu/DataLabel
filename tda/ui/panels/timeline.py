@@ -46,6 +46,9 @@ STATUS_COLORS: dict[str, QColor] = {
     api.STATUS_VERIFIED: QColor(64, 172, 90),
     api.STATUS_NEEDS_REVIEW: QColor(214, 72, 64),
     api.STATUS_CONFLICT: QColor(214, 72, 64),
+    # a frozen frame waiting to be re-checked: amber, between "confirmed" and
+    # "somebody has to look at this" -- it is not yet known which it is
+    api.STATUS_RECHECK: QColor(224, 140, 48),
     api.STATUS_MISSING: QColor(150, 150, 156),
 }
 

@@ -264,6 +264,14 @@ def test_a_missing_bench_shape_does_not_block_the_frame():
     ]
 
 
+def test_a_view_without_a_staging_area_is_not_asked_for_a_bench_box():
+    """Spec 4.2 item 1: a bench box is owed 若该视角有堆放区 ROI, and not otherwise."""
+    out = run({}, zo([]), needs={"screw.01": "box"}, placements={"screw.01": BENCH},
+              bench_roi=None)
+    assert out.problems == []
+    assert out.instances["screw.01"].placement == BENCH
+
+
 def test_an_instance_with_no_visible_pixels_is_reported_unless_overridden():
     out = run(**covered())
     small = out.instances["small"]

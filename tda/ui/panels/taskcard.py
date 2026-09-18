@@ -1,9 +1,10 @@
-"""Task card dock: what stepping from frame k to k-1 requires (spec 4.2).
+"""Task card dock: the work that belongs to the frame on screen (spec 4.2).
 
-The session turns the state diff between two steps into instructions -- draw
-this part back into the chassis, split that keyframe, only flip this state --
-and this panel is their checklist: done items are struck through, the first
-open one is highlighted and is what the four buttons act on.
+The session diffs this frame against the neighbour the annotator came from and
+turns the result into instructions -- draw this part back into the chassis, box
+that one in the staging area, split this keyframe, only flip that state -- and
+this panel is their checklist: done items are struck through, the first open one
+is highlighted and is what the four buttons act on.
 
 The panel decides nothing.  Activating an item is ``begin_edit`` plus a
 :attr:`TaskCardPanel.sigRequestEdit` for the canvas; the buttons are the four
@@ -38,6 +39,7 @@ KIND_ICONS: dict[str, str] = {
     api.KIND_ADD_SHAPE: "✚",  # heavy greek cross: draw a new shape
     api.KIND_SPLIT_KEYFRAME: "✂",  # scissors: split the keyframe
     api.KIND_STATE_ONLY: "≡",  # identical to: shape unchanged
+    api.KIND_ADD_BENCH_BOX: "▭",  # rectangle: box it in the staging area
     api.KIND_REMOVE_BENCH_BOX: "⌫",  # erase: the bench box ends here
     api.KIND_CONFIRM: "✔",  # check: nothing to draw
 }

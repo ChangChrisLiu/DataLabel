@@ -51,16 +51,17 @@ import numpy as np
 from tda.core import masks
 from tda.core.compiler import CompiledFrame, compile_frame, select_keyframe
 from tda.core.db import RESOLUTIONS, Db
-from tda.core.model import FrameKey, FrameOverride, Placement, ShapeKeyframe, Visibility
+from tda.core.model import FrameKey, Placement, ShapeKeyframe
 from tda.core.states import needs_geom
 from tda.core.taxonomy import Taxonomy
+from tda.core.truth_fresh import FreshMixin, digest_of
+from tda.core.truth_resolve import ResolveMixin, StaleConflictError
 from tda.core.truth_conflicts import (
     BOX_TOL_PX,
     GEOM_BOX,
     disagreement,
     geom_payload,
     payload_geometry,
-    payload_row,
     row_payload,
     row_values,
 )
@@ -68,7 +69,6 @@ from tda.core.truth_inputs import (
     FrameInputs,
     InputCache,
     events_of,
-    frame_hw,
     gather,
     instances_of,
     pose_segment_of,
@@ -99,17 +99,7 @@ BENCH_MISSING = "bench_missing:"
 SYSTEM = "system"
 
 
-class StaleConflictError(ValueError):
-    """A queued conflict the inputs have overtaken; it was re-queued, not accepted.
-
-    Raised by :meth:`TruthService.resolve_conflict` on ``accept_new`` when the
-    frame no longer compiles to the value the conflict was queued with. The old
-    conflict is closed as ``superseded`` and the current disagreement is in the
-    queue by the time this reaches the caller, whose job is to show that one.
-    """
-
-
-class TruthService:
+class TruthService(FreshMixin, ResolveMixin):
     """Reads the annotations, compiles frames and owns the ``compiled_mask`` table."""
 
     def __init__(self, db: Db, tax: Taxonomy, compiler_version: str = "1"):
@@ -128,7 +118,11 @@ class TruthService:
     ) -> tuple[FrameInputs, CompiledFrame]:
         """The frame's inputs and its compilation; ``hw`` is needed by callers."""
         inputs = gather(self.db, self.tax, key, cache)
-        compiled = compile_frame(
+        return inputs, self._compile_inputs(key, inputs)
+
+    def _compile_inputs(self, key: FrameKey, inputs: FrameInputs) -> CompiledFrame:
+        """Compile from inputs the caller already gathered."""
+        return compile_frame(
             key,
             inputs.hw,
             inputs.needs,
@@ -141,36 +135,87 @@ class TruthService:
             self.compiler_version,
             placements=inputs.placements,
             pose_segment=inputs.pose_segment,
+            bench_roi=inputs.bench_roi,
         )
-        return inputs, compiled
 
     # ------------------------------------------------------------------ refresh
 
-    def refresh(self, key: FrameKey, cache: Optional[InputCache] = None) -> dict:
+    def refresh(self, key: FrameKey, cache: Optional[InputCache] = None,
+                guard: Optional[str] = None, want_compiled: bool = False,
+                ignore_digest: bool = False) -> dict:
         """Bring one frame's truth rows up to date with the current inputs.
 
-        Returns ``{"updated", "conflicts", "skipped", "problems"}``: rows
-        written (a deleted row counts as written), frozen rows found in
-        disagreement, rows left alone, and the compiler's problem list.
+        Returns ``{"updated", "conflicts", "skipped", "problems", "compiled",
+        "stale"}``: rows written (a deleted row counts as written), frozen rows
+        found in disagreement, rows left alone, the compiler's problem list, the
+        compilation the whole decision was made from -- handed back so that a
+        caller which also needs the frame does not compile it a second time --
+        and whether the write was abandoned.
 
         ``cache`` is :meth:`refresh_range`'s way of reading the step-independent
         inputs once; callers outside this module leave it out.
+
+        ``ignore_digest`` compiles the frame whatever the stored digest says,
+        which is what the session's "I do not trust the cache" refresh is for.
+
+        A frame whose stored digest still describes its inputs is **not
+        compiled at all**: the pixel work is what a batch pass over an untouched
+        view used to spend all its time on. ``compiled`` then comes back
+        ``None`` unless ``want_compiled`` asks for it, which is what the session
+        does when it needs the arrays to draw.
+
+        ``guard`` is an :meth:`inputs_digest` taken before the compilation, for
+        a caller working off the GUI thread. The pixel work happens outside any
+        transaction; every write then happens inside **one**, which begins by
+        taking the digest again. If it moved, nothing is written and ``stale``
+        comes back true: the frame has to be looked at again against the inputs
+        it has now, and a conflict describing the old ones would be a conflict
+        nobody caused.
         """
-        inputs, compiled = self._compile(key, cache)
-        stored = self.db.compiled(key)
-        new_hash = compiled.input_hash
+        inputs = gather(self.db, self.tax, key, cache)
+        digest = digest_of(inputs, self.compiler_version)
+        if not ignore_digest and self._digest_is_current(key, digest):
+            # the rows already describe exactly these inputs: there is nothing
+            # to derive and, since nothing moved, nothing a frozen row could
+            # disagree with either
+            result = {"updated": 0, "conflicts": 0, "skipped": len(self.db.compiled(key)),
+                      "problems": [], "compiled": None, "stale": False}
+            if want_compiled:
+                result["compiled"] = self._compile_inputs(key, inputs)
+            return result
+        # the inputs are already in hand: gathering them a second time reads the
+        # whole keyframe table again, which is most of a batch pass's time
+        compiled = self._compile_inputs(key, inputs)  # no transaction: pixels only
+        with self.db.transaction():
+            return self._write_refresh(key, compiled, guard, digest)
+
+    def _write_refresh(self, key: FrameKey, compiled: CompiledFrame,
+                       guard: Optional[str], digest: str) -> dict:
+        """The write half of :meth:`refresh`; the caller holds the transaction."""
         result: dict = {
             "updated": 0,
             "conflicts": 0,
             "skipped": 0,
             "problems": list(compiled.problems),
+            "compiled": compiled,
+            "stale": False,
         }
+        if guard is not None and self.inputs_digest(key) != guard:
+            result["stale"] = True  # nothing written; the block commits nothing
+            return result
+        stored = self.db.compiled(key)
+        new_hash = compiled.input_hash
         self._mark_bench(key, compiled)
 
         fresh = set(compiled.instances)
         known = set(stored)
         if known == fresh and all(row["input_hash"] == new_hash for row in stored.values()):
-            result["skipped"] = len(stored)  # nothing changed: no work at all
+            # nothing to write -- but the rows *do* describe these inputs, and
+            # saying so is the whole point: a database that predates the digest
+            # table is entirely in this state, and without the stamp no pass
+            # over it is ever cheaper than the first
+            result["skipped"] = len(stored)
+            self._stamp(key, digest)
             return result
 
         verified_frame = self._frame_is_verified(key, stored)
@@ -211,21 +256,90 @@ class TruthService:
 
         if verified_frame and (fresh - known or known - fresh):
             self.demote_frame(key, self._demotion_reason(fresh, known))
+        if result["conflicts"]:
+            # the frozen rows deliberately still hold their old value, so they
+            # do NOT describe these inputs: stamping the digest here would make
+            # the next pass skip the frame and the disagreement would never be
+            # raised again once the queue entry was resolved (spec 3.4)
+            self.db.clear_frame_digest(key)
+        else:
+            self._stamp(key, digest)
         return result
 
-    def refresh_range(self, desktop: int, view: str, steps: Iterable[int]) -> dict:
+    def _stamp(self, key: FrameKey, digest: str) -> None:
+        """Record what the rows just written were derived from (same transaction).
+
+        Only ever called when the rows do describe those inputs: a frame with a
+        queued conflict keeps its frozen value instead, so its digest is dropped
+        and the next pass looks at it again.
+        """
+        self.db.set_frame_digest(key, digest, self.compiler_version,
+                                 len(self.db.compiled(key)))
+
+    def refresh_range(self, desktop: int, view: str, steps: Iterable[int],
+                      per_step: bool = False, ignore_digest: bool = False) -> dict:
         """:meth:`refresh` every step of one view, with the totals summed up.
 
         ``problems`` is the concatenation of the per-step problem lists in the
-        order the steps were given.
+        order the steps were given -- or, with ``per_step``, a dict keyed by
+        step, which is what a caller needs to say *where* a missing shape is
+        (spec 4.4 queues).
+        """
+        cache = InputCache()
+        total: dict = {"updated": 0, "conflicts": 0, "skipped": 0,
+                       "problems": {} if per_step else []}
+        for step in steps:
+            one = self.refresh(FrameKey(desktop, int(step), view), cache,
+                               ignore_digest=ignore_digest)
+            for counter in ("updated", "conflicts", "skipped"):
+                total[counter] += one[counter]
+            if per_step:
+                total["problems"][int(step)] = list(one["problems"])
+            else:
+                total["problems"].extend(one["problems"])
+        return total
+
+    # ------------------------------------------------------- pending rechecks
+
+    def queue_rechecks(self, desktop: int, view: str, steps: Iterable[int]) -> list[int]:
+        """Remember that these frozen frames have to be compared again (spec 3.4).
+
+        Editing a shape changes the inputs of every frame it reaches, and a
+        ``verified`` frame among them may now disagree with what a human froze.
+        Compiling them all before the annotator can carry on is what made an
+        edit cost seconds, so the check is deferred -- and, because a conflict
+        that is never raised is worse than a slow tool, the *request* is stored
+        rather than kept in memory. Returns the steps queued.
+        """
+        wanted = [int(s) for s in steps]
+        if wanted:
+            self.db.add_rechecks(desktop, view, wanted)
+        return sorted(set(wanted))
+
+    def pending_rechecks(self, desktop: int, view: str) -> list[int]:
+        """Frozen frames of one view still waiting to be compared, ascending.
+
+        An export or a quality check must run these first: the truth table is
+        only trustworthy once nothing is outstanding.
+        """
+        return self.db.rechecks(desktop, view)
+
+    def run_pending_rechecks(self, desktop: int, view: str) -> dict:
+        """Work the queue off synchronously; same totals as :meth:`refresh_range`.
+
+        This is the batch path -- ``cli check`` and the exports -- next to the
+        background sweeper the GUI uses. Each request is retired under the
+        generation it was read with, so one that arrives during the drain stays
+        queued rather than being cleared unchecked.
         """
         cache = InputCache()
         total: dict = {"updated": 0, "conflicts": 0, "skipped": 0, "problems": []}
-        for step in steps:
+        for step, gen in self.db.recheck_items(desktop, view):
             one = self.refresh(FrameKey(desktop, int(step), view), cache)
             for counter in ("updated", "conflicts", "skipped"):
                 total[counter] += one[counter]
             total["problems"].extend(one["problems"])
+            self.db.clear_recheck(desktop, view, step, gen)
         return total
 
     # ------------------------------------------------------- verify and demote
@@ -260,6 +374,7 @@ class TruthService:
             for instance in sorted(set(stored) - set(compiled.instances)):
                 self.db.delete_compiled(key, instance)  # not in this frame at all
             self._mark_bench(key, compiled)
+            self._stamp(key, self.inputs_digest(key))
             self.db.set_frame_flags(key, review_status=VERIFIED)
             self.db.log_op(
                 key.desktop, key.view, "verify_frame",
@@ -281,148 +396,6 @@ class TruthService:
         )
 
     # ------------------------------------------------------ conflict resolution
-
-    def resolve_conflict(self, cid: int, resolution: str, annotator: str) -> None:
-        """Close one queued disagreement, and make the inputs agree with it.
-
-        ``accept_new`` confirms what the inputs say **now**: the frame is
-        recompiled and the queued value is compared against that compilation
-        with the rule that queued it. Agreeing (a re-trace within tolerance
-        counts as agreeing) writes the *current* geometry into the frozen row,
-        which stays ``verified``, stamped with the frame's current
-        ``input_hash`` so the next refresh has nothing left to do; when the
-        current compilation has no geometry for the instance at all, the row is
-        removed instead. Disagreeing means the inputs moved on after the
-        conflict was queued: accepting it would confirm something nobody has
-        seen, so this conflict is closed as ``superseded``, the disagreement
-        against the *current* value is queued in its place and
-        :class:`StaleConflictError` is raised for the caller to re-present it.
-
-        ``keep_old`` pins the frame: the frozen value is written back as a
-        :class:`~tda.core.model.FrameOverride`, which is what "only this frame"
-        means everywhere else in the tool (spec 4.3). The compiler then produces
-        the frozen value again and the disagreement cannot come back, while the
-        shape itself keeps whatever the annotator changed it to for every other
-        frame. An existing override of that instance is merged, not replaced. A
-        box row is pinned by the rectangle's mask, so the override stays a plain
-        visible mask, and a frozen *absence* is pinned by the row's own
-        ``visibility``. It is refused when the instance is no longer in the
-        frame's state at all: presence is the step table's and the event log's
-        decision, not an override's, so that conflict is settled by fixing the
-        step (or by ``accept_new``, which drops the frozen row).
-
-        ``edited`` only closes the conflict: whoever edited the row wrote it.
-        """
-        if resolution not in BY_HAND:
-            raise ValueError(f"resolution must be one of {BY_HAND}, got {resolution!r}")
-        conflict = self.db.get_conflict(cid)
-        if conflict is None:
-            raise KeyError(f"no conflict with id={cid}")
-        if conflict["status"] != OPEN:
-            raise ValueError(
-                f"conflict {cid} is already resolved "
-                f"({conflict['resolution'] or conflict['status']})"
-            )
-        key = FrameKey(conflict["desktop"], conflict["step"], conflict["view"])
-        instance = conflict["instance"]
-        stale: Optional[str] = None
-        with self.db.transaction():
-            if resolution == ACCEPT_NEW:
-                stale = self._accept_new(key, instance, conflict, annotator)
-            elif resolution == KEEP_OLD:
-                self._keep_old(key, instance, conflict)
-            settled = SUPERSEDED if stale else resolution
-            self.db.resolve_conflict(cid, settled)
-            self.db.log_op(
-                key.desktop, key.view, "resolve_conflict",
-                {"step": key.step, "instance": instance, "conflict": int(cid),
-                 "resolution": settled},
-                {"kind": "reopen_conflict", "conflict": int(cid)},
-                annotator,
-            )
-        if stale:  # raised only once the supersession itself is committed
-            raise StaleConflictError(stale)
-
-    def _accept_new(
-        self, key: FrameKey, instance: str, conflict: dict, annotator: str
-    ) -> Optional[str]:
-        """Confirm the current compilation, or report that it overtook the conflict.
-
-        Returns ``None`` when the row was written (or removed), and the message
-        of the :class:`StaleConflictError` the caller must raise otherwise.
-        """
-        _, compiled = self._compile(key)
-        compiled_inst = compiled.instances.get(instance)
-        queued = payload_row(conflict["new_rle"])
-        if compiled_inst is None:
-            if conflict["new_rle"] is not None:
-                return self._supersede(key, instance, conflict, None)
-            self.db.delete_compiled(key, instance)  # the instance is gone: so is the row
-            return None
-        if disagreement(queued, compiled_inst) is not None:
-            return self._supersede(key, instance, conflict, compiled_inst)
-        self._put_row(
-            key, instance, row_values(compiled_inst), VERIFIED, compiled.input_hash,
-            verified_by=annotator,
-        )
-        return None
-
-    def _supersede(
-        self, key: FrameKey, instance: str, conflict: dict, compiled_inst
-    ) -> str:
-        """Queue the disagreement against the current value; returns the message."""
-        row = self.db.compiled(key).get(instance)
-        if row is None:
-            return (
-                f"conflict {conflict['id']} is stale: {instance} has no truth row on "
-                f"step {key.step} any more"
-            )
-        diff = None if compiled_inst is None else disagreement(row, compiled_inst)
-        if compiled_inst is None:
-            diff = self._payload_area(row_payload(row))
-        if diff is None:
-            return (
-                f"conflict {conflict['id']} is stale: the inputs changed again and now "
-                f"agree with the frozen row of {instance} on step {key.step}"
-            )
-        values = None if compiled_inst is None else row_values(compiled_inst)
-        new_payload = (
-            None if values is None else geom_payload(values.visible_rle, values.box)
-        )
-        self._queue_conflict(key, instance, row_payload(row), new_payload, diff, None)
-        return (
-            f"conflict {conflict['id']} is stale: the inputs changed after it was queued, "
-            f"so the disagreement about {instance} on step {key.step} was queued again"
-        )
-
-    def _keep_old(self, key: FrameKey, instance: str, conflict: dict) -> None:
-        """Pin the frozen value onto this frame so the compiler reproduces it."""
-        _, compiled = self._compile(key)
-        if instance not in compiled.instances:
-            raise ValueError(
-                f"{instance} is not in the state of desktop {key.desktop} / {key.view} / "
-                f"step {key.step}, so keeping the frozen row cannot be expressed as a "
-                f"frame override: fix the step's actions or events, or accept_new to drop "
-                f"the frozen row"
-            )
-        geom_type, visible_rle, box = payload_geometry(conflict["old_rle"])
-        if geom_type == GEOM_BOX and box is not None:
-            visible_rle = masks.encode_rle(self._box_mask(box, frame_hw(self.db, key)))
-        existing = self.db.frame_overrides(key).get(instance)
-        if visible_rle is None:
-            # the frozen row had no geometry at all: pin the label it carried
-            row = self.db.compiled(key).get(instance) or {}
-            self.db.set_frame_override(FrameOverride(
-                key, instance,
-                visible_rle=None if existing is None else existing.visible_rle,
-                visibility=row.get("visibility") or Visibility.OUT_OF_VIEW.value,
-            ))
-            return
-        self.db.set_frame_override(FrameOverride(
-            key, instance,
-            visible_rle=visible_rle,
-            visibility=None if existing is None else existing.visibility,
-        ))
 
     # -------------------------------------------------------------- keyframes
 
@@ -577,6 +550,10 @@ class TruthService:
         missing bench shape clears it instead of blocking the frame.
         """
         if not any(inst.placement == ON_BENCH for inst in compiled.instances.values()):
+            # no bench instance in this frame at all -- either nothing is out of
+            # the machine yet, or this view has no staging area and the gate in
+            # `gather` dropped them (spec 3.3 step 2). Either way the flag is
+            # about something that is not here, so it is left as it was.
             return
         annotated = not any(p.startswith(BENCH_MISSING) for p in compiled.problems)
         frame = self.db.get_frame(key)

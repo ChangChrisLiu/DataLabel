@@ -31,6 +31,16 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "geom_type": "TEXT NOT NULL DEFAULT 'mask'",
         "box_json": "TEXT",
     },
+    # `recheck_queue` arrived with schema version 3; the generation stamp was
+    # added in the same version, so only a database written by a pre-release
+    # build of that branch can be missing it.
+    "recheck_queue": {
+        "gen": "INTEGER NOT NULL DEFAULT 0",
+    },
+    # the staging-area ROI arrived with schema version 3 as well
+    "pose_segment": {
+        "bench_roi_json": "TEXT",
+    },
 }
 
 

@@ -93,8 +93,15 @@ def run(
     pose_segment: int | None = None,
     compiler_version: str = "1",
     key: FrameKey = KEY,
+    bench_roi=(0, 0, HW[1], HW[0]),
 ) -> CompiledFrame:
-    """compile_frame with the boilerplate filled in (needs defaults to masks)."""
+    """compile_frame with the boilerplate filled in (needs defaults to masks).
+
+    ``bench_roi`` defaults to the whole canvas, i.e. a view that *can* see the
+    staging area, because that is what the bench cases here are about; pass
+    ``None`` for a view like the scanner, which sees none and is therefore never
+    asked for a bench box (spec 4.2 item 1).
+    """
     if needs is None:
         needs = {inst: "mask" for inst in keyframes}
     return compile_frame(
@@ -110,6 +117,7 @@ def run(
         compiler_version,
         placements=placements,
         pose_segment=pose_segment,
+        bench_roi=None if bench_roi is None else list(bench_roi),
     )
 
 

@@ -575,6 +575,40 @@ def test_status_prints_counts(env, capsys):
     assert "scan" in out and "oak2" in out
 
 
+def test_status_reports_the_recheck_backlog_without_draining_it(env, capsys):
+    """Status is read-only: it says how many frames are owed a truth re-check."""
+    from tda.core.db import Db
+    from tda.core.model import FrameKey
+
+    assert run(env, "load-index") == 0
+    assert run(env, "import-logs") == 0
+    db = Db(env["db_path"])
+    db.add_rechecks(13, "scan", [4, 7])
+    db.close()
+
+    capsys.readouterr()
+    assert run(env, "status") == 0
+    out = capsys.readouterr().out
+    assert "re-checks pending: 2" in out
+
+    capsys.readouterr()
+    assert run(env, "status", "--desktop", "13") == 0
+    detail = capsys.readouterr().out
+    assert "re-checks pending: scan 2" in detail
+
+    again = Db(env["db_path"])
+    assert again.rechecks(13, "scan") == [4, 7]  # read-only: nothing was worked off
+    again.close()
+
+
+def test_status_says_nothing_about_rechecks_when_there_are_none(env, capsys):
+    assert run(env, "load-index") == 0
+    assert run(env, "import-logs") == 0
+    capsys.readouterr()
+    assert run(env, "status") == 0
+    assert "re-checks pending" not in capsys.readouterr().out
+
+
 def test_status_single_desktop(env, capsys):
     assert run(env, "load-index") == 0
     assert run(env, "import-logs") == 0

@@ -27,6 +27,8 @@ from tda.core.model import Similarity
 __all__ = [
     "encode_rle",
     "decode_rle",
+    "rle_area",
+    "rle_bbox_xywh",
     "bbox",
     "min_side",
     "area",
@@ -91,6 +93,29 @@ def encode_rle(mask: np.ndarray) -> dict:
         "size": [int(rle["size"][0]), int(rle["size"][1])],
         "counts": rle["counts"].decode("ascii"),
     }
+
+
+def _coco_rle(rle: dict) -> dict:
+    """Our RLE dict in the exact shape pycocotools wants (``bytes`` counts)."""
+    counts = rle["counts"]
+    if isinstance(counts, str):
+        counts = counts.encode("ascii")
+    return {"size": [int(rle["size"][0]), int(rle["size"][1])], "counts": counts}
+
+
+def rle_area(rle: dict) -> int:
+    """Pixels covered, straight off the run lengths.
+
+    The encoding already carries the answer, so a caller that only needs the
+    area -- an export writing one number per annotation -- has no reason to
+    build the ``H x W`` array first.
+    """
+    return int(coco_mask.area(_coco_rle(rle)))
+
+
+def rle_bbox_xywh(rle: dict) -> list[float]:
+    """COCO ``[x, y, w, h]`` straight off the run lengths (``[0, 0, 0, 0]`` if empty)."""
+    return [float(v) for v in coco_mask.toBbox(_coco_rle(rle))]
 
 
 def decode_rle(rle: dict) -> np.ndarray:
