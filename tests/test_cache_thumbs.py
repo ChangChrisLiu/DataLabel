@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import cv2
@@ -184,6 +186,15 @@ def _set_roi(path: str, seg: int, roi, desktop: int = 7, view: str = "scan") -> 
     conn.close()
 
 
+def _sql(path: str, *statements: str) -> None:
+    """Reshape the segments the way ``update_pose_segment``/``delete`` would."""
+    conn = sqlite3.connect(path)
+    for statement in statements:
+        conn.execute(statement)
+    conn.commit()
+    conn.close()
+
+
 def _tables(path: Path) -> list[str]:
     conn = sqlite3.connect(str(path))
     try:
@@ -223,6 +234,21 @@ def test_thumb_path_is_the_layout_the_ui_hard_codes():
             == "D:/DataSet/cache/thumbs/scan/D13/s042.jpg")
     assert thumb_path("D:/c/", FrameKey(1, 5, "oak1")) == "D:/c/thumbs/oak1/D01/s005.jpg"
     assert thumb_path(Path("D:/c"), FrameKey(66, 123, "rs")) == "D:/c/thumbs/rs/D66/s123.jpg"
+
+
+@pytest.mark.parametrize("order", [
+    "tda.core.cache_roi, tda.core.cache_thumbs, tda.core.cache",
+    "tda.core.cache_thumbs, tda.core.cache, tda.core.cache_roi",
+    "tda.core.cache, tda.core.cache_roi, tda.core.cache_thumbs",
+])
+def test_the_three_modules_import_in_any_order(order):
+    # cache imports cache_thumbs, which imports cache back from inside its
+    # functions: a fresh interpreter is the only honest test of that
+    done = subprocess.run([sys.executable, "-c", f"import {order}; print('ok')"],
+                          cwd=str(REPO_ROOT), capture_output=True, text=True)
+
+    assert done.returncode == 0, done.stderr
+    assert "ok" in done.stdout
 
 
 def test_the_tier_is_reachable_through_the_cache_module():
@@ -314,7 +340,7 @@ def test_build_thumbs_uses_one_stable_auto_roi_for_every_step_of_a_desktop(tmp_p
 
     stats = build_thumbs(cache)
 
-    assert _groups(stats) == [{"source": "auto", "segment": None, "steps": [1, 2],
+    assert _groups(stats) == [{"source": "auto", "segment": None, "steps": [[1, 2]],
                                "box": list(box)}]
     for step, img in ((1, first), (2, later)):
         got = _imread(thumb_path(cache, FrameKey(7, step, "scan")))
@@ -327,7 +353,7 @@ def test_build_thumbs_prefers_the_looked_up_roi_over_the_automatic_one(tmp_path)
 
     stats = build_thumbs(cache, roi_lookup=lambda k: RED_BOX)
 
-    assert _groups(stats) == [{"source": "db", "segment": None, "steps": [1, 1],
+    assert _groups(stats) == [{"source": "db", "segment": None, "steps": [[1, 1]],
                                "box": list(RED_BOX)}]
     assert _sidecar(cache)["groups"] == _groups(stats)
 
@@ -337,7 +363,7 @@ def test_build_thumbs_without_auto_roi_keeps_the_whole_frame(tmp_path):
 
     stats = build_thumbs(cache, auto_roi=False, roi_lookup=lambda k: None)
 
-    assert _groups(stats) == [{"source": "none", "segment": None, "steps": [1, 1], "box": None}]
+    assert _groups(stats) == [{"source": "none", "segment": None, "steps": [[1, 1]], "box": None}]
     assert _close(_imread(thumb_path(cache, FrameKey(7, 1, "scan"))),
                   _reference_thumb(_scan_frame(CHASSIS), (0, 0, 1000, 1000)))
 
@@ -349,7 +375,7 @@ def test_build_thumbs_falls_back_to_the_whole_frame_when_no_roi_can_be_measured(
 
     stats = build_thumbs(cache)
 
-    assert _groups(stats) == [{"source": "none", "segment": None, "steps": [1, 1], "box": None}]
+    assert _groups(stats) == [{"source": "none", "segment": None, "steps": [[1, 1]], "box": None}]
     assert (stats["written"], stats["failed"]) == (0, 1)
 
 
@@ -362,7 +388,7 @@ def test_build_thumbs_degrades_a_chassis_box_that_is_too_small_to_the_central_cr
 
     stats = build_thumbs(cache)
 
-    assert _groups(stats, 0) == [{"source": "auto", "segment": None, "steps": [1, 1],
+    assert _groups(stats, 0) == [{"source": "auto", "segment": None, "steps": [[1, 1]],
                                   "box": [150, 150, 850, 850]}]  # the central 70%
     assert _groups(stats, 1)[0]["box"] == list(suggest_roi(real, "scan"))  # its own chassis
 
@@ -388,25 +414,28 @@ def test_build_thumbs_records_the_plan_it_used(tmp_path):
     build_thumbs(cache, max_side=64, quality=70)
 
     record = _sidecar(cache)
-    assert record["groups"] == [{"source": "auto", "segment": None, "steps": [1, 2],
+    assert record["groups"] == [{"source": "auto", "segment": None, "steps": [[1, 2]],
                                  "box": list(suggest_roi(_scan_frame(CHASSIS), "scan"))}]
     assert (record["max_side"], record["quality"]) == (64, 70)
     assert record["built_at"]
 
 
-def test_build_thumbs_treats_a_sidecar_from_the_old_single_box_format_as_stale(tmp_path):
+@pytest.mark.parametrize("older", ["single_box", "first_last_pair"])
+def test_build_thumbs_treats_a_sidecar_in_an_older_format_as_stale(tmp_path, older):
     cache = _make_cache(tmp_path, steps=(1,))
     assert build_thumbs(cache)["written"] == 1
-    sidecar = Path(cache) / "thumbs" / "scan" / "D07" / "thumbs.json"
+    sidecar = Path(cache) / "thumbs" / "scan" / "D07" / ct.SIDECAR_NAME
     box = _sidecar(cache)["groups"][0]["box"]
-    sidecar.write_text(json.dumps({"source": "auto", "box": box, "max_side": 192,
-                                   "quality": 85, "built_at": "old"}), encoding="utf-8")
+    record = {"source": "auto", "box": box} if older == "single_box" else {
+        "groups": [{"source": "auto", "segment": None, "steps": [1, 1], "box": box}]}
+    record.update(max_side=192, quality=85, built_at="old")
+    sidecar.write_text(json.dumps(record), encoding="utf-8")
     _age(Path(thumb_path(cache, FrameKey(7, 1, "scan"))), +60)
 
     stats = build_thumbs(cache)  # unreadable plan: rebuild rather than trust it
 
     assert stats["written"] == 1
-    assert "groups" in _sidecar(cache)
+    assert _sidecar(cache)["groups"][0]["steps"] == [[1, 1]]
 
 
 def test_build_thumbs_rebuilds_an_uncropped_group_that_was_never_recorded(tmp_path):
@@ -476,8 +505,8 @@ def test_build_thumbs_cuts_every_pose_segment_with_its_own_roi(tmp_path):
 
     assert stats["written"] == 4
     assert _groups(stats) == [
-        {"source": "db", "segment": 0, "steps": [1, 2], "box": list(RED_BOX)},
-        {"source": "db", "segment": 1, "steps": [3, 4], "box": list(GREEN_BOX)},
+        {"source": "db", "segment": 0, "steps": [[1, 2]], "box": list(RED_BOX)},
+        {"source": "db", "segment": 1, "steps": [[3, 4]], "box": list(GREEN_BOX)},
     ]
     for step in (1, 2):
         assert _red_fraction(_imread(thumb_path(cache, FrameKey(7, step, "scan")))) > 0.70
@@ -495,7 +524,7 @@ def test_build_thumbs_follows_a_frames_pose_segment_override(tmp_path):
     with DbRoiLookup(db) as lookup:
         stats = build_thumbs(cache, roi_lookup=lookup)
 
-    assert [(g["segment"], g["steps"]) for g in _groups(stats)] == [(0, [1, 1]), (1, [2, 4])]
+    assert [(g["segment"], g["steps"]) for g in _groups(stats)] == [(0, [[1, 1]]), (1, [[2, 4]])]
     assert _green_fraction(_imread(thumb_path(cache, FrameKey(7, 2, "scan")))) > 0.70
 
 
@@ -517,6 +546,105 @@ def test_build_thumbs_rebuilds_only_the_segment_whose_roi_was_adjusted(tmp_path)
     assert all(stamp(s) != stamps[s] for s in (3, 4))  # the adjusted one
 
 
+def test_build_thumbs_rebuilds_a_step_that_moved_to_another_segment(tmp_path):
+    # update_pose_segment() moved the boundary; neither roi_json was touched, so
+    # nothing but step 3's *membership* changed - and its file is cut with the
+    # wrong box until that alone is noticed
+    cache, db = _reoriented(tmp_path)
+    with DbRoiLookup(db) as lookup:
+        assert build_thumbs(cache, roi_lookup=lookup)["written"] == 4
+    stamps = {s: _age(Path(thumb_path(cache, FrameKey(7, s, "scan"))), +60) for s in (1, 2, 3, 4)}
+    _sql(db, "UPDATE pose_segment SET end_step=3 WHERE seg=0",
+         "UPDATE pose_segment SET start_step=4 WHERE seg=1")
+
+    with DbRoiLookup(db) as lookup:
+        stats = build_thumbs(cache, roi_lookup=lookup)
+
+    def stamp(step: int) -> int:
+        return Path(thumb_path(cache, FrameKey(7, step, "scan"))).stat().st_mtime_ns
+
+    assert (stats["written"], stats["skipped"]) == (1, 3)
+    assert _red_fraction(_imread(thumb_path(cache, FrameKey(7, 3, "scan")))) > 0.70
+    assert [stamp(s) for s in (1, 2, 4)] == [stamps[1], stamps[2], stamps[4]]
+    assert _sidecar(cache)["groups"] == [
+        {"source": "db", "segment": 0, "steps": [[1, 3]], "box": list(RED_BOX)},
+        {"source": "db", "segment": 1, "steps": [[4, 4]], "box": list(GREEN_BOX)},
+    ]
+
+
+def test_build_thumbs_rebuilds_the_steps_of_a_segment_that_was_deleted(tmp_path):
+    cache, db = _reoriented(tmp_path)
+    with DbRoiLookup(db) as lookup:
+        assert build_thumbs(cache, roi_lookup=lookup)["written"] == 4
+    stamps = {s: _age(Path(thumb_path(cache, FrameKey(7, s, "scan"))), +60) for s in (1, 2, 3, 4)}
+    _sql(db, "DELETE FROM pose_segment WHERE seg=1",
+         "UPDATE pose_segment SET end_step=4 WHERE seg=0")  # absorbed by its neighbour
+
+    with DbRoiLookup(db) as lookup:
+        stats = build_thumbs(cache, roi_lookup=lookup)
+
+    assert (stats["written"], stats["skipped"]) == (2, 2)
+    for step in (3, 4):
+        thumb = Path(thumb_path(cache, FrameKey(7, step, "scan")))
+        assert _red_fraction(_imread(thumb)) > 0.70  # the absorbing segment's box
+        assert thumb.stat().st_mtime_ns != stamps[step]
+    assert _sidecar(cache)["groups"] == [
+        {"source": "db", "segment": 0, "steps": [[1, 4]], "box": list(RED_BOX)}]
+
+
+def test_build_thumbs_records_a_non_contiguous_membership_exactly(tmp_path):
+    cache, db = _reoriented(tmp_path)
+    _sql(db, "INSERT INTO frame(desktop, step, view, pose_segment)"
+             " VALUES(7, 1, 'scan', 1)")  # step 1 belongs to the second segment
+
+    with DbRoiLookup(db) as lookup:
+        stats = build_thumbs(cache, roi_lookup=lookup)
+
+    assert _groups(stats) == [
+        {"source": "db", "segment": 1, "steps": [[1, 1], [3, 4]], "box": list(GREEN_BOX)},
+        {"source": "db", "segment": 0, "steps": [[2, 2]], "box": list(RED_BOX)},
+    ]
+    assert _sidecar(cache)["groups"] == _groups(stats)
+
+
+def test_build_thumbs_rewrites_the_plan_when_only_the_membership_changed(tmp_path):
+    # both segments carry the same box, so no thumbnail needs rebuilding when one
+    # absorbs the other - but the record must still say who owns which steps
+    cache = _make_cache(tmp_path, steps=(1, 2, 3, 4),
+                        images={s: _two_box_frame() for s in (1, 2, 3, 4)})
+    db = str(tmp_path / "tda.sqlite")
+    _make_db(db, segments=[(0, 1, 2, RED_BOX), (1, 3, 4, RED_BOX)])
+    with DbRoiLookup(db) as lookup:
+        assert build_thumbs(cache, roi_lookup=lookup)["written"] == 4
+    for step in (1, 2, 3, 4):
+        _age(Path(thumb_path(cache, FrameKey(7, step, "scan"))), +60)
+    _sql(db, "DELETE FROM pose_segment WHERE seg=1",
+         "UPDATE pose_segment SET end_step=4 WHERE seg=0")
+
+    with DbRoiLookup(db) as lookup:
+        stats = build_thumbs(cache, roi_lookup=lookup)
+
+    assert (stats["written"], stats["skipped"]) == (0, 4)
+    assert _sidecar(cache)["groups"] == [
+        {"source": "db", "segment": 0, "steps": [[1, 4]], "box": list(RED_BOX)}]
+
+
+def test_build_thumbs_leaves_the_plan_untouched_when_nothing_changed(tmp_path):
+    # every run would otherwise dirty 66 sidecars with a new built_at
+    cache = _make_cache(tmp_path, steps=(1, 2))
+    assert build_thumbs(cache)["written"] == 2
+    for step in (1, 2):
+        _age(Path(thumb_path(cache, FrameKey(7, step, "scan"))), +60)
+    sidecar = Path(cache) / "thumbs" / "scan" / "D07" / ct.SIDECAR_NAME
+    before, stamp = sidecar.read_bytes(), sidecar.stat().st_mtime_ns
+
+    stats = build_thumbs(cache)
+
+    assert (stats["written"], stats["skipped"]) == (0, 2)
+    assert sidecar.read_bytes() == before
+    assert sidecar.stat().st_mtime_ns == stamp
+
+
 def test_build_thumbs_gives_a_segment_without_a_roi_the_automatic_box(tmp_path):
     cache, db = _reoriented(tmp_path)
     _set_roi(db, 1, None)  # the second segment has no ROI yet
@@ -525,7 +653,7 @@ def test_build_thumbs_gives_a_segment_without_a_roi_the_automatic_box(tmp_path):
         stats = build_thumbs(cache, roi_lookup=lookup)
 
     groups = _groups(stats)
-    assert [(g["source"], g["steps"]) for g in groups] == [("db", [1, 2]), ("auto", [3, 4])]
+    assert [(g["source"], g["steps"]) for g in groups] == [("db", [[1, 2]]), ("auto", [[3, 4]])]
     assert groups[1]["box"] == list(suggest_roi(_two_box_frame(), "scan"))  # not the red box
     for step in (3, 4):
         thumb = _imread(thumb_path(cache, FrameKey(7, step, "scan")))
@@ -545,8 +673,9 @@ def test_build_thumbs_rebuilds_when_the_thumbnail_size_changed(tmp_path):
 # build_thumbs: failures
 # --------------------------------------------------------------------------
 def _no_files_under(cache: str) -> bool:
-    """Nothing at all was left in the thumbnail tier - not even a temp file."""
-    return not any(p.is_file() for p in (Path(cache) / "thumbs").rglob("*"))
+    """No thumbnail and no temp file was left behind (the plan record may exist)."""
+    return not any(p.is_file() and p.name != ct.SIDECAR_NAME
+                   for p in (Path(cache) / "thumbs").rglob("*"))
 
 
 def test_build_thumbs_leaves_no_partial_file_when_the_encoder_fails(tmp_path, monkeypatch):
@@ -576,11 +705,14 @@ def test_build_thumbs_leaves_no_partial_file_when_the_encoder_raises(tmp_path, m
 
 def test_build_thumbs_removes_its_temp_file_when_the_replace_fails(tmp_path, monkeypatch):
     cache = _make_cache(tmp_path, steps=(1,))
+    real = os.replace
 
-    def boom(*args, **kwargs):
-        raise OSError("simulated replace failure")
+    def picky(src, dst, *args, **kwargs):
+        if str(dst).endswith(".jpg"):
+            raise OSError("simulated replace failure")
+        return real(src, dst, *args, **kwargs)
 
-    monkeypatch.setattr(ct.os, "replace", boom)
+    monkeypatch.setattr(ct.os, "replace", picky)
     stats = build_thumbs(cache, auto_roi=False)
 
     assert (stats["written"], stats["failed"]) == (0, 1)

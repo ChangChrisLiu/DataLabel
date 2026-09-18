@@ -282,16 +282,25 @@ def _plan_groups(cache_dir, keys: list[FrameKey], view: str,
     return list(groups.values())
 
 
-def _group_key(group: dict) -> tuple:
-    """What identifies a group across runs: its source and its segment or box."""
-    box = group.get("box")
-    segment = group.get("segment")
-    return (group.get("source"), segment if segment is not None else (tuple(box) if box else None))
+def _ranges(steps: list[int]) -> list[list[int]]:
+    """``[1, 2, 3, 7, 8]`` -> ``[[1, 3], [7, 8]]``: membership, exactly, but short.
+
+    A frame moved between segments by hand leaves a group with a hole in it, and
+    a ``[first, last]`` pair would silently claim the steps in between.
+    """
+    out: list[list[int]] = []
+    for step in steps:
+        if out and step == out[-1][1] + 1:
+            out[-1][1] = step
+        else:
+            out.append([step, step])
+    return out
 
 
 def _recorded(group: dict) -> dict:
     """The part of a group that goes into ``thumbs.json``."""
-    return {k: group[k] for k in ("source", "segment", "steps", "box")}
+    return {"source": group["source"], "segment": group["segment"],
+            "steps": _ranges(group["_steps"]), "box": group["box"]}
 
 
 def _load_sidecar(path: str) -> dict:
@@ -304,20 +313,37 @@ def _load_sidecar(path: str) -> dict:
         return {}
 
 
-def _recorded_boxes(record: dict) -> dict[tuple, Any]:
-    """``{group key: box}`` of a recorded plan; empty for the older one-box format.
+def _recorded_step_boxes(record: dict) -> Optional[dict[int, Any]]:
+    """``{step: the box its thumbnail was built with}``, or ``None`` if unreadable.
 
-    An unreadable, missing or older-format record yields nothing, so every group
-    counts as changed and the desktop is rebuilt rather than half-trusted.
+    Staleness has to be decided per *step*, not per group: moving a pose-segment
+    boundary changes which box a step is cut with while leaving both boxes - and
+    both groups - exactly as they were.  ``None`` (a missing record, or one in
+    either older format: a single box, or groups with ``[first, last]`` steps)
+    means nothing can be trusted and every step is rebuilt.
     """
     groups = record.get("groups")
     if not isinstance(groups, list):
-        return {}
-    return {_group_key(g): g.get("box") for g in groups if isinstance(g, dict)}
+        return None
+    out: dict[int, Any] = {}
+    for group in groups:
+        ranges = group.get("steps") if isinstance(group, dict) else None
+        if not isinstance(ranges, list) or not all(
+                isinstance(r, list) and len(r) == 2 for r in ranges):
+            return None
+        for first, last in ranges:
+            for step in range(int(first), int(last) + 1):
+                out[step] = group.get("box")
+    return out
 
 
 def _write_sidecar(path: str, record: dict) -> None:
-    """Record the plan next to the thumbnails it produced (atomically)."""
+    """Record the plan next to the thumbnails it describes (atomically).
+
+    The directory may not exist yet: a plan whose every thumbnail failed, or a
+    membership change with nothing to rebuild, still has to be recorded.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.part"
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -389,18 +415,16 @@ def build_thumbs(cache_dir, views=("scan",), desktops=None, max_side: int = DEFA
         ext = VIEW_EXT.get(view, "png")
         for desktop, keys in _cached_desktops(f"{root}/{view}", view, wanted):
             groups = _plan_groups(cache_dir, keys, view, roi_lookup, auto_roi)
-            stats["rois"].append({"view": view, "desktop": desktop,
-                                  "groups": [_recorded(g) for g in groups]})
+            planned = [_recorded(g) for g in groups]
+            stats["rois"].append({"view": view, "desktop": desktop, "groups": planned})
             sidecar = f"{root}/{THUMBS_DIRNAME}/{view}/D{desktop:02d}/{SIDECAR_NAME}"
             stored = _load_sidecar(sidecar)
             params = (int(max_side), int(quality))
             rebuild_all = force or (stored.get("max_side"), stored.get("quality")) != params
-            boxes = _recorded_boxes(stored)
+            was_built_with = _recorded_step_boxes(stored)
             written_here = 0
 
             for group in groups:
-                # _UNSET, not None: "nothing recorded" is not "recorded as uncropped"
-                stale = rebuild_all or boxes.get(_group_key(group), _UNSET) != group["box"]
                 for step in group["_steps"]:
                     key = FrameKey(desktop, step, view)
                     src, dest = cache_path(cache_dir, key, ext), thumb_path(cache_dir, key)
@@ -408,6 +432,9 @@ def build_thumbs(cache_dir, views=("scan",), desktops=None, max_side: int = DEFA
                         if not os.path.isfile(src):
                             stats["missing_source"] += 1
                             continue
+                        # _UNSET, not None: "nothing recorded" is not "recorded uncropped"
+                        stale = rebuild_all or was_built_with is None or \
+                            was_built_with.get(step, _UNSET) != group["box"]
                         if not stale and _up_to_date(src, dest):
                             stats["skipped"] += 1
                             continue
@@ -421,9 +448,12 @@ def build_thumbs(cache_dir, views=("scan",), desktops=None, max_side: int = DEFA
                             {"path": src, "error": f"{type(exc).__name__}: {exc}"})
 
             stats["written"] += written_here
-            if written_here:  # only a tier that exists gets a plan recorded
-                _write_sidecar(sidecar, {"groups": [_recorded(g) for g in groups],
-                                         "max_side": params[0], "quality": params[1],
+            # A membership change on its own leaves every thumbnail correct but the
+            # record wrong, so it too has to land; an unchanged plan is left alone,
+            # or every run would dirty every sidecar with a new built_at.
+            if written_here or rebuild_all or planned != stored.get("groups"):
+                _write_sidecar(sidecar, {"groups": planned, "max_side": params[0],
+                                         "quality": params[1],
                                          "built_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
 
     stats["elapsed_s"] = round(time.perf_counter() - started, 2)
