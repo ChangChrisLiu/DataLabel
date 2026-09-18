@@ -12,20 +12,30 @@ thread-affine, and WAL plus ``busy_timeout`` is what lets two of them write --
 and it touches nothing else the session owns.  Everything that crosses back is a
 Qt signal, which Qt queues onto the receiving thread.
 
-It does two jobs off one worker thread:
+Nothing may be lost
+-------------------
+The sweeper is the one place a conflict can go missing, so three things are
+deliberate rather than incidental:
 
-* **re-checks**, taken newest-request-first, because the frame the annotator
-  just edited is the one whose verdict matters soonest.  Each is one short
-  transaction, and the persisted request (``recheck_queue``) is cleared only
-  once the frame has actually been compared, so a crash re-queues it;
-* **prefetch** of the frame the annotator is about to reach (``k-1``, spec 4.2),
-  compiled and handed over as a whole :class:`~tda.core.compiler.CompiledFrame`.
-  Every request carries the session's edit counter and the result is dropped if
-  anything changed meanwhile, so a stale compilation can never be displayed.
+* **a failure is loud.**  A re-check that raises is logged, reported on
+  :attr:`sigSweepError`, retried on the :data:`RETRY_DELAYS` backoff and then
+  parked -- never dropped, never spun on.  ``done`` counts successes only, so
+  the progress reported can never read "finished" while a frame failed.  A
+  worker that cannot even open its database says so and stops, and the session
+  falls back to the synchronous path.
+* **a request outlives the work on it.**  The persisted row carries a
+  generation stamp; the sweeper clears it only for the generation it read, so a
+  request arriving mid-check is not cleared away with the older one.
+* **a result describes the inputs it was computed from.**  Every re-check takes
+  the frame's cheap input digest first and checks it again inside the write
+  transaction; if the annotator edited in between, nothing is written and the
+  frame is queued again.
 """
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from collections import deque
 from typing import Iterable, Optional
 
@@ -37,16 +47,36 @@ from tda.core.taxonomy import Taxonomy
 from tda.core.truth import TruthService
 from tda.ui.session_images import ImageCache
 
-__all__ = ["TruthSweeper"]
+__all__ = ["QUEUE_SIGNAL_INTERVAL", "RETRY_DELAYS", "TruthSweeper"]
+
+log = logging.getLogger("tda.sweeper")
+
+#: How long to wait before each retry of a frame whose re-check raised. After
+#: the last one the frame is parked -- still queued in the database, so the next
+#: ``enqueue`` or ``open`` picks it up, but never retried in a hot loop.
+RETRY_DELAYS: tuple[float, ...] = (2.0, 10.0)
+
+#: At most one ``sigQueuesChanged`` per this many seconds while a sweep runs
+#: (plus one when it drains): a fifty-frame sweep must not make the review panel
+#: rebuild fifty times.
+QUEUE_SIGNAL_INTERVAL = 0.25
+
+#: The step a worker-level failure (its database, not one frame) is reported as.
+NO_STEP = -1
 
 
 class TruthSweeper(QObject):
     """A worker thread that re-checks frozen frames and prefetches the next one."""
 
-    #: ``(done, total)`` of the current run of re-checks.
-    sigProgress = Signal(int, int)
-    #: Something the review queues show has changed.
+    #: ``(done, total, failed)`` of the current run of re-checks; ``done``
+    #: counts successes only, so it reaches ``total`` only when all of them went
+    #: through. A slot taking two arguments still works: Qt drops the third.
+    sigProgress = Signal(int, int, int)
+    #: Something the review queues show has changed (coalesced).
     sigQueuesChanged = Signal()
+    #: ``(step, text)`` -- a re-check failed; :data:`NO_STEP` means the worker
+    #: itself could not start.
+    sigError = Signal(int, str)
     #: ``(step, epoch, CompiledFrame)`` for a frame compiled ahead of time.
     sigPrefetched = Signal(int, int, object)
     #: ``(step, RGB array)`` for a frame decoded ahead of time.
@@ -64,48 +94,73 @@ class TruthSweeper(QObject):
 
         self._lock = threading.Condition()
         self._rechecks: deque[int] = deque()  # newest request first
+        self._retry_at: dict[int, float] = {}  # step -> when it may be tried again
+        self._tries: dict[int, int] = {}
+        self._parked: set[int] = set()
         self._prefetch: Optional[tuple[int, int]] = None  # (step, epoch)
         self._done = 0
         self._total = 0
-        self._busy = False
+        self._failed = 0
         self._stopping = False
         self._idle = threading.Event()
         self._idle.set()
         self._thread: Optional[threading.Thread] = None
+        self._queues_dirty = False
+        self._queues_sent_at = 0.0
 
     # -- lifecycle ----------------------------------------------------------
     def open(self, desktop: int, view: str) -> None:
         """Point the sweeper at one desktop/view and start its thread."""
         self.stop()
         self.desktop, self.view = int(desktop), str(view)
-        self._stopping = False
-        self._done = self._total = 0
-        self._rechecks.clear()
-        self._prefetch = None
+        with self._lock:
+            self._stopping = False
+            self._done = self._total = self._failed = 0
+            self._rechecks.clear()
+            self._retry_at.clear()
+            self._tries.clear()
+            self._parked.clear()
+            self._prefetch = None
         self._thread = threading.Thread(target=self._run, name="tda-truth-sweeper",
                                         daemon=True)
         self._thread.start()
 
-    def stop(self, timeout: float = 30.0) -> None:
+    def stop(self, timeout: float = 30.0) -> bool:
         """Ask the worker to finish the frame in hand and join it.
 
-        Called from :meth:`AnnotationSession.close`, which is the one place the
-        GUI is allowed to wait for this thread.
+        Returns whether it actually stopped.  A thread that did not join is
+        **not** forgotten: dropping the handle would make :attr:`is_running` lie
+        about a thread still writing to the database.
         """
         thread = self._thread
         if thread is None:
-            return
+            return True
         with self._lock:
             self._stopping = True
             self._lock.notify_all()
         thread.join(timeout)
+        if thread.is_alive():
+            log.error("truth sweeper did not stop within %.1fs; it is still running",
+                      timeout)
+            return False
         self._thread = None
+        return True
 
     def wait_idle(self, timeout: float = 30.0) -> bool:
         """Block until the queue is empty; ``True`` when it drained in time."""
-        if self._thread is None:
-            return not self._rechecks
-        return self._idle.wait(timeout)
+        deadline = time.monotonic() + timeout
+        while True:
+            if self._idle.wait(min(0.05, max(0.0, deadline - time.monotonic()))):
+                return True
+            if not self.is_running:
+                return not self._rechecks  # the worker is gone; nothing will drain
+            if time.monotonic() >= deadline:
+                return False
+
+    @property
+    def is_running(self) -> bool:
+        """Is the worker thread alive? ``close()`` must leave this ``False``."""
+        return self._thread is not None and self._thread.is_alive()
 
     # -- requests -----------------------------------------------------------
     def enqueue(self, steps: Iterable[int]) -> None:
@@ -115,6 +170,9 @@ class TruthSweeper(QObject):
             return
         with self._lock:
             for step in wanted:
+                self._parked.discard(step)
+                self._retry_at.pop(step, None)
+                self._tries.pop(step, None)
                 if step in self._rechecks:
                     self._rechecks.remove(step)  # re-requested: it goes to the front
                 else:
@@ -134,16 +192,18 @@ class TruthSweeper(QObject):
         with self._lock:
             return len(self._rechecks)
 
-    @property
-    def is_running(self) -> bool:
-        """Is the worker thread alive? ``close()`` must leave this ``False``."""
-        return self._thread is not None and self._thread.is_alive()
-
     # -- the worker ---------------------------------------------------------
     def _run(self) -> None:
-        db: Optional[Db] = None
         try:
             db = Db(self._db_path)
+        except Exception as exc:  # no connection: say so instead of dying quietly
+            log.exception("truth sweeper could not open %s", self._db_path)
+            with self._lock:
+                self._stopping = True
+                self._idle.set()
+            self.sigError.emit(NO_STEP, f"{type(exc).__name__}: {exc}")
+            return
+        try:
             truth = TruthService(db, self._tax, self._compiler_version)
             images = ImageCache(db, self._cache_dir)
             while True:
@@ -151,56 +211,125 @@ class TruthSweeper(QObject):
                 if job is None:
                     return
                 kind, payload = job
+                failed = False
                 try:
                     if kind == "recheck":
-                        self._recheck(db, truth, int(payload))
+                        step, gen = payload
+                        self._recheck(db, truth, int(step), gen)
                     else:
                         self._compile_ahead(truth, images, payload)
-                except Exception:  # a bad frame must not take the thread down
-                    pass
-                finally:
-                    self._finished(kind)
+                except Exception as exc:
+                    failed = True
+                    step = payload[0] if kind == "recheck" else NO_STEP
+                    log.exception("truth sweeper failed on %s step %s", kind, step)
+                    self.sigError.emit(int(step), f"{type(exc).__name__}: {exc}")
+                    if kind == "recheck":
+                        self._schedule_retry(int(step))
+                self._finished(kind, failed)
         finally:
-            if db is not None:
-                db.close()
+            db.close()
 
     def _take(self) -> Optional[tuple[str, object]]:
         """The next job, waiting for one; ``None`` when the sweeper is stopping."""
-        with self._lock:
-            while True:
+        while True:
+            with self._lock:
                 if self._stopping:
                     return None
-                if self._rechecks:
-                    self._busy = True
-                    return ("recheck", self._rechecks.popleft())
+                step = self._next_recheck()
+                if step is not None:
+                    # the generation stamp is read on the worker's own
+                    # connection, inside _recheck_impl
+                    return ("recheck", (step, None))
                 if self._prefetch is not None:
-                    self._busy = True
                     job, self._prefetch = self._prefetch, None
                     return ("prefetch", job)
-                self._busy = False
-                self._idle.set()
-                self._lock.wait(0.05)
+                if not self._retry_at:
+                    self._idle.set()
+                self._lock.wait(0.02)
+            self._flush_queue_signal(force=False)
 
-    def _finished(self, kind: str) -> None:
+    def _next_recheck(self) -> Optional[int]:
+        """The next step due; ``None`` while the queue is empty or only waiting."""
+        now = time.monotonic()
+        for _ in range(len(self._rechecks)):
+            step = self._rechecks.popleft()
+            if self._retry_at.get(step, 0.0) <= now:
+                self._retry_at.pop(step, None)  # it is being tried now
+                return step
+            self._rechecks.append(step)  # not due yet: look at the others
+        return None
+
+    def _schedule_retry(self, step: int) -> None:
+        """Try a failed frame again later, or park it after the last attempt."""
         with self._lock:
-            self._busy = False
-            if kind == "recheck":
-                self._done += 1
-                done, total = self._done, self._total
-            else:
-                done = total = None
-            drained = not self._rechecks and self._prefetch is None
-            if drained:
-                self._idle.set()
-        if done is not None:
-            self.sigProgress.emit(done, total)
-        if kind == "recheck":
-            self.sigQueuesChanged.emit()
+            tries = self._tries.get(step, 0) + 1
+            self._tries[step] = tries
+            if tries > len(RETRY_DELAYS):
+                self._parked.add(step)
+                log.error("truth sweeper parked step %s after %d attempts; it stays "
+                          "queued in the database for the next open()", step, tries)
+                return
+            self._retry_at[step] = time.monotonic() + RETRY_DELAYS[tries - 1]
+            self._rechecks.append(step)
+            self._idle.clear()
 
-    def _recheck(self, db: Db, truth: TruthService, step: int) -> None:
-        """Compare one frozen frame against its inputs and retire the request."""
-        truth.refresh(FrameKey(self.desktop, step, self.view))
-        db.clear_recheck(self.desktop, self.view, step)
+    def _finished(self, kind: str, failed: bool) -> None:
+        with self._lock:
+            if kind == "recheck":
+                if failed:
+                    self._failed += 1
+                else:
+                    self._done += 1
+                    self._queues_dirty = True
+                done, total, bad = self._done, self._total, self._failed
+            else:
+                done = None
+            if not self._rechecks and self._prefetch is None and not self._retry_at:
+                self._idle.set()
+                drained = True
+            else:
+                drained = False
+        if done is not None:
+            self.sigProgress.emit(done, total, bad)
+        self._flush_queue_signal(force=drained)
+
+    def _flush_queue_signal(self, force: bool) -> None:
+        """Emit at most one ``sigQueuesChanged`` per :data:`QUEUE_SIGNAL_INTERVAL`."""
+        now = time.monotonic()
+        with self._lock:
+            if not self._queues_dirty:
+                return
+            if not force and now - self._queues_sent_at < QUEUE_SIGNAL_INTERVAL:
+                return
+            self._queues_dirty = False
+            self._queues_sent_at = now
+        self.sigQueuesChanged.emit()
+
+    # -- the work -----------------------------------------------------------
+    def _recheck(self, db: Db, truth: TruthService, step: int,
+                 gen: Optional[int] = None) -> None:
+        """Compare one frozen frame against its inputs and retire the request.
+
+        Split from :meth:`_recheck_impl` so that a test can make the attempt
+        fail without having to break the comparison itself.
+        """
+        self._recheck_impl(db, truth, step, gen)
+
+    def _recheck_impl(self, db: Db, truth: TruthService, step: int,
+                      gen: Optional[int]) -> None:
+        key = FrameKey(self.desktop, step, self.view)
+        stamp = db.recheck_generation(self.desktop, self.view, step)
+        guard = truth.inputs_digest(key)
+        result = truth.refresh(key, guard=guard)
+        if result.get("stale"):
+            # the annotator edited this frame while it was being compiled: the
+            # comparison describes inputs nobody has any more, so nothing was
+            # written and the frame goes back on the queue
+            db.add_rechecks(self.desktop, self.view, [step])
+            self.enqueue([step])
+            return
+        if stamp is not None:
+            db.clear_recheck(self.desktop, self.view, step, stamp)
 
     def _compile_ahead(self, truth: TruthService, images: ImageCache, job) -> None:
         """Do for ``k-1`` what visiting it would: refresh its rows and read it.

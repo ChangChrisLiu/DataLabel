@@ -25,47 +25,71 @@ __all__ = ["RecheckMixin"]
 class RecheckMixin:
     """Pending truth re-checks, for a repository holding ``self.conn``."""
 
-    def add_rechecks(self, desktop: int, view: str, steps: Iterable[int]) -> int:
-        """Queue these frames for a re-check; returns how many were new.
+    def add_rechecks(self, desktop: int, view: str, steps: Iterable[int]) -> list[int]:
+        """Queue these frames for a re-check; returns the steps queued.
 
-        Idempotent: asking twice for the same frame leaves one request, which is
-        what lets a caller queue an edit's whole interval without checking.
+        Asking again for a frame that is already queued does not add a second
+        row -- it bumps that row's ``gen``. That is what makes a request landing
+        while the sweeper is working on the very same frame safe: the sweeper
+        clears the row only for the generation it read, so the newer request
+        outlives the older one's clear (and outlives a crash, since it is a row
+        rather than something held in memory).
         """
-        rows = [(int(desktop), int(step), str(view), R.now_iso())
-                for step in sorted({int(s) for s in steps})]
-        if not rows:
-            return 0
+        wanted = sorted({int(s) for s in steps})
+        if not wanted:
+            return []
         with self._tx():
             self.conn.execute("INSERT OR IGNORE INTO desktop(id) VALUES(?)", (int(desktop),))
-            before = self._recheck_count(desktop, view)
             self.conn.executemany(
-                "INSERT OR IGNORE INTO recheck_queue(desktop, step, view, requested_at) "
-                "VALUES(?, ?, ?, ?)",
-                rows,
+                "INSERT INTO recheck_queue(desktop, step, view, requested_at, gen) "
+                "VALUES(?, ?, ?, ?, 0) "
+                "ON CONFLICT(desktop, step, view) DO UPDATE SET "
+                "gen = gen + 1, requested_at = excluded.requested_at",
+                [(int(desktop), step, str(view), R.now_iso()) for step in wanted],
             )
-            return self._recheck_count(desktop, view) - before
-
-    def _recheck_count(self, desktop: int, view: Optional[str]) -> int:
-        sql = "SELECT COUNT(*) AS n FROM recheck_queue WHERE desktop=?"
-        args: list = [int(desktop)]
-        if view is not None:
-            sql += " AND view=?"
-            args.append(str(view))
-        return int(self.conn.execute(sql, args).fetchone()["n"])
+        return wanted
 
     def rechecks(self, desktop: int, view: Optional[str] = None) -> list[int]:
         """Logical steps still waiting for a re-check, ascending."""
-        sql = "SELECT step FROM recheck_queue WHERE desktop=?"
+        return [step for step, _gen in self.recheck_items(desktop, view)]
+
+    def recheck_items(self, desktop: int, view: Optional[str] = None
+                      ) -> list[tuple[int, int]]:
+        """``(step, gen)`` for every frame still waiting, ascending by step.
+
+        The generation is what a worker has to carry back to
+        :meth:`clear_recheck`; reading the steps without it is only safe for
+        display.
+        """
+        sql = "SELECT step, gen FROM recheck_queue WHERE desktop=?"
         args: list = [int(desktop)]
         if view is not None:
             sql += " AND view=?"
             args.append(str(view))
-        return [int(r["step"]) for r in self.conn.execute(sql + " ORDER BY step", args)]
+        return [(int(r["step"]), int(r["gen"]))
+                for r in self.conn.execute(sql + " ORDER BY step", args)]
 
-    def clear_recheck(self, desktop: int, view: str, step: int) -> None:
-        """Mark one frame checked; a frame that is not queued is not an error."""
+    def recheck_generation(self, desktop: int, view: str, step: int) -> Optional[int]:
+        """The generation stamp of one queued frame, or ``None`` when it is not."""
+        row = self.conn.execute(
+            "SELECT gen FROM recheck_queue WHERE desktop=? AND step=? AND view=?",
+            (int(desktop), int(step), str(view)),
+        ).fetchone()
+        return None if row is None else int(row["gen"])
+
+    def clear_recheck(self, desktop: int, view: str, step: int,
+                      gen: Optional[int] = None) -> bool:
+        """Retire one re-check request; ``True`` when a row was actually removed.
+
+        With ``gen`` the row goes only if it still carries that stamp, so a
+        request that arrived while the frame was being checked survives. Without
+        it the row goes whatever it says, which is only right for a caller that
+        holds the write lock for the whole drain.
+        """
+        sql = "DELETE FROM recheck_queue WHERE desktop=? AND step=? AND view=?"
+        args: list = [int(desktop), int(step), str(view)]
+        if gen is not None:
+            sql += " AND gen=?"
+            args.append(int(gen))
         with self._tx():
-            self.conn.execute(
-                "DELETE FROM recheck_queue WHERE desktop=? AND step=? AND view=?",
-                (int(desktop), int(step), str(view)),
-            )
+            return self.conn.execute(sql, args).rowcount > 0
