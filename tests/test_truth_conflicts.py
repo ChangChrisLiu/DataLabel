@@ -9,7 +9,8 @@ import pytest
 
 from tda.core import masks
 from tda.core.db import Db
-from tda.core.model import InstanceRec, ShapePart, StateEvent, ZOrderRec
+from tda.core.model import FrameOverride, InstanceRec, ShapePart, StateEvent, ZOrderRec
+from tda.core.truth import StaleConflictError
 from truth_scenes import (
     BENCH_BOX,
     DESKTOP,
@@ -41,17 +42,12 @@ def scene(db: Db) -> Scene:
 # --------------------------------------------------------------------------- #
 # re-compilation against frozen rows
 # --------------------------------------------------------------------------- #
-def _replace_parts(scene: Scene, kf: ShapeKeyframe, parts: list[ShapePart]) -> None:
-    kf.parts = parts
-    scene.db.update_keyframe(kf)
-
-
 def test_shifting_a_shape_updates_auto_rows_and_leaves_the_verified_one(scene: Scene):
     scene.refresh_all()
     scene.svc.verify_frame(scene.key(2), "lin")
     frozen = {inst: dict(row) for inst, row in scene.rows(2).items()}
 
-    _replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(11, 10, 51, 50)))])
+    replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(11, 10, 51, 50)))])
     out = scene.refresh_all()
 
     assert out["conflicts"] == 0
@@ -69,7 +65,7 @@ def test_eroding_a_shape_conflicts_with_the_verified_row_only(scene: Scene):
     frozen_counts = scene.counts(2, PSU)
 
     # 40% off the PSU: 40x40 -> 40x24
-    _replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
+    replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
     out = scene.refresh_all()
 
     assert out["conflicts"] == 1
@@ -90,7 +86,7 @@ def test_eroding_a_shape_conflicts_with_the_verified_row_only(scene: Scene):
 def test_the_same_disagreement_is_queued_only_once(scene: Scene):
     scene.refresh_all()
     scene.svc.verify_frame(scene.key(2), "lin")
-    _replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
+    replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
     scene.svc.refresh(scene.key(2))
 
     out = scene.svc.refresh(scene.key(2))
@@ -103,10 +99,10 @@ def test_a_moved_bench_box_conflicts_only_beyond_two_pixels(scene: Scene):
     scene.refresh_all()
     scene.svc.verify_frame(scene.key(3), "lin")
 
-    _replace_parts(scene, scene.bench_kf, [ShapePart("main", None, (3.0, 2.0, 13.0, 12.0))])
+    replace_parts(scene, scene.bench_kf, [ShapePart("main", None, (3.0, 2.0, 13.0, 12.0))])
     assert scene.svc.refresh(scene.key(3))["conflicts"] == 0
 
-    _replace_parts(scene, scene.bench_kf, [ShapePart("main", None, (7.0, 2.0, 17.0, 12.0))])
+    replace_parts(scene, scene.bench_kf, [ShapePart("main", None, (7.0, 2.0, 17.0, 12.0))])
     out = scene.svc.refresh(scene.key(3))
 
     assert out["conflicts"] == 1
@@ -194,7 +190,7 @@ def _conflicting_scene(scene: Scene) -> int:
     """Verify step 2, erode the PSU, refresh: returns the conflict's id."""
     scene.refresh_all()
     scene.svc.verify_frame(scene.key(2), "lin")
-    _replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
+    replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
     scene.svc.refresh(scene.key(2))
     return scene.db.conflicts(DESKTOP)[0]["id"]
 
@@ -234,7 +230,7 @@ def test_resolving_accept_new_writes_the_new_mask_into_the_frozen_row(scene: Sce
 def test_resolving_accept_new_keeps_a_box_row_a_box(scene: Scene):
     scene.refresh_all()
     scene.svc.verify_frame(scene.key(3), "lin")
-    _replace_parts(scene, scene.bench_kf, [ShapePart("main", None, (7.0, 2.0, 17.0, 12.0))])
+    replace_parts(scene, scene.bench_kf, [ShapePart("main", None, (7.0, 2.0, 17.0, 12.0))])
     scene.svc.refresh(scene.key(3))
     cid = scene.db.conflicts(DESKTOP)[0]["id"]
 
@@ -245,6 +241,137 @@ def test_resolving_accept_new_keeps_a_box_row_a_box(scene: Scene):
     assert row["box"] == [7.0, 2.0, 17.0, 12.0]
     assert row["status"] == "verified"
     assert scene.svc.refresh(scene.key(3))["conflicts"] == 0
+
+
+def test_accept_new_writes_the_geometry_the_inputs_say_now(scene: Scene):
+    cid = _conflicting_scene(scene)  # the conflict carries (10, 10, 50, 34)
+
+    # a re-trace within tolerance: the conflict is still about this disagreement,
+    # but the truth the inputs describe has moved by a pixel
+    replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(11, 10, 51, 34)))])
+    scene.svc.resolve_conflict(cid, "accept_new", "lin")
+
+    row = scene.row(2, PSU)
+    assert masks.bbox(masks.decode_rle(row["visible_rle"])) == (11, 10, 51, 34)
+    assert row["status"] == "verified"
+    assert scene.svc.refresh(scene.key(2)) == {
+        "updated": 0, "conflicts": 0, "skipped": 2, "problems": [],
+    }
+
+
+def test_accept_new_refuses_a_conflict_the_inputs_have_overtaken(scene: Scene):
+    cid = _conflicting_scene(scene)  # the conflict carries (10, 10, 50, 34)
+    frozen_counts = scene.counts(2, PSU)
+
+    # the shape moved again since the conflict was queued: accepting the queued
+    # value would confirm something nobody has seen
+    replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 26)))])
+    with pytest.raises(StaleConflictError):
+        scene.svc.resolve_conflict(cid, "accept_new", "lin")
+
+    stale = scene.db.get_conflict(cid)
+    assert stale["status"] == "resolved" and stale["resolution"] == "superseded"
+    fresh = scene.db.conflicts(DESKTOP)
+    assert len(fresh) == 1 and fresh[0]["id"] != cid
+    assert masks.bbox(masks.decode_rle(fresh[0]["new_rle"])) == (10, 10, 50, 26)
+    assert fresh[0]["old_rle"]["counts"] == frozen_counts
+    assert scene.counts(2, PSU) == frozen_counts  # nothing was written into the row
+
+    scene.svc.resolve_conflict(fresh[0]["id"], "accept_new", "lin")  # the fresh one works
+    assert masks.bbox(masks.decode_rle(scene.row(2, PSU)["visible_rle"])) == (10, 10, 50, 26)
+    assert scene.db.conflicts(DESKTOP) == []
+
+
+def test_accept_new_is_superseded_when_the_instance_left_the_frame(scene: Scene):
+    cid = _conflicting_scene(scene)  # the conflict carries a mask for the PSU
+    frozen_counts = scene.counts(2, PSU)
+
+    # the PSU is now recorded as being nowhere in view from step 2 on
+    scene.db.replace_events(
+        DESKTOP,
+        [StateEvent(DESKTOP, 2, PSU, "placement", "in_chassis", "elsewhere", auto=False)],
+        auto_only=False,
+    )
+    with pytest.raises(StaleConflictError):
+        scene.svc.resolve_conflict(cid, "accept_new", "lin")
+
+    assert scene.db.get_conflict(cid)["resolution"] == "superseded"
+    fresh = scene.db.conflicts(DESKTOP)
+    assert len(fresh) == 1
+    assert fresh[0]["new_rle"] is None  # the disagreement is now about its absence
+    assert fresh[0]["old_rle"]["counts"] == frozen_counts
+    assert scene.counts(2, PSU) == frozen_counts
+
+
+def test_keep_old_merges_into_an_existing_frame_override(scene: Scene):
+    scene.refresh_all()
+    scene.db.set_frame_override(FrameOverride(scene.key(2), PSU, visibility="occluded_full"))
+    scene.svc.verify_frame(scene.key(2), "lin")
+    frozen_counts = scene.counts(2, PSU)
+    replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
+    scene.svc.refresh(scene.key(2))
+    cid = scene.db.conflicts(DESKTOP)[0]["id"]
+
+    scene.svc.resolve_conflict(cid, "keep_old", "lin")
+
+    override = scene.db.frame_overrides(scene.key(2))[PSU]
+    assert override.visible_rle["counts"] == frozen_counts  # the pin
+    assert override.visibility == "occluded_full"  # and what was there before
+    assert scene.svc.refresh(scene.key(2))["conflicts"] == 0
+    assert scene.row(2, PSU)["visibility"] == "occluded_full"
+
+
+def test_keep_old_is_refused_when_the_instance_left_the_frame(scene: Scene):
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    frozen_counts = scene.counts(2, SCREW)
+    scene.db.replace_events(
+        DESKTOP,
+        [StateEvent(DESKTOP, 2, SCREW, "placement", "in_chassis", "elsewhere", auto=False)],
+        auto_only=False,
+    )
+    scene.svc.refresh(scene.key(2))
+    conflict = scene.db.conflicts(DESKTOP)[0]
+
+    with pytest.raises(ValueError) as err:
+        scene.svc.resolve_conflict(conflict["id"], "keep_old", "lin")
+
+    assert SCREW in str(err.value) and "state" in str(err.value)
+    assert scene.db.get_conflict(conflict["id"])["status"] == "open"  # nothing settled
+    assert SCREW not in scene.db.frame_overrides(scene.key(2))  # and nothing written
+    assert scene.counts(2, SCREW) == frozen_counts
+    assert [op["kind"] for op in scene.db.ops(DESKTOP, VIEW)][0] != "resolve_conflict"
+
+
+def test_keep_old_pins_a_frozen_absence(scene: Scene):
+    scene.refresh_all()
+    scene.db.set_frame_override(FrameOverride(scene.key(2), PSU, visibility="out_of_view"))
+    scene.svc.verify_frame(scene.key(2), "lin")
+    assert scene.row(2, PSU)["visible_rle"] is None  # frozen as "not in this frame"
+
+    scene.db.set_frame_override(FrameOverride(scene.key(2), PSU))  # the override is cleared
+    scene.svc.refresh(scene.key(2))
+    conflict = scene.db.conflicts(DESKTOP)[0]
+    assert conflict["old_rle"] is None and conflict["new_rle"] is not None
+
+    scene.svc.resolve_conflict(conflict["id"], "keep_old", "lin")
+
+    override = scene.db.frame_overrides(scene.key(2))[PSU]
+    assert override.visibility == "out_of_view"
+    assert override.visible_rle is None
+    assert scene.svc.refresh(scene.key(2))["conflicts"] == 0
+    assert scene.row(2, PSU)["visible_rle"] is None
+
+
+def test_resolve_conflict_refuses_a_conflict_that_is_already_closed(scene: Scene):
+    cid = _conflicting_scene(scene)
+    scene.svc.resolve_conflict(cid, "edited", "lin")
+
+    with pytest.raises(ValueError) as err:
+        scene.svc.resolve_conflict(cid, "keep_old", "lin")
+
+    assert "resolved" in str(err.value)
+    assert PSU not in scene.db.frame_overrides(scene.key(2))
 
 
 def test_a_resolved_disagreement_can_be_raised_again(scene: Scene):
@@ -264,6 +391,8 @@ def test_resolve_conflict_rejects_an_unknown_resolution(scene: Scene):
 
     with pytest.raises(ValueError):
         scene.svc.resolve_conflict(cid, "whatever", "lin")
+    with pytest.raises(ValueError):
+        scene.svc.resolve_conflict(cid, "superseded", "lin")  # the service's own, not a choice
 
     assert scene.db.get_conflict(cid)["status"] == "open"
     assert scene.counts(2, PSU) == frozen_counts

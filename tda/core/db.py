@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from tda.core import dbrows as R
-from tda.core.dbconn import MIGRATIONS, ConnectionMixin
+from tda.core.dbconn import ConnectionMixin
 from tda.core.model import (
     ActionRec,
     FrameKey,
@@ -40,7 +40,10 @@ from tda.core.model import (
 
 SCHEMA_VERSION = 2
 LOCK_TTL = timedelta(hours=12)
-RESOLUTIONS = ("keep_old", "accept_new", "edited")
+#: How a conflict may be closed. The first three are a human's decision;
+#: ``superseded`` is what the truth service records when the inputs moved on
+#: before anybody got to the conflict (spec 3.4).
+RESOLUTIONS = ("keep_old", "accept_new", "edited", "superseded")
 
 
 class Db(ConnectionMixin):
@@ -60,27 +63,13 @@ class Db(ConnectionMixin):
         self._lock_path = Path(self.path + ".lock")
         self._lock_annotator: Optional[str] = None
         self._tx_depth = 0
-        self._init_schema()
+        try:
+            self.init_schema(Path(__file__).with_name("schema.sql"), SCHEMA_VERSION)
+        except Exception:
+            self.conn.close()  # an unusable file leaves no connection behind
+            raise
 
     # ------------------------------------------------------------------ setup
-
-    def _init_schema(self) -> None:
-        """Replay ``schema.sql``, migrate an older file, and stamp the version.
-
-        The DDL is all ``IF NOT EXISTS``, which is why columns added after
-        version 1 go through :data:`~tda.core.dbconn.MIGRATIONS` instead: an
-        existing table keeps its old shape. Both steps are idempotent.
-        """
-        sql = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
-        with self.conn:
-            self.conn.executescript(sql)
-            for table, columns in MIGRATIONS.items():
-                self._add_missing_columns(table, columns)
-            self.conn.execute(
-                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (str(SCHEMA_VERSION),),
-            )
 
     def close(self) -> None:
         """Close the connection; safe to call more than once."""

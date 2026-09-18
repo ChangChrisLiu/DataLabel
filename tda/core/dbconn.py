@@ -4,11 +4,11 @@
 that are about the *connection* rather than about any table live here, mixed
 into ``Db``:
 
-* :meth:`ConnectionMixin._add_missing_columns` -- ``schema.sql`` is replayed on
-  every open, but its statements are ``CREATE TABLE IF NOT EXISTS``, so a table
-  that already exists keeps the shape it was created with. Columns added after
-  schema version 1 are therefore listed in :data:`MIGRATIONS` and added with
-  ``ALTER TABLE`` when an older file is opened.
+* :meth:`ConnectionMixin.init_schema` -- ``schema.sql`` is replayed on every
+  open, but its statements are ``CREATE TABLE IF NOT EXISTS``, so a table that
+  already exists keeps the shape it was created with. Columns added after schema
+  version 1 are therefore listed in :data:`MIGRATIONS` and added with
+  ``ALTER TABLE``; a file from a newer build is refused instead.
 * :meth:`ConnectionMixin.transaction` -- every repository method commits on its
   own, which is right for a single edit and wrong for a routine that must land
   whole (confirming a frame, resolving a conflict). Inside this block the
@@ -18,7 +18,8 @@ into ``Db``:
 from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
-from typing import Iterator
+from pathlib import Path
+from typing import Iterator, Optional
 
 __all__ = ["MIGRATIONS", "ConnectionMixin"]
 
@@ -34,7 +35,46 @@ MIGRATIONS: dict[str, dict[str, str]] = {
 
 
 class ConnectionMixin:
-    """Schema migration and grouped writes for a repository holding ``self.conn``."""
+    """Schema bootstrap and grouped writes for a repository holding ``self.conn``.
+
+    The host also provides ``self.path`` (for error messages) and a
+    ``self._tx_depth`` initialised to 0.
+    """
+
+    def init_schema(self, sql_path: Path, version: int) -> None:
+        """Replay the DDL, migrate an older file, refuse a newer one, stamp the version.
+
+        A file written by a *newer* build is refused rather than opened: this
+        build does not know what its extra columns mean, and stamping the older
+        version onto it would hide that from the build that does. Everything
+        here is idempotent, so opening a database again is a no-op.
+        """
+        sql = Path(sql_path).read_text(encoding="utf-8")
+        with self.conn:
+            self.conn.executescript(sql)
+            found = self._stored_version()
+            if found is not None and found > version:
+                raise RuntimeError(
+                    f"{self.path} was written by a newer TDA (schema version {found}); "
+                    f"this build knows version {version} -- upgrade tda to open it"
+                )
+            for table, columns in MIGRATIONS.items():
+                self._add_missing_columns(table, columns)
+            self.conn.execute(
+                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(version),),
+            )
+
+    def _stored_version(self) -> Optional[int]:
+        """The file's own schema version, or ``None`` when it carries no readable one."""
+        row = self.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        if row is None:
+            return None
+        try:
+            return int(row["value"])
+        except (TypeError, ValueError):
+            return None
 
     def _add_missing_columns(self, table: str, columns: dict[str, str]) -> None:
         """``ALTER TABLE ADD COLUMN`` for every column ``table`` does not have yet."""

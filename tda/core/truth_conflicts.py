@@ -114,6 +114,16 @@ def payload_geometry(payload: Optional[dict]) -> tuple[str, Optional[dict], Opti
     return (GEOM_MASK, payload, None)
 
 
+def payload_row(payload: Optional[dict]) -> dict:
+    """One conflict side shaped like a stored row, so :func:`disagreement` reads it.
+
+    That is how a queued value is compared against a fresh compilation with
+    exactly the rule that queued it in the first place.
+    """
+    geom_type, visible_rle, box = payload_geometry(payload)
+    return {"geom_type": geom_type, "visible_rle": visible_rle, "box": box}
+
+
 # --------------------------------------------------------------------------- #
 # boxes
 # --------------------------------------------------------------------------- #

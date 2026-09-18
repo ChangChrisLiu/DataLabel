@@ -73,6 +73,22 @@ def test_schema_v1_database_is_migrated_in_place(tmp_db_path: str):
     db.close()
 
 
+def test_a_newer_schema_is_refused_instead_of_downgraded(tmp_db_path: str):
+    db = Db(tmp_db_path)
+    with db.conn:
+        db.conn.execute("UPDATE meta SET value='99' WHERE key='schema_version'")
+    db.close()
+
+    with pytest.raises(RuntimeError) as err:
+        Db(tmp_db_path)
+
+    assert "99" in str(err.value)
+    again = sqlite3.connect(tmp_db_path)
+    stamped = again.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
+    again.close()
+    assert stamped == "99"  # the newer file was left exactly as it was
+
+
 def test_transaction_commits_once_and_rolls_back_on_error(tmp_db_path: str):
     db = Db(tmp_db_path)
     key = FrameKey(13, 4, "scan")
