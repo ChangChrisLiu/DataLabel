@@ -238,6 +238,10 @@ class StubSession(QObject):
     def queues(self) -> dict[str, list[dict]]:
         return {k: [dict(e) for e in v] for k, v in self._queues.items()}
 
+    def retry_rechecks(self) -> int:
+        self.calls.append(("retry_rechecks",))
+        return 0
+
     def resolve_conflict(self, cid: int, resolution: str) -> None:
         self.calls.append(("resolve_conflict", cid, resolution))
         self._queues[api.QUEUE_CONFLICTS] = [

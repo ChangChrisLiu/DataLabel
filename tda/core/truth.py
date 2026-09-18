@@ -51,7 +51,7 @@ import numpy as np
 from tda.core import masks
 from tda.core.compiler import CompiledFrame, compile_frame, select_keyframe
 from tda.core.db import RESOLUTIONS, Db
-from tda.core.model import FrameKey, FrameOverride, Placement, ShapeKeyframe, Visibility
+from tda.core.model import FrameKey, Placement, ShapeKeyframe
 from tda.core.states import needs_geom
 from tda.core.taxonomy import Taxonomy
 from tda.core.truth_fresh import FreshMixin, digest_of
@@ -118,7 +118,11 @@ class TruthService(FreshMixin, ResolveMixin):
     ) -> tuple[FrameInputs, CompiledFrame]:
         """The frame's inputs and its compilation; ``hw`` is needed by callers."""
         inputs = gather(self.db, self.tax, key, cache)
-        compiled = compile_frame(
+        return inputs, self._compile_inputs(key, inputs)
+
+    def _compile_inputs(self, key: FrameKey, inputs: FrameInputs) -> CompiledFrame:
+        """Compile from inputs the caller already gathered."""
+        return compile_frame(
             key,
             inputs.hw,
             inputs.needs,
@@ -133,12 +137,12 @@ class TruthService(FreshMixin, ResolveMixin):
             pose_segment=inputs.pose_segment,
             bench_roi=inputs.bench_roi,
         )
-        return inputs, compiled
 
     # ------------------------------------------------------------------ refresh
 
     def refresh(self, key: FrameKey, cache: Optional[InputCache] = None,
-                guard: Optional[str] = None, want_compiled: bool = False) -> dict:
+                guard: Optional[str] = None, want_compiled: bool = False,
+                ignore_digest: bool = False) -> dict:
         """Bring one frame's truth rows up to date with the current inputs.
 
         Returns ``{"updated", "conflicts", "skipped", "problems", "compiled",
@@ -150,6 +154,9 @@ class TruthService(FreshMixin, ResolveMixin):
 
         ``cache`` is :meth:`refresh_range`'s way of reading the step-independent
         inputs once; callers outside this module leave it out.
+
+        ``ignore_digest`` compiles the frame whatever the stored digest says,
+        which is what the session's "I do not trust the cache" refresh is for.
 
         A frame whose stored digest still describes its inputs is **not
         compiled at all**: the pixel work is what a batch pass over an untouched
@@ -165,17 +172,20 @@ class TruthService(FreshMixin, ResolveMixin):
         it has now, and a conflict describing the old ones would be a conflict
         nobody caused.
         """
-        digest = digest_of(gather(self.db, self.tax, key, cache), self.compiler_version)
-        if self._digest_is_current(key, digest):
+        inputs = gather(self.db, self.tax, key, cache)
+        digest = digest_of(inputs, self.compiler_version)
+        if not ignore_digest and self._digest_is_current(key, digest):
             # the rows already describe exactly these inputs: there is nothing
             # to derive and, since nothing moved, nothing a frozen row could
             # disagree with either
             result = {"updated": 0, "conflicts": 0, "skipped": len(self.db.compiled(key)),
                       "problems": [], "compiled": None, "stale": False}
             if want_compiled:
-                result["compiled"] = self._compile(key, cache)[1]
+                result["compiled"] = self._compile_inputs(key, inputs)
             return result
-        inputs, compiled = self._compile(key, cache)  # no transaction: pixels only
+        # the inputs are already in hand: gathering them a second time reads the
+        # whole keyframe table again, which is most of a batch pass's time
+        compiled = self._compile_inputs(key, inputs)  # no transaction: pixels only
         with self.db.transaction():
             return self._write_refresh(key, compiled, guard, digest)
 
@@ -200,7 +210,12 @@ class TruthService(FreshMixin, ResolveMixin):
         fresh = set(compiled.instances)
         known = set(stored)
         if known == fresh and all(row["input_hash"] == new_hash for row in stored.values()):
-            result["skipped"] = len(stored)  # nothing changed: no work at all
+            # nothing to write -- but the rows *do* describe these inputs, and
+            # saying so is the whole point: a database that predates the digest
+            # table is entirely in this state, and without the stamp no pass
+            # over it is ever cheaper than the first
+            result["skipped"] = len(stored)
+            self._stamp(key, digest)
             return result
 
         verified_frame = self._frame_is_verified(key, stored)
@@ -262,7 +277,7 @@ class TruthService(FreshMixin, ResolveMixin):
                                  len(self.db.compiled(key)))
 
     def refresh_range(self, desktop: int, view: str, steps: Iterable[int],
-                      per_step: bool = False) -> dict:
+                      per_step: bool = False, ignore_digest: bool = False) -> dict:
         """:meth:`refresh` every step of one view, with the totals summed up.
 
         ``problems`` is the concatenation of the per-step problem lists in the
@@ -274,7 +289,8 @@ class TruthService(FreshMixin, ResolveMixin):
         total: dict = {"updated": 0, "conflicts": 0, "skipped": 0,
                        "problems": {} if per_step else []}
         for step in steps:
-            one = self.refresh(FrameKey(desktop, int(step), view), cache)
+            one = self.refresh(FrameKey(desktop, int(step), view), cache,
+                               ignore_digest=ignore_digest)
             for counter in ("updated", "conflicts", "skipped"):
                 total[counter] += one[counter]
             if per_step:
@@ -534,6 +550,10 @@ class TruthService(FreshMixin, ResolveMixin):
         missing bench shape clears it instead of blocking the frame.
         """
         if not any(inst.placement == ON_BENCH for inst in compiled.instances.values()):
+            # no bench instance in this frame at all -- either nothing is out of
+            # the machine yet, or this view has no staging area and the gate in
+            # `gather` dropped them (spec 3.3 step 2). Either way the flag is
+            # about something that is not here, so it is left as it was.
             return
         annotated = not any(p.startswith(BENCH_MISSING) for p in compiled.problems)
         frame = self.db.get_frame(key)
