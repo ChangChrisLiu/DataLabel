@@ -123,8 +123,10 @@ def test_the_start_frame_lists_everything_that_still_needs_a_shape(session):
     assert CHASSIS in listed and "motherboard.01" in listed
     assert all(item["kind"] == api.KIND_ADD_SHAPE for item in items)
     assert all(item["done"] is False for item in items)
-    # the chassis is drawn first: everything else is layered on top of it
+    # bottom-up, not alphabetical: the chassis is drawn first and the parts
+    # bolted into it before the latches and fasteners that hold them
     assert listed[0] == CHASSIS
+    assert listed.index("motherboard.01") < listed.index("cpu_socket_lever.01")
 
 
 def test_a_drawn_instance_leaves_the_start_frame_card(session):

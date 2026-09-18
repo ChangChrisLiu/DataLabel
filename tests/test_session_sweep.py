@@ -234,6 +234,36 @@ def test_a_request_arriving_mid_sweep_is_not_cleared_away(session):
     assert db.rechecks(DESKTOP, VIEW) == []
 
 
+def test_a_request_that_arrives_mid_check_survives_the_clear(session, monkeypatch):
+    """End to end: the sweeper must retire only the request it picked up.
+
+    The stamp is read before the comparison, so a request made while the frame
+    is being compared carries a newer one and the clear does not match it -- the
+    frame stays queued and is looked at again, rather than being retired on the
+    strength of a check that predates the edit.
+    """
+    session.sweeper_enabled = False
+    verified_edit(session)
+    original = TruthService.refresh
+    bumped = {"done": False}
+
+    def refresh_then_request_again(self, key, cache=None, guard=None):
+        result = original(self, key, cache, guard)
+        if not bumped["done"]:
+            bumped["done"] = True  # the annotator edits this frame again, now
+            self.db.add_rechecks(key.desktop, key.view, [key.step])
+        return result
+
+    monkeypatch.setattr(TruthService, "refresh", refresh_then_request_again)
+    session.sweeper_enabled = True
+    session.sweeper.open(DESKTOP, VIEW)
+    session.sweeper.enqueue([12])
+    session.drain_sweeper(timeout=20.0)
+
+    assert bumped["done"]
+    assert session.db.rechecks(DESKTOP, VIEW) == [12]
+
+
 # --------------------------------------------------------------------------- #
 # queue notifications (minor)
 # --------------------------------------------------------------------------- #
