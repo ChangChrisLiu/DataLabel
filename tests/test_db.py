@@ -70,7 +70,7 @@ def _tables(conn: sqlite3.Connection) -> set[str]:
 def test_schema_creation_is_idempotent_and_sets_pragmas(tmp_db_path: str):
     db = Db(tmp_db_path)
     assert _tables(db.conn) >= EXPECTED_TABLES
-    assert db.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "1"
+    assert db.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
     assert db.conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
     assert db.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     db.close()
@@ -430,6 +430,14 @@ def test_conflict_queue_add_list_resolve(db: Db):
     assert closed["status"] == "resolved" and closed["resolution"] == "keep_old"
     with pytest.raises(ValueError):
         db.resolve_conflict(other, "whatever")
+
+    assert db.get_conflict(other)["instance"] == "mainboard.01"
+    assert db.get_conflict(other)["new_rle"] == RLE_A
+    assert db.get_conflict(cid)["resolution"] == "keep_old"
+    assert db.get_conflict(999999) is None
+
+
+
 
 
 def test_relations_roundtrip(db: Db):

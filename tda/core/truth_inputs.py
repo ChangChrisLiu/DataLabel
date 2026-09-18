@@ -7,9 +7,9 @@ folds them into the state at one logical step, and collects the geometry of
 that frame -- keyframes, z-order, pairwise overrides, occluders, frame
 overrides and the registration transform -- into one :class:`FrameInputs`.
 
-Nothing here writes to the database except :func:`frame_hw`, which stores an
-image size it had to infer back onto the frame row so the next compilation of
-that frame (and its ``input_hash``) uses the same canvas.
+Nothing here writes to the database except :func:`frame_hw`, which stores the
+image size it measured or inferred back onto the frame row, so the next
+compilation of that frame (and its ``input_hash``) uses the same canvas.
 
 An :class:`InputCache` makes a sweep over many steps of the same view read the
 instance table, the event log and the keyframes once instead of once per step.
@@ -21,7 +21,10 @@ the duration of its own loop only.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
+
+import cv2
 
 from tda.core.db import Db
 from tda.core.model import (
@@ -40,6 +43,8 @@ from tda.core.taxonomy import Taxonomy
 
 __all__ = [
     "DEFAULT_POSE_SEGMENT",
+    "HW_INFERRED",
+    "HW_MEASURED",
     "VIEW_HW",
     "FrameInputs",
     "InputCache",
@@ -64,6 +69,10 @@ VIEW_HW: dict[str, tuple[int, int]] = {
     "oak2": (3040, 4032),
     "rs": (720, 1280),
 }
+
+#: Values of ``aux["hw_source"]``: the view's nominal size vs. the real image's.
+HW_INFERRED = "inferred"
+HW_MEASURED = "measured"
 
 
 # --------------------------------------------------------------------------- #
@@ -100,23 +109,68 @@ def _read_hw(row: Optional[dict]) -> Optional[tuple[int, int]]:
     return None
 
 
-def frame_hw(db: Db, key: FrameKey) -> tuple[int, int]:
-    """The frame's image size, inferring it from the view when it is unrecorded.
+def _image_path(row: Optional[dict]) -> Optional[str]:
+    """Where this frame's pixels are: the cached copy, else the frame's own path."""
+    if not row:
+        return None
+    aux = row.get("aux") or {}
+    for candidate in (aux.get("cache_path"), row.get("path")):
+        if candidate:
+            return str(candidate)
+    return None
 
-    An inferred size is written back onto the frame row (in ``aux``), because
-    the canvas enters every compiled mask and the frame's ``input_hash``: it
-    must not change silently between two runs, and the real size -- once the
-    indexer or the canvas has read the image -- overrides it from then on.
+
+def _measure_hw(row: Optional[dict]) -> Optional[tuple[int, int]]:
+    """``(H, W)`` read off the image file, or ``None`` when there is none to read."""
+    path = _image_path(row)
+    if not path:
+        return None
+    try:
+        if not Path(path).exists():
+            return None
+        image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    except (OSError, ValueError):
+        return None
+    if image is None or getattr(image, "ndim", 0) < 2:
+        return None
+    height, width = (int(v) for v in image.shape[:2])
+    return (height, width) if height > 0 and width > 0 else None
+
+
+def _store_hw(
+    db: Db, key: FrameKey, row: Optional[dict], hw: tuple[int, int], source: str
+) -> None:
+    """Write a size and where it came from onto the frame row, keeping path/ts."""
+    aux = dict((row or {}).get("aux") or {})
+    aux["hw"] = [int(hw[0]), int(hw[1])]
+    aux["hw_source"] = source
+    db.upsert_frame(key, (row or {}).get("path"), aux, (row or {}).get("ts"))
+
+
+def frame_hw(db: Db, key: FrameKey) -> tuple[int, int]:
+    """The frame's image size: measured from the image, or inferred from the view.
+
+    The canvas enters every compiled mask and the frame's ``input_hash``, so it
+    must not change silently between two runs: whatever this returns is written
+    back onto the frame row together with ``aux["hw_source"]``
+    (:data:`HW_MEASURED` or :data:`HW_INFERRED`). The image is read at most
+    once -- a measured size is never questioned again -- and a measurement
+    supersedes an earlier guess as soon as the cached image is there.
     """
     row = db.get_frame(key)
     stored = _read_hw(row)
+    source = ((row or {}).get("aux") or {}).get("hw_source")
+    if stored is not None and source == HW_MEASURED:
+        return stored
+    measured = _measure_hw(row)
+    if measured is not None:
+        _store_hw(db, key, row, measured, HW_MEASURED)
+        return measured
     if stored is not None:
         return stored
-    hw = infer_hw(key.view)
-    aux = dict((row or {}).get("aux") or {})
-    aux["hw"] = [int(hw[0]), int(hw[1])]
-    db.upsert_frame(key, (row or {}).get("path"), aux, (row or {}).get("ts"))
-    return hw
+    inferred = infer_hw(key.view)
+    _store_hw(db, key, row, inferred, HW_INFERRED)
+    return inferred
 
 
 # --------------------------------------------------------------------------- #
@@ -146,20 +200,40 @@ def instances_of(
     return cache.instances[desktop]
 
 
+def _merge_events(derived: list[StateEvent], manual: list[StateEvent]) -> list[StateEvent]:
+    """Both logs in one chronological list, manual events last within a step.
+
+    Sorting is stable and keyed only on ``(step, source)``, so each log keeps
+    its own order and a hand-written event always folds in *after* the derived
+    events of the same step -- which is what lets an annotator correct what the
+    step table says without having to delete the action.
+    """
+    tagged = [(event.step, 0, event) for event in derived]
+    tagged += [(event.step, 1, event) for event in manual]
+    return [event for _, _, event in sorted(tagged, key=lambda item: (item[0], item[1]))]
+
+
 def events_of(
     db: Db, tax: Taxonomy, desktop: int, cache: Optional[InputCache] = None
 ) -> list[StateEvent]:
-    """The state-event log, derived from the actions when none is stored.
+    """The state-event log: always derived from the actions, manual events on top.
+
+    The recorded actions are the authority on what happened (spec 6.3), so they
+    are compiled on every read and the stored ``auto=True`` rows -- a cached
+    copy of exactly that -- are ignored. Stored events an annotator entered by
+    hand (``auto=False``) are merged in afterwards: they correct or complete the
+    derived log instead of replacing it, so one manual note can no longer erase
+    every action's effect.
 
     The derived log is **not** persisted: it is a view of the step table, and
-    storing it here would compete with :meth:`tda.core.db.Db.replace_events`
-    (the step-table importer's job) and quietly outvote a hand-edited log.
+    writing it here would compete with :meth:`tda.core.db.Db.replace_events`.
     """
     if cache is not None and desktop in cache.events:
         return cache.events[desktop]
-    events = db.events(desktop)
-    if not events:
-        events = events_from_actions(instances_of(db, desktop, cache), db.actions(desktop), tax)
+    instances = instances_of(db, desktop, cache)
+    derived = events_from_actions(instances, db.actions(desktop), tax)
+    manual = [event for event in db.events(desktop) if not event.auto]
+    events = _merge_events(derived, manual)
     if cache is not None:
         cache.events[desktop] = events
     return events

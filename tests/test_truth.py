@@ -1,120 +1,32 @@
-"""Tests for the persisted truth table (tda.core.truth / tda.core.truth_inputs).
+"""Tests for the persisted truth table: compiling, refreshing and verifying.
 
-One synthetic scene backs almost every test: desktop 1, view ``scan``, a 64x64
-image, three logical steps and two instances -- a PSU and the screw that
-fastens it, which is unscrewed and taken out at step 3 (so it lies on the bench
-there, tracked by a box). Shapes are rectangles encoded as COCO RLE.
+The frozen-row comparison, the conflict queue and its resolutions live in
+``test_truth_conflicts.py``; the scene both modules use is ``truth_scenes.py``.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
 from tda.core import masks
 from tda.core.db import Db
-from tda.core.model import (
-    ActionRec,
-    FrameKey,
-    FrameOverride,
-    InstanceRec,
-    OccluderMask,
-    ShapeKeyframe,
-    ShapePart,
-    Similarity,
-    StateEvent,
-    StepRec,
-    ZOrderRec,
+from tda.core.model import FrameKey, FrameOverride, OccluderMask, Similarity, StateEvent
+from tda.core.truth_inputs import VIEW_HW, frame_hw, state_of
+from truth_scenes import (
+    BENCH_BOX,
+    DESKTOP,
+    HW,
+    PSU,
+    SCREW,
+    VIEW,
+    Scene,
+    build_scene,
+    mask_kf,
+    rect,
 )
-from tda.core.taxonomy import Taxonomy, load_taxonomy
-from tda.core.truth import TruthService
-from tda.core.truth_inputs import VIEW_HW, frame_hw
-
-DESKTOP = 1
-VIEW = "scan"
-HW = (64, 64)
-PSU = "psu.01"
-SCREW = "screw.psu.01"
-FAN = "case_fan.01"
-
-PSU_RECT = (10, 10, 50, 50)
-SCREW_RECT = (14, 14, 22, 22)
-FAN_RECT = (52, 52, 62, 62)
-BENCH_BOX = (2.0, 2.0, 12.0, 12.0)
-
-
-# --------------------------------------------------------------------------- #
-# scene
-# --------------------------------------------------------------------------- #
-def rect(x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
-    """A filled rectangle ``[x0, x1) x [y0, y1)`` as a 64x64 bool mask."""
-    m = np.zeros(HW, dtype=bool)
-    m[y0:y1, x0:x1] = True
-    return m
-
-
-def mask_kf(instance: str, box, anchor: int, placement: str = "in_chassis") -> ShapeKeyframe:
-    return ShapeKeyframe(
-        id=None,
-        instance=instance,
-        desktop=DESKTOP,
-        view=VIEW,
-        pose_segment=1,
-        anchor_step=anchor,
-        placement=placement,
-        geom_type="mask",
-        parts=[ShapePart("main", masks.encode_rle(rect(*box)))],
-    )
-
-
-def box_kf(instance: str, box, anchor: int, placement: str = "on_bench") -> ShapeKeyframe:
-    return ShapeKeyframe(
-        id=None,
-        instance=instance,
-        desktop=DESKTOP,
-        view=VIEW,
-        pose_segment=1,
-        anchor_step=anchor,
-        placement=placement,
-        geom_type="box",
-        parts=[ShapePart("main", None, tuple(float(v) for v in box))],
-    )
-
-
-@dataclass
-class Scene:
-    """The seeded database plus the service and the keyframes under test."""
-
-    db: Db
-    tax: Taxonomy
-    svc: TruthService
-    psu_kf: ShapeKeyframe
-    screw_kf: ShapeKeyframe
-    bench_kf: ShapeKeyframe
-
-    def key(self, step: int) -> FrameKey:
-        return FrameKey(DESKTOP, step, VIEW)
-
-    def refresh_all(self) -> dict:
-        return self.svc.refresh_range(DESKTOP, VIEW, [1, 2, 3])
-
-    def rows(self, step: int) -> dict[str, dict]:
-        return self.db.compiled(self.key(step))
-
-    def row(self, step: int, instance: str) -> dict:
-        return self.rows(step)[instance]
-
-    def counts(self, step: int, instance: str) -> str | None:
-        rle = self.row(step, instance)["visible_rle"]
-        return None if rle is None else rle["counts"]
-
-    def review_status(self, step: int) -> str | None:
-        return self.db.get_frame(self.key(step))["review_status"]
-
-    def add_frame(self, step: int, hw=HW) -> None:
-        aux = {} if hw is None else {"hw": [int(hw[0]), int(hw[1])]}
-        self.db.upsert_frame(self.key(step), f"s{step:03d}.jpg", aux, None)
 
 
 @pytest.fixture
@@ -126,41 +38,7 @@ def db(tmp_db_path: str):
 
 @pytest.fixture
 def scene(db: Db) -> Scene:
-    tax = load_taxonomy()
-    db.upsert_instance(InstanceRec(key=PSU, desktop=DESKTOP, cls="psu"))
-    db.upsert_instance(
-        InstanceRec(
-            key=SCREW,
-            desktop=DESKTOP,
-            cls="screw",
-            attrs={"role": "psu", "head": "PH2", "captive": False},
-            parent=PSU,
-            fastens=PSU,
-        )
-    )
-    db.replace_steps(
-        DESKTOP,
-        [
-            StepRec(DESKTOP, 1, "initial", "initial state"),
-            StepRec(DESKTOP, 2, "normal", "loosen psu screw"),
-            StepRec(DESKTOP, 3, "normal", "psu screw"),
-        ],
-        [ActionRec(DESKTOP, 3, 0, SCREW, "remove", tool="PH2")],
-    )
-    scene = Scene(
-        db=db,
-        tax=tax,
-        svc=TruthService(db, tax),
-        psu_kf=mask_kf(PSU, PSU_RECT, anchor=3),
-        screw_kf=mask_kf(SCREW, SCREW_RECT, anchor=2),
-        bench_kf=box_kf(SCREW, BENCH_BOX, anchor=3),
-    )
-    for step in (1, 2, 3):
-        scene.add_frame(step)
-    for kf in (scene.psu_kf, scene.screw_kf, scene.bench_kf):
-        db.add_keyframe(kf)
-    db.set_zorder(ZOrderRec(DESKTOP, VIEW, 1, [(PSU, "main"), (SCREW, "main")]))
-    return scene
+    return build_scene(db)
 
 
 # --------------------------------------------------------------------------- #
@@ -190,19 +68,35 @@ def test_compile_follows_the_state_machine_onto_the_bench(scene: Scene):
     assert screw.box == pytest.approx(BENCH_BOX)
 
 
-def test_compile_uses_stored_events_when_the_db_has_them(scene: Scene):
+def test_manual_events_are_merged_on_top_of_the_derived_ones(scene: Scene):
+    # a hand-written note: the PSU was pushed aside at step 1
     scene.db.replace_events(
         DESKTOP,
-        [StateEvent(DESKTOP, 2, PSU, "placement", "in_chassis", "on_bench", auto=False)],
+        [StateEvent(DESKTOP, 1, PSU, "state", "installed", "displaced", auto=False)],
+        auto_only=False,
+    )
+
+    state = state_of(scene.db, scene.tax, DESKTOP, 3)
+
+    assert state[PSU].state == "displaced"  # the manual event survives
+    assert state[SCREW].state == "removed"  # and the recorded action still applies
+    out = scene.svc.compile(scene.key(3))
+    assert out.instances[PSU].placement == "in_chassis"
+    assert out.instances[SCREW].placement == "on_bench"
+
+
+def test_a_manual_removal_still_cascades_to_attached_children(scene: Scene):
+    scene.db.replace_events(
+        DESKTOP,
+        [StateEvent(DESKTOP, 2, PSU, "state", "installed", "removed", auto=False)],
         auto_only=False,
     )
 
     out = scene.svc.compile(scene.key(2))
 
-    assert out.instances[PSU].placement == "on_bench"
-    # the stored log replaces the derived one, so the screw never left step 3
-    assert out.instances[SCREW].placement == "in_chassis"
-    assert f"bench_missing:{PSU}" in out.problems  # no bench chain for the PSU
+    assert PSU not in out.instances  # removed: it needs no geometry in the chassis
+    assert out.instances[SCREW].placement == "on_bench"  # dragged out with its parent
+    assert out.instances[SCREW].box == pytest.approx(BENCH_BOX)
 
 
 def test_compile_gathers_occluders_overrides_and_the_transform(scene: Scene):
@@ -233,10 +127,28 @@ def test_frame_hw_is_inferred_from_the_view_and_stored_back(scene: Scene):
     scene.db.upsert_frame(key, "s001.png", {}, None)
 
     assert frame_hw(scene.db, key) == VIEW_HW["rs"] == (720, 1280)
-    assert scene.db.get_frame(key)["aux"]["hw"] == [720, 1280]
+    aux = scene.db.get_frame(key)["aux"]
+    assert aux["hw"] == [720, 1280] and aux["hw_source"] == "inferred"
     assert frame_hw(scene.db, key) == (720, 1280)  # read back, not inferred again
     assert frame_hw(scene.db, FrameKey(DESKTOP, 1, "oak1")) == (3040, 4032)
     assert frame_hw(scene.db, scene.key(1)) == HW  # the scene stores its own
+
+
+def test_frame_hw_measures_the_cached_image_and_supersedes_a_guess(scene: Scene, tmp_path: Path):
+    key = FrameKey(DESKTOP, 2, "rs")
+    image = tmp_path / "s002.png"
+    scene.db.upsert_frame(key, str(image), {}, None)
+
+    assert frame_hw(scene.db, key) == (720, 1280)  # no file yet: the view's nominal size
+    assert scene.db.get_frame(key)["aux"]["hw_source"] == "inferred"
+
+    cv2.imwrite(str(image), np.zeros((12, 34, 3), np.uint8))
+    assert frame_hw(scene.db, key) == (12, 34)  # measured beats inferred
+    aux = scene.db.get_frame(key)["aux"]
+    assert aux["hw"] == [12, 34] and aux["hw_source"] == "measured"
+
+    image.unlink()
+    assert frame_hw(scene.db, key) == (12, 34)  # measured once, then trusted
 
 
 # --------------------------------------------------------------------------- #
@@ -254,13 +166,16 @@ def test_refresh_writes_one_auto_row_per_instance_and_step(scene: Scene):
             assert row["verified_by"] is None and row["verified_at"] is None
             assert row["input_hash"]
     psu = scene.row(1, PSU)
+    assert psu["geom_type"] == "mask" and psu["box"] is None
     assert masks.area(masks.decode_rle(psu["visible_rle"])) == 40 * 40 - 8 * 8
     assert psu["occlusion_ratio"] == pytest.approx(64 / 1600)
     assert psu["visibility"] == "visible" and psu["placement"] == "in_chassis"
-    # a bench box is stored as its rectangle, so the truth table stays readable
+    # a bench part is a box row: its rectangle, no mask
     bench = scene.row(3, SCREW)
     assert bench["placement"] == "on_bench"
-    assert masks.bbox(masks.decode_rle(bench["visible_rle"])) == (2, 2, 12, 12)
+    assert bench["geom_type"] == "box"
+    assert bench["visible_rle"] is None
+    assert bench["box"] == list(BENCH_BOX)
 
 
 def test_refresh_skips_every_row_when_the_input_hash_is_unchanged(scene: Scene, monkeypatch):
@@ -338,6 +253,21 @@ def test_verify_frame_accepts_a_bench_warning(scene: Scene):
     assert scene.row(3, SCREW)["status"] == "verified"
 
 
+def test_verify_frame_writes_all_or_nothing(scene: Scene, monkeypatch):
+    scene.refresh_all()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("the op log is down")
+
+    monkeypatch.setattr(scene.db, "log_op", boom)
+    with pytest.raises(RuntimeError):
+        scene.svc.verify_frame(scene.key(2), "lin")
+
+    assert [row["status"] for row in scene.rows(2).values()] == ["auto", "auto"]
+    assert all(row["verified_by"] is None for row in scene.rows(2).values())
+    assert scene.review_status(2) != "verified"
+
+
 def test_demote_frame_marks_needs_review_and_logs_the_reason(scene: Scene):
     scene.refresh_all()
     scene.svc.verify_frame(scene.key(2), "lin")
@@ -350,148 +280,6 @@ def test_demote_frame_marks_needs_review_and_logs_the_reason(scene: Scene):
     assert op["payload"]["reason"] == "z-order changed"
     assert op["payload"]["step"] == 2
 
-
-# --------------------------------------------------------------------------- #
-# re-compilation against frozen rows
-# --------------------------------------------------------------------------- #
-def _replace_parts(scene: Scene, kf: ShapeKeyframe, parts: list[ShapePart]) -> None:
-    kf.parts = parts
-    scene.db.update_keyframe(kf)
-
-
-def test_shifting_a_shape_updates_auto_rows_and_leaves_the_verified_one(scene: Scene):
-    scene.refresh_all()
-    scene.svc.verify_frame(scene.key(2), "lin")
-    frozen = {inst: dict(row) for inst, row in scene.rows(2).items()}
-
-    _replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(11, 10, 51, 50)))])
-    out = scene.refresh_all()
-
-    assert out["conflicts"] == 0
-    assert out["updated"] == 4  # both instances of step 1 and step 3
-    assert out["skipped"] == 2  # the two frozen rows of step 2
-    assert scene.db.conflicts(DESKTOP) == []
-    assert masks.bbox(masks.decode_rle(scene.row(1, PSU)["visible_rle"])) == (11, 10, 51, 50)
-    assert scene.rows(2) == frozen  # byte for byte, including the input hash
-    assert scene.review_status(2) == "verified"
-
-
-def test_eroding_a_shape_conflicts_with_the_verified_row_only(scene: Scene):
-    scene.refresh_all()
-    scene.svc.verify_frame(scene.key(2), "lin")
-    frozen_counts = scene.counts(2, PSU)
-
-    # 40% off the PSU: 40x40 -> 40x24
-    _replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
-    out = scene.refresh_all()
-
-    assert out["conflicts"] == 1
-    assert out["updated"] == 4  # steps 1 and 3 follow the new shape
-    conflicts = scene.db.conflicts(DESKTOP)
-    assert len(conflicts) == 1
-    conflict = conflicts[0]
-    assert (conflict["instance"], conflict["step"], conflict["status"]) == (PSU, 2, "open")
-    assert conflict["old_rle"]["counts"] == frozen_counts
-    assert masks.bbox(masks.decode_rle(conflict["new_rle"])) == (10, 10, 50, 34)
-    assert conflict["sym_diff_px"] > 100
-    # the frozen row itself is untouched
-    assert scene.counts(2, PSU) == frozen_counts
-    assert scene.row(2, PSU)["status"] == "verified"
-    assert masks.bbox(masks.decode_rle(scene.row(1, PSU)["visible_rle"])) == (10, 10, 50, 34)
-
-
-def test_the_same_disagreement_is_queued_only_once(scene: Scene):
-    scene.refresh_all()
-    scene.svc.verify_frame(scene.key(2), "lin")
-    _replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
-    scene.svc.refresh(scene.key(2))
-
-    out = scene.svc.refresh(scene.key(2))
-
-    assert out["conflicts"] == 1  # still in disagreement
-    assert len(scene.db.conflicts(DESKTOP)) == 1  # but not queued twice
-
-
-def test_a_moved_bench_box_conflicts_only_beyond_two_pixels(scene: Scene):
-    scene.refresh_all()
-    scene.svc.verify_frame(scene.key(3), "lin")
-    frozen_counts = scene.counts(3, SCREW)
-
-    _replace_parts(scene, scene.bench_kf, [ShapePart("main", None, (3.0, 2.0, 13.0, 12.0))])
-    assert scene.svc.refresh(scene.key(3))["conflicts"] == 0
-
-    _replace_parts(scene, scene.bench_kf, [ShapePart("main", None, (7.0, 2.0, 17.0, 12.0))])
-    out = scene.svc.refresh(scene.key(3))
-
-    assert out["conflicts"] == 1
-    conflict = scene.db.conflicts(DESKTOP)[-1]
-    assert conflict["instance"] == SCREW
-    assert masks.bbox(masks.decode_rle(conflict["new_rle"])) == (7, 2, 17, 12)
-    assert conflict["sym_diff_px"] == 2 * 5 * 10  # two 5x10 slivers
-    assert scene.counts(3, SCREW) == frozen_counts
-
-
-def test_an_instance_added_to_a_verified_frame_demotes_it(scene: Scene):
-    scene.refresh_all()
-    scene.svc.verify_frame(scene.key(2), "lin")
-    frozen_counts = scene.counts(2, PSU)
-
-    scene.db.upsert_instance(InstanceRec(key=FAN, desktop=DESKTOP, cls="case_fan"))
-    scene.db.add_keyframe(mask_kf(FAN, FAN_RECT, anchor=3))
-    scene.db.set_zorder(
-        ZOrderRec(DESKTOP, VIEW, 1, [(PSU, "main"), (SCREW, "main"), (FAN, "main")], version=2)
-    )
-    out = scene.svc.refresh(scene.key(2))
-
-    assert sorted(scene.rows(2)) == [FAN, PSU, SCREW]
-    assert scene.row(2, FAN)["status"] == "auto"
-    assert out["updated"] == 1 and out["conflicts"] == 0
-    assert scene.review_status(2) == "needs_review"
-    assert scene.counts(2, PSU) == frozen_counts  # the frozen rows stay frozen
-    assert scene.row(2, PSU)["status"] == "verified"
-    demotions = [op for op in scene.db.ops(DESKTOP, VIEW) if op["kind"] == "demote_frame"]
-    assert FAN in demotions[0]["payload"]["reason"]
-
-
-def test_an_instance_dropped_from_a_verified_frame_conflicts_and_demotes(scene: Scene):
-    scene.refresh_all()
-    scene.svc.verify_frame(scene.key(2), "lin")
-    frozen_counts = scene.counts(2, SCREW)
-    frozen_area = masks.area(masks.decode_rle(scene.row(2, SCREW)["visible_rle"]))
-
-    # the screw was put down outside every view from step 2 on: no geometry
-    scene.db.replace_events(
-        DESKTOP,
-        [StateEvent(DESKTOP, 2, SCREW, "placement", "in_chassis", "elsewhere", auto=False)],
-        auto_only=False,
-    )
-    out = scene.svc.refresh(scene.key(2))
-
-    assert out["conflicts"] == 1
-    conflict = scene.db.conflicts(DESKTOP)[0]
-    assert conflict["instance"] == SCREW
-    assert conflict["new_rle"] is None
-    assert conflict["old_rle"]["counts"] == frozen_counts
-    assert conflict["sym_diff_px"] == frozen_area
-    assert scene.counts(2, SCREW) == frozen_counts  # kept, never deleted
-    assert scene.row(2, SCREW)["status"] == "verified"
-    assert scene.review_status(2) == "needs_review"
-
-
-def test_an_instance_dropped_from_an_auto_frame_deletes_its_row(scene: Scene):
-    scene.refresh_all()
-    scene.db.replace_events(
-        DESKTOP,
-        [StateEvent(DESKTOP, 2, SCREW, "placement", "in_chassis", "elsewhere", auto=False)],
-        auto_only=False,
-    )
-
-    out = scene.svc.refresh(scene.key(3))
-
-    assert sorted(scene.rows(3)) == [PSU]
-    assert out["conflicts"] == 0
-    assert out["updated"] == 2  # the PSU row rewritten, the screw row deleted
-    assert scene.db.conflicts(DESKTOP) == []
 
 
 # --------------------------------------------------------------------------- #

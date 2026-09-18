@@ -8,8 +8,14 @@
 * :meth:`TruthService.refresh`  -- write the result into the truth table.
 * :meth:`TruthService.verify_frame` / :meth:`TruthService.demote_frame`
   -- freeze a frame a human confirmed, or send it back for review.
+* :meth:`TruthService.resolve_conflict` -- close one queued disagreement by
+  accepting the new value or pinning the frozen one.
 * :meth:`TruthService.affected_steps` -- which frames one shape reaches, for
   the canvas' "affects N frames" strip (spec 4.3).
+
+Geometry, the frozen-vs-recompiled comparison and the conflict payloads live
+next door in :mod:`tda.core.truth_conflicts`; reading the inputs out of the
+database is :mod:`tda.core.truth_inputs`' job.
 
 The rules the table lives by (spec 3.4)
 ---------------------------------------
@@ -21,8 +27,9 @@ The rules the table lives by (spec 3.4)
   (box rows: a corner moving more than :data:`BOX_TOL_PX`), the disagreement is
   queued in the ``conflict`` table -- old value, new value and the number of
   differing pixels -- and the row keeps its frozen value until a human resolves
-  it. Nothing is ever silently overwritten, and a disagreement that is already
-  queued is not queued a second time.
+  it with :meth:`TruthService.resolve_conflict`. Nothing is ever silently
+  overwritten, and a disagreement already sitting in the open queue is not
+  queued twice.
 * A verified frame that gains or loses an instance drops back to
   ``needs_review``: the human confirmed a different set of objects than the one
   the inputs now describe.
@@ -42,15 +49,25 @@ from typing import Iterable, Optional
 import numpy as np
 
 from tda.core import masks
-from tda.core.compiler import CompiledFrame, CompiledInstance, compile_frame, select_keyframe
-from tda.core.db import Db
-from tda.core.model import FrameKey, Placement, ShapeKeyframe
+from tda.core.compiler import CompiledFrame, compile_frame, select_keyframe
+from tda.core.db import RESOLUTIONS, Db
+from tda.core.model import FrameKey, FrameOverride, Placement, ShapeKeyframe, Visibility
 from tda.core.states import needs_geom
 from tda.core.taxonomy import Taxonomy
+from tda.core.truth_conflicts import (
+    BOX_TOL_PX,
+    GEOM_BOX,
+    disagreement,
+    geom_payload,
+    payload_geometry,
+    row_payload,
+    row_values,
+)
 from tda.core.truth_inputs import (
     FrameInputs,
     InputCache,
     events_of,
+    frame_hw,
     gather,
     instances_of,
     pose_segment_of,
@@ -64,9 +81,8 @@ __all__ = ["BLOCKING_PROBLEMS", "BOX_TOL_PX", "TruthService"]
 #: ``pose_segment_ambiguous`` -- is a warning the annotator may accept.
 BLOCKING_PROBLEMS = ("missing_shape:", "zorder_cycle:", "shape_size_mismatch:")
 
-#: How far a box corner may move before a frozen box row is in conflict.
-BOX_TOL_PX = 2
-
+ACCEPT_NEW = "accept_new"
+KEEP_OLD = "keep_old"
 AUTO = "auto"
 VERIFIED = "verified"
 NEEDS_REVIEW = "needs_review"
@@ -144,35 +160,35 @@ class TruthService:
 
         for instance in sorted(fresh):
             compiled_inst = compiled.instances[instance]
-            visible_rle, ratio, visibility, placement = self._row_values(compiled_inst, inputs.hw)
             row = stored.get(instance)
             if row is not None and row["input_hash"] == new_hash:
                 result["skipped"] += 1
                 continue
             if row is not None and row["status"] == VERIFIED:
-                diff = self._disagreement(row["visible_rle"], compiled_inst, inputs.hw)
+                diff = disagreement(row, compiled_inst)
                 if diff is None:
                     result["skipped"] += 1
                     continue
+                values = row_values(compiled_inst)
                 queued = self._queue_conflict(
-                    key, instance, row["visible_rle"], visible_rle, diff, queued
+                    key, instance, row_payload(row),
+                    geom_payload(values.visible_rle, values.box), diff, queued,
                 )
                 result["conflicts"] += 1
                 continue
-            self.db.put_compiled(
-                key, instance, visible_rle, ratio, visibility, placement, AUTO, new_hash
-            )
+            self._put_row(key, instance, row_values(compiled_inst), AUTO, new_hash)
             result["updated"] += 1
 
         for instance in sorted(known - fresh):
             row = stored[instance]
             if row["status"] == VERIFIED:
-                old_rle = row["visible_rle"]
-                pixels = 0 if old_rle is None else masks.area(masks.decode_rle(old_rle))
-                queued = self._queue_conflict(key, instance, old_rle, None, pixels, queued)
+                old_payload = row_payload(row)
+                queued = self._queue_conflict(
+                    key, instance, old_payload, None, self._payload_area(old_payload), queued
+                )
                 result["conflicts"] += 1
             else:
-                self._delete_row(key, instance)
+                self.db.delete_compiled(key, instance)
                 result["updated"] += 1
 
         if verified_frame and (fresh - known or known - fresh):
@@ -204,8 +220,11 @@ class TruthService:
         contradictory z-order is not a truth anybody can confirm. Warnings, such
         as a bench part nobody has boxed yet, do not stop the confirmation; they
         only leave ``bench_annotated`` false.
+
+        Every write goes into one transaction: a frame is either confirmed
+        whole -- rows, flag and op log -- or not at all.
         """
-        inputs, compiled = self._compile(key)
+        _, compiled = self._compile(key)
         blocking = [p for p in compiled.problems if p.startswith(BLOCKING_PROBLEMS)]
         if blocking:
             raise ValueError(
@@ -213,26 +232,24 @@ class TruthService:
                 + ", ".join(blocking)
             )
         stored = self.db.compiled(key)
-        for instance in sorted(compiled.instances):
-            visible_rle, ratio, visibility, placement = self._row_values(
-                compiled.instances[instance], inputs.hw
-            )
-            self.db.put_compiled(
-                key, instance, visible_rle, ratio, visibility, placement, VERIFIED,
-                compiled.input_hash, verified_by=annotator,
-            )
-        for instance in sorted(set(stored) - set(compiled.instances)):
-            self._delete_row(key, instance)  # confirmed away: it is not in this frame
-        self._mark_bench(key, compiled)
         previous = self._review_status(key)
-        self.db.set_frame_flags(key, review_status=VERIFIED)
-        self.db.log_op(
-            key.desktop, key.view, "verify_frame",
-            {"step": key.step, "instances": sorted(compiled.instances),
-             "problems": list(compiled.problems), "input_hash": compiled.input_hash},
-            {"kind": "set_review_status", "step": key.step, "review_status": previous},
-            annotator,
-        )
+        with self.db.transaction():
+            for instance in sorted(compiled.instances):
+                self._put_row(
+                    key, instance, row_values(compiled.instances[instance]),
+                    VERIFIED, compiled.input_hash, verified_by=annotator,
+                )
+            for instance in sorted(set(stored) - set(compiled.instances)):
+                self.db.delete_compiled(key, instance)  # not in this frame at all
+            self._mark_bench(key, compiled)
+            self.db.set_frame_flags(key, review_status=VERIFIED)
+            self.db.log_op(
+                key.desktop, key.view, "verify_frame",
+                {"step": key.step, "instances": sorted(compiled.instances),
+                 "problems": list(compiled.problems), "input_hash": compiled.input_hash},
+                {"kind": "set_review_status", "step": key.step, "review_status": previous},
+                annotator,
+            )
 
     def demote_frame(self, key: FrameKey, reason: str) -> None:
         """Send a frame back to the review queue (spec 3.4, "需复核")."""
@@ -244,6 +261,85 @@ class TruthService:
             {"kind": "set_review_status", "step": key.step, "review_status": previous},
             SYSTEM,
         )
+
+    # ------------------------------------------------------ conflict resolution
+
+    def resolve_conflict(self, cid: int, resolution: str, annotator: str) -> None:
+        """Close one queued disagreement, and make the inputs agree with it.
+
+        ``accept_new`` writes the conflict's new geometry into the frozen row
+        (which stays ``verified``) and stamps it with the frame's current
+        ``input_hash``, so the next refresh has nothing left to do; a conflict
+        whose new value is *nothing* -- the instance left the frame -- removes
+        the row instead.
+
+        ``keep_old`` pins the frame: the frozen value is written back as a
+        :class:`~tda.core.model.FrameOverride`, which is what "only this frame"
+        means everywhere else in the tool (spec 4.3). The compiler then produces
+        the frozen value again and the disagreement cannot come back, while the
+        shape itself keeps whatever the annotator changed it to for every other
+        frame. A box row is pinned by the rectangle's mask, so the frame
+        override stays a plain visible mask.
+
+        ``edited`` only closes the conflict: whoever edited the row wrote it.
+        """
+        if resolution not in RESOLUTIONS:
+            raise ValueError(f"resolution must be one of {RESOLUTIONS}, got {resolution!r}")
+        conflict = self.db.get_conflict(cid)
+        if conflict is None:
+            raise KeyError(f"no conflict with id={cid}")
+        key = FrameKey(conflict["desktop"], conflict["step"], conflict["view"])
+        instance = conflict["instance"]
+        with self.db.transaction():
+            if resolution == ACCEPT_NEW:
+                self._accept_new(key, instance, conflict, annotator)
+            elif resolution == KEEP_OLD:
+                self._keep_old(key, instance, conflict)
+            self.db.resolve_conflict(cid, resolution)
+            self.db.log_op(
+                key.desktop, key.view, "resolve_conflict",
+                {"step": key.step, "instance": instance, "conflict": int(cid),
+                 "resolution": resolution},
+                {"kind": "reopen_conflict", "conflict": int(cid)},
+                annotator,
+            )
+
+    def _accept_new(self, key: FrameKey, instance: str, conflict: dict, annotator: str) -> None:
+        """Write the conflict's new geometry into the frozen row."""
+        payload = conflict["new_rle"]
+        if payload is None:
+            self.db.delete_compiled(key, instance)
+            return
+        geom_type, visible_rle, box = payload_geometry(payload)
+        _, compiled = self._compile(key)
+        compiled_inst = compiled.instances.get(instance)
+        row = self.db.compiled(key).get(instance) or {}
+        if compiled_inst is not None:
+            values = row_values(compiled_inst)
+            ratio, visibility, placement = (
+                values.occlusion_ratio, values.visibility, values.placement
+            )
+        else:  # it left the compile since: keep what the row said about it
+            ratio = float(row.get("occlusion_ratio") or 0.0)
+            visibility = row.get("visibility") or Visibility.OUT_OF_VIEW.value
+            placement = row.get("placement") or Placement.IN_CHASSIS.value
+        self.db.put_compiled(
+            key, instance, visible_rle, ratio, visibility, placement, VERIFIED,
+            compiled.input_hash, verified_by=annotator, geom_type=geom_type, box=box,
+        )
+
+    def _keep_old(self, key: FrameKey, instance: str, conflict: dict) -> None:
+        """Pin the frozen value onto this frame so the compiler reproduces it."""
+        geom_type, visible_rle, box = payload_geometry(conflict["old_rle"])
+        if geom_type == GEOM_BOX and box is not None:
+            visible_rle = masks.encode_rle(self._box_mask(box, frame_hw(self.db, key)))
+        if visible_rle is None:
+            # the frozen row had no geometry at all: say so for this frame
+            self.db.set_frame_override(
+                FrameOverride(key, instance, visibility=Visibility.OUT_OF_VIEW.value)
+            )
+            return
+        self.db.set_frame_override(FrameOverride(key, instance, visible_rle=visible_rle))
 
     # -------------------------------------------------------------- keyframes
 
@@ -292,154 +388,85 @@ class TruthService:
             return int(chosen.id) == int(wanted.id)
         return chosen is wanted
 
-    def _row_values(
-        self, compiled_inst: CompiledInstance, hw: tuple[int, int]
-    ) -> tuple[Optional[dict], float, str, str]:
-        """One truth row's column values: RLE, occlusion ratio, label, placement.
-
-        The truth table holds one geometry column, so a box-only instance (a
-        part lying on the bench) stores its box as a filled rectangle: the
-        corners come back exactly through :func:`tda.core.masks.bbox`, and every
-        consumer -- export, review, the conflict queue -- reads one kind of
-        geometry instead of two.
-        """
-        visible = compiled_inst.visible
-        if visible is not None:
-            rle = masks.encode_rle(visible)
-        elif compiled_inst.box is not None:
-            rle = masks.encode_rle(self._box_mask(compiled_inst.box, hw))
-        else:
-            rle = None
-        return (
-            rle,
-            float(compiled_inst.occlusion_ratio),
-            compiled_inst.visibility,
-            compiled_inst.placement,
+    def _put_row(
+        self,
+        key: FrameKey,
+        instance: str,
+        values,
+        status: str,
+        input_hash: str,
+        verified_by: Optional[str] = None,
+    ) -> None:
+        """Write one truth row from the values :func:`row_values` derived."""
+        self.db.put_compiled(
+            key, instance, values.visible_rle, values.occlusion_ratio, values.visibility,
+            values.placement, status, input_hash, verified_by=verified_by,
+            geom_type=values.geom_type, box=values.box,
         )
 
     @staticmethod
-    def _clip_box(box, hw: tuple[int, int]) -> Optional[tuple[int, int, int, int]]:
-        """``box`` rounded to whole pixels and clipped to the canvas, or ``None``."""
+    def _box_mask(box, hw: tuple[int, int]) -> np.ndarray:
+        """A filled rectangle clipped to the canvas, ``x1``/``y1`` exclusive."""
         height, width = int(hw[0]), int(hw[1])
+        mask = np.zeros((height, width), dtype=bool)
         x0, y0, x1, y1 = (int(round(float(v))) for v in box)
         x0, x1 = max(0, min(x0, width)), max(0, min(x1, width))
         y0, y1 = max(0, min(y0, height)), max(0, min(y1, height))
-        return None if x1 <= x0 or y1 <= y0 else (x0, y0, x1, y1)
-
-    @classmethod
-    def _box_mask(cls, box, hw: tuple[int, int]) -> np.ndarray:
-        """A filled rectangle, ``x1``/``y1`` exclusive like every other box."""
-        mask = np.zeros((int(hw[0]), int(hw[1])), dtype=bool)
-        clipped = cls._clip_box(box, hw)
-        if clipped is not None:
-            x0, y0, x1, y1 = clipped
+        if x1 > x0 and y1 > y0:
             mask[y0:y1, x0:x1] = True
         return mask
 
     @staticmethod
-    def _is_box(compiled_inst: CompiledInstance) -> bool:
-        """Box-only geometry: a box, no mask and no amodal shape behind it."""
-        return (
-            compiled_inst.visible is None
-            and compiled_inst.amodal is None
-            and compiled_inst.box is not None
-        )
-
-    def _disagreement(
-        self, old_rle: Optional[dict], compiled_inst: CompiledInstance, hw: tuple[int, int]
-    ) -> Optional[int]:
-        """Differing pixels between a frozen row and a re-compilation, or ``None``.
-
-        ``None`` means "close enough to be the same annotation": within the
-        re-tracing tolerance of :func:`tda.core.masks.is_conflict` for masks, or
-        within :data:`BOX_TOL_PX` on every corner for boxes. Geometry appearing
-        or disappearing always counts, and so does a change of canvas size,
-        which no comparison could survive.
-        """
-        if self._is_box(compiled_inst):
-            return self._box_disagreement(old_rle, compiled_inst.box, hw)
-        old = None if old_rle is None else masks.decode_rle(old_rle)
-        new = compiled_inst.visible
-        if old is None and new is None:
-            return None
-        if old is None:
-            return masks.area(new)
-        if new is None:
-            return masks.area(old)
-        if old.shape != new.shape:
-            return max(masks.area(old), masks.area(new))
-        return masks.tolerant_sym_diff(old, new) if masks.is_conflict(old, new) else None
-
-    def _box_disagreement(
-        self, old_rle: Optional[dict], box, hw: tuple[int, int]
-    ) -> Optional[int]:
-        """The same question for box geometry: has a corner moved more than the tolerance?"""
-        old_box = None if old_rle is None else masks.bbox(masks.decode_rle(old_rle))
-        new_box = None if box is None else self._clip_box(box, hw)
-        if old_box is None and new_box is None:
-            return None
-        if old_box is None or new_box is None:
-            present = new_box or old_box
-            return int((present[2] - present[0]) * (present[3] - present[1]))
-        if max(abs(a - b) for a, b in zip(old_box, new_box)) <= BOX_TOL_PX:
-            return None
-        return self._box_sym_diff(old_box, new_box)
-
-    @staticmethod
-    def _box_sym_diff(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> int:
-        """Pixels covered by exactly one of two axis-aligned boxes."""
-        area_a = (a[2] - a[0]) * (a[3] - a[1])
-        area_b = (b[2] - b[0]) * (b[3] - b[1])
-        overlap = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(
-            0, min(a[3], b[3]) - max(a[1], b[1])
-        )
-        return int(area_a + area_b - 2 * overlap)
+    def _payload_area(payload: Optional[dict]) -> int:
+        """How many pixels one conflict side covers -- its ``sym_diff_px`` alone."""
+        geom_type, visible_rle, box = payload_geometry(payload)
+        if geom_type == GEOM_BOX and box is not None:
+            return int(max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1]))
+        return 0 if visible_rle is None else masks.area(masks.decode_rle(visible_rle))
 
     def _queue_conflict(
         self,
         key: FrameKey,
         instance: str,
-        old_rle: Optional[dict],
-        new_rle: Optional[dict],
+        old_payload: Optional[dict],
+        new_payload: Optional[dict],
         pixels: int,
         queued: Optional[list[dict]],
     ) -> list[dict]:
-        """Queue one frozen-vs-recompiled disagreement, unless it already is.
+        """Queue one frozen-vs-recompiled disagreement, unless it is queued already.
 
-        The queue is deduplicated on ``(step, instance, new value)``: refreshing
-        the same frame twice must not pile up copies of one disagreement, and a
-        conflict a human already dealt with does not come back while the inputs
-        still say the same thing. Returns the conflict list it read, so one
-        refresh reads it at most once.
+        Deduplication is on the **open** queue only, keyed by
+        ``(step, instance, new value)``: refreshing the same frame twice must
+        not pile up copies of one disagreement, while a conflict a human already
+        resolved may legitimately be raised again -- the resolution writes the
+        inputs it settled on, so an identical conflict coming back means the
+        inputs moved again. Returns the queue it read, so one refresh reads it
+        at most once.
         """
         if queued is None:
-            queued = self.db.conflicts(key.desktop, key.view, open_only=False)
-        wanted = self._counts(new_rle)
+            queued = self.db.conflicts(key.desktop, key.view, open_only=True)
+        wanted = self._geom_id(new_payload)
         for conflict in queued:
             if (
                 conflict["step"] == key.step
                 and conflict["instance"] == instance
-                and self._counts(conflict["new_rle"]) == wanted
+                and self._geom_id(conflict["new_rle"]) == wanted
             ):
                 return queued
-        self.db.add_conflict(key, instance, old_rle, new_rle, int(pixels))
+        self.db.add_conflict(key, instance, old_payload, new_payload, int(pixels))
         return queued
 
     @staticmethod
-    def _counts(rle: Optional[dict]) -> Optional[str]:
-        """An RLE's ``counts`` string, the cheapest identity of a mask."""
-        if not rle:
+    def _geom_id(payload: Optional[dict]) -> Optional[str]:
+        """The cheapest identity of a conflict side: its counts string or its box."""
+        if not payload:
             return None
-        counts = rle.get("counts")
-        return counts.decode("ascii") if isinstance(counts, bytes) else counts
-
-    def _delete_row(self, key: FrameKey, instance: str) -> None:
-        """Drop one truth row; the repository has no delete for these yet."""
-        with self.db.conn:
-            self.db.conn.execute(
-                "DELETE FROM compiled_mask WHERE desktop=? AND step=? AND view=? AND instance=?",
-                (key.desktop, key.step, key.view, instance),
-            )
+        if "box" in payload:
+            return "box:" + ",".join(f"{float(v):.3f}" for v in payload["box"])
+        counts = payload.get("counts")
+        if isinstance(counts, bytes):
+            counts = counts.decode("ascii")
+        return None if counts is None else str(counts)
 
     def _review_status(self, key: FrameKey) -> Optional[str]:
         frame = self.db.get_frame(key)

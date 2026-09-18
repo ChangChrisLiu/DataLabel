@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from tda.core import dbrows as R
+from tda.core.dbconn import MIGRATIONS, ConnectionMixin
 from tda.core.model import (
     ActionRec,
     FrameKey,
@@ -37,13 +38,14 @@ from tda.core.model import (
     ZOrderRec,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 LOCK_TTL = timedelta(hours=12)
 RESOLUTIONS = ("keep_old", "accept_new", "edited")
 
 
-class Db:
-    """Repository over the TDA SQLite file. Every write commits immediately."""
+class Db(ConnectionMixin):
+    """Repository over the TDA SQLite file. Every write commits immediately --
+    unless it runs inside :meth:`~tda.core.dbconn.ConnectionMixin.transaction`."""
 
     def __init__(self, path: str):
         self.path = str(path)
@@ -57,17 +59,26 @@ class Db:
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._lock_path = Path(self.path + ".lock")
         self._lock_annotator: Optional[str] = None
+        self._tx_depth = 0
         self._init_schema()
 
     # ------------------------------------------------------------------ setup
 
     def _init_schema(self) -> None:
-        """Replay ``schema.sql`` (all statements are IF NOT EXISTS) and stamp meta."""
+        """Replay ``schema.sql``, migrate an older file, and stamp the version.
+
+        The DDL is all ``IF NOT EXISTS``, which is why columns added after
+        version 1 go through :data:`~tda.core.dbconn.MIGRATIONS` instead: an
+        existing table keeps its old shape. Both steps are idempotent.
+        """
         sql = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         with self.conn:
             self.conn.executescript(sql)
+            for table, columns in MIGRATIONS.items():
+                self._add_missing_columns(table, columns)
             self.conn.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
+                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(SCHEMA_VERSION),),
             )
 
@@ -84,7 +95,7 @@ class Db:
     def _upsert(self, table: str, keys: dict, data: dict, desktop: int | None = None) -> None:
         """Insert-or-update one row in its own transaction."""
         sql, params = R.upsert_sql(table, keys, data)
-        with self.conn:
+        with self._tx():
             if desktop is not None:
                 self._ensure_desktop(desktop)
             self.conn.execute(sql, params)
@@ -92,7 +103,7 @@ class Db:
     def _insert(self, table: str, data: dict, desktop: int | None = None) -> int:
         """Insert one row in its own transaction; returns the new rowid."""
         sql, params = R.insert_sql(table, data)
-        with self.conn:
+        with self._tx():
             if desktop is not None:
                 self._ensure_desktop(desktop)
             cur = self.conn.execute(sql, params)
@@ -164,7 +175,7 @@ class Db:
 
     def replace_steps(self, desktop: int, steps: list[StepRec], actions: list[ActionRec]) -> None:
         """Replace the whole step table (and its actions) of one desktop atomically."""
-        with self.conn:
+        with self._tx():
             self._ensure_desktop(desktop)
             self.conn.execute("DELETE FROM action WHERE desktop=?", (desktop,))
             self.conn.execute("DELETE FROM step WHERE desktop=?", (desktop,))
@@ -211,7 +222,7 @@ class Db:
 
     def replace_events(self, desktop: int, events: list[StateEvent], auto_only=True) -> None:
         """Replace state events; with ``auto_only`` the hand-written ones survive."""
-        with self.conn:
+        with self._tx():
             self._ensure_desktop(desktop)
             sql = "DELETE FROM state_event WHERE desktop=?"
             self.conn.execute(sql + (" AND auto=1" if auto_only else ""), (desktop,))
@@ -244,7 +255,7 @@ class Db:
     def add_keyframe(self, kf: ShapeKeyframe) -> int:
         """Insert a new shape keyframe with its parts; returns (and sets) its id."""
         sql, params = R.insert_sql("shape_keyframe", R.keyframe_data(kf))
-        with self.conn:
+        with self._tx():
             self._ensure_desktop(kf.desktop)
             kf.id = int(self.conn.execute(sql, params).lastrowid)
             self._write_parts(kf.id, kf.parts)
@@ -254,7 +265,7 @@ class Db:
         """Overwrite a keyframe and its parts, bumping the stored version by one."""
         if kf.id is None:
             raise ValueError("update_keyframe needs kf.id; use add_keyframe for new shapes")
-        with self.conn:
+        with self._tx():
             row = self.conn.execute(
                 "SELECT version FROM shape_keyframe WHERE id=?", (kf.id,)
             ).fetchone()
@@ -306,7 +317,7 @@ class Db:
 
     def set_pair_override(self, po: PairOverride) -> None:
         """Record "above beats below" for one pair; repeated calls are no-ops."""
-        with self.conn:
+        with self._tx():
             self._ensure_desktop(po.desktop)
             self.conn.execute(
                 "INSERT OR IGNORE INTO pair_override(desktop, view, pose_segment, above, below) "
@@ -411,24 +422,40 @@ class Db:
 
     def put_compiled(self, key: FrameKey, instance: str, visible_rle: dict | None,
                      occlusion_ratio: float, visibility: str, placement: str, status: str,
-                     input_hash: str, verified_by: str | None = None) -> None:
-        """Insert or refresh one compiled-truth row of (desktop, view, step, instance)."""
+                     input_hash: str, verified_by: str | None = None,
+                     geom_type: str = "mask", box: tuple | list | None = None) -> None:
+        """Insert or refresh one compiled-truth row of (desktop, view, step, instance).
+
+        ``geom_type`` says which column carries the geometry: ``"mask"`` rows
+        store ``visible_rle``, ``"box"`` rows (a bench part tracked by a
+        rectangle) store ``box`` as ``[x0, y0, x1, y1]``.
+        """
         verified_at = R.now_iso() if (verified_by is not None or status == "verified") else None
         self._upsert(
             "compiled_mask", self._fk(key) | {"instance": instance},
             {"visible_rle_json": R.dumps(visible_rle), "occlusion_ratio": occlusion_ratio,
              "visibility": visibility, "placement": placement, "status": status,
-             "input_hash": input_hash, "verified_by": verified_by, "verified_at": verified_at},
+             "input_hash": input_hash, "verified_by": verified_by, "verified_at": verified_at,
+             "geom_type": geom_type,
+             "box_json": R.dumps(None if box is None else [float(v) for v in box])},
             desktop=key.desktop,
         )
 
     def compiled(self, key: FrameKey) -> dict[str, dict]:
-        """Compiled truth of one frame keyed by instance."""
+        """Compiled truth of one frame keyed by instance (``visible_rle`` and ``box`` decoded)."""
         rows = self.conn.execute(
             "SELECT * FROM compiled_mask WHERE desktop=? AND step=? AND view=? ORDER BY instance",
             (key.desktop, key.step, key.view),
         ).fetchall()
-        return {r["instance"]: R.json_row(r, "visible_rle") for r in rows}
+        return {r["instance"]: R.json_row(r, "visible_rle", "box") for r in rows}
+
+    def delete_compiled(self, key: FrameKey, instance: str) -> None:
+        """Drop one compiled-truth row; a row that is not there is not an error."""
+        with self._tx():
+            self.conn.execute(
+                "DELETE FROM compiled_mask WHERE desktop=? AND step=? AND view=? AND instance=?",
+                (key.desktop, key.step, key.view, instance),
+            )
 
     def add_conflict(self, key: FrameKey, instance: str, old_rle: dict | None,
                      new_rle: dict | None, sym_diff_px: int) -> int:
@@ -452,11 +479,16 @@ class Db:
         rows = self.conn.execute(sql + " ORDER BY id", args).fetchall()
         return [R.json_row(r, "old_rle", "new_rle") for r in rows]
 
+    def get_conflict(self, cid: int) -> Optional[dict]:
+        """One conflict by id, or ``None``."""
+        row = self.conn.execute("SELECT * FROM conflict WHERE id=?", (cid,)).fetchone()
+        return None if row is None else R.json_row(row, "old_rle", "new_rle")
+
     def resolve_conflict(self, cid: int, resolution: str) -> None:
         """Close a conflict with keep_old / accept_new / edited."""
         if resolution not in RESOLUTIONS:
             raise ValueError(f"resolution must be one of {RESOLUTIONS}, got {resolution!r}")
-        with self.conn:
+        with self._tx():
             self.conn.execute(
                 "UPDATE conflict SET status='resolved', resolution=?, resolved_at=? WHERE id=?",
                 (resolution, R.now_iso(), cid),
