@@ -167,7 +167,6 @@ class EditMixin:
         """What the editing half has to do when the frame changes."""
         self._pending_scope = None
         self.scope_bar.hide()
-        self._sync_editing_layer()
         if self.session.image() is not None:
             segment = (int(key.desktop), str(key.view), self._pose_segment(key))
             if self.roi() is not None:
@@ -179,7 +178,7 @@ class EditMixin:
                 self.start_roi_edit()
         self._offer_restore(key)
 
-    def _sync_editing_layer(self) -> None:
+    def _sync_editing_layer(self, repaint: bool = True) -> None:
         """Keep the overlay's edit layer in step with the session's."""
         if self.overlay is None:
             return
@@ -189,7 +188,8 @@ class EditMixin:
             self.overlay.set_editing(instance, mask)
         else:
             self.overlay.clear_editing()
-        self.canvas.refresh()
+        if repaint:
+            self.canvas.refresh()
 
     # ----------------------------------------------------------------- edits
     @S.guard
@@ -299,10 +299,24 @@ class EditMixin:
         self.report(f"suggested scope: {scope}")
 
     def _commit(self, scope: str) -> None:
+        """Write the edit, or show why the session will not take it.
+
+        A refusal -- "this part is on the bench, use the bench box" -- is an
+        ordinary answer, not a failure: it keeps the editing layer so the
+        annotator can press ``R`` and draw the box instead, and it does not go
+        through the exception path, which would log a traceback for something
+        the annotator simply has to read.
+        """
         if getattr(self.session, "editing_instance", None) is None:
             self.report("nothing is being edited")
             return
-        result = self.session.commit_edit(scope) or {}
+        try:
+            result = self.session.commit_edit(scope) or {}
+        except ValueError as refused:
+            self._pending_scope = None
+            self.scope_bar.hide()
+            self.report_error(f"refused: {refused}")
+            return
         self._pending_scope = None
         self.scope_bar.hide()
         self.session.clear_edit()

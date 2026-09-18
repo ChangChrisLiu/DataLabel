@@ -135,10 +135,20 @@ class InstanceListPanel(QWidget):
 
     # -- content ------------------------------------------------------------
     def refresh(self) -> None:
-        """Rebuild the table from ``session.instance_rows()``, keeping the selection."""
+        """Rebuild the table from ``session.instance_rows()``, keeping the selection.
+
+        The two columns that size themselves to their contents are switched off
+        while the rows are written and switched back on once: with them live,
+        ``setItem`` re-measures every section on every cell, which on a 90-part
+        machine cost ~380 ms per frame change -- more than decoding the 12 MP
+        frame itself.
+        """
         keep = self.selected_instance()
         self._rows = self._session.instance_rows() if self._session is not None else []
         self._loading = True
+        header = self._table.horizontalHeader()
+        self._table.setUpdatesEnabled(False)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         try:
             self._table.clearContents()
             self._table.setRowCount(len(self._rows))
@@ -172,6 +182,9 @@ class InstanceListPanel(QWidget):
                     self._table.setItem(row, col, item)
         finally:
             self._loading = False
+            header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            self._table.setUpdatesEnabled(True)
         if keep is not None:
             self.select_instance(keep)
 

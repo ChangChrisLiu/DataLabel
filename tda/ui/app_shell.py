@@ -94,8 +94,9 @@ class ShellMixin:
         self.addToolBar(bar)
 
         self.desktop_combo = QComboBox()
+        counts = self._view_counts()  # two aggregate queries, not two per desktop
         for desktop in self.db.desktop_ids():
-            self.desktop_combo.addItem(self._desktop_text(desktop), desktop)
+            self.desktop_combo.addItem(self._desktop_text(desktop, counts), desktop)
         index = self.desktop_combo.findData(self.session.desktop)
         if index >= 0:
             self.desktop_combo.setCurrentIndex(index)
@@ -136,6 +137,10 @@ class ShellMixin:
         right = QSplitter(Qt.Orientation.Vertical)
         right.addWidget(self.task_card)
         right.addWidget(self.instances)
+        # The card is a short checklist, the instance table is long: without
+        # this they open at half the dock each and the table shows four rows.
+        right.setStretchFactor(0, 1)
+        right.setStretchFactor(1, 2)
         self.right_dock = self._dock("Frame", right,
                                      Qt.DockWidgetArea.RightDockWidgetArea)
         self.review_dock = self._dock("Review", self.review,
@@ -199,11 +204,20 @@ class ShellMixin:
         status = self.session.frame_status(key.step)
         return f"D{key.desktop} · {key.view} · step {key.step}/{total} · {status}"
 
-    def _desktop_text(self, desktop: int) -> str:
+    def _view_counts(self) -> tuple[dict, dict]:
+        """``(verified, frames)`` per ``(desktop, view)``; two whole-table scans.
+
+        Read once and passed around: at 66 desktops, asking per row turned the
+        combo box into 132 aggregate queries and 0.7 s of the start-up.
+        """
+        return self.db.count_per_view("verified"), self.db.count_per_view("frames")
+
+    def _desktop_text(self, desktop: int, counts: Optional[tuple] = None) -> str:
         """``D13 Dell Optiplex [12/38]`` -- the done/total counter of this view."""
         meta = self.db.get_desktop(desktop) or {}
-        done = self.db.count_per_view("verified").get((desktop, self.session.view), 0)
-        total = self.db.count_per_view("frames").get((desktop, self.session.view), 0)
+        verified, frames = counts if counts is not None else self._view_counts()
+        done = verified.get((desktop, self.session.view), 0)
+        total = frames.get((desktop, self.session.view), 0)
         brand = str(meta.get("brand") or "")
         return f"D{desktop} {brand} [{done}/{total}]".replace("  ", " ")
 

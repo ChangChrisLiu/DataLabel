@@ -131,6 +131,8 @@ class MainWindow(EditMixin, AssistMixin, ShellMixin, QMainWindow):
             )
             self._ensure_overlay(image.shape[:2])
             self.canvas.set_image(image)
+            # Edit layer first, committed masks second: one composite per frame.
+            self._sync_editing_layer(repaint=False)
             self.refresh_overlay()
             self._restore_view(keep, zoom, centre)
             self._attach_tool()

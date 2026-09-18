@@ -203,6 +203,23 @@ def test_the_scope_bar_alternatives_are_frame_override_and_split(window, monkeyp
     assert committed == [api.SCOPE_SPLIT]
 
 
+def test_a_refused_commit_keeps_the_edit_and_shows_the_reason(window, monkeypatch):
+    """A part on the bench needs the bench box; that is an answer, not a crash."""
+    session = window.session
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+
+    def refuse(scope, *a, **k):
+        raise ValueError(f"{instance} is on the bench at step 3: use the bench box tool")
+
+    monkeypatch.setattr(session, "commit_edit", refuse)
+    window.act_commit()
+    assert "bench box" in window.last_error_message()
+    assert session.editing_instance == instance          # the edit is still there
+    assert not window.scope_bar.isVisibleTo(window)
+
+
 def test_a_plain_keyframe_suggestion_commits_straight_away(window, monkeypatch):
     session = window.session
     instance = first_task_instance(window)
