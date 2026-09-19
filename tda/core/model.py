@@ -40,6 +40,38 @@ class StepType(str, Enum):
     IGNORE = "ignore"
 
 
+# --------------------------------------------------------------------------- #
+# what a step type means (spec 6.6)
+# --------------------------------------------------------------------------- #
+#: Step types that describe no annotatable moment of the teardown.
+#:
+#: An ``ignore`` step -- a calibration shot, a re-take -- gets no task card, is
+#: never compiled into the truth table, never carries a review status of its own
+#: and is never exported. The timeline still shows its frame, in the neutral
+#: colour of a step nobody has annotated, because the frame exists and the state
+#: machine and the shape anchors still run through it (spec 4.2, 缺帧处理).
+SKIP_STEP_TYPES = frozenset({StepType.IGNORE.value})
+
+#: Step types that are never the "after" frame of a change question (spec 8.2
+#: V3): nothing happened before an ``initial`` frame, a ``dupli`` step is a
+#: repeat of one already asked about, and an ``ignore`` step is not a moment.
+NO_CHANGE_STEP_TYPES = frozenset(
+    {StepType.IGNORE.value, StepType.INITIAL.value, StepType.DUPLI.value}
+)
+
+
+def step_is_annotatable(step_type: Optional[str]) -> bool:
+    """Is there a moment of the teardown here to compile, confirm and export?
+
+    The single answer both halves of the tool read: the truth table gates on it
+    (:func:`tda.core.truth_inputs.annotatable_steps`) and so do the exports. They
+    used to disagree -- an ``ignore`` step was compiled, stamped and
+    confirmable, and then dropped on the way out -- which is annotator work with
+    nowhere to go. A step the table has no row for counts as ``normal``.
+    """
+    return str(step_type or StepType.NORMAL.value) not in SKIP_STEP_TYPES
+
+
 @dataclass(frozen=True, order=True)
 class FrameKey:
     """Identifies one image: desktop id, 1-based logical step, view name."""

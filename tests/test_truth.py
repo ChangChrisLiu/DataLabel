@@ -202,6 +202,27 @@ def test_refresh_skips_every_row_when_the_input_hash_is_unchanged(scene: Scene, 
     assert calls == []
 
 
+def test_an_ignore_step_is_never_compiled_or_stamped(scene: Scene):
+    """Spec 6.6: an ``ignore`` step describes no moment of the teardown.
+
+    The exports already skipped it; the truth table did not, so it was compiled,
+    stamped and confirmable -- and then dropped on the way out.
+    """
+    from tda.core.truth_inputs import annotatable_steps
+
+    steps = scene.db.steps(DESKTOP)
+    steps[1].step_type = "ignore"
+    scene.db.replace_steps(DESKTOP, steps, scene.db.actions(DESKTOP))
+
+    assert annotatable_steps(scene.db, DESKTOP, VIEW, [1, 2, 3]) == [1, 3]
+
+    scene.svc.ensure_fresh(DESKTOP, VIEW)
+
+    assert scene.rows(2) == {}
+    assert scene.db.frame_digest(scene.key(2)) is None
+    assert scene.rows(1) and scene.rows(3)
+
+
 def test_input_digest_ignores_whether_an_rle_carries_str_or_bytes_counts(scene: Scene):
     """pycocotools hands out ``bytes`` counts; a digest that saw them never matched."""
     from tda.core.truth_fresh import digest_of

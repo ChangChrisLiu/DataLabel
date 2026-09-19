@@ -48,6 +48,8 @@ from tda.core.compiler import select_keyframe
 from tda.core.db import Db
 from tda.core.implied import is_implied
 from tda.core.model import (
+    NO_CHANGE_STEP_TYPES,
+    SKIP_STEP_TYPES,
     VIEWS,
     ActionRec,
     FrameKey,
@@ -57,6 +59,7 @@ from tda.core.model import (
     StepRec,
     StepType,
     Visibility,
+    step_is_annotatable,
 )
 from tda.core.states import FrameState, state_at
 from tda.core.taxonomy import Taxonomy
@@ -65,6 +68,8 @@ from tda.core.truth_inputs import events_of, infer_hw, pose_segment_of
 
 __all__ = [
     "ANSWERABLE",
+    "NO_CHANGE_STEP_TYPES",
+    "SKIP_STEP_TYPES",
     "DesktopCtx",
     "bbox_xywh",
     "cache_rel_path",
@@ -99,12 +104,10 @@ GEOM_BOX = "box"
 DEFAULT_EXT = ".png"
 EXPORT_VERSION = "1"
 
-#: Steps that describe no annotatable moment of the teardown (spec 6.6).
-SKIP_STEP_TYPES = frozenset({StepType.IGNORE.value})
-#: Steps that are never the "after" frame of a change question.
-NO_CHANGE_STEP_TYPES = frozenset(
-    {StepType.IGNORE.value, StepType.INITIAL.value, StepType.DUPLI.value}
-)
+# What a step type means is :mod:`tda.core.model`'s table, re-exported here
+# because :mod:`tda.core.export.vlm` reads it off this module. The truth table
+# gates on the same table, so a step nobody may export is a step nobody was
+# asked to annotate in the first place.
 
 
 # --------------------------------------------------------------------------- #
@@ -249,7 +252,7 @@ class DesktopCtx:
 
     def exportable(self, step: int) -> bool:
         """Is this step a moment worth exporting at all? (``ignore`` is not.)"""
-        return self.step_type(step) not in SKIP_STEP_TYPES
+        return step_is_annotatable(self.step_type(step))
 
     def actions_at(self, step: int, successful_only: bool = True) -> list[ActionRec]:
         """Actions recorded at ``step``, in ``idx`` order."""

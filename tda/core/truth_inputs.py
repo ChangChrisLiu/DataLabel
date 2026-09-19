@@ -38,6 +38,7 @@ from tda.core.model import (
     Similarity,
     StateEvent,
     ZOrderRec,
+    step_is_annotatable,
 )
 from tda.core.states import (
     FrameState,
@@ -88,15 +89,27 @@ ON_BENCH = Placement.ON_BENCH.value
 # image size
 # --------------------------------------------------------------------------- #
 def annotatable_steps(db: Db, desktop: int, view: str, steps) -> list[int]:
-    """The subset of ``steps`` that has an image to compile against.
+    """The subset of ``steps`` this view is actually asked to annotate.
 
-    A logical step whose frame row is absent, or flagged ``missing``, carries no
-    canvas: compiling it would fall back to the view's nominal size and produce
-    masks in the wrong coordinates. The state machine and the shape anchors
-    still run through it (spec 4.2, 缺帧处理), only the truth table skips it.
+    Two gates, and both leave the step where it is -- the state machine and the
+    shape anchors still run through it (spec 4.2, 缺帧处理):
+
+    * a logical step whose frame row is absent, or flagged ``missing``, carries
+      no canvas: compiling it would fall back to the view's nominal size and
+      produce masks in the wrong coordinates;
+    * a step the step table types ``ignore`` is no moment of the teardown
+      (:func:`tda.core.model.step_is_annotatable`). The exports have always
+      dropped it; compiling and confirming it first only produced work with
+      nowhere to go.
     """
+    wanted = sorted({int(s) for s in steps})
+    if not wanted:
+        return []
+    types = {rec.step: rec.step_type for rec in db.steps(desktop)}
     out = []
-    for step in sorted({int(s) for s in steps}):
+    for step in wanted:
+        if not step_is_annotatable(types.get(step)):
+            continue
         row = db.get_frame(FrameKey(desktop, step, view))
         if row is not None and not row.get("missing"):
             out.append(step)
