@@ -12,6 +12,7 @@ import time
 
 from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
+from tda.ui import app_priors
 from tda.ui import app_support as S
 from tda.ui import session_api as api
 
@@ -142,6 +143,8 @@ class CommitMixin:
         if instance is None:
             self.report("nothing is being edited")
             return
+        if not self._area_is_plausible(instance, scope):
+            return
         key = self.session.current()
         mask = self.session.editing_mask()
         pixels = int(mask.sum()) if mask is not None else 0
@@ -182,6 +185,13 @@ class CommitMixin:
         while the ROI bar is up that is the rectangle, not the instance that
         happens to be loaded behind it.
         """
+        if self._pending_warning is not None:
+            # The warning is the thing on screen: Esc answers it by taking the
+            # annotator back to the layer, not by throwing the layer away.
+            self._pending_warning = None
+            self.warn_bar.hide()
+            self.report("回到编辑 / back to the mask")
+            return
         if self.roi_editing:
             self.cancel_roi_edit()
             self.report("ROI unchanged")
@@ -236,6 +246,62 @@ class CommitMixin:
             self.report(f"step {step} is not complete: {count} problem(s) — "
                         f"见任务卡 / see the task card")
         return bool(ok)
+
+    # ------------------------------------------------------- the size warning
+    def warn_bar_text(self) -> str:
+        """What the area warning bar is currently saying."""
+        return self.warn_bar.label.text()
+
+    def _area_is_plausible(self, instance: str, scope: str) -> bool:
+        """``False`` when a warning was raised and is waiting for a second Enter.
+
+        Never blocks: the second press writes the mask exactly as it is and the
+        override is logged, because the annotator is the authority on what a
+        part looks like.  The rehearsal committed 1,502,386 px as a ``screw``
+        and 40 masks under 50 px with nothing said either way, which is the
+        only outcome this rules out.
+        """
+        pending = self._pending_warning
+        if pending is not None and pending[0] == scope:
+            self._pending_warning = None
+            self.warn_bar.hide()
+            # Not in the op-log payload: writing it there needs a session
+            # change (``commit_edit`` would have to carry it), and that file
+            # belongs to another worker this round.  The log line is searchable
+            # and carries the same facts.
+            self.logger.info("area_warning_overridden instance=%s scope=%s: %s",
+                             instance, scope, pending[1])
+            return True
+        mask = self.session.editing_mask()
+        if mask is None:
+            return True
+        warning = app_priors.area_warning(
+            mask, self._class_of(instance), self._roi_area(), self.priors)
+        if warning is None:
+            self._pending_warning = None
+            self.warn_bar.hide()
+            return True
+        self._pending_warning = (scope, warning)
+        self.warn_bar.show_text(f"{warning}  —— Enter 仍然提交 / Esc 回去改")
+        self.report(warning)
+        self.logger.info("area_warning instance=%s scope=%s: %s",
+                         instance, scope, warning)
+        return False
+
+    def _class_of(self, instance: str) -> str:
+        """The taxonomy class of an instance, for the per-class prior."""
+        for row in self.session.instance_rows():
+            if str(row.get("key")) == str(instance):
+                return str(row.get("cls") or "")
+        return str(instance).split(".", 1)[0] if instance else ""
+
+    def _roi_area(self) -> float:
+        """Area of the stored ROI, or of the whole frame when there is none."""
+        roi = self.roi()
+        if roi is not None:
+            return max(1.0, float(roi[2] - roi[0]) * float(roi[3] - roi[1]))
+        hw = None if self.overlay is None else self.overlay.hw
+        return max(1.0, float(hw[0]) * float(hw[1])) if hw else 1.0
 
     def _open_the_selected_entry(self) -> bool:
         """In Review mode, make ``Enter`` mean what its label says.

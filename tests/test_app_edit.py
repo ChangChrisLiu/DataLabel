@@ -750,3 +750,93 @@ def test_a_real_stroke_still_writes_a_sidecar(window):
     paint(window)
     window.flush_sidecar()
     assert window.sidecar.pending_for(window.session.current(), instance) is not None
+
+
+# --------------------------------------------------------------------------- #
+# the area warning bar (addendum, item 16b)
+# --------------------------------------------------------------------------- #
+def tiny_mask() -> np.ndarray:
+    mask = np.zeros((64, 64), dtype=bool)
+    mask[30, 30:33] = True          # 3 px, one pixel tall
+    return mask
+
+
+def test_a_tiny_mask_warns_once_and_commits_on_the_second_enter(window):
+    """A 9-px "part" and a 1-px-wide sliver both went in without a word."""
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    window.set_editing_mask(tiny_mask(), undoable=True)
+
+    window.act_commit()
+
+    assert window.warn_bar.isVisibleTo(window)
+    assert "掩码过小" in window.warn_bar_text()
+    assert not window.session.db.keyframes(DESKTOP, VIEW, instance), "it was written"
+    assert window.session.editing_instance == instance
+
+    window.act_commit()             # the annotator says they meant it
+
+    assert window.session.db.keyframes(DESKTOP, VIEW, instance)
+    assert not window.warn_bar.isVisibleTo(window)
+
+
+def test_escape_on_the_warning_returns_to_editing(window):
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    window.set_editing_mask(tiny_mask(), undoable=True)
+    window.act_commit()
+    assert window.warn_bar.isVisibleTo(window)
+
+    window.act_clear_edit()
+
+    assert not window.warn_bar.isVisibleTo(window)
+    assert window.session.editing_instance == instance, "the layer was discarded"
+    assert window.session.editing_mask().any()
+
+
+def test_a_mask_far_outside_its_class_prior_warns(window, monkeypatch):
+    """1,502,386 px committed as a screw, with nothing said."""
+    from tda.ui import app_priors
+
+    instance = first_task_instance(window)
+    monkeypatch.setattr(type(window), "_class_of", lambda _s, _i: "screw")
+    window.priors = app_priors.AreaPriors(
+        {"screw": {"min_frac": 0.00003, "max_frac": 0.0002}})
+    window.task_card.sigRequestEdit.emit(instance)
+    big = np.zeros((64, 64), dtype=bool)
+    big[8:56, 8:56] = True                      # most of the ROI
+    window.set_editing_mask(big, undoable=True)
+
+    window.act_commit()
+
+    assert window.warn_bar.isVisibleTo(window)
+    assert "screw" in window.warn_bar_text()
+    assert not window.session.db.keyframes(DESKTOP, VIEW, instance)
+
+
+def test_a_plausible_mask_is_not_warned_about(window):
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    mask = np.zeros((64, 64), dtype=bool)
+    mask[20:32, 20:32] = True
+    window.set_editing_mask(mask, undoable=True)
+
+    window.act_commit()
+
+    assert not window.warn_bar.isVisibleTo(window)
+    assert window.session.db.keyframes(DESKTOP, VIEW, instance)
+
+
+def test_an_overridden_warning_is_logged(window):
+    from tda.ui import app_support as S
+
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    window.set_editing_mask(tiny_mask(), undoable=True)
+    window.act_commit()
+    window.act_commit()
+
+    for handler in window.logger.handlers:
+        handler.flush()
+    text = Path(S.log_path(window.paths)).read_text(encoding="utf-8")
+    assert "area_warning_overridden" in text and instance in text

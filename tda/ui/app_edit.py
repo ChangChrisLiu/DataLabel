@@ -26,6 +26,7 @@ from PySide6.QtCore import QTimer, Qt
 
 from tda.core import masks as _masks
 from tda.ui import app_compat as compat
+from tda.ui import app_priors
 from tda.ui import app_support as S
 from tda.ui import session_api as api
 from tda.ui.app_widgets import Bar, BoxDragTool
@@ -114,6 +115,13 @@ class EditMixin:
         #: The instance an ``add_bench_box`` card item armed the box tool for.
         self.bench_instance: Optional[str] = None
 
+        #: The area warning waiting for a second ``Enter``: ``(scope, text)``.
+        self._pending_warning: Optional[tuple] = None
+        self.priors = app_priors.load_priors()
+        self.warn_bar = Bar(self)
+        self.warn_bar.add_button("Enter 仍然提交", self.act_commit)
+        self.warn_bar.add_button("Esc 回去改", self.act_clear_edit)
+
         self.scope_bar = Bar(self)
         self.scope_bar.add_button("Enter 接受", self.act_commit)
         self.scope_bar.add_button("Alt+Enter 仅本帧", self.act_commit_override)
@@ -121,6 +129,7 @@ class EditMixin:
         self.restore_bar = Bar(self)
         self.restore_bar.add_button("恢复 Restore", self.restore_pending)
         self.restore_bar.add_button("丢弃 Discard", self.discard_pending)
+        self._central_layout.addWidget(self.warn_bar)
         self._central_layout.addWidget(self.scope_bar)
         self._central_layout.addWidget(self.restore_bar)
 
