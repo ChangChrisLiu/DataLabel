@@ -85,15 +85,23 @@ def test_eroding_a_shape_conflicts_with_the_verified_row_only(scene: Scene):
 
 
 def test_the_same_disagreement_is_queued_only_once(scene: Scene):
+    """``conflicts`` counts what this refresh queued; ``standing`` what is open.
+
+    Reporting the de-duplicated disagreement as a conflict again told the
+    annotator that a sweep of fifty frames had "found 50 conflicts" when it had
+    found the same one fifty times and queued none of them.
+    """
     scene.refresh_all()
     scene.svc.verify_frame(scene.key(2), "lin")
     replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
-    scene.svc.refresh(scene.key(2))
+    first = scene.svc.refresh(scene.key(2))
+    assert (first["conflicts"], first["standing"]) == (1, 1)
 
     out = scene.svc.refresh(scene.key(2))
 
-    assert out["conflicts"] == 1  # still in disagreement
-    assert len(scene.db.conflicts(DESKTOP)) == 1  # but not queued twice
+    assert out["conflicts"] == 0  # nothing new was queued
+    assert out["standing"] == 1   # ... and it is still open
+    assert len(scene.db.conflicts(DESKTOP)) == 1
 
 
 def test_a_moved_bench_box_conflicts_only_beyond_two_pixels(scene: Scene):
@@ -296,6 +304,24 @@ def test_keeping_a_removed_override_pins_it_again(scene: Scene):
     scene.svc.refresh(scene.key(1))
     assert scene.row(1, PSU)["visibility"] == "occluded_full"
     assert scene.db.conflicts(DESKTOP, open_only=True) == []
+
+
+def test_a_row_with_no_visibility_recorded_is_not_treated_as_forced():
+    """``NULL`` is "nobody wrote one", which is not the same as "a human did".
+
+    ``was_forced`` compared it against the label the geometry implies and found
+    them different, so every legacy row without a visibility would have been
+    read as carrying a human's decision and queued the moment anything moved.
+    """
+    from tda.core.truth_conflicts import was_forced
+
+    assert not was_forced({"geom_type": "mask", "visible_rle": None,
+                           "visibility": None, "occlusion_ratio": 0.0})
+    assert not was_forced({"geom_type": "mask", "visible_rle": None,
+                           "visibility": "", "occlusion_ratio": 0.0})
+    # ... while a label that contradicts its own pixels still is one
+    assert was_forced({"geom_type": "mask", "visible_rle": None,
+                       "visibility": "occluded_full", "occlusion_ratio": 0.0})
 
 
 def test_a_frozen_row_the_pixels_agree_with_is_not_re_examined(scene: Scene):

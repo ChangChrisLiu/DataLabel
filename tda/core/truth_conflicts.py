@@ -295,8 +295,13 @@ def was_forced(row: dict) -> bool:
     told about -- otherwise it keeps a label neither a human nor its own pixels
     stand behind, and the export writes it beside a segmentation that
     contradicts it.
+
+    A row with **no** visibility recorded is not forced: ``NULL`` is "nobody
+    wrote one", which is the opposite of "a human did", and reading it as a
+    decision would have queued every legacy row the moment anything moved.
     """
-    return (row.get("visibility") or None) != row_visibility(row)
+    held = row.get("visibility") or None
+    return held is not None and held != row_visibility(row)
 
 
 def label_changes(row: dict, compiled_inst: CompiledInstance,

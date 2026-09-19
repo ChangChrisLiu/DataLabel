@@ -41,7 +41,10 @@ def _loggable_extra(extra: Optional[dict]) -> Optional[dict]:
     if not isinstance(extra, dict):
         raise ValueError(f"extra must be a dict, got {type(extra).__name__}")
     try:
-        json.dumps(extra)
+        # allow_nan=False: NaN and the infinities are Python's extension to
+        # JSON, not JSON, and a reader anywhere else refuses the file the op
+        # log would have become
+        json.dumps(extra, allow_nan=False)
     except (TypeError, ValueError) as bad:
         raise ValueError(f"extra must be JSON-serialisable: {bad}") from bad
     return dict(extra)

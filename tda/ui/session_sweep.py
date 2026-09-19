@@ -74,6 +74,10 @@ STALE_QUIET_PERIOD = 1.0
 #: The step a worker-level failure (its database, not one frame) is reported as.
 NO_STEP = -1
 
+#: What PySide raises when the object a signal belongs to has been destroyed.
+#: The only ``RuntimeError`` an emit may swallow (:meth:`TruthSweeper._emit`).
+DELETED_SOURCE = "Signal source has been deleted"
+
 
 class TruthSweeper(QObject):
     """A worker thread that re-checks frozen frames and prefetches the next one."""
@@ -253,11 +257,15 @@ class TruthSweeper(QObject):
         real exception surfaced as an unhandled one somewhere else entirely.
 
         There is nothing to do about a receiver that no longer exists except
-        note it: the work itself is in the database either way.
+        note it: the work itself is in the database either way. Every *other*
+        ``RuntimeError`` is a bug in a slot and is re-raised -- swallowing
+        those would make this guard the next place a failure goes missing.
         """
         try:
             signal.emit(*args)
-        except RuntimeError:  # the receiving object is gone
+        except RuntimeError as gone:
+            if DELETED_SOURCE not in str(gone):
+                raise
             log.debug("truth sweeper could not deliver %s", signal)
 
     def _run(self) -> None:

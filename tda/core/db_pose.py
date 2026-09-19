@@ -121,7 +121,7 @@ class PoseSegmentMixin:
         """
         payload = None if roi is None else _clean_roi(roi, hw)
         before = self._roi_of(desktop, view, seg)
-        with self._tx():
+        with self.transaction():
             cur = self.conn.execute(
                 "UPDATE pose_segment SET roi_json=? "
                 "WHERE desktop=? AND view=? AND seg=?",
@@ -131,12 +131,22 @@ class PoseSegmentMixin:
                 raise ValueError(
                     f"no pose segment {seg} for desktop {desktop} view {view!r}"
                 )
-        self.log_op(
-            desktop, view, "set_pose_roi",
-            {"seg": int(seg), "roi": payload}, {"seg": int(seg), "roi": before},
-            annotator,
-        )
+            # in the same transaction as the write, like the bench ROI next
+            # door: a crop that leaves the tool with no record of who chose it
+            # is the half of this pair that must not survive alone
+            self.log_op(
+                desktop, view, "set_pose_roi",
+                {"seg": int(seg), "roi": payload}, {"seg": int(seg), "roi": before},
+                annotator,
+            )
         return payload
+
+    def _has_segment(self, desktop: int, view: str, seg: int) -> bool:
+        """Does this segment exist? Asked before a write decides it has nothing to do."""
+        return self.conn.execute(
+            "SELECT 1 FROM pose_segment WHERE desktop=? AND view=? AND seg=?",
+            (desktop, view, seg),
+        ).fetchone() is not None
 
     def _roi_of(self, desktop: int, view: str, seg: int) -> Optional[list[int]]:
         row = self.conn.execute(
@@ -198,6 +208,11 @@ class PoseSegmentMixin:
         """
         payload = None if roi is None else _clean_roi(roi, hw)
         before = self.bench_roi(desktop, view, seg)
+        if payload == before and self._has_segment(desktop, view, seg):
+            # re-confirming the rectangle that is already there is not a change
+            # to the view: nothing compiles differently, so nothing is queued
+            # and there is nothing to log
+            return payload
         with self.transaction():
             cur = self.conn.execute(
                 "UPDATE pose_segment SET bench_roi_json=? WHERE desktop=? AND view=? "

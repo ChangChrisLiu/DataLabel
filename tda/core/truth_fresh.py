@@ -178,7 +178,7 @@ class FreshMixin:
             )
             swept = self.refresh_range(desktop, view, steps)
             total["refreshed"] = swept
-            for counter in ("updated", "conflicts", "skipped"):
+            for counter in ("updated", "conflicts", "standing", "skipped"):
                 total[counter] = total.get(counter, 0) + swept[counter]
             total["problems"] = list(total.get("problems") or []) + list(swept["problems"])
         left = self.pending_rechecks(desktop, view)

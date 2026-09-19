@@ -227,6 +227,10 @@ def test_commit_edit_refuses_a_note_that_cannot_be_logged(session):
 
     with pytest.raises(ValueError, match="JSON"):
         session.commit_edit(api.SCOPE_KEYFRAME, extra={"when": object()})
+    # NaN and the infinities are Python's JSON extension, not JSON: a reader
+    # anywhere else refuses the file the op log would have become
+    with pytest.raises(ValueError, match="JSON"):
+        session.commit_edit(api.SCOPE_KEYFRAME, extra={"ratio": float("nan")})
 
     assert session.db.ops(DESKTOP, VIEW) == []  # nothing was written
     assert session.editing_instance == COOLER   # and the layer is still there

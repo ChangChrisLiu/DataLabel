@@ -165,7 +165,8 @@ def test_frame_hw_measures_the_cached_image_and_supersedes_a_guess(scene: Scene,
 def test_refresh_writes_one_auto_row_per_instance_and_step(scene: Scene):
     out = scene.refresh_all()
 
-    assert out == {"updated": 6, "conflicts": 0, "skipped": 0, "problems": []}
+    assert out == {"updated": 6, "conflicts": 0, "standing": 0, "skipped": 0,
+                   "problems": []}
     for step in (1, 2, 3):
         rows = scene.rows(step)
         assert sorted(rows) == [PSU, SCREW]

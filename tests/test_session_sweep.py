@@ -188,6 +188,24 @@ def test_a_worker_that_cannot_start_is_not_running_the_moment_it_says_so(
         session.close()
 
 
+def test_the_emit_guard_only_swallows_a_receiver_that_is_gone(qapp, tmp_path):
+    """Everything else is a bug in the slot, and a bug has to be reportable."""
+    sweeper = TruthSweeper(str(tmp_path / "x.sqlite"), None, str(tmp_path))
+
+    class Gone:
+        def emit(self, *a):
+            raise RuntimeError("Signal source has been deleted")
+
+    class Broken:
+        def emit(self, *a):
+            raise RuntimeError("the slot raised")
+
+    sweeper._emit(Gone())  # noqa: SLF001 - the guard is what is under test
+
+    with pytest.raises(RuntimeError, match="the slot raised"):
+        sweeper._emit(Broken())
+
+
 def test_stop_keeps_is_running_truthful_when_the_join_times_out(session):
     session.sweeper.open(DESKTOP, VIEW)
     holding = threading.Event()
