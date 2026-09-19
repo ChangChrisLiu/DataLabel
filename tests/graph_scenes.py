@@ -25,8 +25,10 @@ def bench_instances() -> dict[str, InstanceRec]:
     """One motherboard, one cooler, RAM, a PSU, a SATA drive and a screw cover.
 
     Slot ids are the family-template slots; every relational field the rules
-    read (``fastens``, ``socket_host``, ``cable``, ``of``) is filled in, so
-    ``propose_edges`` can run without the heuristics.
+    read (``fastens``, ``socket_host``, ``cable``, ``of``, and the
+    ``parent``/``attached`` pair of everything that rides out of the chassis
+    inside something else) is filled in, so ``propose_edges`` can run without
+    the heuristics and :func:`infer_relational_fields` finds nothing left to do.
     """
     recs = [
         inst("chassis", "chassis", slot_id="chassis"),
@@ -34,7 +36,10 @@ def bench_instances() -> dict[str, InstanceRec]:
         inst("cpu.01", "cpu", mounted_on="motherboard.01", slot_id="cpu"),
         inst("cpu_cooler.fan.01", "cpu_cooler", attrs={"kind": "fan"},
              mounted_on="motherboard.01", slot_id="cooler"),
-        inst("cpu_socket_lever.01", "cpu_socket_lever", slot_id="lever"),
+        # the two board-mounted latch classes (taxonomy `host_class`): they
+        # leave the chassis inside the board, exactly like a captive screw
+        inst("cpu_socket_lever.01", "cpu_socket_lever", parent="motherboard.01",
+             attached=True, slot_id="lever"),
         inst("ram_module.01", "ram_module", mounted_on="motherboard.01", slot_id="ram1"),
         inst("psu.01", "psu", mounted_on="chassis", slot_id="psu"),
         inst("psu_latch.01", "psu_latch", slot_id="psu_latch"),
@@ -51,6 +56,7 @@ def bench_instances() -> dict[str, InstanceRec]:
                          fastens="cpu_cooler.fan.01", parent="cpu_cooler.fan.01",
                          attached=True, slot_id=f"cooler_screw{i}"))
         recs.append(inst(f"ram_latch.{i:02d}", "ram_latch", attrs={"of": "ram_module.01"},
+                         parent="motherboard.01", attached=True,
                          slot_id=f"ram1_latch{i}"))
     # PSU 24-pin: socket on the motherboard, cable owned by the PSU.
     recs.append(inst("connector.atx_24pin.01", "connector", attrs={"kind": "atx_24pin"},
