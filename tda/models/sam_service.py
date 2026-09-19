@@ -46,8 +46,27 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PATHS_YAML = _REPO_ROOT / "configs" / "paths.yaml"
 
 
+def checkpoint_in(paths: Any) -> Optional[Path]:
+    """The checkpoint inside an **already loaded** paths mapping.
+
+    The application passes the configuration it was started with (``--paths``),
+    which :func:`default_checkpoint` cannot know about: it reads the repo's own
+    ``configs/paths.yaml``, so a second data disk or a colleague's copy silently
+    loaded the wrong weights directory -- or reported the wrong one as missing.
+    """
+    if not isinstance(paths, dict):
+        return None
+    weights_dir = paths.get("weights_dir")
+    if not isinstance(weights_dir, (str, Path)) or not str(weights_dir).strip():
+        return None
+    return Path(weights_dir) / CHECKPOINT_NAME
+
+
 def default_checkpoint() -> Optional[Path]:
     """Return the SAM 2.1 checkpoint path from ``configs/paths.yaml``.
+
+    The fallback for library use and for callers with no configuration of their
+    own; the application uses :func:`checkpoint_in` with its own paths.
 
     Falls back to ``<repo>/models/weights/<name>`` when the config file is absent
     or does not define ``weights_dir``. The file is not required to exist.

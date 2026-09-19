@@ -178,6 +178,15 @@ class AssistController(QObject):
             self._pending = (token, key, image, previous, roi, expected)
             self._lock.notify()
 
+    def queued(self) -> int:
+        """How many comparisons are waiting: the mailbox holds at most one.
+
+        For the test that holding ``PgDn`` does not queue a comparison per
+        frame it skips past -- ten repeats must leave one request, not ten.
+        """
+        with self._lock:
+            return 1 if self._pending is not None else 0
+
     def _run(self) -> None:
         while True:
             with self._lock:

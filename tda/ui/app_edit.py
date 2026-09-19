@@ -26,13 +26,14 @@ from PySide6.QtCore import QTimer, Qt
 
 from tda.core import masks as _masks
 from tda.ui import app_compat as compat
+from tda.ui import app_priors
 from tda.ui import app_support as S
 from tda.ui import session_api as api
 from tda.ui.app_widgets import Bar, BoxDragTool
 from tda.ui.canvas.tools import BrushTool, EraserTool, OccluderTool
 
 __all__ = ["BLOCK_HINT", "BoxDragTool", "EditMixin", "DESPECKLE_MIN_PX",
-           "NO_INSTANCE_HINT", "REVIEW_READ_ONLY"]
+           "FLASH_HINT", "NO_INSTANCE_HINT", "REVIEW_READ_ONLY"]
 
 #: Components smaller than this are specks (``Shift+D``); spec 9.1's floor.
 DESPECKLE_MIN_PX = 16
@@ -52,6 +53,14 @@ _ON_BENCH = "on_bench"
 #: Shown when the canvas is clicked in Review mode, which is read-only.
 REVIEW_READ_ONLY = ("按 R 返工：切到标注模式处理这一帧  "
                     "(press R to rework: Review mode only shows the frame)")
+#: How long the flash hint stays put against an ordinary status line.
+FLASH_HINT_HOLD_MS = 2000
+#: Shown when the canvas is clicked while another frame is flashed over it.
+FLASH_HINT = ("松开 Tab 再操作：屏幕上是对照帧  "
+              "(release Tab first: the canvas is showing the other frame)")
+#: Shown, and kept on screen, when the crash sidecar cannot be written.
+SIDECAR_BROKEN = ("崩溃保护已失效：{why} —— 请尽快提交，崩溃会丢失当前图层 "
+                  "(the crash sidecar cannot be written)")
 
 
 def _is_right(ev: Any) -> bool:
@@ -80,12 +89,22 @@ class EditMixin:
         # Connected before any tool is attached, so the window sees a press
         # first and can adopt an instance for it (or mark it as doomed).
         self.canvas.sigMousePress.connect(self._on_canvas_press)
+        # The wheel zooms without going through any action, so the percentage
+        # in the status bar has to follow the canvas rather than the keyboard.
+        self.canvas.sigZoomChanged.connect(self._on_zoom_changed)
         self._paint_blocked = False
         self._blocked_layer: Optional[np.ndarray] = None
 
         self.refusal = compat.session_refusal()
         self.sidecar_writes = 0
         self._sidecar_pending: Optional[tuple] = None
+        #: Set once the sidecar cannot be written, and kept: it is the crash
+        #: protection, so it outranks every other hint until the run ends.
+        self._sidecar_broken = ""
+        #: ``(desktop, view, step, instance)`` this window has written a crash
+        #: copy for.  A net-zero gesture may delete its own file; one left by
+        #: an earlier run belongs to whoever answers the restore offer.
+        self._sidecar_written: set[tuple] = set()
         self._sidecar_timer = QTimer(self)
         self._sidecar_timer.setSingleShot(True)
         self._sidecar_timer.setInterval(SIDECAR_DEBOUNCE_MS)
@@ -102,6 +121,17 @@ class EditMixin:
         #: The instance an ``add_bench_box`` card item armed the box tool for.
         self.bench_instance: Optional[str] = None
 
+        #: The area warning waiting for a second ``Enter``:
+        #: ``(scope, text, facts)``, the facts going into the commit's op log.
+        self._pending_warning: Optional[tuple] = None
+        #: Those facts, once the second ``Enter`` has answered the warning, for
+        #: exactly the one commit that follows.
+        self._override_facts: Optional[dict] = None
+        self.priors = app_priors.load_priors()
+        self.warn_bar = Bar(self)
+        self.warn_bar.add_button("Enter 仍然提交", self.act_commit)
+        self.warn_bar.add_button("Esc 回去改", self.act_clear_edit)
+
         self.scope_bar = Bar(self)
         self.scope_bar.add_button("Enter 接受", self.act_commit)
         self.scope_bar.add_button("Alt+Enter 仅本帧", self.act_commit_override)
@@ -109,8 +139,18 @@ class EditMixin:
         self.restore_bar = Bar(self)
         self.restore_bar.add_button("恢复 Restore", self.restore_pending)
         self.restore_bar.add_button("丢弃 Discard", self.discard_pending)
+        self._central_layout.addWidget(self.warn_bar)
         self._central_layout.addWidget(self.scope_bar)
         self._central_layout.addWidget(self.restore_bar)
+
+    @S.guard
+    def _on_zoom_changed(self, _factor: float) -> None:
+        """The canvas zoomed by any route; the percentage follows it.
+
+        Guarded like every other slot the window connects: an exception here
+        would go straight into the Qt event loop.
+        """
+        self.update_status()
 
     def _rewire_panels(self) -> None:
         """Every panel gesture the window has to be able to refuse, in one place.
@@ -178,7 +218,15 @@ class EditMixin:
         self._offer_restore(key)
 
     def _sync_editing_layer(self, repaint: bool = True) -> None:
-        """Keep the overlay's edit layer in step with the session's."""
+        """Keep the overlay's edit layer in step with the session's.
+
+        This is the **one** place the layer is replaced from outside the SAM
+        tool -- a commit, ``Esc``, an undo, a restored sidecar all end here --
+        so it is where the half-built prompt is dropped.  Keeping the points
+        made the next click refine a layer their result no longer had anything
+        to do with.
+        """
+        self.reset_sam_prompt()
         if self.overlay is None:
             return
         instance = getattr(self.session, "editing_instance", None)
@@ -210,6 +258,11 @@ class EditMixin:
         if not self.has_uncommitted_edit():
             return True
         self.flush_sidecar()
+        if self._sidecar_broken:
+            # The worse of the two messages wins: "press Enter" is advice,
+            # "your work is no longer being protected" is news.
+            self.report(self._sidecar_broken)
+            return False
         self.report(BLOCK_HINT)
         return False
 
@@ -249,6 +302,13 @@ class EditMixin:
         """
         self._paint_blocked = False
         self._blocked_layer = None
+        if self.is_flashing():
+            # The tools are detached while flashing, so nothing is going to
+            # paint; this is only here to say why the click did nothing.  Held,
+            # because the difference map answers a few milliseconds later and
+            # used to take it straight off the screen.
+            self.report(FLASH_HINT, hold_ms=FLASH_HINT_HOLD_MS)
+            return
         if self.mode == "review":
             self.report(REVIEW_READ_ONLY)
             return
@@ -404,26 +464,81 @@ class EditMixin:
         immediately (it is the window's buffer and the next stroke changes it)
         and written once the annotator pauses.
         """
+        if not self.has_uncommitted_edit():
+            # A layer back at what ``begin_edit`` loaded -- an undo inside the
+            # debounce window, a net-zero brush-then-erase, a stroke inside a
+            # shape that is already committed -- is not work to protect.  It is
+            # not enough to skip the write: the *pending* one has to be dropped
+            # and the file **this window wrote for this edit** deleted, or the
+            # annotator is offered a "restore" of pixels they took back
+            # (measured: 197 px).
+            #
+            # Only that file.  A sidecar left by an earlier run is somebody
+            # else's unfinished work: it goes away when the annotator answers
+            # the restore offer or commits the instance, never because their
+            # first gesture on the frame happened to cancel itself out.
+            self.drop_sidecar(key, instance)
+            return
         self._sidecar_pending = (key, str(instance), np.array(mask, dtype=bool, copy=True))
         self._sidecar_timer.start()
 
     @S.guard
     def flush_sidecar(self) -> None:
-        """Write the pending editing layer now (the debounce timer, or on close)."""
+        """Write the pending editing layer now (the debounce timer, or on close).
+
+        A failure here is the **crash protection** failing, which is worse news
+        than anything else on the status bar: it is said once, in a plain
+        sentence, and it stays there -- ``BLOCK_HINT`` used to overwrite it on
+        the very next gesture, so the annotator was told to press Enter and
+        never told that a crash would now cost them the layer.
+        """
         self._sidecar_timer.stop()
         pending, self._sidecar_pending = self._sidecar_pending, None
         if pending is None:
             return
         key, instance, mask = pending
-        self.sidecar.save(key, instance, mask)
+        try:
+            self.sidecar.save(key, instance, mask)
+        except Exception as exc:  # noqa: BLE001 - reported, never raised at a stroke
+            self._sidecar_broken = SIDECAR_BROKEN.format(why=exc)
+            self.logger.error("sidecar write failed: %s", exc)
+            self.report_error(self._sidecar_broken)
+            return
         self.sidecar_writes += 1
+        self._sidecar_written.add(self._sidecar_id(key, instance))
 
-    def drop_sidecar(self, key, instance: Optional[str]) -> None:
-        """Forget a layer that has been committed or abandoned."""
+    def _sidecar_id(self, key, instance: Optional[str]) -> tuple:
+        """What identifies one crash copy: the frame and the instance."""
+        return (int(key.desktop), str(key.view), int(key.step), str(instance))
+
+    def _wrote_sidecar_for(self, key, instance: Optional[str]) -> bool:
+        """Did **this** window write the stored copy of that frame's instance?"""
+        return self._sidecar_id(key, instance) in self._sidecar_written
+
+    def drop_sidecar(self, key, instance: Optional[str], *,
+                     foreign_ok: bool = False) -> None:
+        """Forget a layer that has been committed or abandoned.
+
+        The pending write and the debounce always go.  The **file** only goes
+        when this window wrote it, unless ``foreign_ok`` says the caller is one
+        of the three gestures that may speak for a copy left by an earlier run:
+
+        * ``Restore`` -- the annotator took it back into the layer;
+        * ``Discard`` -- they threw it away;
+        * committing that instance -- what it held is now in the database.
+
+        ``Esc`` is not one of them, which is what this argument exists for: it
+        discards *the layer on screen*, and a crash copy that is still being
+        offered belongs to a question nobody has answered yet.  Deleting it
+        there took the previous session's work away with no answer at all.
+        """
         self._sidecar_timer.stop()
         self._sidecar_pending = None
-        if instance is not None:
+        if instance is None:
+            return
+        if foreign_ok or self._wrote_sidecar_for(key, instance):
             self.sidecar.clear(key, instance)
+            self._sidecar_written.discard(self._sidecar_id(key, instance))
 
     def set_editing_mask(self, mask: np.ndarray, undoable: bool = False) -> None:
         """Replace the editing layer everywhere it is held at once."""

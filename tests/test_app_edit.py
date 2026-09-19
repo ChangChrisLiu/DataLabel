@@ -505,3 +505,592 @@ def test_a_blocked_card_activation_snaps_the_selection_back(window):
 
     assert window.session.editing_instance == instance
     assert window.task_card.current_instance() == instance
+
+
+# --------------------------------------------------------------------------- #
+# Review mode: Enter accepts the frame the queue points at (item 9)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("queue", list(api.QUEUE_NAMES))
+def test_review_enter_opens_the_selected_entry_then_confirms(window, monkeypatch, queue):
+    """The label said "the frame the queue points at"; it confirmed the open one.
+
+    The annotator clicks an entry, presses Enter, and a *different* frame --
+    whichever one happened to be on the canvas -- is marked verified.
+    """
+    here = window.session.current().step
+    target = min(s for s in window.session.steps() if s != here)
+    monkeypatch.setattr(window.session, "queues", lambda: {
+        q: ([{"step": target, "instance": "chassis", "id": 1}] if q == queue else [])
+        for q in api.QUEUE_NAMES
+    })
+    window.set_mode(A.MODE_REVIEW)
+    window.review.refresh()
+    window.review.tabs().setCurrentIndex(list(api.QUEUE_NAMES).index(queue))
+    window.review.list_for(queue).setCurrentRow(0)
+    confirmed: list[int] = []
+    monkeypatch.setattr(window.task_card, "confirm",
+                        lambda: confirmed.append(window.session.current().step) or True)
+
+    window.act_confirm()
+
+    assert confirmed == [target], "it confirmed the frame that was on screen"
+    assert window.session.current().step == target
+
+
+def test_review_enter_on_the_open_frame_confirms_it(window, monkeypatch):
+    """Nothing selected anywhere: Enter still means "accept this one"."""
+    monkeypatch.setattr(window.session, "queues",
+                        lambda: {q: [] for q in api.QUEUE_NAMES})
+    window.set_mode(A.MODE_REVIEW)
+    window.review.refresh()
+    here = window.session.current().step
+    confirmed: list[int] = []
+    monkeypatch.setattr(window.task_card, "confirm",
+                        lambda: confirmed.append(window.session.current().step) or True)
+
+    window.act_confirm()
+
+    assert confirmed == [here]
+
+
+def test_review_enter_is_refused_with_an_uncommitted_edit(window, monkeypatch):
+    """Opening another frame is a way out of the edit, wherever it is asked for."""
+    window.set_mode(A.MODE_ANNOTATE)
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    here = window.session.current().step
+
+    window.act_confirm()
+
+    assert window.session.current().step == here
+    assert window.session.editing_instance == instance
+
+
+# --------------------------------------------------------------------------- #
+# a refused Space on a real start frame (item 11)
+# --------------------------------------------------------------------------- #
+def test_a_refused_confirm_is_one_short_line(window):
+    """60 missing shapes made a 2,550-character status line 30,612 px wide."""
+    window.act_confirm()
+
+    line = window.status_message()
+    assert len(line) < 120, f"{len(line)} characters in the status bar"
+    assert "problem" in line or "个问题" in line
+    assert "task card" in line or "任务卡" in line
+
+
+def test_the_hint_label_never_grows_the_window(window):
+    from PySide6.QtWidgets import QSizePolicy
+
+    window.report("x" * 4000)
+    hint = window.hint_label
+    assert hint.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Ignored
+    assert hint.minimumSizeHint().width() <= 200
+    assert hint.toolTip() == "x" * 4000       # the whole line is still readable
+
+
+def test_the_hint_is_cleared_on_a_frame_change(window):
+    """A stale line from two actions ago stayed on screen, still being read."""
+    window.report("something about the frame we are leaving")
+    window.session.goto(min(window.session.steps()), force=True)
+    QApplication.processEvents()
+    assert "the frame we are leaving" not in window.status_message()
+    assert len(window.status_message()) < 120
+
+
+def test_each_problem_appears_once_with_its_code_in_the_tooltip(window):
+    """The pane listed `missing_shape:x` AND "Draw x on this frame".
+
+    The session's refusal opens with its own line, which explains no code and
+    so keeps a row to itself; everything under it is one code, once.
+    """
+    window.act_confirm()
+
+    rows = window.task_card.problem_rows()
+    assert rows, "no problems were shown"
+    assert len(rows) == len({r["instance"] for r in rows}), rows
+
+    lead, rest = rows[0], rows[1:]
+    assert "cannot be verified" in lead["text"], lead
+    assert lead["instance"] == "", "the refusal is about the frame, not a part"
+    assert rest, "only the refusal was shown"
+    for row in rest:
+        assert not row["text"].startswith("missing_shape:")
+        assert row["code"].startswith("missing_shape:")
+        assert row["instance"] and row["instance"] in row["code"]
+    # the count in the status bar is of things to fix, not of lines
+    assert window.task_card.problem_count() == len(rest)
+    assert f"{len(rest)} problem(s)" in window.status_message()
+
+
+def test_clicking_a_problem_selects_that_instances_card_item(window):
+    window.act_confirm()
+    rows = window.task_card.problem_rows()
+    card = [str(x["instance"]) for x in window.session.task_card()]
+    wanted = next(r for r in rows if r["instance"] in card)
+
+    window.task_card.activate_problem(wanted["instance"])
+
+    assert window.task_card.current_instance() == wanted["instance"]
+
+
+# --------------------------------------------------------------------------- #
+# the ROI is proposed from the segment's reference frame (item 14)
+# --------------------------------------------------------------------------- #
+def test_the_roi_is_proposed_from_the_segments_first_frame(qapp, tmp_path, monkeypatch):
+    """It was proposed from whatever frame happened to be open -- the LAST one.
+
+    On the real D13 that is the empty chassis with a bright interior, where both
+    scanner strategies fail and the proposal is the whole frame; the strongest
+    diff blob then sat on a scan-bed artefact at the right edge and *that*
+    became the SAM prompt box on 7 of 13 frames.
+    """
+    from tda.ui import app_roi
+
+    asked: list = []
+    win = open_window(tmp_path)
+    try:
+        def remember(img, view):
+            asked.append(np.array(img, copy=True))
+            return (4, 4, 40, 40)
+
+        monkeypatch.setattr(app_roi, "suggest_roi", remember)
+        win.start_roi_edit()
+
+        assert asked, "no proposal was made"
+        first = min(s for s in win.session.steps()
+                    if win.session.image_at(s) is not None)
+        assert np.array_equal(asked[-1], win.session.image_at(first)), (
+            "the proposal was measured on a frame other than the segment's first"
+        )
+        assert not np.array_equal(asked[-1], win.session.image())   # not the open one
+    finally:
+        close_window(win)
+
+
+def test_a_full_frame_proposal_is_not_stored_without_a_drag(qapp, tmp_path, monkeypatch):
+    """A full-frame ROI is "I could not find the chassis", not an answer."""
+    from tda.ui import app_roi
+
+    win = open_window(tmp_path)
+    try:
+        monkeypatch.setattr(app_roi, "suggest_roi", lambda img, view: (0, 0, 64, 64))
+        win.start_roi_edit()
+        assert "未能自动找到机箱" in win.status_message()
+
+        win.act_commit()                       # Enter, with nothing dragged
+
+        assert win.roi() is None, "the full frame was stored"
+        assert win.roi_editing is True         # still waiting for a rectangle
+
+        win.on_roi_box((8.0, 8.0, 40.0, 40.0))  # the annotator drags one
+        win.act_commit()
+
+        assert win.roi() == (8, 8, 40, 40)
+        assert win.roi_editing is False
+    finally:
+        close_window(win)
+
+
+def test_no_prompt_box_while_the_segment_has_no_roi(qapp, tmp_path, monkeypatch):
+    """A diff blob outside a known chassis is as likely to be a scan artefact."""
+    from tda.core.diffmap import DiffBlob
+
+    win = open_window(tmp_path)
+    try:
+        assert win.roi() is None
+        win.begin_add_shape(DiffBlob(box=(10.0, 10.0, 20.0, 20.0), area=100,
+                                     score=9.0))
+        assert win.sam_point.prompt_box is None
+    finally:
+        close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# a commit with nothing to commit (addendum, item 16a)
+# --------------------------------------------------------------------------- #
+def test_enter_on_an_unchanged_layer_says_so_and_changes_nothing(window):
+    """21 of 21 dry-run Enters reported "committed (keyframe): False".
+
+    It also cleared the editing layer, so the annotator lost the instance they
+    had just loaded and had to double-click it again.
+    """
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    before = window.session.editing_mask().copy()
+    ops = len(window.session.undo_stack)
+
+    window.act_commit()
+
+    assert "没有可提交的修改" in window.status_message()
+    assert window.session.editing_instance == instance
+    assert np.array_equal(window.session.editing_mask(), before)
+    assert len(window.session.undo_stack) == ops
+    assert not window.session.db.keyframes(DESKTOP, VIEW, instance)
+
+
+def test_enter_after_a_stroke_still_commits(window):
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    window.act_commit()
+    assert window.session.db.keyframes(DESKTOP, VIEW, instance)
+
+
+# --------------------------------------------------------------------------- #
+# a stroke that changes nothing writes no sidecar (addendum, item 18)
+# --------------------------------------------------------------------------- #
+def test_a_stroke_that_changes_nothing_writes_no_sidecar(window):
+    """Then it offered to "restore" a layer identical to the committed shape."""
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    window.flush_sidecar()
+    before = window.sidecar_writes
+
+    window.queue_sidecar(window.session.current(), instance,
+                         window.session.editing_mask())
+    window.flush_sidecar()
+
+    assert window.sidecar_writes == before
+    assert window.sidecar.pending_for(window.session.current(), instance) is None
+
+
+def test_a_real_stroke_still_writes_a_sidecar(window):
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    window.flush_sidecar()
+    assert window.sidecar.pending_for(window.session.current(), instance) is not None
+
+
+# --------------------------------------------------------------------------- #
+# the area warning bar (addendum, item 16b)
+# --------------------------------------------------------------------------- #
+def tiny_mask() -> np.ndarray:
+    mask = np.zeros((64, 64), dtype=bool)
+    mask[30, 30:33] = True          # 3 px, one pixel tall
+    return mask
+
+
+def test_a_tiny_mask_warns_once_and_commits_on_the_second_enter(window):
+    """A 9-px "part" and a 1-px-wide sliver both went in without a word."""
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    window.set_editing_mask(tiny_mask(), undoable=True)
+
+    window.act_commit()
+
+    assert window.warn_bar.isVisibleTo(window)
+    assert "掩码过小" in window.warn_bar_text()
+    assert not window.session.db.keyframes(DESKTOP, VIEW, instance), "it was written"
+    assert window.session.editing_instance == instance
+
+    window.act_commit()             # the annotator says they meant it
+
+    assert window.session.db.keyframes(DESKTOP, VIEW, instance)
+    assert not window.warn_bar.isVisibleTo(window)
+
+
+def test_escape_on_the_warning_returns_to_editing(window):
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    window.set_editing_mask(tiny_mask(), undoable=True)
+    window.act_commit()
+    assert window.warn_bar.isVisibleTo(window)
+
+    window.act_clear_edit()
+
+    assert not window.warn_bar.isVisibleTo(window)
+    assert window.session.editing_instance == instance, "the layer was discarded"
+    assert window.session.editing_mask().any()
+
+
+def test_a_mask_far_outside_its_class_prior_warns(window, monkeypatch):
+    """1,502,386 px committed as a screw, with nothing said."""
+    from tda.ui import app_priors
+
+    instance = first_task_instance(window)
+    monkeypatch.setattr(type(window), "_class_of", lambda _s, _i: "screw")
+    window.priors = app_priors.AreaPriors(
+        {"screw": {"min_frac": 0.00003, "max_frac": 0.0002}})
+    window.task_card.sigRequestEdit.emit(instance)
+    big = np.zeros((64, 64), dtype=bool)
+    big[8:56, 8:56] = True                      # most of the ROI
+    window.set_editing_mask(big, undoable=True)
+
+    window.act_commit()
+
+    assert window.warn_bar.isVisibleTo(window)
+    assert "screw" in window.warn_bar_text()
+    assert not window.session.db.keyframes(DESKTOP, VIEW, instance)
+
+
+def test_a_plausible_mask_is_not_warned_about(window):
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    mask = np.zeros((64, 64), dtype=bool)
+    mask[20:32, 20:32] = True
+    window.set_editing_mask(mask, undoable=True)
+
+    window.act_commit()
+
+    assert not window.warn_bar.isVisibleTo(window)
+    assert window.session.db.keyframes(DESKTOP, VIEW, instance)
+
+
+def test_an_overridden_warning_is_logged(window):
+    from tda.ui import app_support as S
+
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    window.set_editing_mask(tiny_mask(), undoable=True)
+    window.act_commit()
+    window.act_commit()
+
+    for handler in window.logger.handlers:
+        handler.flush()
+    text = Path(S.log_path(window.paths)).read_text(encoding="utf-8")
+    assert "area_warning_overridden" in text and instance in text
+
+
+def test_an_overridden_warning_is_in_the_op_log_of_that_commit(window):
+    """The log line is searchable, but nothing joins it back to the commit it
+    explains.  Whoever audits a mask later reads the op log, so what the
+    annotator was told and went ahead with belongs in that commit's payload.
+    """
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    window.set_editing_mask(tiny_mask(), undoable=True)
+    window.act_commit()
+    window.act_commit()             # the annotator says they meant it
+
+    payloads = [op["payload"] or {} for op in window.session.db.ops(DESKTOP, VIEW)]
+    overridden = [p for p in payloads if p.get("area_warning_overridden")]
+    assert len(overridden) == 1, payloads
+    assert overridden[0]["area_px"] == 3
+    assert "掩码过小" in overridden[0]["area_warning"]
+    # "too small" applies to every class, including one with no band at all
+    assert window.priors.band(window._class_of(instance)) is None
+    assert "area_bounds" not in overridden[0]
+
+
+def test_an_overridden_prior_records_the_band_it_was_judged_against(window,
+                                                                    monkeypatch):
+    """Whoever reads the row later needs to know what "too big" meant that day:
+    the bands are regenerated from the database as it grows."""
+    from tda.ui import app_priors
+
+    instance = first_task_instance(window)
+    monkeypatch.setattr(type(window), "_class_of", lambda _s, _i: "screw")
+    window.priors = app_priors.AreaPriors(
+        {"screw": {"min_frac": 0.00003, "max_frac": 0.0002}})
+    window.task_card.sigRequestEdit.emit(instance)
+    big = np.zeros((64, 64), dtype=bool)
+    big[8:56, 8:56] = True
+    window.set_editing_mask(big, undoable=True)
+
+    window.act_commit()
+    window.act_commit()
+
+    payloads = [op["payload"] or {} for op in window.session.db.ops(DESKTOP, VIEW)]
+    overridden = [p for p in payloads if p.get("area_warning_overridden")]
+    assert len(overridden) == 1, payloads
+    assert overridden[0]["area_bounds"] == [0.00003, 0.0002]
+    assert overridden[0]["area_px"] == 48 * 48
+
+
+def test_a_commit_nobody_was_warned_about_carries_no_override(window):
+    """The flag says a human overrode a warning; an ordinary commit has none."""
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    mask = np.zeros((64, 64), dtype=bool)
+    mask[20:32, 20:32] = True
+    window.set_editing_mask(mask, undoable=True)
+
+    window.act_commit()
+
+    payloads = [op["payload"] or {} for op in window.session.db.ops(DESKTOP, VIEW)]
+    assert not [p for p in payloads if "area_warning_overridden" in p]
+
+
+# --------------------------------------------------------------------------- #
+# the debounce must not outlive what it was protecting (F3 round 2, item 2)
+# --------------------------------------------------------------------------- #
+def test_an_undo_inside_the_debounce_window_cancels_the_write(window):
+    """Brush, Ctrl+Z within 300 ms: the stale 197-px mask was written anyway.
+
+    The next open then offered to "restore" pixels the annotator had already
+    taken back.
+    """
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    assert window._sidecar_pending is not None
+    before = window.sidecar_writes
+
+    window.act_undo()             # inside the debounce window
+
+    assert window._sidecar_pending is None
+    assert not window._sidecar_timer.isActive()
+    window.flush_sidecar()
+    assert window.sidecar_writes == before
+    assert window.sidecar.pending_for(window.session.current(), instance) is None
+
+
+def test_an_undo_after_the_write_deletes_the_sidecar(window):
+    """... and after the 300 ms, where the file is already on disk."""
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    window.flush_sidecar()        # the debounce elapsed
+    assert window.sidecar.pending_for(window.session.current(), instance) is not None
+
+    window.act_undo()
+
+    assert window.sidecar.pending_for(window.session.current(), instance) is None
+    assert window.pending_restore() is None
+
+
+# --------------------------------------------------------------------------- #
+# a net-zero gesture may only delete its own crash copy (F3 round 3, item 1)
+# --------------------------------------------------------------------------- #
+def test_a_net_zero_gesture_never_deletes_another_sessions_sidecar(qapp, tmp_path):
+    """The A/B the reviewer ran: a previous run's crash copy was deleted.
+
+    Window 1 paints and flushes, the process dies, window 2 opens the same
+    frame and offers to restore it -- and the annotator's first gesture on that
+    instance is a net-zero one (a stroke then Ctrl+Z).  That gesture used to
+    take the *previous session's* work with it, which is the one thing the
+    sidecar exists to prevent.
+    """
+    first = open_window(tmp_path)
+    instance = first_task_instance(first)
+    try:
+        first.task_card.sigRequestEdit.emit(instance)
+        paint(first)
+        first.flush_sidecar()
+        key = first.session.current()
+        assert first.sidecar.pending_for(key, instance) is not None
+    finally:
+        close_window(first)                      # a crash-style exit: no commit
+
+    second = open_window(tmp_path)
+    try:
+        assert second.pending_restore() is not None, "nothing was offered"
+        second.task_card.sigRequestEdit.emit(instance)
+        paint(second)
+        second.act_undo()                        # net zero: back to begin_edit
+
+        assert second.sidecar.pending_for(key, instance) is not None, (
+            "the earlier session's crash copy was deleted by a net-zero gesture"
+        )
+        second.session.goto(min(second.session.steps()), force=True)
+        second.session.goto(key.step, force=True)
+        QApplication.processEvents()
+        assert second.pending_restore() is not None, "the offer is gone"
+    finally:
+        close_window(second)
+
+
+def test_answering_the_restore_offer_still_removes_the_file(qapp, tmp_path):
+    """The offer is the *only* thing that may drop somebody else's copy."""
+    first = open_window(tmp_path)
+    instance = first_task_instance(first)
+    try:
+        first.task_card.sigRequestEdit.emit(instance)
+        paint(first)
+        first.flush_sidecar()
+        key = first.session.current()
+    finally:
+        close_window(first)
+
+    second = open_window(tmp_path)
+    try:
+        assert second.pending_restore() is not None
+        second.discard_pending()
+        assert second.sidecar.pending_for(key, instance) is None
+    finally:
+        close_window(second)
+
+
+# --------------------------------------------------------------------------- #
+# Esc is not one of the three ways a foreign copy may go (F3 round 4, item 1)
+# --------------------------------------------------------------------------- #
+def leave_a_crash_copy(tmp_path: Path) -> tuple[str, object]:
+    """Window 1 paints, flushes and dies; returns ``(instance, key)``."""
+    first = open_window(tmp_path)
+    instance = first_task_instance(first)
+    try:
+        first.task_card.sigRequestEdit.emit(instance)
+        paint(first)
+        first.flush_sidecar()
+        key = first.session.current()
+        assert first.sidecar.pending_for(key, instance) is not None
+        return instance, key
+    finally:
+        close_window(first)
+
+
+@pytest.mark.parametrize("paint_first", [False, True],
+                         ids=["no-paint", "unflushed-stroke"])
+def test_escape_never_deletes_another_sessions_offer(qapp, tmp_path, paint_first):
+    """Walk (f): ``Esc`` deleted a crash copy that was still being offered.
+
+    Both variants of the reviewer's walk: straight after ``begin_edit`` with
+    nothing painted, and after an own stroke that has not been flushed yet.
+    The offer disappeared with the file, so the previous session's work was
+    gone with no answer from anybody.
+    """
+    instance, key = leave_a_crash_copy(tmp_path)
+    second = open_window(tmp_path)
+    try:
+        assert second.pending_restore() is not None, "nothing was offered"
+        second.task_card.sigRequestEdit.emit(instance)
+        if paint_first:
+            paint(second)
+
+        second.act_clear_edit()          # Esc
+
+        assert second.sidecar.pending_for(key, instance) is not None, (
+            "Esc deleted a crash copy that was still being offered"
+        )
+        assert second.pending_restore() is not None, "the offer is gone"
+        assert second.restore_bar.isVisibleTo(second)
+    finally:
+        close_window(second)
+
+
+def test_escape_still_deletes_this_windows_own_copy(qapp, tmp_path):
+    """Nothing changes for the layer the annotator was actually working on."""
+    win = open_window(tmp_path)
+    try:
+        instance = first_task_instance(win)
+        win.task_card.sigRequestEdit.emit(instance)
+        paint(win)
+        win.flush_sidecar()
+        key = win.session.current()
+        assert win.sidecar.pending_for(key, instance) is not None
+
+        win.act_clear_edit()
+
+        assert win.sidecar.pending_for(key, instance) is None
+    finally:
+        close_window(win)
+
+
+def test_committing_an_instance_clears_even_a_foreign_copy(qapp, tmp_path):
+    """One of the three ways: the instance is written, so the copy is stale."""
+    instance, key = leave_a_crash_copy(tmp_path)
+    second = open_window(tmp_path)
+    try:
+        second.task_card.sigRequestEdit.emit(instance)
+        paint(second)
+        second.act_commit()
+        if second.warn_bar.isVisibleTo(second):
+            second.act_commit()
+
+        assert second.session.db.keyframes(DESKTOP, VIEW, instance)
+        assert second.sidecar.pending_for(key, instance) is None
+    finally:
+        close_window(second)

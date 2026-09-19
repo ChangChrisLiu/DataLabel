@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from tda.ui import session_api as api
+from tda.ui.panels import session_is_open
 
 __all__ = ["TimelinePanel", "STATUS_COLORS", "status_brush"]
 
@@ -99,6 +100,8 @@ class TimelinePanel(QWidget):
     BAR_WIDTH = 6
     #: Extra rows loaded above and below the visible range.
     PREFETCH = 2
+    #: Thumbnails decoded per event-loop turn (see ``ensure_visible_thumbs``).
+    THUMBS_PER_TICK = 2
 
     def __init__(self, session: Optional[api.SessionLike] = None,
                  parent: Optional[QWidget] = None) -> None:
@@ -206,6 +209,17 @@ class TimelinePanel(QWidget):
         item = self._list.currentItem()
         return None if item is None else int(item.data(STEP_ROLE))
 
+    def refresh_statuses(self) -> None:
+        """Re-read every row's status colour without rebuilding the list.
+
+        Cheap -- it asks the session for one status per row and repaints -- and
+        it is the only way a frame *other than the open one* ever changes
+        colour: a commit that reaches a verified frame queues a re-check, the
+        sweeper then turns it into a conflict, and until this ran the row still
+        said what it said when the annotator last stood on it.
+        """
+        self._refresh_statuses()
+
     def select_current_step(self) -> None:
         """Put the highlight back on the frame that is actually open.
 
@@ -249,7 +263,7 @@ class TimelinePanel(QWidget):
         cache_key = self._cache_key(step)
         if cache_key in self._thumbs:
             return self._thumbs[cache_key]
-        if self._session is None:
+        if not session_is_open(self._session):
             return None
         path = self._session.thumb_path(step)
         pm: Optional[QPixmap] = None
@@ -271,16 +285,32 @@ class TimelinePanel(QWidget):
         return pm
 
     def ensure_visible_thumbs(self) -> None:
-        """Load the thumbnails of the rows currently on screen (plus a margin)."""
+        """Load the thumbnails of the rows currently on screen (plus a margin).
+
+        At most :data:`THUMBS_PER_TICK` of them per call; the rest are picked up
+        from a zero-timer, so the GUI thread goes back to the annotator between
+        batches.  Jumping to an unvisited part of the list scrolled a whole
+        screenful of *new* rows into view, and decoding and scaling all of them
+        synchronously is a large part of why a timeline click cost three times
+        what ``PgDn`` costs (313 ms against 114 ms measured).
+        """
         rows = self._visible_rows()
         if not rows:
             return
         first = max(0, min(rows) - self.PREFETCH)
         last = min(self._list.count() - 1, max(rows) + self.PREFETCH)
+        loaded = 0
         for row in range(first, last + 1):
             item = self._list.item(row)
-            if item is not None:
-                self.thumbnail(int(item.data(STEP_ROLE)))
+            if item is None:
+                continue
+            if self._cache_key(int(item.data(STEP_ROLE))) in self._thumbs:
+                continue
+            if loaded >= self.THUMBS_PER_TICK:
+                QTimer.singleShot(0, self.ensure_visible_thumbs)
+                return
+            self.thumbnail(int(item.data(STEP_ROLE)))
+            loaded += 1
 
     # -- Qt overrides -------------------------------------------------------
     def showEvent(self, event) -> None:  # noqa: D102 - Qt override
@@ -294,14 +324,14 @@ class TimelinePanel(QWidget):
 
     # -- internals ----------------------------------------------------------
     def _ordered_steps(self) -> list[int]:
-        if self._session is None:
+        if not session_is_open(self._session):
             return []
         steps = sorted(self._session.steps())
         return list(reversed(steps)) if self._descending else steps
 
     def _current_context(self) -> Optional[tuple[int, str]]:
         """``(desktop, view)`` of the open frame, which the cache is keyed by."""
-        if self._session is None:
+        if not session_is_open(self._session):
             return None
         key = self._session.current()
         return (key.desktop, key.view)
@@ -311,7 +341,7 @@ class TimelinePanel(QWidget):
         return (desktop, view, step)
 
     def _status(self, step: int) -> str:
-        if self._session is None:
+        if not session_is_open(self._session):
             return api.STATUS_UNLABELED
         return self._session.frame_status(step)
 
@@ -323,7 +353,7 @@ class TimelinePanel(QWidget):
         return None
 
     def _select_current(self) -> None:
-        if self._session is None:
+        if not session_is_open(self._session):
             return
         item = self._item_for(self._session.current().step)
         if item is None:

@@ -40,6 +40,17 @@ class _SamLoader(QObject):
 #: How long ``Space`` waits for an unfinished comparison before giving up on it.
 ASSIST_CONFIRM_WAIT = 1.0
 
+#: A diff box bigger than this share of the ROI is not used as a prompt box:
+#: it says "everything changed", which narrows nothing for SAM.
+MAX_PROMPT_BOX_FRAC = 0.6
+
+
+def _covers_most(box, roi, limit: float = MAX_PROMPT_BOX_FRAC) -> bool:
+    """Does ``box`` take up more than ``limit`` of the ROI's area?"""
+    bw, bh = max(0.0, box[2] - box[0]), max(0.0, box[3] - box[1])
+    rw, rh = max(1.0, float(roi[2] - roi[0])), max(1.0, float(roi[3] - roi[1]))
+    return (bw * bh) > limit * (rw * rh)
+
 
 class AssistMixin:
     """The window half of the assist: SAM tools, prompt boxes, the heat map."""
@@ -55,10 +66,14 @@ class AssistMixin:
         self.sam_reason = "" if sam_queue is not None else "not loaded yet"
         self.sam_point = SamPointTool(self.canvas, None, queue=sam_queue, refine=True)
         self.sam_box = SamBoxTool(self.canvas, None, queue=sam_queue)
+        #: Why the last prompt failed, until one is armed again.  Empty means
+        #: the label may say "SAM ready" -- which it used to say after a submit
+        #: raised, so the annotator clicked the same broken thing over and over.
+        self._sam_failure = ""
         for tool in (self.sam_point, self.sam_box):
             tool.sigStroke.connect(self.on_stroke)
             tool.sigHint.connect(self.report)
-            tool.sigError.connect(self.report_error)
+            tool.sigError.connect(self.on_sam_error)
 
         self.assist = AssistController(self)
         self.assist.sigBlobs.connect(self._on_blobs)
@@ -84,15 +99,46 @@ class AssistMixin:
     def _sam_tool(self):
         return self.sam_box if self._tool_name == "sam_box" else self.sam_point
 
+    @S.guard
+    def on_sam_error(self, text: str) -> None:
+        """A SAM tool could not do what was asked; say it in both places.
+
+        The status line is transient and the label is not: a prompt that failed
+        has to leave a mark on the label, or the next click repeats it.  A
+        dropped *result* (the frame moved on) is not a failure of the tool, so
+        it only gets the line.
+        """
+        self.logger.info("SAM: %s", text)
+        self.report_error(text)
+        if not str(text).startswith("SAM result dropped"):
+            self.note_sam_failure(text)
+
     def set_sam_instance(self, instance: Optional[str]) -> None:
         """Name the instance an applied mask belongs to.
 
         The tools have a ``"editing"`` fallback for when nothing says; relying
         on it would stamp two different edits with the same identity, so the
         window always answers explicitly.
+
+        Changing it also throws the half-built prompt away: the points clicked
+        so far were about the *previous* part, and sending them with the next
+        click made every mask after the first commit a union of the two.
         """
         for tool in (self.sam_point, self.sam_box):
+            if tool.instance != instance:
+                tool.reset_prompt()
             tool.instance = instance
+
+    def reset_sam_prompt(self) -> None:
+        """Forget the points, the box drag and the candidates of both SAM tools.
+
+        Called wherever the **editing layer is replaced from outside the tool**
+        -- a commit, ``Esc``, an undo/redo, a restored sidecar.  That is the one
+        rule worth remembering: a prompt refines the layer it produced, so the
+        moment somebody else writes that layer the prompt describes nothing.
+        """
+        for tool in (self.sam_point, self.sam_box):
+            tool.reset_prompt()
 
     def clear_prompt_box(self) -> None:
         """Forget the box prompt; the next frame's diff map proposes its own."""
@@ -108,6 +154,7 @@ class AssistMixin:
         tool = self._sam_tool()
         if not self.sam_available or self._tool_name not in ("sam_point", "sam_box"):
             return
+        self.clear_sam_failure()     # arming a SAM tool is "try again"
         if compat.is_open(self.session) and self.session.image() is not None:
             tool.set_frame_token(self.session.current())
         if self._prompt_box is not None:
@@ -121,10 +168,14 @@ class AssistMixin:
         frame with no image gets ``None`` (prompting is meaningless there) and
         every other frame gets its :class:`~tda.core.model.FrameKey`.
         """
-        token = key if self.session.image() is not None else None
+        image = self.session.image()
+        token = key if image is not None else None
         self.clear_prompt_box()
         for tool in (self.sam_point, self.sam_box):
             tool.overlay = self.overlay
+            # The frame to crop from, explicitly: the canvas may be showing the
+            # neighbour (``Tab``) and a prompt must never be about that one.
+            tool.image = image
             tool.set_frame_token(token)
             # set_frame_token drops the box only when the token really changes,
             # and re-arming an attached tool may already have set it: say it.
@@ -281,8 +332,27 @@ class AssistMixin:
             self.begin_add_shape(blob)
 
     def begin_add_shape(self, blob: DiffBlob) -> None:
-        """Feed a changed region's box to SAM as the box half of point+box."""
+        """Feed a changed region's box to SAM as the box half of point+box.
+
+        Only once the segment has a stored ROI.  Without one the difference map
+        covers the whole frame, and its strongest region is as likely to be a
+        scan-bed artefact at the edge as the part being drawn -- which is
+        exactly what happened on 7 of 13 real frames.
+        """
+        roi = self.roi()
+        if roi is None:
+            return
         box = tuple(float(v) for v in blob.box)
+        if _covers_most(box, roi):
+            # "Everything changed" is not a prompt: it narrows nothing, and it
+            # is exactly when SAM's single answer came back as the whole
+            # chassis.  A point on its own does better.
+            self.clear_prompt_box()
+            for tool in (self.sam_point, self.sam_box):
+                tool.set_prompt_box(None)
+            self.report(f"差异覆盖了 ROI 的整块，不作为框提示 / the changed region "
+                        f"covers most of the ROI: point-only ({blob.area} px)")
+            return
         self._prompt_box = box
         for tool in (self.sam_point, self.sam_box):
             tool.set_prompt_box(box)
@@ -321,10 +391,25 @@ class AssistMixin:
         """
         if not self.sam_available:
             return f"SAM unavailable: {self.sam_reason}"
+        if self._sam_failure:
+            # A failed prompt with "SAM ready" still on the label is how an
+            # annotator clicks the same broken thing twenty times.
+            return f"SAM error: {self._sam_failure} (S to retry)"
         tool = self._candidate_tool()
         if tool is not None:
             return f"SAM ready · {tool.candidate_index + 1}/{tool.candidate_count}"
         return "SAM ready"
+
+    def note_sam_failure(self, text: str) -> None:
+        """Remember that the last prompt failed, until the next one is armed."""
+        self._sam_failure = str(text).strip()[:60]
+        self.update_status()
+
+    def clear_sam_failure(self) -> None:
+        """``S`` (or any fresh arming) means "try again"."""
+        if self._sam_failure:
+            self._sam_failure = ""
+            self.update_status()
 
     def _candidate_tool(self):
         """The SAM tool holding candidates right now, preferring the armed one."""
@@ -361,14 +446,21 @@ class AssistMixin:
             return
         self._sam_loading = True
         self.sam_reason = "loading"
+        self.logger.info("SAM: loading the checkpoint")
         self.update_status()
         loader = self._sam_loader
+        paths = dict(self.paths)
 
         def load() -> None:
             try:
-                from tda.models.sam_service import SamQueue, SamService
+                from tda.models import sam_service
 
-                loader.sigLoaded.emit(SamQueue(SamService()))
+                # The paths the app was *started* with, not the repo's own
+                # configs/paths.yaml: --paths was being ignored for the weights.
+                checkpoint = sam_service.checkpoint_in(paths)
+                service = (sam_service.SamService(checkpoint=str(checkpoint))
+                           if checkpoint is not None else sam_service.SamService())
+                loader.sigLoaded.emit(sam_service.SamQueue(service))
             except Exception as exc:  # noqa: BLE001 - the app works without SAM
                 loader.sigLoaded.emit(f"{type(exc).__name__}: {exc}")
 
@@ -381,6 +473,7 @@ class AssistMixin:
         """The background load finished -- possibly after the window closed."""
         self._sam_loading = False
         if isinstance(outcome, str):
+            self.logger.info("SAM: unavailable (%s)", outcome)
             self.set_sam_unavailable(outcome)
             return
         if self.closed:
@@ -389,6 +482,7 @@ class AssistMixin:
             outcome.stop()
             return
         self.set_sam_queue(outcome, owns=True)
+        self.logger.info("SAM: ready")
         self.report("SAM ready")
 
     # -------------------------------------------------------------- actions

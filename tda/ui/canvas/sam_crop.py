@@ -29,9 +29,16 @@ def norm_box(a: tuple[float, float], b: tuple[float, float]) -> Box:
 
 
 def viewport_crop(
-    canvas: Any, max_side: int = MAX_SAM_SIDE
+    canvas: Any, max_side: int = MAX_SAM_SIDE,
+    image: Optional[np.ndarray] = None,
 ) -> Optional[tuple[np.ndarray, Rect, float]]:
     """``(crop, rect, scale)`` for the visible image region, or ``None``.
+
+    ``image`` is the frame the crop must come from.  It defaults to whatever the
+    canvas is *displaying*, which is not always the frame being annotated: while
+    ``Tab`` is held the canvas shows the neighbour, and a prompt cropped from it
+    asked SAM about a frame the resulting mask was not going to be written to.
+    The window passes the session's current image explicitly.
 
     ``rect`` is the crop window in image coordinates and ``scale`` the factor
     applied to fit ``max_side`` (1.0 when the viewport is already small enough,
@@ -47,7 +54,7 @@ def viewport_crop(
     ``REFINE_RADIUS_PX / scale`` **image** pixels -- a zoomed-out view refines
     coarsely.  Zoom in for a tight correction.
     """
-    rgb = canvas.image_rgb()
+    rgb = canvas.image_rgb() if image is None else image
     if rgb is None:
         return None
     rect = canvas.viewport_image_rect()

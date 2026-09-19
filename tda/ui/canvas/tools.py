@@ -91,6 +91,11 @@ class Tool(QObject):
     """
 
     sigStroke = Signal(object)
+    #: Something went wrong inside the tool; the payload is for the status bar.
+    #: The three mouse slots are Qt slots, so an exception raised in one of them
+    #: goes straight into the event loop: ``queue.submit`` raising left the SAM
+    #: label saying "ready" while every click repeated the failure in silence.
+    sigError = Signal(str)
 
     def __init__(
         self,
@@ -107,19 +112,36 @@ class Tool(QObject):
         """Connect to the canvas mouse signals (idempotent)."""
         if self.canvas is None or self._attached:
             return
-        self.canvas.sigMousePress.connect(self.on_press)
-        self.canvas.sigMouseMove.connect(self.on_move)
-        self.canvas.sigMouseRelease.connect(self.on_release)
+        self.canvas.sigMousePress.connect(self._press)
+        self.canvas.sigMouseMove.connect(self._move)
+        self.canvas.sigMouseRelease.connect(self._release)
         self._attached = True
 
     def detach(self) -> None:
         """Disconnect from the canvas mouse signals (idempotent)."""
         if self.canvas is None or not self._attached:
             return
-        self.canvas.sigMousePress.disconnect(self.on_press)
-        self.canvas.sigMouseMove.disconnect(self.on_move)
-        self.canvas.sigMouseRelease.disconnect(self.on_release)
+        self.canvas.sigMousePress.disconnect(self._press)
+        self.canvas.sigMouseMove.disconnect(self._move)
+        self.canvas.sigMouseRelease.disconnect(self._release)
         self._attached = False
+
+    # -- the guarded slots --------------------------------------------------
+    def _press(self, x: float, y: float, ev: Any) -> None:
+        self._guarded(self.on_press, x, y, ev)
+
+    def _move(self, x: float, y: float, ev: Any) -> None:
+        self._guarded(self.on_move, x, y, ev)
+
+    def _release(self, x: float, y: float, ev: Any) -> None:
+        self._guarded(self.on_release, x, y, ev)
+
+    def _guarded(self, handler, x: float, y: float, ev: Any) -> None:
+        """Run one mouse handler; a failure becomes a status line, not a crash."""
+        try:
+            handler(x, y, ev)
+        except Exception as exc:  # noqa: BLE001 - this is a Qt slot
+            self.sigError.emit(f"{type(exc).__name__}: {exc}")
 
     def on_press(self, x: float, y: float, ev: Any) -> None:
         """Mouse down at image coords ``(x, y)``."""

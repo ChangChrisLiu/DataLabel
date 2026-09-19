@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from tda.ui import session_api as api
+from tda.ui.panels import session_is_open
 
 __all__ = ["ReviewPanel", "QUEUE_TITLES"]
 
@@ -48,10 +49,13 @@ def _entry_text(queue: str, entry: dict) -> str:
     """One line for a queue entry."""
     step = entry.get("step", "?")
     if queue == api.QUEUE_CONFLICTS:
-        return (
-            f"Step {step} — {entry.get('instance', '')} "
-            f"(Δ {entry.get('sym_diff_px', 0)} px)"
-        )
+        # A disagreement about a *label* moves no pixels: "visibility: visible
+        # -> occluded_partial" is 0 differing pixels, and the row read "(Δ 0
+        # px)" -- an entry somebody has to settle, described as nothing having
+        # changed.  The queue says what disagrees; the pixel count is its
+        # fallback, and is all an entry queued by an older session carries.
+        what = entry.get("summary") or f"{entry.get('sym_diff_px', 0)} px differ"
+        return f"Step {step} — {entry.get('instance', '')} ({what})"
     if queue == api.QUEUE_MISSING_SHAPE:
         return f"Step {step} — {entry.get('instance', '')}"
     return f"Step {step}"
@@ -120,8 +124,11 @@ class ReviewPanel(QWidget):
         buttons.addWidget(self.accept_new_button)
         # The two other keys live in the tooltip and in the cheat sheet, not in
         # a 384 px label that decides how wide the dock has to be.
-        self.setToolTip("Enter: accept the frame    R: rework it in Annotate mode\n"
-                        "K: keep the frozen shape    N: take the edit")
+        self.setToolTip(
+            "Enter: open the selected entry's frame and accept it\n"
+            "R: rework it in Annotate mode\n"
+            "K: keep the frozen shape    N: take the edit"
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -166,7 +173,7 @@ class ReviewPanel(QWidget):
     # -- content ------------------------------------------------------------
     def refresh(self) -> None:
         """Re-read ``session.queues()`` into the four lists."""
-        queues = self._session.queues() if self._session is not None else {}
+        queues = self._session.queues() if session_is_open(self._session) else {}
         for index, queue in enumerate(api.QUEUE_NAMES):
             entries = list(queues.get(queue, []))
             lw = self._lists[queue]
@@ -193,7 +200,7 @@ class ReviewPanel(QWidget):
         item = self._lists[self.current_queue()].currentItem()
         if item is not None:
             return int(item.data(STEP_ROLE))
-        if self._session is not None:
+        if session_is_open(self._session):
             return int(self._session.current().step)
         return None
 
@@ -213,7 +220,7 @@ class ReviewPanel(QWidget):
         then had nothing to act on.
         """
         lw, self._activated = self._activated, None
-        if self._session is None or lw is None:
+        if lw is None or not session_is_open(self._session):
             return
         step = int(self._session.current().step)
         rows = [r for r in range(lw.count())

@@ -563,3 +563,31 @@ def test_set_desktop_reloads_the_panel(panel):
     assert panel.desktop == 63
     assert panel.steps_model.rowCount() == 37
     assert panel.issues.count() > 0
+
+
+# ---------------------------------------------------------------------------
+# Label Studio drafts are one line in the open questions (F3 round 4)
+# ---------------------------------------------------------------------------
+def test_the_open_questions_collapse_the_label_studio_drafts(qapp, db, tmp_path, tax):
+    """D13 carries 63 ``ls:`` drafts and the pane opened with 63 lines asking
+    the annotator to delete or retarget each one -- work that does not exist,
+    burying the work that does.  They are reference material: one line, last."""
+    from tda.core.model import InstanceRec
+
+    for n in (1, 2, 3):
+        db.upsert_instance(InstanceRec(key=f"ls:Motherboard#{n}", desktop=13,
+                                       cls="motherboard",
+                                       raw_names=[f"Motherboard#{n}"]))
+    panel = StepTablePanel(db, 13, taxonomy=tax, cache_dir=tmp_path / "cache")
+    try:
+        shown = [panel.issues.item(i).text() for i in range(panel.issues.count())]
+        drafts = [line for line in shown if "ls:" in line]
+
+        assert len(drafts) == 1, drafts
+        assert "3 Label Studio drafts" in drafts[0]
+        assert "retarget" not in drafts[0] and "delete" not in drafts[0]
+        # last of the open questions: a state event may still follow it
+        questions = [line for line in shown if not line.startswith("state event:")]
+        assert questions[-1] == drafts[0]
+    finally:
+        panel.deleteLater()

@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from tda.ui import session_api as api
 from tda.ui.canvas.overlay import palette_color
+from tda.ui.panels import session_is_open
 
 __all__ = ["InstanceListPanel"]
 
@@ -185,7 +186,8 @@ class InstanceListPanel(QWidget):
         frame itself.
         """
         keep = self.selected_instance()
-        self._rows = self._session.instance_rows() if self._session is not None else []
+        self._rows = (self._session.instance_rows()
+                      if session_is_open(self._session) else [])
         self._gone = self._removed_rows()
         self._loading = True
         header = self._table.horizontalHeader()
@@ -291,6 +293,15 @@ class InstanceListPanel(QWidget):
         if row < 0 or row >= len(self._rows):
             return None
         return str(self._rows[row].get("key", ""))
+
+    def selected_is_removed(self) -> bool:
+        """Is the selected row one of the read-only "already removed" ones?
+
+        They are listed so the annotator can see what has come out of the
+        machine; there is nothing about them to reorder, hide or re-label.
+        """
+        row = self._table.currentRow()
+        return bool(self._gone) and len(self._rows) <= row < self._table.rowCount()
 
     def select_instance(self, instance: str) -> bool:
         """Select the row of ``instance``; ``False`` when it is not in the table."""

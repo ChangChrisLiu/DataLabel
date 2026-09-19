@@ -192,8 +192,11 @@ class Smoke:
 
         self.report["drawn"] = [self.draw_named(window, spec)
                                 for spec in self.args.draw]
+        self.report["prompt_points"] = self.check_prompt_points(window)
+        self.report["timeline_jump_ms"] = self.time_timeline_jumps(window)
         if self.args.shots:
             self.report["cjk_shot"] = self.shoot_blocked_hint(window)
+            self.report["refused_space_shot"] = self.shoot_refused_space(window)
         self.note_peak()
 
         latencies = []
@@ -231,9 +234,19 @@ class Smoke:
             self.shoot(window, len(self.report["screenshots"]) + 1)
 
         started = time.perf_counter()
+        warned = False
         window.act_commit()
-        if window.scope_bar.isVisible():
+        # The two non-modal bars an annotator answers with a second Enter: the
+        # scope suggestion and the area warning.  Sampled over the *whole*
+        # sequence -- the warning follows an accepted scope, so looking only
+        # after the first Enter missed it -- because "how often does the size
+        # warning fire on real masks?" is what a smoke run should answer.
+        for _ in range(2):
+            warned = warned or bool(window.warn_bar.isVisible())
+            if not (window.scope_bar.isVisible() or window.warn_bar.isVisible()):
+                break
             window.act_commit()
+        frame["area_warned"] = warned
         frame["commit_ms"] = (time.perf_counter() - started) * 1000
         frame["committed"] = window.session.editing_instance is None
         frame["refusal"] = window.last_error_message() if not frame["committed"] else ""
@@ -275,6 +288,10 @@ class Smoke:
         if window.scope_bar.isVisible():
             out["scope_bar"] = window.scope_bar_text()
             window.act_commit()
+        out["area_warned"] = bool(window.warn_bar.isVisible())
+        if window.warn_bar.isVisible():
+            out["area_warning"] = window.warn_bar_text()
+            window.act_commit()
         out["commit_ms"] = (time.perf_counter() - started) * 1000
         out["committed"] = window.session.editing_instance is None
         out["keyframes"] = len(window.session.db.keyframes(
@@ -311,6 +328,68 @@ class Smoke:
         out["sam_mask_px"] = int(window.overlay.editing.sum())
         out["sam_candidates"] = window.sam_point.candidate_count
         return out
+
+    def check_prompt_points(self, window) -> dict:
+        """The second instance's first prompt must carry exactly one point.
+
+        Final review item 1: the points used to accumulate for the whole
+        session, so every mask after the first commit was a union over
+        everything that had been clicked.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        if not (self.args.sam and window.sam_available):
+            return {"skipped": "SAM not loaded"}
+        card = [row for row in window.session.task_card() if row.get("instance")]
+        if len(card) < 2:
+            return {"skipped": "the frame has fewer than two card items"}
+        out: dict[str, Any] = {}
+        for index, row in enumerate(card[:2]):
+            window.on_request_edit(str(row["instance"]))
+            window.act_tool("sam_point")
+            x0, y0, x1, y1 = window.roi() or (0, 0, 100, 100)
+            window.sam_point.on_press((x0 + x1) / 2.0, (y0 + y1) / 2.0, None)
+            QApplication.processEvents()
+            out[f"instance_{index + 1}_points"] = len(window.sam_point.points)
+            out[f"instance_{index + 1}_candidates"] = window.sam_point.candidate_count
+            window.act_clear_edit()
+        out["ok"] = out.get("instance_2_points") == 1
+        return out
+
+    def time_timeline_jumps(self, window, jumps: int = 6) -> list:
+        """Clicking a row in the timeline, the way an annotator reaches a frame."""
+        from PySide6.QtWidgets import QApplication
+
+        steps = sorted(window.session.steps())
+        if len(steps) < 4:
+            return []
+        picks = [steps[i * len(steps) // (jumps + 1)] for i in range(1, jumps + 1)]
+        out = []
+        for step in picks:
+            started = time.perf_counter()
+            window.timeline_goto(int(step))
+            QApplication.processEvents()
+            out.append((time.perf_counter() - started) * 1000)
+        return out
+
+    def shoot_refused_space(self, window) -> dict:
+        """The start frame with 60+ missing shapes, refused: is it readable?
+
+        Final review item 11: this is the frame whose refusal put 2,550
+        characters into the status bar and listed every part twice.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        window.session.goto(max(window.session.steps()), force=True)
+        QApplication.processEvents()
+        window.act_confirm()
+        QApplication.processEvents()
+        text = window.status_message()
+        out = Path(self.args.img_dir) / f"mvp_d{self.args.desktop}_refused.png"
+        self.shoot_to(window, out)
+        return {"path": str(out), "status_len": len(text),
+                "problems_listed": len(window.task_card.problem_rows()),
+                "hint_min_width_px": window.hint_label.minimumSizeHint().width()}
 
     def shoot_blocked_hint(self, window) -> dict:
         """One screenshot with Chinese on screen, so CJK rendering is evidenced.

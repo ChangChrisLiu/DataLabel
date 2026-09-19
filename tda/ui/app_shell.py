@@ -41,6 +41,11 @@ from tda.core.db import acquire_lock_file, release_lock_file
 from tda.core.model import VIEWS
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
+from tda.ui.app_status import (  # re-exported: this was their home
+    KNOWN_FAILURES,
+    StatusMixin,
+    explain_exception,
+)
 from tda.ui.canvas.overlay import LabelOverlay
 from tda.ui.canvas.view import ImageCanvas
 from tda.ui.panels.instances import InstanceListPanel
@@ -48,7 +53,8 @@ from tda.ui.panels.review import ReviewPanel
 from tda.ui.panels.taskcard import TaskCardPanel
 from tda.ui.panels.timeline import TimelinePanel
 
-__all__ = ["MODE_TITLES", "ShellMixin", "main", "take_lock"]
+__all__ = ["KNOWN_FAILURES", "MODE_TITLES", "ShellMixin", "StatusMixin",
+           "explain_exception", "main", "take_lock"]
 
 #: Tab caption -> mode name, in the order the tabs appear.
 MODE_TITLES: tuple[tuple[str, str], ...] = (
@@ -110,6 +116,7 @@ def take_lock(target, annotator: str) -> Optional[str]:
     return None
 
 
+#: Failures the annotator can do something about, in words they can act on.
 def confirm_discard_dialog(parent, why: str) -> bool:
     """Ask before throwing unsaved S1 edits away."""
     answer = QMessageBox.question(
@@ -151,6 +158,11 @@ class ShellMixin:
         self.addToolBar(bar)
 
         self.desktop_combo = QComboBox()
+        # Nothing in the toolbar may hold the keyboard.  A click on the chooser
+        # or a view button left the focus there, and ``blocks_shortcuts`` -- which
+        # is right about a combo the annotator may be typing in -- then switched
+        # every shortcut off with no cue at all until they clicked the canvas.
+        self.desktop_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         counts = self._view_counts()  # two aggregate queries, not two per desktop
         for desktop in self.db.desktop_ids():
             self.desktop_combo.addItem(self._desktop_text(desktop, counts), desktop)
@@ -167,6 +179,7 @@ class ShellMixin:
         for i, view in enumerate(VIEWS):
             button = QToolButton()
             button.setText(f"{view} (F{i + 1})")
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.setCheckable(True)
             button.setChecked(view == self.session.view)
             button.clicked.connect(lambda _c=False, v=view: self.act_set_view(v))
@@ -176,6 +189,7 @@ class ShellMixin:
         bar.addSeparator()
 
         self.mode_tabs = QTabBar()
+        self.mode_tabs.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         for title, _mode in MODE_TITLES:
             self.mode_tabs.addTab(title)
         self.mode_tabs.setCurrentIndex(1)
@@ -223,21 +237,6 @@ class ShellMixin:
         self.addDockWidget(area, dock)
         return dock
 
-    def _build_status_bar(self) -> None:
-        self.zoom_label = QLabel("100%")
-        self.frame_label = QLabel("")
-        self.tool_label = QLabel("")
-        self.sam_label = QLabel("")
-        self.hint_label = QLabel("")
-        # The Chinese hints start with a full-width glyph, which Qt draws hard
-        # against the window edge without this.
-        self.hint_label.setContentsMargins(8, 0, 4, 0)
-        bar = self.statusBar()
-        for label in (self.zoom_label, self.frame_label, self.tool_label,
-                      self.sam_label):
-            bar.addPermanentWidget(label)
-        bar.addWidget(self.hint_label, 1)
-
     def _connect_session(self) -> None:
         """Every session signal the window reacts to, when the session has it."""
         self.session.sigFrameChanged.connect(self._on_frame_changed)
@@ -252,81 +251,6 @@ class ShellMixin:
             found = getattr(self.session, name, None)
             if found is not None:
                 found.connect(slot)
-
-    # ----------------------------------------------------------- status bar
-    def update_status(self) -> None:
-        """Rewrite the four permanent status labels from the current state."""
-        self.zoom_label.setText(f"{self.canvas.zoom_factor() * 100:.0f}%")
-        self.frame_label.setText(self._frame_text())
-        radius = getattr(self.active_tool, "radius", None)
-        suffix = "" if radius is None else f" r{radius}"
-        self.tool_label.setText(f"{self._tool_name}{suffix}")
-        self.sam_label.setText(self.sam_status_text())
-
-    def _frame_text(self) -> str:
-        if not compat.is_open(self.session):
-            return "no frame"
-        key = self.session.current()
-        steps = self.session.steps()
-        total = max(steps) if steps else key.step
-        status = self.session.frame_status(key.step)
-        return f"D{key.desktop} · {key.view} · step {key.step}/{total} · {status}"
-
-    def _view_counts(self) -> tuple[dict, dict]:
-        """``(verified, frames)`` per ``(desktop, view)``; two whole-table scans.
-
-        Read once and passed around: at 66 desktops, asking per row turned the
-        combo box into 132 aggregate queries and 0.7 s of the start-up.
-        """
-        return self.db.count_per_view("verified"), self.db.count_per_view("frames")
-
-    def _desktop_text(self, desktop: int, counts: Optional[tuple] = None) -> str:
-        """``D13 Dell OptiPlex 7020 [12/38]`` -- brand, model and this view's count.
-
-        The model matters on a bench with four Dells on it: the brand alone does
-        not tell two machines apart.
-        """
-        meta = self.db.get_desktop(desktop) or {}
-        verified, frames = counts if counts is not None else self._view_counts()
-        done = verified.get((desktop, self.session.view), 0)
-        total = frames.get((desktop, self.session.view), 0)
-        name = " ".join(str(meta.get(k) or "").strip()
-                        for k in ("brand", "model_family") if meta.get(k))
-        return " ".join(f"D{desktop} {name} [{done}/{total}]".split())
-
-    def status_message(self) -> str:
-        """The last transient line shown in the status bar."""
-        return self._message
-
-    def report(self, text: str) -> None:
-        """Show a transient line (a hint, a count, a refusal)."""
-        self._message = str(text)
-        self.hint_label.setText(self._message)
-
-    def last_error_message(self) -> str:
-        """The last error shown, which a later hint does not erase."""
-        return self._last_error
-
-    def report_error(self, text: str) -> None:
-        """Show an error line and log it."""
-        self.logger.error("%s", text)
-        self._last_error = str(text)
-        self.report(str(text))
-
-    def report_exception(self, exc: BaseException, where: str = "") -> None:
-        """What :func:`tda.ui.app_support.guard` calls; never raises itself.
-
-        The rollback matters as much as the message: a slot that failed halfway
-        through a write would otherwise leave the connection inside a
-        transaction, and every later write would join it.
-        """
-        self.logger.exception("exception in %s: %s", where, exc)
-        try:
-            if self.db.conn.in_transaction:
-                self.db.conn.rollback()
-        except Exception:  # pragma: no cover - a rollback failure is terminal
-            self.logger.exception("rollback after %s failed", where)
-        self.report(f"{type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------- lifecycle
     def save_window_state(self) -> None:
@@ -439,6 +363,7 @@ class ShellMixin:
                 pass
         if self._cheat_sheet is not None:
             self._cheat_sheet.close()
+        self.logger.info("window closed (%s)", self.annotator)
         sys.excepthook = self._previous_hook
         S.close_logger(self.logger)
 
@@ -550,7 +475,66 @@ def resume_target(config: dict, annotator: str, desktop: Optional[int],
         target["view"] = VIEWS[0]
     if target["desktop"] is None:
         target["desktop"] = _lowest_desktop_with_frames(db_path)
+    asked = {"desktop": desktop is not None, "view": view is not None,
+             "step": step is not None}
+    return _validated(target, db_path, asked)
+
+
+def _validated(target: dict, db_path: str, asked: dict) -> dict:
+    """Fall back to something that exists; a stale INI must not stop the launch.
+
+    The INI is written from whatever was last on screen, so a view with no
+    frames could be stored as "last view" -- and the next launch then died in
+    ``MainWindow.__init__`` (the timeline asks the session for a frame that is
+    not there) and the app would not start until somebody edited the file.
+    Every part of the target that came from the INI is checked against the
+    database here and replaced when it is not there.
+
+    What the annotator asked for on the command line is **not** second-guessed:
+    ``--desktop 42`` opens 42, and if it has no frames the window says so
+    (spec 4.5) rather than opening something else without being asked.
+    """
+    rows = _frame_index(db_path)
+    if not rows:
+        return target
+    desktop = target["desktop"]
+    if not asked["desktop"] and (desktop is None or int(desktop) not in rows):
+        desktop = min(rows)
+        target["step"] = None      # a step of another machine means nothing
+    target["desktop"] = int(desktop)
+    views = rows.get(int(desktop), {})
+    if not asked["view"] and views and target["view"] not in views:
+        target["view"] = next((v for v in VIEWS if v in views), sorted(views)[0])
+        target["step"] = None
+    steps = views.get(target["view"], set())
+    if not asked["step"] and target["step"] is not None and int(target["step"]) not in steps:
+        target["step"] = None      # the session opens on its own starting frame
     return target
+
+
+def _frame_index(db_path: str) -> dict[int, dict[str, set[int]]]:
+    """``{desktop: {view: {steps}}}`` straight from ``frame``, read-only.
+
+    One query, no ``Db`` (which replays the schema): this runs before the
+    database is opened for writing, and before the lock is anybody's.
+    """
+    import sqlite3
+
+    index: dict[int, dict[str, set[int]]] = {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return index
+    try:
+        for desktop, view, step in conn.execute(
+            "SELECT desktop, view, step FROM frame"
+        ):
+            index.setdefault(int(desktop), {}).setdefault(str(view), set()).add(int(step))
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
+    return index
 
 
 def _lowest_desktop_with_frames(db_path: str) -> int:
