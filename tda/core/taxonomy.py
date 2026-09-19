@@ -51,6 +51,11 @@ class Taxonomy:
     #: the separate ``verified`` field, and conflating the two is what the old
     #: single ``quality`` field did.
     view_tiers: dict[str, str] = field(default_factory=dict)
+    #: ``class -> host class``: every instance of the key class is mounted on
+    #: the desktop's *unique* instance of the value class and rides out of the
+    #: chassis inside it. Gathered from the per-class ``host_class`` key of
+    #: ``taxonomy.yaml``; empty unless a class says so.
+    host_classes: dict[str, str] = field(default_factory=dict)
 
     # -- class queries ------------------------------------------------------
     def _defn(self, cls: str) -> dict:
@@ -81,6 +86,20 @@ class Taxonomy:
 
     def default_state(self, cls: str) -> str:
         return self._defn(cls)["default_state"]
+
+    def host_class(self, cls: str) -> Optional[str]:
+        """The class whose one instance this class's instances ride on, or ``None``.
+
+        A ``ram_latch`` is moulded into the motherboard: it is never removed by
+        an action of its own, and when the board is lifted out the latch goes
+        with it. Saying that here is what lets
+        :func:`tda.core.graph_infer.infer_relational_fields` fill the latch's
+        ``parent``/``attached`` pair, which is the mechanism spec 3.3 already
+        uses for a captive screw. An unknown class simply has no host rather
+        than raising, like :meth:`group_of`: callers sweep every key of an
+        instance table, drafts and virtual nodes included.
+        """
+        return self.host_classes.get(cls)
 
     def needs_mask(self, cls: str, state: str, placement: str) -> bool:
         """Does this instance need its own geometry in the given placement?
@@ -122,6 +141,28 @@ class Taxonomy:
         return (attr, chosen)
 
 
+def _host_classes(classes: dict[str, dict]) -> dict[str, str]:
+    """The per-class ``host_class`` declarations, checked against the classes.
+
+    A host that is not itself a class of the taxonomy would resolve to nothing
+    for ever -- every latch of every desktop silently left without a parent --
+    so it is a configuration error, raised while the file is read rather than
+    discovered as a missing fill months later.
+    """
+    hosts = {
+        cls: str(defn["host_class"]).strip()
+        for cls, defn in classes.items()
+        if str((defn or {}).get("host_class") or "").strip()
+    }
+    for cls, host in sorted(hosts.items()):
+        if host not in classes:
+            raise ValueError(
+                f"taxonomy.yaml: class {cls!r} declares host_class {host!r}, "
+                f"which is not a class of the taxonomy"
+            )
+    return hosts
+
+
 @lru_cache(maxsize=None)
 def _load_taxonomy_cached(path: str) -> Taxonomy:
     with open(path, "r", encoding="utf-8") as f:
@@ -137,6 +178,7 @@ def _load_taxonomy_cached(path: str) -> Taxonomy:
             str(c) for c in (cfg.get("implied_when_referenced") or [])
         ],
         view_tiers={str(k): str(v) for k, v in (cfg.get("view_tiers") or {}).items()},
+        host_classes=_host_classes(cfg["classes"]),
     )
 
 

@@ -70,6 +70,35 @@ def test_taxonomy_states_and_verbs():
     assert t.needs_mask("psu", "removed", "elsewhere") is False
 
 
+def test_board_mounted_latches_declare_the_motherboard_as_their_host():
+    t = load_taxonomy()
+    assert t.host_class("ram_latch") == "motherboard"
+    assert t.host_class("cpu_socket_lever") == "motherboard"
+
+
+def test_no_other_class_rides_on_a_host():
+    """Deliberately narrow: the rest sit on the chassis or are ambiguous."""
+    t = load_taxonomy()
+    assert {c for c in t.classes if t.host_class(c)} == {"ram_latch", "cpu_socket_lever"}
+    for cls in ("psu_latch", "card_latch", "drive_latch", "cable_clip", "cooler_latch"):
+        assert t.host_class(cls) is None
+
+
+def test_host_class_of_an_unknown_class_is_none():
+    assert load_taxonomy().host_class("no_such_class") is None
+
+
+def test_a_host_class_must_name_a_class_of_the_taxonomy(tmp_path):
+    with open(REPO_ROOT / "configs" / "taxonomy.yaml", "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    cfg["classes"]["ram_latch"]["host_class"] = "flux_capacitor"
+    path = tmp_path / "taxonomy.yaml"
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f)
+    with pytest.raises(ValueError, match="flux_capacitor"):
+        load_taxonomy(path)
+
+
 @pytest.mark.parametrize(
     "raw,exp",
     [
