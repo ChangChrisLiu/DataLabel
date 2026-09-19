@@ -252,6 +252,9 @@ def infer_relational_fields(
       step order says the screw was undone for;
     * a captive screw's ``parent`` = what it fastens, with ``attached=True``
       (spec 7.1: a captive cooler screw leaves with the cooler);
+    * the ``parent`` of an instance whose class declares a ``host_class`` = that
+      class's unique instance, with ``attached=True`` -- see
+      :func:`_infer_host_mounted`;
     * ``ram_latch.of`` by nearest ordinal -- the latches are split evenly over
       the modules, so two latches per module pair up with module 1, 2, ...;
     * ``socket_host`` given as a class name -> that class's unique instance.
@@ -282,6 +285,7 @@ def infer_relational_fields(
             host = resolve_ref(instances, rec.socket_host)
             if host and host != rec.socket_host:
                 put(rec, "socket_host", host)
+        _infer_host_mounted(instances, rec, tax, put, filled)
     _infer_ram_latches(instances, filled)
     return filled
 
@@ -306,6 +310,44 @@ def _infer_screw(instances, rec: InstanceRec, clock, put, filled: list[str]) -> 
         if not rec.attached:
             rec.attached = True
             filled.append(f"{rec.key}.attached = True")
+
+
+def _infer_host_mounted(instances, rec: InstanceRec, tax: Taxonomy, put,
+                        filled: list[str]) -> None:
+    """``parent`` = the one instance of the class's ``host_class``, and attached.
+
+    A ``ram_latch`` and a ``cpu_socket_lever`` are part of the motherboard: no
+    verb ever removes one, so nothing filled their ``parent`` and they went on
+    standing ``in_chassis`` with a mask due on every frame after the board was
+    lifted out -- on 61 of the 66 desktops, which in reverse-order annotation is
+    the *first* frame the annotator meets. Saying "instances of this class ride
+    on the unique instance of class X" in ``taxonomy.yaml``
+    (:meth:`tda.core.taxonomy.Taxonomy.host_class`) is enough: the
+    ``parent``/``attached`` pair is the mechanism spec 3.3 already has for a
+    captive screw, and the cascade does the rest.
+
+    ``attached`` is ticked **only** in the same pass that fills ``parent``, for
+    exactly the reason :func:`_infer_screw` gives: the flag is a bool, so a
+    stored ``False`` cannot say whether it is the dataclass default or an
+    annotator who unticked it in S1, and an instance that already carries a
+    ``parent`` has been looked at. A desktop with no unique host fills nothing
+    and is reported by :func:`unresolved_relations` instead.
+
+    An instance is never made its own parent. ``load_taxonomy`` already refuses
+    a class that names itself as its host, so this can only arrive from a
+    ``Taxonomy`` assembled in code -- and a parent cycle of length one is not
+    something to discover through :func:`tda.core.states._close_attached_cascade`.
+    """
+    host = tax.host_class(rec.cls)
+    if not host or not blank(rec.parent):
+        return
+    target = unique_of_class(instances, host)
+    if not target or target == rec.key:
+        return
+    put(rec, "parent", target)
+    if not rec.attached:
+        rec.attached = True
+        filled.append(f"{rec.key}.attached = True")
 
 
 def _infer_ram_latches(instances: dict[str, InstanceRec], filled: list[str]) -> None:
@@ -360,10 +402,11 @@ def unresolved_relations(
     instances: dict[str, InstanceRec],
     tax: Taxonomy,
     actions: Optional[Iterable[ActionRec]] = None,
+    declined: Optional[Iterable[str]] = None,
 ) -> list[str]:
     """What :func:`infer_relational_fields` refused to guess, one line each.
 
-    Three questions are left to the annotator rather than answered by a coin
+    Four questions are left to the annotator rather than answered by a coin
     toss, and every one of them is reported here so it does not disappear:
 
     * a relational field holding a taxonomy *class* the desktop has zero or two
@@ -372,7 +415,10 @@ def unresolved_relations(
       one the clock and the sheet name disagree about (:func:`screw_target`
       supplies the exact wording);
     * a *captive* screw that consequently has no ``parent``, which is what
-      makes it leave the chassis with its part (spec 3.3).
+      makes it leave the chassis with its part (spec 3.3);
+    * an instance of a class with a ``host_class`` whose desktop has no unique
+      host to hang it on (:func:`_infer_host_mounted`) -- the same defect, on
+      the board-mounted latches -- unless that host class is in ``declined``.
 
     Every line starts with :data:`UNRESOLVED` and carries its kind in brackets
     -- :data:`NO_CANDIDATE` or :data:`AMBIGUOUS` -- because the two want
@@ -382,9 +428,17 @@ def unresolved_relations(
     pointer, which the S1 step table already asks about
     (:mod:`tda.ui.steps_issues`). Provisional ``ls:*`` drafts are skipped: they
     carry no relations yet by construction.
+
+    ``declined`` is the desktop's :meth:`tda.core.db.Db.declined_implied` set --
+    the classes whose implied instance the annotator has deleted in S1. The host
+    question is not asked about one of them: the answer would be "add a
+    motherboard back", on every latch, for ever, which is telling the human to
+    undo the decision they have just recorded. It is passed in rather than read
+    here so this function stays pure and takes no database.
     """
     out: list[str] = []
     clock = None if actions is None else _Clock(actions)
+    refused = {str(c) for c in (declined or ())}
     for key, rec in sorted(instances.items()):
         if is_provisional(key):
             continue
@@ -392,6 +446,10 @@ def unresolved_relations(
             value = (getattr(rec, name) or "").strip()
             if value and value in tax.classes and resolve_ref(instances, value) is None:
                 out.append(_class_line(instances, key, name, value))
+        host = tax.host_class(rec.cls)
+        if (host and host not in refused and blank(rec.parent)
+                and unique_of_class(instances, host) is None):
+            out.append(_host_line(instances, key, rec.cls, host))
         if rec.cls != "screw":
             continue
         kind = AMBIGUOUS
@@ -405,6 +463,26 @@ def unresolved_relations(
                 f"with the part it is screwed into"
             )))
     return out
+
+
+def _host_line(instances, key: str, cls: str, host: str) -> str:
+    """One unresolved line for an instance that found no unique host to ride on.
+
+    Says what it costs, because the consequence is invisible otherwise: without
+    a ``parent`` the latch stays ``in_chassis`` once the board is gone and is a
+    ``missing_shape`` on every frame after it.
+    """
+    found = real_instances(instances, host)
+    if not found:
+        return _line(NO_CANDIDATE, (
+            f"{key} is mounted on the {host} of this desktop, which has no {host} "
+            f"instance - once the {host} leaves, {key} will still be asked for a "
+            f"mask; add the instance in the Instances tab"
+        ))
+    return _line(AMBIGUOUS, (
+        f"{key} is mounted on a {host} and the desktop has {len(found)} of them "
+        f"- pick its parent in S1"
+    ))
 
 
 def _class_line(instances, key: str, name: str, value: str) -> str:

@@ -7,10 +7,12 @@ a temporary cache directory.  The database is therefore exactly what S0/S1
 would leave behind, and the session under test is driven through the public
 :class:`tda.ui.session_api.SessionLike` surface only.
 
-One thing the importer cannot know is filled in the way the S1 step-table
-review would (spec 4.1): the four captive CPU-cooler screws are marked
-``attached`` to the cooler, so that removing the cooler at step 13 takes them
-out with it.
+Two things the importer cannot know are filled in the way stage S0/S1 does
+(spec 4.1, :func:`tda.core.graph_infer.infer_relational_fields`): the four
+captive CPU-cooler screws are marked ``attached`` to the cooler, so that
+removing the cooler at step 13 takes them out with it, and the board-mounted
+latches (``taxonomy.yaml``'s ``host_class``) are marked ``attached`` to the
+motherboard, so that lifting the board at step 42 takes them out with it.
 
 :func:`make_session` builds a 64x64 scene for the behaviour tests;
 ``hw=(1600, 1600)`` with ``instances=None`` is what the benchmark uses.
@@ -47,6 +49,12 @@ SCREWS = tuple(f"screw.cpu_cooler.{i:02d}" for i in (1, 2, 3, 4))
 CHASSIS = "chassis"
 FAN_CONNECTOR = "connector.fan.01"
 ANNOTATOR = "tester"
+#: The sheet's last step: "Motherboard" -- the board is lifted out of the case.
+BOARD_STEP = 42
+BOARD = "motherboard.01"
+#: What rides out inside it (``taxonomy.yaml``'s ``host_class``): D13 has four
+#: RAM clips and one socket lever, and no step ever operates on them again.
+BOARD_MOUNTED = (*(f"ram_latch.{i:02d}" for i in (1, 2, 3, 4)), "cpu_socket_lever.01")
 
 
 # --------------------------------------------------------------------------- #
@@ -103,6 +111,9 @@ def seed_db(db: Db, tax, cache_dir: Path, last_step: int = LAST_STEP,
             rec.parent = COOLER
             rec.attached = True
             rec.fastens = COOLER
+        if key in BOARD_MOUNTED:  # the taxonomy's host_class, as S0 fills it in
+            rec.parent = BOARD
+            rec.attached = True
         db.upsert_instance(rec)
     _write_frames(db, cache_dir, range(1, last_step + 1), hw, missing=missing)
 

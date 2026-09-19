@@ -652,6 +652,7 @@ def _write_import(
     so the stored automatic log and the one
     :func:`tda.core.truth_inputs.events_of` re-derives on every read agree.
     """
+    declined = db.declined_implied(li.desktop)  # read before the transaction writes
     with db.transaction():
         kept, dropped = carry_ls_notes(li.steps, previous)
         merge_desktop_meta(db, li.desktop, desktop_fields(li.meta))
@@ -668,7 +669,7 @@ def _write_import(
         db.replace_events(li.desktop, events, auto_only=True)
         split_pose_segments(db, li.desktop)
     return (len(events), kept, dropped, fills,
-            unresolved_relations(li.instances, tax, li.actions), implied,
+            unresolved_relations(li.instances, tax, li.actions, declined), implied,
             gone, drop_issues)
 
 

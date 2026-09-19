@@ -175,7 +175,10 @@ def test_annotation_guide_embeds_the_generated_table():
     body = GUIDE.read_text(encoding="utf-8")
     assert A.shortcut_markdown() in body
     prose = [l for l in body.splitlines() if not l.startswith("| `")]
-    assert len(prose) <= 200, "the prose is the part that has to stay readable"
+    # A budget, not a fact: the table may grow freely, the prose may not drift.
+    # Raised from 200 by the two FAQ entries about parts that leave inside
+    # something else (board-mounted latches) and covers logged as `open`.
+    assert len(prose) <= 212, "the prose is the part that has to stay readable"
 
 
 # --------------------------------------------------------------------------- #

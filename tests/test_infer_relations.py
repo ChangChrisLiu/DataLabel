@@ -16,6 +16,7 @@ test reads F: or touches the real annotations file.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -339,6 +340,122 @@ def test_a_socket_host_class_with_no_instance_asks_for_one_to_be_created(tax):
         "unresolved socket host: class 'motherboard' has no instance on this "
         "desktop - add the instance in the Instances tab or leave it unresolved"
     ]
+
+
+# --------------------------------------------------------------------------- #
+# 1c. a class that rides on its host: the board-mounted latches
+# --------------------------------------------------------------------------- #
+BOARD = "motherboard.01"
+#: The three instances ``taxonomy.yaml``'s ``host_class`` speaks for.
+BOARD_LATCHES = ("ram_latch.01", "ram_latch.02", "cpu_socket_lever.01")
+
+
+def _board_and_latches(boards: int = 1) -> dict[str, InstanceRec]:
+    """Two RAM latches and a socket lever, with ``boards`` motherboards to host them."""
+    recs = [
+        inst("chassis", "chassis"),
+        inst("ram_module.01", "ram_module"),
+        *[inst(f"motherboard.{n:02d}", "motherboard") for n in range(1, boards + 1)],
+        inst("ram_latch.01", "ram_latch"),
+        inst("ram_latch.02", "ram_latch"),
+        inst("cpu_socket_lever.01", "cpu_socket_lever"),
+    ]
+    return {r.key: r for r in recs}
+
+
+def test_a_board_mounted_latch_gets_the_board_as_its_parent(tax):
+    instances = _board_and_latches()
+    filled = infer_relational_fields(instances, tax)
+    for key in BOARD_LATCHES:
+        assert (instances[key].parent, instances[key].attached) == (BOARD, True), key
+    assert f"ram_latch.01.parent = {BOARD}" in filled
+    assert "ram_latch.01.attached = True" in filled
+    assert f"cpu_socket_lever.01.parent = {BOARD}" in filled
+
+
+def test_a_latch_the_taxonomy_declares_no_host_for_gets_no_parent(tax):
+    """The deliberate gap: those latches sit on the chassis, or it depends."""
+    instances = _board_and_latches()
+    for cls in ("psu_latch", "card_latch", "drive_latch", "cooler_latch", "cable_clip"):
+        instances[f"{cls}.01"] = inst(f"{cls}.01", cls)
+    infer_relational_fields(instances, tax)
+    for cls in ("psu_latch", "card_latch", "drive_latch", "cooler_latch", "cable_clip"):
+        rec = instances[f"{cls}.01"]
+        assert (rec.parent, rec.attached) == (None, False), cls
+
+
+def test_filling_a_latch_parent_is_idempotent(tax):
+    instances = _board_and_latches()
+    infer_relational_fields(instances, tax)
+    assert infer_relational_fields(instances, tax) == []
+
+
+def test_a_hand_picked_latch_parent_is_never_overwritten(tax):
+    instances = _board_and_latches()
+    instances["ram_latch.01"].parent = "chassis"
+    filled = infer_relational_fields(instances, tax)
+    assert instances["ram_latch.01"].parent == "chassis"
+    assert instances["ram_latch.01"].attached is False  # not this pass's flag to tick
+    assert not any(line.startswith("ram_latch.01.parent") for line in filled)
+
+
+def test_a_latch_whose_attached_was_unticked_keeps_it_unticked(tax):
+    """Same convention as the captive screw: the flag goes with the parent pass."""
+    instances = _board_and_latches()
+    infer_relational_fields(instances, tax)
+    instances["ram_latch.01"].attached = False  # deliberately unticked in S1
+    filled = infer_relational_fields(instances, tax)
+    assert instances["ram_latch.01"].attached is False
+    assert not any(line.startswith("ram_latch.01.attached") for line in filled)
+
+
+def test_a_provisional_latch_draft_is_left_alone(tax):
+    instances = _board_and_latches()
+    instances["ls:RAM clip#1"] = inst("ls:RAM clip#1", "ram_latch")
+    infer_relational_fields(instances, tax)
+    draft = instances["ls:RAM clip#1"]
+    assert (draft.parent, draft.attached) == (None, False)
+
+
+def test_a_desktop_with_no_board_leaves_the_latch_unresolved(tax):
+    instances = _board_and_latches(boards=0)
+    infer_relational_fields(instances, tax)
+    assert instances["ram_latch.01"].parent is None
+    lines = [line for line in unresolved_relations(instances, tax)
+             if "ram_latch.01" in line]
+    assert len(lines) == 1
+    assert unresolved_kind(lines[0]) == NO_CANDIDATE
+    assert "motherboard" in lines[0]
+
+
+def test_two_boards_leave_the_latch_ambiguous(tax):
+    instances = _board_and_latches(boards=2)
+    infer_relational_fields(instances, tax)
+    assert instances["ram_latch.01"].parent is None
+    lines = [line for line in unresolved_relations(instances, tax)
+             if "ram_latch.01" in line]
+    assert len(lines) == 1
+    assert unresolved_kind(lines[0]) == AMBIGUOUS
+
+
+def test_nothing_is_unresolved_once_the_latches_have_their_board(tax):
+    instances = _board_and_latches()
+    infer_relational_fields(instances, tax)
+    assert unresolved_relations(instances, tax) == []
+
+
+def test_an_instance_is_never_made_its_own_parent(tax):
+    """Defence in depth: the loader rejects a self-host, this refuses to act on one.
+
+    ``load_taxonomy`` raises on a class naming itself, so this can only arrive
+    from a ``Taxonomy`` assembled in code -- and a parent cycle of length one is
+    not something to find out about through ``_close_attached_cascade``.
+    """
+    self_hosting = replace(tax, host_classes={"motherboard": "motherboard"})
+    instances = {"motherboard.01": inst("motherboard.01", "motherboard")}
+    assert infer_relational_fields(instances, self_hosting) == []
+    assert instances["motherboard.01"].parent is None
+    assert instances["motherboard.01"].attached is False
 
 
 # --------------------------------------------------------------------------- #
@@ -813,23 +930,45 @@ def test_a_captive_screw_without_a_parent_is_an_issue(tax):
     assert list(unresolved_issues(instances, tax)) == []
 
 
-def test_the_step_table_asks_about_both_after_the_existing_questions(tmp_db_path, tax):
-    """A desktop the heuristic never reached must put both questions on screen."""
+def test_a_board_mounted_latch_without_a_parent_is_an_issue(tax):
+    """The same defect as the captive screw, on the classes with a ``host_class``."""
+    instances = _board_and_latches(boards=0)
+    lines = list(unresolved_issues(instances, tax))
+    assert [line for line in lines if "host-mounted instance without parent" in line]
+    assert all("ram_latch" in line or "cpu_socket_lever" in line for line in lines)
+    for key in BOARD_LATCHES:
+        instances[key].parent = "motherboard.01"
+    assert list(unresolved_issues(instances, tax)) == []
+
+
+def test_the_step_table_asks_about_them_after_the_existing_questions(tmp_db_path, tax):
+    """A desktop the heuristic never reached must put every question on screen."""
     from steps_fixtures import seeded_db
     from tda.ui.steps_model import StepTableData
 
     db = seeded_db(tmp_db_path, tax, desktops=(13,))
     try:
         strip_relations(db, 13)
+        # stripping the relations leaves *only* the new kinds, so one question of
+        # an older kind goes in as well: "after the existing ones" needs one
+        db.upsert_instance(InstanceRec(key="misc_part.01", desktop=13, cls="misc_part"))
         data = StepTableData.load(db, 13, tax)
     finally:
         db.close()
-    new = [
-        i for i, line in enumerate(data.orphans)
-        if "unresolved socket host" in line or "captive screw without parent" in line
-    ]
-    assert new
-    # the new kinds sit at the very end, after every pre-existing one
+    assert data.orphans[0].startswith("no action references misc_part.01")
+    kinds = ("unresolved socket host", "captive screw without parent",
+             "host-mounted instance without parent")
+    # every kind really is asked about: D13 has connectors whose socket_host is
+    # back to the bare class, four captive cooler screws, and five latches
+    found = {kind for kind in kinds if any(kind in line for line in data.orphans)}
+    assert found == set(kinds), f"never asked: {sorted(set(kinds) - found)}"
+    hosted = [line for line in data.orphans
+              if "host-mounted instance without parent" in line]
+    assert len(hosted) == 5  # ram_latch.01-04 + cpu_socket_lever.01
+    # and they sit at the very end, after questions that really are there first
+    new = [i for i, line in enumerate(data.orphans)
+           if any(kind in line for kind in kinds)]
+    assert 0 < len(new) < len(data.orphans)
     assert new == list(range(len(data.orphans) - len(new), len(data.orphans)))
     text = "\n".join(data.orphans)
     assert "unresolved socket host" in text and "captive screw without parent" in text

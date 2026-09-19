@@ -165,20 +165,40 @@ classes:
     needs_mask: {fastened: true, loosened: true, removed: false}
 
   # --- 锁扣 / latch ----------------------------------------------------------
+  #
+  # `host_class` (read by Taxonomy.host_class, filled in by tda.core.graph_infer)
+  # says: every instance of this class is mounted on the desktop's one instance
+  # of that class and leaves the chassis inside it. It fills `parent` and ticks
+  # `attached`, so the spec-3.3 cascade puts the latch in state `removed` the
+  # moment its host goes and `gone_with_parent` stops asking for its mask.
+  #
+  # Only the two latches that are physically part of the motherboard carry one.
+  # psu_latch, card_latch, drive_latch, cable_clip and cooler_latch are NOT
+  # declared on purpose: they sit on the chassis, the cage or the cooler, or it
+  # genuinely depends on the machine -- so they stay a question for the human in
+  # stage S1 rather than a guess the vocabulary makes for all 66 desktops.
   ram_latch:
     group: latch
+    host_class: motherboard
     attrs:
       of: []            # ram_module instance key
-    states: [closed, open]
+    states: [closed, open, removed]
     default_state: closed
-    needs_mask: {closed: true, open: true}
+    # `removed` here means "left the chassis on its host; never the effect of a
+    # verb" -- the spec-3.3 cascade writes it when the motherboard goes, and
+    # `remove.applies_to` deliberately does not list this class, so no annotator
+    # can reach it by picking a verb. Out of the chassis there is nothing of it
+    # left to draw.
+    needs_mask: {closed: true, open: true, removed: false}
 
   cpu_socket_lever:
     group: latch
+    host_class: motherboard
     attrs: {}
-    states: [closed, open]
+    states: [closed, open, removed]
     default_state: closed
-    needs_mask: {closed: true, open: true}
+    # see ram_latch: `removed` is the cascade's word, not a verb's
+    needs_mask: {closed: true, open: true, removed: false}
 
   psu_latch:
     group: latch

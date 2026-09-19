@@ -32,7 +32,12 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-from tda.core.graph_infer import SCREW_ROLE_CLASSES, is_provisional, real_instances
+from tda.core.graph_infer import (
+    SCREW_ROLE_CLASSES,
+    blank,
+    is_provisional,
+    real_instances,
+)
 from tda.core.model import ActionRec, InstanceRec
 from tda.core.taxonomy import Taxonomy
 
@@ -59,33 +64,47 @@ def is_implied(rec: InstanceRec) -> bool:
     return bool(rec.attrs.get(IMPLIED_ATTR))
 
 
-def referencing_instances(instances: dict[str, InstanceRec], cls: str) -> list[str]:
+def referencing_instances(
+    instances: dict[str, InstanceRec], cls: str, tax: Taxonomy
+) -> list[str]:
     """Keys of the instances that point at ``cls`` without naming an instance.
 
-    Two references exist in practice and both come straight out of the sheet:
-    a connector whose ``socket_host`` is the bare class name (``logs.py`` writes
-    ``"motherboard"`` when the step name says which part carries the socket but
-    not which one), and a screw whose ``role`` names the class
-    (:data:`~tda.core.graph_infer.SCREW_ROLE_CLASSES`). Those are exactly the
+    Three references exist in practice and all three come straight out of the
+    sheet plus the vocabulary: a connector whose ``socket_host`` is the bare
+    class name (``logs.py`` writes ``"motherboard"`` when the step name says
+    which part carries the socket but not which one), a screw whose ``role``
+    names the class (:data:`~tda.core.graph_infer.SCREW_ROLE_CLASSES`), and an
+    instance of a class whose ``host_class`` is this one and whose ``parent`` is
+    still blank -- a ``ram_latch`` is a statement that this machine has a
+    motherboard, whether or not the sheet ever named one. Those are exactly the
     rows :func:`~tda.core.graph_infer.unresolved_relations` reports as
-    ``no candidate``.
+    ``no candidate``, which is why a latch a human has already given a parent to
+    is **not** counted: it is not missing anything.
 
     Provisional ``ls:*`` drafts are **not** references. They carry no relations
     yet by construction, so nothing about them is unresolved and nothing about
     them is evidence that the machine has this part: D66 holds eight
     ``ls:Motherboard Screw#k`` drafts and no imported sheet at all, and implying
     a board from those would invent an instance out of a drawing.
+
+    The host test is deliberately **not** another arm of the class chain: a
+    class that one day declares a ``host_class`` *and* is a connector or a screw
+    would otherwise be swallowed by the older arm and silently stop counting.
+    ``hit`` is what keeps it from counting such a row twice instead.
     """
     out: list[str] = []
     for key, rec in sorted(instances.items()):
         if is_provisional(key):
             continue
-        if rec.cls == "connector" and str(rec.socket_host or "").strip() == cls:
-            out.append(key)
+        hit = False
+        if rec.cls == "connector":
+            hit = str(rec.socket_host or "").strip() == cls
         elif rec.cls == "screw":
-            role = str(rec.attrs.get("role") or "")
-            if cls in SCREW_ROLE_CLASSES.get(role, ()):
-                out.append(key)
+            hit = cls in SCREW_ROLE_CLASSES.get(str(rec.attrs.get("role") or ""), ())
+        if not hit and tax.host_class(rec.cls) == cls and blank(rec.parent):
+            hit = True
+        if hit:
+            out.append(key)
     return out
 
 
@@ -117,7 +136,8 @@ def implied_instances(
     * has **no** real (non-``ls:``) instance on this desktop -- a Label Studio
       draft is a draft, not a settled identity, and cannot stand in for one;
     * is referenced by at least one other instance
-      (:func:`referencing_instances`); and
+      (:func:`referencing_instances`) -- an unresolved ``socket_host``, a screw
+      role, or a class that declares this one as its ``host_class``; and
     * has no action aimed at its ``<class>.01`` key, which would mean the log
       *did* operate on it and something else is wrong.
 
@@ -139,7 +159,7 @@ def implied_instances(
             continue
         if key in instances or real_instances(instances, cls) or key in targeted:
             continue
-        referees = referencing_instances(instances, cls)
+        referees = referencing_instances(instances, cls, tax)
         if not referees:
             continue
         out.append(InstanceRec(

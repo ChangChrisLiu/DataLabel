@@ -118,6 +118,15 @@ def test_apply_edit_rejects_a_verb_that_does_not_apply_to_the_class(data):
     assert data.row(3).actions[0].verb == "unscrew"  # unchanged
 
 
+def test_apply_edit_refuses_to_remove_a_board_mounted_latch(data):
+    """A latch reaches ``removed`` by riding out inside the board, never by a verb."""
+    for step, cls in ((14, "ram_latch"), (20, "cpu_socket_lever")):
+        with pytest.raises(EditError) as err:
+            data.apply_edit(step, "verb", "remove")
+        assert cls in str(err.value)
+        assert data.row(step).actions[0].verb == "open"  # unchanged
+
+
 def test_apply_edit_rejects_an_unknown_verb(data):
     with pytest.raises(EditError):
         data.apply_edit(3, "verb", "unbolt")

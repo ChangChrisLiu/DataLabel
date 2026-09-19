@@ -28,6 +28,9 @@ from tda.core.model import FrameKey
 from tda.ui import session_api as api
 from tda.ui.session import AnnotationSession
 from session_scene import (
+    BOARD,
+    BOARD_MOUNTED,
+    BOARD_STEP,
     CHASSIS,
     COOLER,
     DESKTOP,
@@ -257,3 +260,71 @@ def test_the_layer_ranks_cover_every_taxonomy_group():
     tax = load_taxonomy()
     groups = {defn.get("group") for defn in tax.classes.values() if defn.get("group")}
     assert groups == set(LAYER_RANK)
+
+
+# --------------------------------------------------------------------------- #
+# the board leaves at the last step, and takes its latches with it
+#
+# D13's step 42 is "Motherboard", and in reverse order that is the *first*
+# frame the annotator opens. Before the latches had a parent, its card asked
+# for ram_latch.01-04 and cpu_socket_lever.01 on a picture of an empty chassis.
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def whole_sheet(qapp, tmp_path: Path) -> AnnotationSession:
+    """The full 42-step sheet, so the board really does come out."""
+    made = make_session(tmp_path, last_step=BOARD_STEP)
+    yield made
+    made.close(force=True)
+
+
+def test_the_start_frame_no_longer_asks_for_a_board_mounted_latch(whole_sheet):
+    whole_sheet.goto(BOARD_STEP)
+    items = card(whole_sheet)
+    for key in (BOARD, *BOARD_MOUNTED):
+        assert key not in items, key
+    # what is genuinely still in the empty case: the chassis, its covers and the
+    # two latches the taxonomy declares no host for
+    assert set(items) == {CHASSIS, "cover.01", "cover.02",
+                          "drive_latch.01", "psu_latch.01"}
+
+
+def test_they_come_back_into_the_chassis_with_the_board_on_the_frame_before(whole_sheet):
+    """The transition is ``removed -> open``, and the card reads it as work.
+
+    Not a verb-less state change nobody could commit: the latch is visible on
+    this frame, so it is an ``add_shape``, and the text says which parent
+    brought it back.
+    """
+    whole_sheet.goto(BOARD_STEP - 1)
+    items = card(whole_sheet)
+    assert items[BOARD]["kind"] == api.KIND_ADD_SHAPE
+    for key in BOARD_MOUNTED:
+        assert items[key]["kind"] == api.KIND_ADD_SHAPE, key
+        assert f"back in with {BOARD}" in items[key]["text"], key
+    # the parent leads the children it brought back in
+    order = [i["instance"] for i in whole_sheet.task_card()]
+    assert order[0] == BOARD
+    assert order[1:1 + len(BOARD_MOUNTED)] == sorted(BOARD_MOUNTED)
+
+
+def test_the_guide_quotes_the_card_text_the_app_really_emits(whole_sheet):
+    """A quoted string in the manual is a promise about what is on screen.
+
+    Whitespace is collapsed on both sides because the guide wraps its lines;
+    everything else, punctuation included, has to match character for character.
+    """
+    guide = Path(__file__).resolve().parents[1] / "docs" / "annotation_guide.md"
+    whole_sheet.goto(BOARD_STEP - 1)
+    emitted = " ".join(card(whole_sheet)["ram_latch.01"]["text"].split())
+    body = " ".join(guide.read_text(encoding="utf-8").split())
+    assert emitted in body, emitted
+
+
+def test_the_instance_panel_lists_them_among_the_parts_that_are_gone(whole_sheet):
+    """They have no compiled row any more, so this is where they stay visible."""
+    from tda.ui.app_compat import removed_rows
+
+    whole_sheet.goto(BOARD_STEP)
+    gone = {row["key"]: row["state"] for row in removed_rows(whole_sheet)}
+    for key in (BOARD, *BOARD_MOUNTED):
+        assert gone.get(key) == "removed", key

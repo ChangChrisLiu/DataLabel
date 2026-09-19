@@ -14,12 +14,20 @@ removes the board, so nothing may be implied for it.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from test_cli import d13_steps, env, open_db, run  # noqa: F401  (re-used fixtures)
 
 from tda.cli import EXIT_OK
 from tda.core.graph_infer import NO_CANDIDATE, infer_relational_fields, unresolved_relations
-from tda.core.implied import IMPLIED_ATTR, OP_KIND, implied_instances, is_implied
+from tda.core.implied import (
+    IMPLIED_ATTR,
+    OP_KIND,
+    implied_instances,
+    is_implied,
+    referencing_instances,
+)
 from tda.core.model import ActionRec, InstanceRec
 from tda.core.taxonomy import load_taxonomy
 from tda.ui.steps_issues import orphan_issues, unresolved_issues
@@ -122,6 +130,71 @@ def test_a_draft_is_not_a_reference_either(tax):
 def test_nothing_is_implied_when_nothing_references_the_class(tax):
     instances = {"chassis.01": InstanceRec("chassis.01", 64, "chassis")}
     assert implied_instances(instances, [], tax) == []
+
+
+# --------------------------------------------------------------------------- #
+# a host_class declaration is a reference too
+# --------------------------------------------------------------------------- #
+def _latches_only(desktop: int = 64) -> dict[str, InstanceRec]:
+    """A desktop whose only claim on a motherboard is that it has board latches."""
+    return {
+        "chassis.01": InstanceRec("chassis.01", desktop, "chassis"),
+        "ram_latch.01": InstanceRec("ram_latch.01", desktop, "ram_latch"),
+        "cpu_socket_lever.01": InstanceRec(
+            "cpu_socket_lever.01", desktop, "cpu_socket_lever"),
+    }
+
+
+def test_a_board_mounted_latch_references_the_board_it_rides_on(tax):
+    made = implied_instances(_latches_only(), [], tax)
+    assert [rec.key for rec in made] == ["motherboard.01"]
+    assert "referenced by 2 instances" in made[0].attrs["note"]
+
+
+def test_the_implied_board_then_becomes_the_latches_parent(tax):
+    instances = _latches_only()
+    for rec in implied_instances(instances, [], tax):
+        instances[rec.key] = rec
+    infer_relational_fields(instances, tax, [])
+    for key in ("ram_latch.01", "cpu_socket_lever.01"):
+        assert (instances[key].parent, instances[key].attached) \
+            == ("motherboard.01", True), key
+    assert unresolved_relations(instances, tax, []) == []
+
+
+def test_a_latch_that_already_has_a_parent_is_not_a_reference(tax):
+    """Only an *unresolved* row is evidence the desktop is missing the part."""
+    instances = _latches_only()
+    instances["ram_latch.01"].parent = "chassis.01"
+    instances["cpu_socket_lever.01"].parent = "chassis.01"
+    assert implied_instances(instances, [], tax) == []
+
+
+def test_a_latch_draft_is_not_a_reference_either(tax):
+    instances = {
+        "ls:RAM Module Retention Clip#1": InstanceRec(
+            "ls:RAM Module Retention Clip#1", 66, "ram_latch"),
+    }
+    assert implied_instances(instances, [], tax) == []
+
+
+def test_a_host_on_a_connector_or_screw_class_is_counted_all_the_same(tax):
+    """The host check is not an ``elif``: it has to survive the two older ones.
+
+    ``screw`` matches the role branch first and that branch says no -- a psu
+    screw names no motherboard. A class that one day declares both must still
+    be counted once, not dropped and not twice.
+    """
+    hosted = replace(tax, host_classes={**tax.host_classes, "screw": "motherboard"})
+    instances = {
+        "screw.psu.01": InstanceRec("screw.psu.01", 64, "screw", attrs={"role": "psu"}),
+    }
+    assert referencing_instances(instances, "motherboard", hosted) == ["screw.psu.01"]
+    # a screw whose *role* already names the class is still counted exactly once
+    instances["screw.motherboard.01"] = InstanceRec(
+        "screw.motherboard.01", 64, "screw", attrs={"role": "motherboard"})
+    assert referencing_instances(instances, "motherboard", hosted) \
+        == ["screw.motherboard.01", "screw.psu.01"]
 
 
 def test_creating_the_implied_instance_is_idempotent(tax):
