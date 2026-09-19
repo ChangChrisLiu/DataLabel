@@ -33,11 +33,6 @@ import cv2
 import numpy as np
 
 from tda.core.cache_roi_detect import (  # re-exported: suggest_roi's two strategies
-    ROI_MAX_AREA_FRAC,
-    ROI_MIN_AREA_FRAC,
-    best_candidate,
-    board_mask,
-    box_plausibility,
     scan_bed_box,
     scan_bed_candidates,
     scan_chassis_box,

@@ -66,11 +66,11 @@ def test_auto_rows_alone_are_not_a_reason_to_refuse(db: Db):
     assert db.instance_reference_counts(DESKTOP, PSU) == {}
 
 
-def test_auto_rows_are_still_reported_for_information(db: Db):
+def test_the_delete_says_how_many_cached_rows_went_with_it(db: Db):
     _auto_row(db, 2)
     _auto_row(db, 3, "oak1")
-    assert db.instance_cache_counts(DESKTOP, PSU) == {"compiled_mask_auto": 2}
-    assert db.instance_cache_counts(DESKTOP, "nothing.01") == {}
+    assert db.delete_instance(DESKTOP, PSU) == 2
+    assert db.delete_instance(DESKTOP, "nothing.01") == 0
 
 
 def test_a_verified_row_still_refuses(db: Db):
