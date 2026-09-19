@@ -465,6 +465,26 @@ def test_needs_geom_ignores_keys_without_an_instance(instances, tax):
     assert "phantom.99" not in needs_geom(instances, fs, tax)
 
 
+def test_needs_geom_drops_the_bench_on_a_view_that_cannot_see_it(instances, tax):
+    """Spec 4.2 item 1: bench work only 若该视角有堆放区 ROI.
+
+    The gate used to live in ``truth_inputs`` alone, so the queues, the task
+    card and the "affects N frames" strip each asked for a different set.
+    """
+    fs = initial_state(instances, tax)
+    fs["psu.01"] = InstState(state="removed", placement="on_bench")
+
+    blind = needs_geom(instances, fs, tax, bench_roi=None)
+    seeing = needs_geom(instances, fs, tax, bench_roi=[0, 0, 32, 32])
+
+    assert "psu.01" not in blind
+    assert seeing["psu.01"] == "box"
+    assert blind["chassis.01"] == seeing["chassis.01"] == "mask"
+    # no view in mind at all: the pure policy, which is what the callers that
+    # do not know a view (and every test of the state machine) still want
+    assert needs_geom(instances, fs, tax) == seeing
+
+
 # --------------------------------------------------------------------------- #
 # diff_states
 # --------------------------------------------------------------------------- #

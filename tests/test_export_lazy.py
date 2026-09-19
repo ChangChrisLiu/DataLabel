@@ -79,8 +79,10 @@ def test_an_export_drains_the_pending_rechecks(session, tmp_path):
     draw(session, CHASSIS, rect(2, 34, 34, 62), api.SCOPE_KEYFRAME)
     assert session.truth.pending_rechecks(DESKTOP, VIEW) == [12]
 
+    # the re-check finds a disagreement, so the view has a standing conflict by
+    # the time the rows are read out; draining the queue is what is under test
     export_coco(session.db, session.tax, [DESKTOP], VIEW, str(tmp_path / "c.json"),
-                only_verified=False)
+                only_verified=False, allow_conflicts=True)
     assert session.truth.pending_rechecks(DESKTOP, VIEW) == []
 
 

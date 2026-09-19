@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 
+from tda.core import masks
 from tda.core.compiler import select_keyframe
 from tda.core.model import FrameKey, Placement
 from tda.core.truth_inputs import FrameInputs, annotatable_steps
@@ -63,9 +64,9 @@ def digest_of(inputs: FrameInputs, compiler_version: str) -> str:
         str((inputs.zorder.version, inputs.zorder.order)),
         str([(p.above, p.below) for p in inputs.overrides]),
         str(_selected(inputs)),
-        str(sorted((o.occluder_type, (o.rle or {}).get("counts"))
+        str(sorted((o.occluder_type, masks.rle_counts(o.rle))
                    for o in inputs.occluders)),
-        str(sorted((i, (o.visible_rle or {}).get("counts"), o.visibility)
+        str(sorted((i, masks.rle_counts(o.visible_rle), o.visibility)
                    for i, o in inputs.frame_overrides.items())),
         compiler_version,
     ]
@@ -112,7 +113,8 @@ class FreshMixin:
         """:func:`digest_of` for one frame, gathering its inputs first."""
         from tda.core.truth_inputs import gather
 
-        return digest_of(gather(self.db, self.tax, key, cache), self.compiler_version)
+        return digest_of(gather(self.db, self.tax, key, cache, self.cache_dir),
+                         self.compiler_version)
 
     def _digest_is_current(self, key: FrameKey, digest: str) -> bool:
         """Do the stored rows already describe exactly these inputs?
@@ -150,6 +152,13 @@ class FreshMixin:
         reported on its own under ``rechecked`` and ``refreshed``, so a caller
         can say which of them found something.
 
+        ``open_conflicts`` counts the disagreements of this view that nobody has
+        settled. They are **not** an error here -- the truth table is as fresh
+        as it can be made while they stand, and the frozen rows deliberately
+        keep their values -- but a caller publishing the view has to know: that
+        is what :func:`tda.core.export.coco.export_coco`'s ``allow_conflicts``
+        decides, and what a quality check reports.
+
         Raises ``RuntimeError`` when a re-check is still outstanding afterwards
         -- an export must not run on a frozen frame nobody has compared -- and
         when the stored digests were written by another ``compiler_version``,
@@ -178,6 +187,7 @@ class FreshMixin:
                 f"desktop {desktop} view {view}: {len(left)} frozen frame(s) still "
                 f"await a truth re-check ({left[:5]}...); run them before exporting"
             )
+        total["open_conflicts"] = len(self.open_conflicts(desktop, view))
         return total
 
     def _refuse_foreign_digests(self, desktop: int, view: str) -> None:

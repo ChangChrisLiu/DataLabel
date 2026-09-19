@@ -48,6 +48,8 @@ from tda.core.compiler import select_keyframe
 from tda.core.db import Db
 from tda.core.implied import is_implied
 from tda.core.model import (
+    NO_CHANGE_STEP_TYPES,
+    SKIP_STEP_TYPES,
     VIEWS,
     ActionRec,
     FrameKey,
@@ -57,6 +59,8 @@ from tda.core.model import (
     StepRec,
     StepType,
     Visibility,
+    is_provisional,
+    step_is_annotatable,
 )
 from tda.core.states import FrameState, state_at
 from tda.core.taxonomy import Taxonomy
@@ -65,11 +69,14 @@ from tda.core.truth_inputs import events_of, infer_hw, pose_segment_of
 
 __all__ = [
     "ANSWERABLE",
+    "NO_CHANGE_STEP_TYPES",
+    "SKIP_STEP_TYPES",
     "DesktopCtx",
     "bbox_xywh",
     "cache_rel_path",
     "categories",
     "category_ids",
+    "conflicted_steps",
     "export_coco",
     "frame_file_name",
     "frame_hw",
@@ -99,12 +106,10 @@ GEOM_BOX = "box"
 DEFAULT_EXT = ".png"
 EXPORT_VERSION = "1"
 
-#: Steps that describe no annotatable moment of the teardown (spec 6.6).
-SKIP_STEP_TYPES = frozenset({StepType.IGNORE.value})
-#: Steps that are never the "after" frame of a change question.
-NO_CHANGE_STEP_TYPES = frozenset(
-    {StepType.IGNORE.value, StepType.INITIAL.value, StepType.DUPLI.value}
-)
+# What a step type means is :mod:`tda.core.model`'s table, re-exported here
+# because :mod:`tda.core.export.vlm` reads it off this module. The truth table
+# gates on the same table, so a step nobody may export is a step nobody was
+# asked to annotate in the first place.
 
 
 # --------------------------------------------------------------------------- #
@@ -201,6 +206,15 @@ class DesktopCtx:
     reads exactly the log the truth service compiled the frames from: always
     derived from the recorded actions, with the hand-written (``auto=False``)
     events merged on top.
+
+    **``instances`` holds only real instances.** A Label Studio draft
+    (:func:`tda.core.model.is_provisional`) carries a real taxonomy class, so a
+    loop that asks "every screw of this role" finds it and counts it -- which is
+    how ``ls:Screw#7`` came to answer a V2 counting question and to appear in
+    its rationale, on a frame the compiler never put it in. Filtering here
+    rather than at each call site is the point: the drafts are not in the
+    mapping, so a loop cannot walk past the rule. What was dropped is kept in
+    :attr:`drafts` for a caller that has to say so.
     """
 
     desktop: int
@@ -210,21 +224,31 @@ class DesktopCtx:
     actions: list[ActionRec]
     steps: dict[int, StepRec]
     keyframes: dict[tuple[str, str, int], list[ShapeKeyframe]] = field(default_factory=dict)
+    #: The provisional keys :meth:`__post_init__` took out of ``instances``.
+    drafts: dict[str, InstanceRec] = field(default_factory=dict, repr=False)
     _states: dict[int, FrameState] = field(default_factory=dict, repr=False)
 
+    def __post_init__(self) -> None:
+        drafts = {k: v for k, v in self.instances.items() if is_provisional(k)}
+        if drafts:
+            self.drafts = drafts
+            self.instances = {k: v for k, v in self.instances.items()
+                              if k not in drafts}
+
     def state_at(self, step: int) -> FrameState:
-        """State of every instance at ``step`` (memoised)."""
+        """State of every instance at ``step`` (memoised); drafts are not in it."""
         if step not in self._states:
             self._states[step] = state_at(self.instances, self.events, step, self.tax)
         return self._states[step]
 
     def cls_of(self, instance: str) -> Optional[str]:
-        """Taxonomy class of an instance key, ``None`` when it has none.
+        """Taxonomy class of an exportable instance key, else ``None``.
 
-        ``None`` covers both an instance that is not in the table at all and one
-        carrying a class the taxonomy does not know -- a provisional ``ls:``
-        draft key, say. Neither can be exported, and both must be skipped rather
-        than crash the export.
+        ``None`` covers three things, and all three are skipped rather than
+        allowed to crash or leak into a release: an instance that is not in the
+        table at all, one carrying a class the taxonomy does not know, and a
+        Label Studio draft -- which is not in ``instances`` to begin with, so
+        this answers ``None`` for it without a rule of its own.
         """
         rec = self.instances.get(instance)
         if rec is None or rec.cls not in self.tax.classes:
@@ -249,7 +273,7 @@ class DesktopCtx:
 
     def exportable(self, step: int) -> bool:
         """Is this step a moment worth exporting at all? (``ignore`` is not.)"""
-        return self.step_type(step) not in SKIP_STEP_TYPES
+        return step_is_annotatable(self.step_type(step))
 
     def actions_at(self, step: int, successful_only: bool = True) -> list[ActionRec]:
         """Actions recorded at ``step``, in ``idx`` order."""
@@ -351,6 +375,31 @@ def frame_is_verified(db: Db, key: FrameKey, rows: dict[str, dict]) -> bool:
     return bool(rows) and all(row.get("status") == VERIFIED for row in rows.values())
 
 
+def conflicted_steps(service: TruthService, desktop: int, view: str,
+                     allow_conflicts: bool) -> set[int]:
+    """Steps of one view with an open disagreement; refuses unless allowed.
+
+    A *standing* conflict is a frozen row a human was told is disputed and has
+    not settled: the compiler may not overwrite it, so every export of that view
+    republishes the disputed value, marked as confirmed, for as long as the
+    queue entry sits there. Both exports therefore stop and say so.
+
+    ``allow_conflicts=True`` is the deliberate "publish it anyway" -- a
+    rehearsal export, a mid-annotation snapshot -- and then the frames involved
+    go out with ``verified: false``, because that is what they are.
+    """
+    rows = service.open_conflicts(desktop, view)
+    if rows and not allow_conflicts:
+        steps = sorted({int(r["step"]) for r in rows})
+        raise RuntimeError(
+            f"desktop {desktop} view {view}: {len(rows)} open conflict(s) on step(s) "
+            f"{steps[:5]}{'...' if len(steps) > 5 else ''} are still unsettled; "
+            f"resolve them in the review panel, or pass allow_conflicts=True to "
+            f"export those frames as unverified"
+        )
+    return {int(r["step"]) for r in rows}
+
+
 def view_tier(view: str, tax: Taxonomy) -> str:
     """The annotation tier of one view (spec 8.1); raises for an unknown one.
 
@@ -374,7 +423,8 @@ def view_tier(view: str, tax: Taxonomy) -> str:
 
 
 def _attributes(ctx: DesktopCtx, instance: str, row: dict, step: int,
-                keyframe: Optional[ShapeKeyframe], tier: Optional[str]) -> dict:
+                keyframe: Optional[ShapeKeyframe], tier: Optional[str],
+                disputed: bool = False) -> dict:
     """The truth-table semantics carried alongside every annotation.
 
     ``tier`` and ``verified`` are deliberately two fields. The tier is the
@@ -383,6 +433,12 @@ def _attributes(ctx: DesktopCtx, instance: str, row: dict, step: int,
     whether a human confirmed this particular row. The single ``quality`` field
     that used to hold ``gold``/``auto`` answered the second question with the
     first question's vocabulary.
+
+    ``disputed`` says the frame carries an open conflict and is being exported
+    anyway (``allow_conflicts``). No row of such a frame is confirmed, whatever
+    its own ``status`` column still says: the image entry already said so, and
+    a consumer filtering on the annotations rather than on the images would
+    otherwise have taken the disputed rows as signed off.
 
     ``implied`` is provenance: the instance was created by
     :mod:`tda.core.implied` because the desktop plainly has one and its log
@@ -399,7 +455,7 @@ def _attributes(ctx: DesktopCtx, instance: str, row: dict, step: int,
         "amodal_complete": None if keyframe is None else bool(keyframe.amodal_complete),
         "implied": bool(rec is not None and is_implied(rec)),
         "tier": tier,
-        "verified": row.get("status") == VERIFIED,
+        "verified": not disputed and row.get("status") == VERIFIED,
     }
 
 
@@ -462,6 +518,7 @@ def export_coco(
     *,
     include_boxes: bool = False,
     truth: Optional[TruthService] = None,
+    allow_conflicts: bool = False,
 ) -> dict:
     """Write the compiled truth of ``desktops`` in ``view`` as one COCO file.
 
@@ -480,6 +537,11 @@ def export_coco(
         Also emit the compiled ``box`` rows -- a part lying on the bench, whose
         truth is a rectangle rather than a mask -- as bbox-only annotations with
         ``segmentation: []``.
+    allow_conflicts:
+        Export a view that still has open conflicts. Without it the export
+        **refuses** (:func:`conflicted_steps`); with it the frames involved are
+        written with ``verified: false``, and ``info`` records how many there
+        were.
 
     Steps typed ``ignore`` are skipped: they describe no moment of the teardown.
 
@@ -496,6 +558,8 @@ def export_coco(
             "only_verified": bool(only_verified),
             "roi_crop": bool(roi_crop),
             "include_boxes": bool(include_boxes),
+            "allow_conflicts": bool(allow_conflicts),
+            "open_conflicts": 0,
         },
         "licenses": [],
         "images": [],
@@ -514,6 +578,8 @@ def export_coco(
         # reading the view out, or a frame nobody visited is exported
         # as it was several edits ago -- or silently not at all
         service.ensure_fresh(desktop, view, only_verified)
+        disputed = conflicted_steps(service, desktop, view, allow_conflicts)
+        doc["info"]["open_conflicts"] += len(disputed)
         for frame in db.frames_for(desktop, view):
             key = FrameKey(desktop, frame["step"], view)
             if not ctx.exportable(key.step):
@@ -536,7 +602,10 @@ def export_coco(
                 # have to read all of them; `review_status` is the raw column
                 # underneath and stays for whoever already reads it
                 "tier": tier,
-                "verified": frame_is_verified(db, key, db.compiled(key)),
+                # a frame somebody is still arguing about is not a confirmed
+                # one, whatever its rows say (spec 3.4)
+                "verified": (key.step not in disputed
+                             and frame_is_verified(db, key, db.compiled(key))),
                 "extra": {"desktop": desktop, "step": key.step, "view": view,
                           "review_status": frame.get("review_status")},
             }
@@ -554,7 +623,8 @@ def export_coco(
                                            segment)
                 ann = _annotation(
                     ann_id, img_id, cat_of[cls], row,
-                    _attributes(ctx, instance, row, key.step, keyframe, tier),
+                    _attributes(ctx, instance, row, key.step, keyframe, tier,
+                                key.step in disputed),
                     roi, include_boxes,
                 )
                 if ann is not None:

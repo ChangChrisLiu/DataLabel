@@ -12,18 +12,54 @@ the :class:`~tda.ui.session_api.SessionLike` protocol.
 """
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 import numpy as np
 
-from tda.core.model import FrameKey
+from tda.core.model import FrameKey, is_provisional
 from tda.core.truth_inputs import frame_hw
 from tda.ui import session_api as api
 from tda.ui.session_api import SessionRefusal
 from tda.ui import session_edit as edit
 from tda.ui.session_ops import GEOM_BOX, ON_BENCH
+from tda.ui.session_tasks import has_bench_roi
 
 __all__ = ["CommitMixin"]
+
+
+def _loggable_extra(extra: Optional[dict]) -> Optional[dict]:
+    """Check a caller's op-log note before anything is written.
+
+    The op log is JSON, so a value that cannot be serialised would fail deep
+    inside the write transaction -- after the keyframe, with the annotator's
+    pixels half in the database. Raising here costs one ``json.dumps`` of a
+    handful of flags and leaves the editing layer exactly as it was.
+    """
+    if extra is None:
+        return None
+    if not isinstance(extra, dict):
+        raise ValueError(f"extra must be a dict, got {type(extra).__name__}")
+    try:
+        json.dumps(extra)
+    except (TypeError, ValueError) as bad:
+        raise ValueError(f"extra must be JSON-serialisable: {bad}") from bad
+    return dict(extra)
+
+
+def _refuse_draft(instance: str) -> None:
+    """Refuse to draw on a Label Studio draft key (spec 3.2).
+
+    Its keyframes are the record of what the team traced before this tool
+    existed; a commit would rewrite one of them in place, still stamped
+    ``source="labelstudio"``, and the draft nobody has adopted yet would quietly
+    become somebody's annotation.
+    """
+    if is_provisional(instance):
+        raise SessionRefusal(
+            f"{instance}：Label Studio 草稿不可直接编辑，"
+            f"请先在 S1 中把草稿指派给真实实例"
+        )
 
 
 class CommitMixin:
@@ -44,11 +80,19 @@ class CommitMixin:
         return key
 
     def begin_edit(self, instance: str) -> None:
-        """Load the instance's amodal shape into the editing layer (spec 4.3)."""
+        """Load the instance's amodal shape into the editing layer (spec 4.3).
+
+        Refuses a Label Studio draft key: its keyframes are the record of what
+        the team traced before this tool existed, and a commit would rewrite one
+        of them in place, under its own ``labelstudio`` source. A draft is
+        resolved onto a real instance in S1 first (spec 3.2); only then is there
+        something to draw on.
+        """
         key = self._editable_frame()
+        _refuse_draft(instance)
         found = self.compiled().instances.get(instance)
         self.layer.begin(instance, None if found is None else found.amodal,
-                         frame_hw(self.db, key))
+                         frame_hw(self.db, key, self.truth.cache_dir))
 
     @property
     def editing_instance(self) -> Optional[str]:
@@ -80,8 +124,17 @@ class CommitMixin:
         """Drop the editing layer without writing anything."""
         self.layer.clear()
 
-    def commit_edit(self, scope: str, direction: str = edit.REVERSE) -> dict:
+    def commit_edit(self, scope: str, direction: str = edit.REVERSE, *,
+                    extra: Optional[dict] = None) -> dict:
         """Write the editing layer back with the scope the annotator chose.
+
+        ``extra`` is merged into the op-log payload of this commit: what the
+        *window* knows about why it was made and the session cannot derive --
+        "the annotator was warned the shape is implausibly large and went
+        ahead". It belongs in the audit trail of that commit rather than in a
+        log nobody joins back to it. Values must be JSON-serialisable, because
+        the op log is JSON; anything else raises :class:`ValueError` **before**
+        anything is written. Keys the payload already uses are not overwritten.
 
         ``scope`` is one of :data:`tda.ui.session_api.COMMIT_SCOPES`, or one of
         the two layering answers :func:`tda.ui.session_edit.suggest_scope` gives
@@ -103,6 +156,7 @@ class CommitMixin:
         """
         if not self.layer.active:
             raise RuntimeError("commit_edit() needs begin_edit() first")
+        extra = _loggable_extra(extra)
         key, instance = self._editable_frame(), self.layer.instance
         pair = edit.split_zorder_scope(scope)
         if pair is None and not self.layer.changed():
@@ -114,19 +168,20 @@ class CommitMixin:
             self._refuse_mask_on_bench(key, instance)
             result = edit.commit_edit(self.db, self.truth, key, instance,
                                       self.layer.mask(), self._shape_scope(scope),
-                                      direction, self.annotator, pair=other)
+                                      direction, self.annotator, pair=other,
+                                      extra=extra)
             self.layer.settle()   # the pixels went to the database with the pair
         elif pair is not None:
             other, above = pair
             result = edit.commit_pair_override(
                 self.db, self.truth, key,
                 instance if above else other, other if above else instance,
-                self.annotator, known=self._known_instances(),
+                self.annotator, known=self._known_instances(), extra=extra,
             )
         else:
             self._refuse_mask_on_bench(key, instance)
             result = edit.commit_edit(self.db, self.truth, key, instance, self.layer.mask(),
-                                      scope, direction, self.annotator)
+                                      scope, direction, self.annotator, extra=extra)
             # What was just written is no longer uncommitted: the layer's
             # baseline moves to the mask that went to the database, so the guard
             # on goto/open/close sees a settled layer rather than refusing to
@@ -181,8 +236,20 @@ class CommitMixin:
             )
 
     def commit_box(self, instance: str, box, direction: str = edit.REVERSE) -> dict:
-        """Draw the staging-area rectangle of a part on the bench (spec 4.2 S4)."""
-        result = edit.commit_box(self.db, self.truth, self._editable_frame(), instance, box,
+        """Draw the staging-area rectangle of a part on the bench (spec 4.2 S4).
+
+        Refused on a view with no staging-area ROI: a part that has been taken
+        out is not in that picture at all (spec 4.2 item 1), so the keyframe
+        would be one the compiler never selects, on a frame the part is not in.
+        """
+        key = self._editable_frame()
+        _refuse_draft(instance)  # the one write that names its own instance
+        if not has_bench_roi(self.db, key):
+            raise SessionRefusal(
+                f"本视图没有堆放区 ROI，不能画桌面框：{self.view} 看不到堆放区，"
+                f"{instance} 离开机箱后不在这个画面里"
+            )
+        result = edit.commit_box(self.db, self.truth, key, instance, box,
                                  direction=direction, annotator=self.annotator)
         return self._after_edit(result)
 

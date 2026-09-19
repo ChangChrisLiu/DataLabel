@@ -177,11 +177,14 @@ def test_a_resolved_conflict_leaves_the_frame_to_be_judged_again(session):
     session.truth.run_pending_rechecks(DESKTOP, VIEW)
     cid = session.queues()[api.QUEUE_CONFLICTS][0]["id"]
 
-    # a human may confirm a frame that still has an open conflict, and that
-    # stamps a digest; resolving then changes the rows under it, so the stamp
-    # has to go or the next pass would skip a frame it has never judged
+    # a frame can carry a stamp while a conflict of it is open -- a pass that
+    # found nothing to do wrote one, a repair script wrote one -- and resolving
+    # changes the rows under it, so the stamp has to go or the next pass would
+    # skip a frame it has never judged
     key = FrameKey(DESKTOP, 12, VIEW)
-    session.truth.verify_frame(key, "tester")
+    session.db.set_frame_digest(key, session.truth.inputs_digest(key),
+                                session.truth.compiler_version,
+                                len(session.db.compiled(key)))
     assert session.db.frame_digest(key) is not None
 
     session.truth.resolve_conflict(cid, api.RESOLVE_ACCEPT_NEW, "tester")

@@ -49,19 +49,23 @@ from typing import Iterable, Optional
 import numpy as np
 
 from tda.core import masks
+from tda.core.cache import configured_cache_dir
 from tda.core.compiler import CompiledFrame, compile_frame, select_keyframe
 from tda.core.db import RESOLUTIONS, Db
-from tda.core.model import FrameKey, Placement, ShapeKeyframe
+from tda.core.model import FrameKey, FrameOverride, ShapeKeyframe
 from tda.core.states import needs_geom
 from tda.core.taxonomy import Taxonomy
 from tda.core.truth_fresh import FreshMixin, digest_of
 from tda.core.truth_resolve import ResolveMixin, StaleConflictError
+from tda.core.truth_verify import BLOCKING_PROBLEMS, VerifyMixin
 from tda.core.truth_conflicts import (
     BOX_TOL_PX,
     GEOM_BOX,
     disagreement,
     geom_payload,
+    label_changes,
     payload_geometry,
+    payload_labels,
     row_payload,
     row_values,
 )
@@ -77,11 +81,6 @@ from tda.core.truth_inputs import (
 
 __all__ = ["BLOCKING_PROBLEMS", "BOX_TOL_PX", "BY_HAND", "StaleConflictError", "TruthService"]
 
-#: Problem prefixes that stop a frame from being verified (spec 3.3 step 3).
-#: Everything else -- ``bench_missing``, ``zorder_missing``, ``empty_visible``,
-#: ``pose_segment_ambiguous`` -- is a warning the annotator may accept.
-BLOCKING_PROBLEMS = ("missing_shape:", "zorder_cycle:", "shape_size_mismatch:")
-
 ACCEPT_NEW = "accept_new"
 KEEP_OLD = "keep_old"
 SUPERSEDED = "superseded"
@@ -91,21 +90,36 @@ OPEN = "open"
 #: :meth:`TruthService.resolve_conflict` itself.
 BY_HAND = tuple(r for r in RESOLUTIONS if r != SUPERSEDED)
 
+#: ``cache_dir`` was not given: resolve it from the configuration.
+_CONFIGURED = object()
+
 AUTO = "auto"
+#: The two row statuses the session and the review panel read off this module.
 VERIFIED = "verified"
 NEEDS_REVIEW = "needs_review"
-ON_BENCH = Placement.ON_BENCH.value
-BENCH_MISSING = "bench_missing:"
-SYSTEM = "system"
 
 
-class TruthService(FreshMixin, ResolveMixin):
+class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
     """Reads the annotations, compiles frames and owns the ``compiled_mask`` table."""
 
-    def __init__(self, db: Db, tax: Taxonomy, compiler_version: str = "1"):
+    def __init__(self, db: Db, tax: Taxonomy, compiler_version: str = "1",
+                 cache_dir: object = _CONFIGURED):
+        """``cache_dir`` is where this database's frames are cached locally.
+
+        Every compilation needs the frame's canvas size, and measuring it off
+        the read-only source drive costs a 12 MP decode per frame; the local
+        copy costs nothing. Left out, it is resolved from ``configs/paths.yaml``
+        -- but only for the database that file names
+        (:func:`tda.core.cache.configured_cache_dir`), because a cache belongs
+        to the annotations it was built for. Pass it explicitly (``None`` to opt
+        out) when the caller knows better.
+        """
         self.db = db
         self.tax = tax
         self.compiler_version = compiler_version
+        if cache_dir is _CONFIGURED:
+            cache_dir = configured_cache_dir(getattr(db, "path", None))
+        self.cache_dir: Optional[str] = None if cache_dir is None else str(cache_dir)
 
     # ------------------------------------------------------------------ compile
 
@@ -117,7 +131,7 @@ class TruthService(FreshMixin, ResolveMixin):
         self, key: FrameKey, cache: Optional[InputCache] = None
     ) -> tuple[FrameInputs, CompiledFrame]:
         """The frame's inputs and its compilation; ``hw`` is needed by callers."""
-        inputs = gather(self.db, self.tax, key, cache)
+        inputs = gather(self.db, self.tax, key, cache, self.cache_dir)
         return inputs, self._compile_inputs(key, inputs)
 
     def _compile_inputs(self, key: FrameKey, inputs: FrameInputs) -> CompiledFrame:
@@ -172,7 +186,7 @@ class TruthService(FreshMixin, ResolveMixin):
         it has now, and a conflict describing the old ones would be a conflict
         nobody caused.
         """
-        inputs = gather(self.db, self.tax, key, cache)
+        inputs = gather(self.db, self.tax, key, cache, self.cache_dir)
         digest = digest_of(inputs, self.compiler_version)
         if not ignore_digest and self._digest_is_current(key, digest):
             # the rows already describe exactly these inputs: there is nothing
@@ -187,10 +201,12 @@ class TruthService(FreshMixin, ResolveMixin):
         # whole keyframe table again, which is most of a batch pass's time
         compiled = self._compile_inputs(key, inputs)  # no transaction: pixels only
         with self.db.transaction():
-            return self._write_refresh(key, compiled, guard, digest)
+            return self._write_refresh(key, compiled, guard, digest,
+                                       inputs.frame_overrides)
 
     def _write_refresh(self, key: FrameKey, compiled: CompiledFrame,
-                       guard: Optional[str], digest: str) -> dict:
+                       guard: Optional[str], digest: str,
+                       overrides: dict[str, FrameOverride]) -> dict:
         """The write half of :meth:`refresh`; the caller holds the transaction."""
         result: dict = {
             "updated": 0,
@@ -229,13 +245,15 @@ class TruthService(FreshMixin, ResolveMixin):
                 continue
             if row is not None and row["status"] == VERIFIED:
                 diff = disagreement(row, compiled_inst)
-                if diff is None:
+                labels = label_changes(row, compiled_inst, overrides.get(instance))
+                if diff is None and not labels:
                     result["skipped"] += 1
                     continue
                 values = row_values(compiled_inst)
                 queued, _new = self._queue_conflict(
                     key, instance, row_payload(row),
-                    geom_payload(values.visible_rle, values.box), diff, queued,
+                    geom_payload(values.visible_rle, values.box, labels),
+                    int(diff or 0), queued,
                 )
                 result["conflicts"] += 1
                 continue
@@ -316,6 +334,26 @@ class TruthService(FreshMixin, ResolveMixin):
             self.db.add_rechecks(desktop, view, wanted)
         return sorted(set(wanted))
 
+    def queue_rechecks_for_view(self, desktop: int, view: str) -> list[int]:
+        """Queue every frozen frame of one view (:meth:`tda.core.db.Db.queue_rechecks_for_view`).
+
+        The service's name for it, so a caller that already holds a
+        :class:`TruthService` does not have to reach past it into the database.
+        """
+        return self.db.queue_rechecks_for_view(desktop, view)
+
+    def open_conflicts(self, desktop: int, view: Optional[str] = None) -> list[dict]:
+        """Disagreements of one desktop (or one view) nobody has settled, oldest first.
+
+        A *standing* conflict is the one thing a batch pass cannot work around:
+        :meth:`refresh` will not overwrite the frozen row, so the view keeps
+        publishing a value a human has already been told is disputed. Exports
+        refuse on it unless they are told to go ahead
+        (:func:`tda.core.export.coco.export_coco`'s ``allow_conflicts``), and a
+        quality check reports it.
+        """
+        return self.db.conflicts(desktop, view, open_only=True)
+
     def pending_rechecks(self, desktop: int, view: str) -> list[int]:
         """Frozen frames of one view still waiting to be compared, ascending.
 
@@ -342,59 +380,6 @@ class TruthService(FreshMixin, ResolveMixin):
             self.db.clear_recheck(desktop, view, step, gen)
         return total
 
-    # ------------------------------------------------------- verify and demote
-
-    def verify_frame(self, key: FrameKey, annotator: str) -> None:
-        """Freeze every row of one frame after a human confirmed it (spec 4.2).
-
-        Raises :class:`ValueError` when the compilation has a blocking problem
-        (:data:`BLOCKING_PROBLEMS`) -- a frame with a missing chassis shape or a
-        contradictory z-order is not a truth anybody can confirm. Warnings, such
-        as a bench part nobody has boxed yet, do not stop the confirmation; they
-        only leave ``bench_annotated`` false.
-
-        Every write goes into one transaction: a frame is either confirmed
-        whole -- rows, flag and op log -- or not at all.
-        """
-        _, compiled = self._compile(key)
-        blocking = [p for p in compiled.problems if p.startswith(BLOCKING_PROBLEMS)]
-        if blocking:
-            raise ValueError(
-                f"frame {key.desktop}/{key.view}/step {key.step} cannot be verified: "
-                + ", ".join(blocking)
-            )
-        stored = self.db.compiled(key)
-        previous = self._review_status(key)
-        with self.db.transaction():
-            for instance in sorted(compiled.instances):
-                self._put_row(
-                    key, instance, row_values(compiled.instances[instance]),
-                    VERIFIED, compiled.input_hash, verified_by=annotator,
-                )
-            for instance in sorted(set(stored) - set(compiled.instances)):
-                self.db.delete_compiled(key, instance)  # not in this frame at all
-            self._mark_bench(key, compiled)
-            self._stamp(key, self.inputs_digest(key))
-            self.db.set_frame_flags(key, review_status=VERIFIED)
-            self.db.log_op(
-                key.desktop, key.view, "verify_frame",
-                {"step": key.step, "instances": sorted(compiled.instances),
-                 "problems": list(compiled.problems), "input_hash": compiled.input_hash},
-                {"kind": "set_review_status", "step": key.step, "review_status": previous},
-                annotator,
-            )
-
-    def demote_frame(self, key: FrameKey, reason: str) -> None:
-        """Send a frame back to the review queue (spec 3.4, "需复核")."""
-        previous = self._review_status(key)
-        self.db.set_frame_flags(key, review_status=NEEDS_REVIEW)
-        self.db.log_op(
-            key.desktop, key.view, "demote_frame",
-            {"step": key.step, "reason": reason},
-            {"kind": "set_review_status", "step": key.step, "review_status": previous},
-            SYSTEM,
-        )
-
     # ------------------------------------------------------ conflict resolution
 
     # -------------------------------------------------------------- keyframes
@@ -409,10 +394,16 @@ class TruthService(FreshMixin, ResolveMixin):
         was drawn for, and :func:`tda.core.compiler.select_keyframe` picks this
         keyframe out of the chain -- i.e. exactly the frames an edit to this
         shape would change (spec 4.3).
+
+        "Needs geometry there" is asked of :func:`tda.core.states.needs_geom`
+        with this segment's bench ROI, exactly as :func:`gather` asks it: a
+        bench box on a view with no staging area reaches no frame at all, and
+        saying it reached four was a promise about pixels nobody compiles.
         """
         cache = InputCache()
         instances = instances_of(self.db, desktop, cache)
         events = events_of(self.db, self.tax, desktop, cache)
+        bench_roi = self.db.bench_roi(desktop, view, keyframe.pose_segment)
         chain = [
             kf
             for kf in self.db.keyframes(desktop, view, instance)
@@ -425,7 +416,8 @@ class TruthService(FreshMixin, ResolveMixin):
             if pose_segment_of(self.db, key, cache) != keyframe.pose_segment:
                 continue
             state = state_of(self.db, self.tax, desktop, step, cache)
-            if instance not in needs_geom(instances, state, self.tax):
+            if instance not in needs_geom(instances, state, self.tax,
+                                          bench_roi=bench_roi):
                 continue
             if state[instance].placement != keyframe.placement:
                 continue
@@ -518,49 +510,23 @@ class TruthService(FreshMixin, ResolveMixin):
 
     @staticmethod
     def _geom_id(payload: Optional[dict]) -> Optional[str]:
-        """The cheapest identity of a conflict side: its counts string or its box."""
+        """The cheapest identity of a conflict side: its geometry and its labels.
+
+        The labels are part of the identity because two disagreements about the
+        same unchanged outline -- "it is occluded_partial", then "no, it is
+        too_small" -- are two different things to decide, and deduplicating them
+        onto one queue entry would lose the second.
+        """
         if not payload:
             return None
         if "box" in payload:
-            return "box:" + ",".join(f"{float(v):.3f}" for v in payload["box"])
-        counts = payload.get("counts")
-        if isinstance(counts, bytes):
-            counts = counts.decode("ascii")
-        return None if counts is None else str(counts)
-
-    def _review_status(self, key: FrameKey) -> Optional[str]:
-        frame = self.db.get_frame(key)
-        return None if frame is None else frame.get("review_status")
-
-    def _frame_is_verified(self, key: FrameKey, stored: dict[str, dict]) -> bool:
-        """Has a human confirmed this frame? The flag, or any frozen row."""
-        if self._review_status(key) == VERIFIED:
-            return True
-        return any(row["status"] == VERIFIED for row in stored.values())
-
-    @staticmethod
-    def _demotion_reason(fresh: set[str], known: set[str]) -> str:
-        parts = []
-        if fresh - known:
-            parts.append("gained " + ", ".join(sorted(fresh - known)))
-        if known - fresh:
-            parts.append("lost " + ", ".join(sorted(known - fresh)))
-        return "the verified frame " + " and ".join(parts)
-
-    def _mark_bench(self, key: FrameKey, compiled: CompiledFrame) -> None:
-        """Keep ``bench_annotated`` in step with the bench shapes (spec 3.3.3).
-
-        Only frames that actually have a part on the bench carry the flag; a
-        missing bench shape clears it instead of blocking the frame.
-        """
-        if not any(inst.placement == ON_BENCH for inst in compiled.instances.values()):
-            # no bench instance in this frame at all -- either nothing is out of
-            # the machine yet, or this view has no staging area and the gate in
-            # `gather` dropped them (spec 3.3 step 2). Either way the flag is
-            # about something that is not here, so it is left as it was.
-            return
-        annotated = not any(p.startswith(BENCH_MISSING) for p in compiled.problems)
-        frame = self.db.get_frame(key)
-        if frame is not None and frame.get("bench_annotated") is annotated:
-            return  # unchanged: a refresh that changes nothing writes nothing
-        self.db.set_frame_flags(key, bench_annotated=annotated)
+            geom: Optional[str] = "box:" + ",".join(
+                f"{float(v):.3f}" for v in payload["box"]
+            )
+        else:
+            geom = masks.rle_counts(payload)
+        labels = payload_labels(payload)
+        if not labels:
+            return geom
+        tag = ";".join(f"{c.get('field')}={c.get('new')}" for c in labels)
+        return f"{geom or ''}|{tag}"

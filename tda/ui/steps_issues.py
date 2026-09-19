@@ -36,7 +36,7 @@ from tda.core.taxonomy import Taxonomy
 from tda.ui.steps_values import DIFFICULTY_MAX, DIFFICULTY_MIN, RELATION_FIELDS
 
 __all__ = [
-    "action_issues", "dangling_issues", "orphan_issues", "row_issues",
+    "action_issues", "dangling_issues", "draft_issues", "orphan_issues", "row_issues",
     "unresolved_issues",
 ]
 
@@ -83,13 +83,35 @@ def orphan_issues(
 
     So is an *implied* instance (:mod:`tda.core.implied`): "no action names it"
     is its definition, not a defect, and :func:`unresolved_issues` already asks
-    the one question that matters about it.
+    the one question that matters about it. So is a Label Studio draft, for the
+    same reason and more strongly -- see :func:`draft_issues`.
     """
     targeted = {action.target for action in actions}
     for key in sorted(instances):
-        if key == CHASSIS_KEY or key in targeted or is_implied(instances[key]):
+        if (key == CHASSIS_KEY or key in targeted or is_provisional(key)
+                or is_implied(instances[key])):
             continue
         yield f"no action references {key} - delete it or retarget a step at it"
+
+
+def draft_issues(instances: dict[str, InstanceRec]) -> Iterator[str]:
+    """One line saying how many Label Studio drafts this desktop carries.
+
+    They are not orphaned parts of the machine and never will be: nothing
+    references them because they are the team's old tracings, waiting for an
+    annotator to adopt them onto real instances (spec 3.2). Listed one by one
+    they were 63 lines on D13 telling the annotator to delete or retarget each
+    -- work that does not exist, burying the work that does.
+
+    Yielded last, after every real question, and nothing follows from it: the
+    drafts stay deletable in the ordinary way.
+    """
+    drafts = [key for key in instances if is_provisional(key)]
+    if drafts:
+        yield (
+            f"{len(drafts)} Label Studio drafts (ls:*) on this desktop - they are "
+            f"reference material and need no action"
+        )
 
 
 def dangling_issues(instances: dict[str, InstanceRec], tax: Taxonomy) -> Iterator[str]:

@@ -153,7 +153,8 @@ def _result(db: Db, truth: TruthService, key: FrameKey, steps: Sequence[int], op
 # --------------------------------------------------------------------------- #
 def commit_edit(db: Db, truth: TruthService, key: FrameKey, instance: str,
                 mask: np.ndarray, scope: str, direction: str = REVERSE,
-                annotator: str = "system", pair: Optional[str] = None) -> dict:
+                annotator: str = "system", pair: Optional[str] = None,
+                extra: Optional[dict] = None) -> dict:
     """Write one pixel edit back with the scope the annotator chose (spec 4.3).
 
     ``scope`` is one of :data:`tda.ui.session_api.COMMIT_SCOPES`:
@@ -185,15 +186,16 @@ def commit_edit(db: Db, truth: TruthService, key: FrameKey, instance: str,
         raise SessionRefusal(
             f"direction must be one of {DIRECTIONS}, got {direction!r}")
     cache = InputCache()
-    hw = frame_hw(db, key)
+    hw = frame_hw(db, key, truth.cache_dir)
     edited = as_mask(mask, hw)
     if scope == api.SCOPE_FRAME_OVERRIDE:
-        return _commit_frame_override(db, truth, key, instance, edited, hw, annotator)
+        return _commit_frame_override(db, truth, key, instance, edited, hw, annotator,
+                                      extra)
     if scope not in (api.SCOPE_KEYFRAME, api.SCOPE_SPLIT):
         raise SessionRefusal(f"unknown commit scope {scope!r}")
     parts = [ShapePart(MAIN, masks.encode_rle(edited))]
     return _commit_shape(db, truth, key, instance, parts, GEOM_MASK, scope, direction,
-                         cache, annotator, pair=pair)
+                         cache, annotator, pair=pair, extra=extra)
 
 
 def commit_box(db: Db, truth: TruthService, key: FrameKey, instance: str,
@@ -214,7 +216,8 @@ def commit_box(db: Db, truth: TruthService, key: FrameKey, instance: str,
 def _commit_shape(db: Db, truth: TruthService, key: FrameKey, instance: str,
                   parts: list[ShapePart], geom_type: str, scope: str, direction: str,
                   cache: InputCache, annotator: str,
-                  pair: Optional[str] = None) -> dict:
+                  pair: Optional[str] = None,
+                  extra: Optional[dict] = None) -> dict:
     """The shared body of :func:`commit_edit` and :func:`commit_box`.
 
     ``pair`` is the instance this one is to be put *above* in the same gesture
@@ -280,7 +283,7 @@ def _commit_shape(db: Db, truth: TruthService, key: FrameKey, instance: str,
         common = {"desktop": key.desktop, "view": key.view, "step": key.step,
                   "instance": instance, "scope": scope, "direction": direction,
                   "steps": steps}
-        payload = common | {"keyframes": after,
+        payload = _with_extra(common, extra) | {"keyframes": after,
                             "zorder": None if zorder is None else zorder["after"],
                             "pair": _pair_payload(pair_state, True)}
         inverse = common | {"keyframes": list(reversed(before)),
@@ -419,6 +422,19 @@ def _cannot_split(chosen: Optional[ShapeKeyframe], step: int, direction: str) ->
     return direction == REVERSE and int(chosen.anchor_step) == int(step)
 
 
+def _with_extra(common: dict, extra: Optional[dict]) -> dict:
+    """The caller's op-log note under the payload's own keys, never over them.
+
+    ``extra`` is what the *window* knows about why a commit was made -- "the
+    annotator was warned the shape is implausibly large and went ahead" -- which
+    belongs in the audit trail of that commit. It is checked for
+    JSON-serialisability by the session before anything is written
+    (:func:`tda.ui.session_commits._loggable_extra`); here it only has to be
+    unable to rewrite the payload's own account of what happened.
+    """
+    return common if not extra else dict(extra) | common
+
+
 def _loggable(payload: dict) -> dict:
     """The op-log copy of a payload: the shared ``ref`` holders flattened away."""
     return payload | {
@@ -452,7 +468,8 @@ def _append_to_zorder(db: Db, key: FrameKey, seg: int, instance: str,
 
 
 def _commit_frame_override(db: Db, truth: TruthService, key: FrameKey, instance: str,
-                           edited: np.ndarray, hw: tuple[int, int], annotator: str) -> dict:
+                           edited: np.ndarray, hw: tuple[int, int], annotator: str,
+                           extra: Optional[dict] = None) -> dict:
     """Spec 4.3 单帧覆盖: the edit applies to this frame and to no other.
 
     The stored mask is the *visible* one, so the frame's occluders come off it
@@ -464,8 +481,9 @@ def _commit_frame_override(db: Db, truth: TruthService, key: FrameKey, instance:
     previous = db.frame_overrides(key).get(instance)
     common = {"desktop": key.desktop, "view": key.view, "step": key.step,
               "instance": instance, "steps": [key.step]}
-    payload = common | {"exists": True, "visible_rle": masks.encode_rle(visible),
-                        "visibility": None if previous is None else previous.visibility}
+    payload = _with_extra(common, extra) | {
+        "exists": True, "visible_rle": masks.encode_rle(visible),
+        "visibility": None if previous is None else previous.visibility}
     inverse = common | {"exists": previous is not None,
                         "visible_rle": None if previous is None else previous.visible_rle,
                         "visibility": None if previous is None else previous.visibility}
@@ -526,7 +544,8 @@ def set_zorder_move(db: Db, truth: TruthService, key: FrameKey, instance: str,
 
 def commit_pair_override(db: Db, truth: TruthService, key: FrameKey, above: str,
                          below: str, annotator: str = "system",
-                         known: Optional[set[str]] = None) -> dict:
+                         known: Optional[set[str]] = None,
+                         extra: Optional[dict] = None) -> dict:
     """Record "``above`` beats ``below``" for this pose segment (spec 4.3 改层级).
 
     A pairwise exception rather than a new global order: it says one thing about
@@ -543,7 +562,7 @@ def commit_pair_override(db: Db, truth: TruthService, key: FrameKey, above: str,
 
     common = {"desktop": key.desktop, "view": key.view, "pose_segment": seg,
               "above": above, "below": below, "steps": steps}
-    payload = common | {"exists": True}
+    payload = _with_extra(common, extra) | {"exists": True}
     inverse = common | {"exists": existed}
     with db.transaction():
         db.set_pair_override(po)
@@ -583,7 +602,7 @@ def commit_occluder(db: Db, truth: TruthService, key: FrameKey, mask: np.ndarray
     One layer per type, because the compiler subtracts each type separately and
     the database keys ``occluder_mask`` on it.
     """
-    layer = as_mask(mask, frame_hw(db, key))
+    layer = as_mask(mask, frame_hw(db, key, truth.cache_dir))
     previous = next((o for o in db.occluders(key) if o.occluder_type == occluder_type), None)
     common = {"desktop": key.desktop, "view": key.view, "step": key.step,
               "occluder_type": occluder_type, "steps": [key.step]}

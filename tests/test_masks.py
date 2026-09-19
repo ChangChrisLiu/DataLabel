@@ -418,3 +418,19 @@ def test_labelmap_rejects_more_than_uint16_ids():
             [str(i) for i in range(65_536)],
             hw,
         )
+
+
+# --------------------------------------------------------------------------
+# counts of an RLE (one helper, three callers)
+# --------------------------------------------------------------------------
+def test_rle_counts_normalises_bytes_to_str():
+    rle = M.encode_rle(_square((16, 16), 2, 2, 4))
+    as_bytes = {"size": list(rle["size"]), "counts": rle["counts"].encode("ascii")}
+    assert M.rle_counts(as_bytes) == rle["counts"]
+    assert M.rle_counts(rle) == rle["counts"]
+
+
+def test_rle_counts_of_nothing_is_none():
+    assert M.rle_counts(None) is None
+    assert M.rle_counts({}) is None
+    assert M.rle_counts({"size": [4, 4]}) is None

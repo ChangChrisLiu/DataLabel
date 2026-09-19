@@ -24,6 +24,7 @@ from tda.core.model import FrameKey
 from tda.ui import session_api as api
 from tda.ui.commands import edit_editing_mask_op
 from tda.ui.session import AnnotationSession
+from tda.ui.session_api import SessionRefusal
 from session_scene import (
     CHASSIS,
     COOLER,
@@ -201,6 +202,36 @@ def test_frame_override_touches_only_this_frame(session):
     assert np.array_equal(session.compiled().instances[COOLER].visible, cell(0))
 
 
+def test_commit_edit_carries_the_windows_own_note_into_the_op_log(session):
+    """``extra`` is what the window records about *why* it committed.
+
+    "The annotator was warned the shape is implausibly large and went ahead" is
+    not something the session can derive, and it belongs in the audit trail of
+    that commit rather than in a log nobody joins back to it.
+    """
+    session.goto(10)
+    session.begin_edit(COOLER)
+    session.set_editing_mask(cell(0))
+    session.commit_edit(api.SCOPE_KEYFRAME, extra={"area_warning_overridden": True})
+
+    op = session.db.ops(DESKTOP, VIEW)[0]
+    assert op["kind"] == "commit_keyframe"
+    assert op["payload"]["area_warning_overridden"] is True
+    assert op["payload"]["instance"] == COOLER  # and everything else is still there
+
+
+def test_commit_edit_refuses_a_note_that_cannot_be_logged(session):
+    session.goto(10)
+    session.begin_edit(COOLER)
+    session.set_editing_mask(cell(0))
+
+    with pytest.raises(ValueError, match="JSON"):
+        session.commit_edit(api.SCOPE_KEYFRAME, extra={"when": object()})
+
+    assert session.db.ops(DESKTOP, VIEW) == []  # nothing was written
+    assert session.editing_instance == COOLER   # and the layer is still there
+
+
 def test_commit_logs_a_source_level_operation(session):
     session.goto(10)
     draw(session, COOLER, cell(0), api.SCOPE_KEYFRAME)
@@ -211,6 +242,10 @@ def test_commit_logs_a_source_level_operation(session):
 
 
 def test_commit_box_writes_a_bench_rectangle(session):
+    # the scene's view sees no staging area by default, and a bench box only
+    # reaches the frames the compiler would put the part on the bench in
+    session.db.set_pose_segment(DESKTOP, VIEW, 1, 1, LAST_STEP, LAST_STEP, None, None)
+    session.db.set_pose_segment_bench_roi(DESKTOP, VIEW, 1, (0, 0, 32, 32))
     session.goto(14)  # the cooler is on the bench from step 13 on
     result = session.commit_box(COOLER, (2.0, 2.0, 12.0, 12.0))
     kfs = [kf for kf in session.db.keyframes(DESKTOP, VIEW, COOLER) if kf.geom_type == "box"]
@@ -218,6 +253,19 @@ def test_commit_box_writes_a_bench_rectangle(session):
     assert kfs[0].placement == "on_bench"
     assert kfs[0].anchor_step == LAST_STEP
     assert result["affected"] == [13, 14]
+
+
+def test_a_bench_box_on_a_view_without_a_staging_area_is_refused(session):
+    """The scanner cannot see the bench, so there is nothing to box there.
+
+    It used to be written and then reported as "affects 1 frame" -- a keyframe
+    the compiler will never select, on a frame the part is not in.
+    """
+    session.goto(14)
+    with pytest.raises(SessionRefusal, match="堆放区"):
+        session.commit_box(COOLER, (2.0, 2.0, 12.0, 12.0))
+    assert not [kf for kf in session.db.keyframes(DESKTOP, VIEW, COOLER)
+                if kf.geom_type == "box"]
 
 
 # --------------------------------------------------------------------------- #

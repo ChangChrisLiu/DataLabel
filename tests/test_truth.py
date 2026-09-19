@@ -202,6 +202,121 @@ def test_refresh_skips_every_row_when_the_input_hash_is_unchanged(scene: Scene, 
     assert calls == []
 
 
+# --------------------------------------------------------------------------- #
+# where the pixels are
+# --------------------------------------------------------------------------- #
+def test_frame_hw_reads_the_local_cache_and_never_the_source_drive(
+    scene: Scene, tmp_path: Path, monkeypatch
+):
+    """The first compile of a view used to decode 12 MP images off F: (spec 2.4).
+
+    ``_image_path`` looked for ``aux["cache_path"]``, which nothing writes, so
+    it fell through to the frame's own path -- the read-only source drive, one
+    full-resolution read per frame, and the nominal size when F: is detached.
+    """
+    from tda.core.cache import cached_image_path
+
+    key = FrameKey(DESKTOP, 9, VIEW)
+    scene.db.upsert_frame(key, "F:/raw/scan/D01/s009.png", {}, None)
+    cached = Path(cached_image_path(str(tmp_path), key))
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(cached), np.zeros((12, 34, 3), np.uint8))
+
+    read: list[str] = []
+    real = cv2.imread
+    monkeypatch.setattr(cv2, "imread",
+                        lambda path, *a, **k: (read.append(str(path)), real(path, *a, **k))[1])
+
+    assert frame_hw(scene.db, key, cache_dir=str(tmp_path)) == (12, 34)
+
+    assert [Path(p) for p in read] == [cached]
+    assert not [p for p in read if p.upper().startswith("F:")]
+    assert scene.db.get_frame(key)["aux"]["hw_source"] == "measured"
+
+
+def test_a_truth_service_carries_the_cache_directory_into_every_compile(
+    scene: Scene, tmp_path: Path
+):
+    from tda.core.cache import cached_image_path
+    from tda.core.truth import TruthService
+
+    key = FrameKey(DESKTOP, 9, VIEW)
+    scene.db.upsert_frame(key, "F:/raw/scan/D01/s009.png", {}, None)
+    cached = Path(cached_image_path(str(tmp_path), key))
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(cached), np.zeros((12, 34, 3), np.uint8))
+
+    TruthService(scene.db, scene.tax, cache_dir=str(tmp_path)).compile(key)
+
+    assert tuple(scene.db.get_frame(key)["aux"]["hw"]) == (12, 34)
+
+
+def test_a_temporary_database_never_borrows_the_configured_cache(tmp_path: Path):
+    """A cache belongs to the annotations it was built for, and to no other.
+
+    The default is resolved through the database's own path, so a copy under
+    ``.cache/tmp`` -- or a test's temp file -- gets ``None`` rather than the
+    machine's real cache, whose D01 images would be measured into it.
+    """
+    from tda.core.cache import configured_cache_dir
+
+    assert configured_cache_dir(str(tmp_path / "scratch.sqlite")) is None
+    assert configured_cache_dir(None) is None
+
+
+def test_affected_steps_asks_the_same_need_set_the_compiler_does(scene: Scene):
+    """A view with no staging area is not asked for bench boxes -- everywhere.
+
+    ``affected_steps`` drives the canvas' "affects N frames" strip; it used to
+    count frames the compiler does not even put the instance in.
+    """
+    assert scene.svc.affected_steps(DESKTOP, VIEW, SCREW, scene.bench_kf) == [3]
+
+    scene.db.set_pose_segment_bench_roi(DESKTOP, VIEW, 1, None)
+
+    assert scene.svc.affected_steps(DESKTOP, VIEW, SCREW, scene.bench_kf) == []
+    assert scene.svc.affected_steps(DESKTOP, VIEW, PSU, scene.psu_kf) == [1, 2, 3]
+
+
+def test_an_ignore_step_is_never_compiled_or_stamped(scene: Scene):
+    """Spec 6.6: an ``ignore`` step describes no moment of the teardown.
+
+    The exports already skipped it; the truth table did not, so it was compiled,
+    stamped and confirmable -- and then dropped on the way out.
+    """
+    from tda.core.truth_inputs import annotatable_steps
+
+    steps = scene.db.steps(DESKTOP)
+    steps[1].step_type = "ignore"
+    scene.db.replace_steps(DESKTOP, steps, scene.db.actions(DESKTOP))
+
+    assert annotatable_steps(scene.db, DESKTOP, VIEW, [1, 2, 3]) == [1, 3]
+
+    scene.svc.ensure_fresh(DESKTOP, VIEW)
+
+    assert scene.rows(2) == {}
+    assert scene.db.frame_digest(scene.key(2)) is None
+    assert scene.rows(1) and scene.rows(3)
+
+
+def test_input_digest_ignores_whether_an_rle_carries_str_or_bytes_counts(scene: Scene):
+    """pycocotools hands out ``bytes`` counts; a digest that saw them never matched."""
+    from tda.core.truth_fresh import digest_of
+    from tda.core.truth_inputs import gather
+
+    key = scene.key(1)
+    inputs = gather(scene.db, scene.tax, key)
+    rle = masks.encode_rle(rect(0, 0, 8, 8))
+    raw = {"size": list(rle["size"]), "counts": rle["counts"].encode("ascii")}
+
+    def digest(payload) -> str:
+        inputs.occluders = [OccluderMask(key, "hand", dict(payload))]
+        inputs.frame_overrides = {PSU: FrameOverride(key, PSU, dict(payload), "visible")}
+        return digest_of(inputs, "1")
+
+    assert digest(raw) == digest(rle)
+
+
 def test_refresh_reports_problems_without_refusing_to_write(scene: Scene):
     scene.add_frame(4)  # beyond every anchor: no shape applies any more
 
