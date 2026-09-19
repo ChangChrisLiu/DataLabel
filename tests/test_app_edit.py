@@ -878,3 +878,65 @@ def test_an_undo_after_the_write_deletes_the_sidecar(window):
 
     assert window.sidecar.pending_for(window.session.current(), instance) is None
     assert window.pending_restore() is None
+
+
+# --------------------------------------------------------------------------- #
+# a net-zero gesture may only delete its own crash copy (F3 round 3, item 1)
+# --------------------------------------------------------------------------- #
+def test_a_net_zero_gesture_never_deletes_another_sessions_sidecar(qapp, tmp_path):
+    """The A/B the reviewer ran: a previous run's crash copy was deleted.
+
+    Window 1 paints and flushes, the process dies, window 2 opens the same
+    frame and offers to restore it -- and the annotator's first gesture on that
+    instance is a net-zero one (a stroke then Ctrl+Z).  That gesture used to
+    take the *previous session's* work with it, which is the one thing the
+    sidecar exists to prevent.
+    """
+    first = open_window(tmp_path)
+    instance = first_task_instance(first)
+    try:
+        first.task_card.sigRequestEdit.emit(instance)
+        paint(first)
+        first.flush_sidecar()
+        key = first.session.current()
+        assert first.sidecar.pending_for(key, instance) is not None
+    finally:
+        close_window(first)                      # a crash-style exit: no commit
+
+    second = open_window(tmp_path)
+    try:
+        assert second.pending_restore() is not None, "nothing was offered"
+        second.task_card.sigRequestEdit.emit(instance)
+        paint(second)
+        second.act_undo()                        # net zero: back to begin_edit
+
+        assert second.sidecar.pending_for(key, instance) is not None, (
+            "the earlier session's crash copy was deleted by a net-zero gesture"
+        )
+        second.session.goto(min(second.session.steps()), force=True)
+        second.session.goto(key.step, force=True)
+        QApplication.processEvents()
+        assert second.pending_restore() is not None, "the offer is gone"
+    finally:
+        close_window(second)
+
+
+def test_answering_the_restore_offer_still_removes_the_file(qapp, tmp_path):
+    """The offer is the *only* thing that may drop somebody else's copy."""
+    first = open_window(tmp_path)
+    instance = first_task_instance(first)
+    try:
+        first.task_card.sigRequestEdit.emit(instance)
+        paint(first)
+        first.flush_sidecar()
+        key = first.session.current()
+    finally:
+        close_window(first)
+
+    second = open_window(tmp_path)
+    try:
+        assert second.pending_restore() is not None
+        second.discard_pending()
+        assert second.sidecar.pending_for(key, instance) is None
+    finally:
+        close_window(second)

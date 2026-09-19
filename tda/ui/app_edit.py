@@ -101,6 +101,10 @@ class EditMixin:
         #: Set once the sidecar cannot be written, and kept: it is the crash
         #: protection, so it outranks every other hint until the run ends.
         self._sidecar_broken = ""
+        #: ``(desktop, view, step, instance)`` this window has written a crash
+        #: copy for.  A net-zero gesture may delete its own file; one left by
+        #: an earlier run belongs to whoever answers the restore offer.
+        self._sidecar_written: set[tuple] = set()
         self._sidecar_timer = QTimer(self)
         self._sidecar_timer.setSingleShot(True)
         self._sidecar_timer.setInterval(SIDECAR_DEBOUNCE_MS)
@@ -461,9 +465,18 @@ class EditMixin:
             # debounce window, a net-zero brush-then-erase, a stroke inside a
             # shape that is already committed -- is not work to protect.  It is
             # not enough to skip the write: the *pending* one has to be dropped
-            # and an already written file deleted, or the annotator is offered
-            # a "restore" of pixels they took back (measured: 197 px).
-            self.drop_sidecar(key, instance)
+            # and the file **this window wrote for this edit** deleted, or the
+            # annotator is offered a "restore" of pixels they took back
+            # (measured: 197 px).
+            #
+            # Only that file.  A sidecar left by an earlier run is somebody
+            # else's unfinished work: it goes away when the annotator answers
+            # the restore offer or commits the instance, never because their
+            # first gesture on the frame happened to cancel itself out.
+            self._sidecar_timer.stop()
+            self._sidecar_pending = None
+            if self._wrote_sidecar_for(key, instance):
+                self.drop_sidecar(key, instance)
             return
         self._sidecar_pending = (key, str(instance), np.array(mask, dtype=bool, copy=True))
         self._sidecar_timer.start()
@@ -491,13 +504,27 @@ class EditMixin:
             self.report_error(self._sidecar_broken)
             return
         self.sidecar_writes += 1
+        self._sidecar_written.add(self._sidecar_id(key, instance))
+
+    def _sidecar_id(self, key, instance: Optional[str]) -> tuple:
+        """What identifies one crash copy: the frame and the instance."""
+        return (int(key.desktop), str(key.view), int(key.step), str(instance))
+
+    def _wrote_sidecar_for(self, key, instance: Optional[str]) -> bool:
+        """Did **this** window write the stored copy of that frame's instance?"""
+        return self._sidecar_id(key, instance) in self._sidecar_written
 
     def drop_sidecar(self, key, instance: Optional[str]) -> None:
-        """Forget a layer that has been committed or abandoned."""
+        """Forget a layer that has been committed or abandoned.
+
+        The deliberate path -- a commit, ``Esc``, an answered restore offer --
+        so it removes the file whoever wrote it.
+        """
         self._sidecar_timer.stop()
         self._sidecar_pending = None
         if instance is not None:
             self.sidecar.clear(key, instance)
+            self._sidecar_written.discard(self._sidecar_id(key, instance))
 
     def set_editing_mask(self, mask: np.ndarray, undoable: bool = False) -> None:
         """Replace the editing layer everywhere it is held at once."""
