@@ -55,6 +55,8 @@ __all__ = ["MainWindow", "main", "take_lock"]
 OPACITY_STEP = 20
 #: Zoom the pixel grid is disabled at (the canvas draws it above ``GRID_ZOOM``).
 GRID_OFF = 1e9
+#: ``_flashing`` when a neighbour is on screen but its step number is unknown.
+FLASH_UNNAMED = -1
 
 
 class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
@@ -77,6 +79,9 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         self._cheat_sheet: Optional[QWidget] = None
         self.tools_enabled = True
         self._tool_name = "brush"
+        #: The neighbour step the canvas is showing while ``Tab`` is held, or
+        #: ``None``.  One place: every guard reads this and nothing else.
+        self._flashing: Optional[int] = None
         self.review_refreshes = 0
         #: Steps whose background re-check gave up; ``F5`` retries them.
         self.sweep_failures: set[int] = set()
@@ -124,6 +129,11 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
 
     def render_frame(self) -> None:
         """Repaint everything that belongs to the frame the session is on."""
+        # Whatever was being compared, this is not it; the tools are re-armed
+        # below (or detached, when the frame has no image).
+        self._flashing = None
+        for tool in (self.sam_point, self.sam_box):
+            tool.paused = False
         if not compat.is_open(self.session):
             return
         key = self.session.current()
@@ -222,7 +232,13 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
             return False
         action = A.action_for(event.key(), event.modifiers(), self.mode)
         if action is None:
+            # Any other key is the annotator moving on: a flash that is still up
+            # because its release went missing ends here.
+            if event.type() == QEvent.Type.KeyPress:
+                self.end_flash()
             return False
+        if not action.hold and event.type() == QEvent.Type.KeyPress:
+            self.end_flash()
         if event.isAutoRepeat():
             return True
         pressed = event.type() == QEvent.Type.KeyPress
@@ -414,16 +430,79 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         The neighbour is the frame the task card is written against -- the one
         the annotator came from, ``j + 1`` in reverse order.  ``Shift+Tab``
         shows the other side instead.
+
+        While it is held the canvas is showing a frame that is **not** the one
+        being annotated, so nothing may be drawn on it: every tool is detached
+        and the SAM tools refuse to prompt.  A brush stroke or a SAM click on
+        the flashed image asked about the neighbour's pixels and wrote the
+        answer into this frame's layer -- and in reverse order the part the card
+        asks for is *absent* in j+1, so the mask was confidently wrong.
         """
-        image = (compat.flash_image(self.session, other=other) if pressed
-                 else self.session.image())
+        if not pressed:
+            self.end_flash()
+            return
+        if self._flashing is not None or not compat.is_open(self.session):
+            return
+        image = compat.flash_image(self.session, other=other)
         if image is None:
             return
+        # The step shown, so the status bar can name it; ``FLASH_UNNAMED`` when
+        # the adapter cannot say which one it handed back.
+        step = compat.flash_step(self.session, other=other)
+        self._flashing = FLASH_UNNAMED if step is None else int(step)
+        self._pause_tools(True)
+        self._show_image(image)
+        self.update_status()
+
+    def end_flash(self) -> None:
+        """Put the frame back on the canvas; safe to call at any time.
+
+        Called from everywhere a release might never arrive: the key release,
+        the window losing focus (``Alt+Tab`` while holding ``Tab`` is the one
+        the reviewer hit), any other key, and every frame change.  Without it
+        the canvas stayed on the neighbour's image with this frame's overlay and
+        status, and every tool stayed live over it.
+        """
+        if self._flashing is None:
+            return
+        self._flashing = None
+        self._pause_tools(False)
+        image = self.session.image() if compat.is_open(self.session) else None
+        if image is not None:
+            self._show_image(image)
+        self.update_status()
+
+    def is_flashing(self) -> bool:
+        """Is the canvas showing a neighbour frame rather than the open one?"""
+        return self._flashing is not None
+
+    def _show_image(self, image) -> None:
+        """Swap the picture under the overlay, keeping zoom and centre."""
         zoom, centre = self.canvas.zoom_factor(), self._canvas_centre()
         self.canvas.set_image(image)
         self.canvas.set_zoom(zoom)
         self.canvas.center_on(centre)
         self.canvas.refresh()
+
+    def _pause_tools(self, paused: bool) -> None:
+        """Make every tool inert, or arm the chosen one again."""
+        for tool in (self.sam_point, self.sam_box):
+            tool.paused = bool(paused)
+        if paused:
+            self._detach_tool()
+        else:
+            self._attach_tool()
+
+    def event(self, ev) -> bool:  # noqa: D102 - Qt override
+        # A lost key release (Alt+Tab, a focus steal, a system dialog) would
+        # otherwise leave the canvas stuck on the neighbour for good.  Qt
+        # delivers the deactivation here, not through ``changeEvent``.
+        kind = ev.type()
+        if kind in (QEvent.Type.WindowDeactivate, QEvent.Type.FocusOut) or (
+            kind == QEvent.Type.ActivationChange and not self.isActiveWindow()
+        ):
+            self.end_flash()
+        return super().event(ev)
 
     @S.guard
     def act_flash_other(self, pressed: bool) -> None:

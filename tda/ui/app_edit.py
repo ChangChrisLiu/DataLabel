@@ -32,7 +32,7 @@ from tda.ui.app_widgets import Bar, BoxDragTool
 from tda.ui.canvas.tools import BrushTool, EraserTool, OccluderTool
 
 __all__ = ["BLOCK_HINT", "BoxDragTool", "EditMixin", "DESPECKLE_MIN_PX",
-           "NO_INSTANCE_HINT", "REVIEW_READ_ONLY"]
+           "FLASH_HINT", "NO_INSTANCE_HINT", "REVIEW_READ_ONLY"]
 
 #: Components smaller than this are specks (``Shift+D``); spec 9.1's floor.
 DESPECKLE_MIN_PX = 16
@@ -52,6 +52,9 @@ _ON_BENCH = "on_bench"
 #: Shown when the canvas is clicked in Review mode, which is read-only.
 REVIEW_READ_ONLY = ("按 R 返工：切到标注模式处理这一帧  "
                     "(press R to rework: Review mode only shows the frame)")
+#: Shown when the canvas is clicked while another frame is flashed over it.
+FLASH_HINT = ("松开 Tab 再操作：屏幕上是对照帧  "
+              "(release Tab first: the canvas is showing the other frame)")
 
 
 def _is_right(ev: Any) -> bool:
@@ -257,6 +260,11 @@ class EditMixin:
         """
         self._paint_blocked = False
         self._blocked_layer = None
+        if self.is_flashing():
+            # The tools are detached while flashing, so nothing is going to
+            # paint; this is only here to say why the click did nothing.
+            self.report(FLASH_HINT)
+            return
         if self.mode == "review":
             self.report(REVIEW_READ_ONLY)
             return

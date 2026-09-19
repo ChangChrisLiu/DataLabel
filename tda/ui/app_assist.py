@@ -138,10 +138,14 @@ class AssistMixin:
         frame with no image gets ``None`` (prompting is meaningless there) and
         every other frame gets its :class:`~tda.core.model.FrameKey`.
         """
-        token = key if self.session.image() is not None else None
+        image = self.session.image()
+        token = key if image is not None else None
         self.clear_prompt_box()
         for tool in (self.sam_point, self.sam_box):
             tool.overlay = self.overlay
+            # The frame to crop from, explicitly: the canvas may be showing the
+            # neighbour (``Tab``) and a prompt must never be about that one.
+            tool.image = image
             tool.set_frame_token(token)
             # set_frame_token drops the box only when the token really changes,
             # and re-arming an attached tool may already have set it: say it.

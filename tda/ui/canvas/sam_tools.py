@@ -68,6 +68,8 @@ ERR_OUT_OF_BOUNDS = "SAM result dropped: the crop no longer fits the frame"
 #: Emitted on :attr:`SamToolBase.sigError` when the tool has not been told which
 #: frame it is on, which makes every later staleness check meaningless.
 ERR_NO_FRAME_TOKEN = "frame token not set: call set_frame_token(...) on frame change"
+#: Emitted when a prompt is attempted while the canvas is showing another frame.
+ERR_FLASHING = "松开 Tab 再操作 / release Tab first: another frame is on screen"
 #: Instance key used when neither the tool nor the overlay names one yet.
 FALLBACK_INSTANCE = "editing"
 
@@ -117,6 +119,13 @@ class SamToolBase(Tool):
         self.refine = bool(refine)
         self.instance = instance
         self.last_result: Optional[SamResult] = None
+        #: The frame to crop prompts from.  ``None`` means "whatever the canvas
+        #: is displaying", which is only the same thing while nothing is being
+        #: flashed over it; the window sets this on every frame change.
+        self.image: Optional[np.ndarray] = None
+        #: While true the tool accepts no prompt: the canvas is showing another
+        #: frame (``Tab``), so a click on it is not about this one.
+        self.paused = False
         self.prompt_box: Optional[Box] = None
         self.stroke_before: Optional[np.ndarray] = None
         self._frame_token: Any = None
@@ -332,12 +341,17 @@ class SamToolBase(Tool):
     def _submit(self, points: Sequence[Point], box: Optional[Box] = None) -> None:
         if self.queue is None or self.canvas is None or self.overlay is None:
             return
+        if self.paused:
+            # The canvas is showing another frame; the crop would be of that one
+            # and the mask would be written to this one.
+            self.sigError.emit(ERR_FLASHING)
+            return
         if self._frame_token is None:
             # Without an identity a late result could not be told apart from a
             # fresh one, so refuse to create one rather than accept it blindly.
             self.sigError.emit(ERR_NO_FRAME_TOKEN)
             return
-        prepared = viewport_crop(self.canvas)
+        prepared = viewport_crop(self.canvas, image=self.image)
         if prepared is None:
             return
         crop, rect, scale = prepared

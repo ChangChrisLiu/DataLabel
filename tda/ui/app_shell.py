@@ -266,6 +266,11 @@ class ShellMixin:
     def _frame_text(self) -> str:
         if not compat.is_open(self.session):
             return "no frame"
+        if self.is_flashing():
+            # What is on the canvas is not what the rest of the window is about,
+            # and the annotator has to be able to see that at a glance.
+            which = "另一帧" if self._flashing < 0 else f"step {self._flashing}"
+            return f"正在对照 {which} / comparing — 松开 Tab 返回"
         key = self.session.current()
         steps = self.session.steps()
         total = max(steps) if steps else key.step

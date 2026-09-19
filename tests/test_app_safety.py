@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -901,3 +901,95 @@ def test_sequence_d_blocked_navigation_then_commit_then_navigation(window):
     window.act_commit()
     window.act_step(-1)
     assert window.session.current().step < step
+
+
+# --------------------------------------------------------------------------- #
+# while Tab is held the canvas is showing another frame (final review, item 2)
+# --------------------------------------------------------------------------- #
+def flashable(win: MainWindow) -> MainWindow:
+    """Stand on a frame that *has* a neighbour to flash (the last one has none)."""
+    win.session.goto(LAST_STEP - 1, force=True)
+    QApplication.processEvents()
+    return win
+
+
+def test_a_press_while_flashing_is_swallowed_with_a_hint(window):
+    """The canvas is showing the neighbour; a stroke there would be a lie.
+
+    In reverse order the part the card asks for is ABSENT in j+1, so a SAM
+    click on the flashed image cropped pixels that do not contain it and the
+    mask landed in the *current* frame's layer, confidently wrong.
+    """
+    flashable(window)
+    instance = start_edit(window)
+    window.act_flash_compare(True)
+    assert window.is_flashing() is True
+    before = window.overlay.editing.copy()
+
+    paint(window)
+
+    assert np.array_equal(window.overlay.editing, before), "a stroke landed while flashed"
+    assert "Tab" in window.status_message()
+
+
+def test_sam_is_refused_while_flashing(window):
+    flashable(window)
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.act_flash_compare(True)
+    pending = window.sam_queue.pending()
+
+    window.sam_point.on_press(32.0, 32.0, None)
+
+    assert window.sam_queue.pending() == pending, "a prompt went out on the wrong image"
+
+
+def test_the_status_bar_says_which_frame_is_being_compared(window):
+    """What is on the canvas is not what the rest of the window is about."""
+    flashable(window)
+    window.act_flash_compare(True)
+    assert "对照" in window.frame_label.text()
+    window.act_flash_compare(False)
+    assert "对照" not in window.frame_label.text()
+    assert str(window.session.current().step) in window.frame_label.text()
+
+
+def test_a_lost_key_release_does_not_leave_the_canvas_on_the_neighbour(window):
+    """Alt+Tab while holding Tab: the release never arrives.
+
+    The canvas stayed on the neighbour's image with the current frame's overlay
+    and status -- and every tool stayed live over it.
+    """
+    flashable(window)
+    window.act_flash_compare(True)
+    assert window.is_flashing() is True
+
+    QApplication.sendEvent(window, QEvent(QEvent.Type.WindowDeactivate))
+    QApplication.processEvents()
+
+    assert window.is_flashing() is False
+    assert np.array_equal(window.canvas.image_rgb(), window.session.image())
+
+
+def test_any_other_key_ends_the_flash(window):
+    flashable(window)
+    window.act_flash_compare(True)
+    window.handle_key(_key_event(Qt.Key.Key_B))
+    assert window.is_flashing() is False
+
+
+def test_a_frame_change_ends_the_flash(window):
+    flashable(window)
+    window.act_flash_compare(True)
+    window.session.goto(min(window.session.steps()), force=True)
+    QApplication.processEvents()
+    assert window.is_flashing() is False
+
+
+def _key_event(key, press: bool = True):
+    from PySide6.QtGui import QKeyEvent
+
+    return QKeyEvent(
+        QEvent.Type.KeyPress if press else QEvent.Type.KeyRelease,
+        key, Qt.KeyboardModifier.NoModifier,
+    )

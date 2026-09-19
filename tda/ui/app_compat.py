@@ -27,6 +27,7 @@ __all__ = [
     "retry_rechecks",
     "editing_changed_signal",
     "flash_image",
+    "flash_step",
     "is_open",
     "layer_changed",
     "overlay_layers",
@@ -210,6 +211,11 @@ def task_neighbour(session: Any) -> Optional[int]:
         return None if found is None else int(found)
     _note("task_neighbour", "next available step above the current one")
     return _neighbour_step(session, above=True)
+
+
+def flash_step(session: Any, other: bool = False) -> Optional[int]:
+    """Which step ``Tab`` (or ``Shift+Tab``) is showing, for the status bar."""
+    return _neighbour_step(session, above=not other)
 
 
 def _neighbour_step(session: Any, above: bool) -> Optional[int]:
