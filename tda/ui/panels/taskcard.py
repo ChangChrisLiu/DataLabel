@@ -65,20 +65,59 @@ def _is_code(problem: str) -> bool:
     return bool(sep) and bool(head) and set(head) <= _CODE_CHARS and " " not in head
 
 
+#: The session writes a "how to fix it" sentence for exactly these codes
+#: (``session_review._how_to_fix``), in the order they appear, so they are the
+#: only ones a sentence may be paired with.  Pairing them with *every* code put
+#: "Draw c.01 on this frame" next to ``bench_missing:b.01`` on any frame that
+#: had both, and left the real missing shape showing its raw code.
+EXPLAINED_CODES = ("missing_shape:",)
+
+#: What every other code means, in one place.  ``{what}`` is the part of the
+#: code after the colon -- an instance key, sometimes with a part or a second
+#: key after it -- which is what the annotator has to go and look at.
+PROBLEM_SENTENCES: tuple[tuple[str, str], ...] = (
+    ("bench_missing:", "{what}：已拆到台面上但还没有台面框（按 R 拖一个框）"),
+    ("shape_size_mismatch:", "{what}：形状和这一帧的画面尺寸对不上，重画一次"),
+    ("zorder_cycle:", "{what}：层级关系互相矛盾，改掉其中一条"),
+    ("zorder_missing:", "{what}：不在层级顺序里，会被画在最上面"),
+    ("empty_visible:", "{what}：可见部分是空的，可能被完全遮挡或画到了框外"),
+    ("pose_segment_ambiguous:", "{what}：跨了不止一个位姿段，先确认位姿分段"),
+    ("missing_shape:", "{what}：这一帧还缺形状，把它画出来"),
+)
+
+
+def explain_code(code: str) -> str:
+    """The human sentence for a problem code, or the code itself when unknown."""
+    for prefix, template in PROBLEM_SENTENCES:
+        if code.startswith(prefix):
+            return template.format(what=code[len(prefix):])
+    return code
+
+
+def instance_of(code: str) -> str:
+    """The instance key a code is about: before any ``/`` part or ``,`` partner."""
+    tail = code.split(":", 1)[1] if ":" in code else ""
+    return tail.split("/", 1)[0].split(",", 1)[0].strip()
+
+
 def pair_problems(problems: list[str]) -> list[dict]:
     """``{"text", "code", "instance"}`` per problem, each one listed once.
 
-    ``confirm_frame`` emits the codes followed by one sentence per *blocking*
-    code, in the same order, so they pair up from the front; a code with no
-    sentence keeps its own text, and a sentence with no code is shown as it is.
+    ``confirm_frame`` emits the compiler's codes **and** one sentence per code
+    it knows how to explain (:data:`EXPLAINED_CODES`), in the same order.  Only
+    those codes consume a sentence; every other one is explained from
+    :data:`PROBLEM_SENTENCES` here, and a code nobody has written a sentence for
+    is shown as it is rather than wearing somebody else's.
     """
     codes = [p for p in problems if _is_code(p)]
     sentences = [p for p in problems if not _is_code(p)]
     rows: list[dict] = []
     for code in codes:
-        instance = code.split(":", 1)[1]
-        text = sentences.pop(0) if sentences else code
-        rows.append({"text": text, "code": code, "instance": instance})
+        if code.startswith(EXPLAINED_CODES) and sentences:
+            text = sentences.pop(0)
+        else:
+            text = explain_code(code)
+        rows.append({"text": text, "code": code, "instance": instance_of(code)})
     rows.extend({"text": text, "code": "", "instance": ""} for text in sentences)
     return rows
 

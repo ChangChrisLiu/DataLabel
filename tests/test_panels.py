@@ -31,7 +31,12 @@ from tda.ui import session_api as api
 from tda.ui.canvas.overlay import palette_color
 from tda.ui.panels.instances import InstanceListPanel
 from tda.ui.panels.review import STEP_ROLE, ReviewPanel
-from tda.ui.panels.taskcard import KIND_ICONS, TaskCardPanel
+from tda.ui.panels.taskcard import (
+    KIND_ICONS,
+    TaskCardPanel,
+    instance_of,
+    pair_problems,
+)
 from tda.ui.panels.timeline import TimelinePanel, status_brush
 
 
@@ -532,7 +537,10 @@ def test_taskcard_shows_problems_when_confirm_fails(session: StubSession) -> Non
     session.confirm_result = False
     panel.confirm()          # what the window's act_confirm calls
     assert panel.problems_visible() is True
-    assert panel.problems() == ["missing_shape:screw.cpu_cooler.03"]
+    # the row is the human sentence; the compiler's code is in the tooltip
+    assert panel.problems() == ["screw.cpu_cooler.03：这一帧还缺形状，把它画出来"]
+    assert [r["code"] for r in panel.problem_rows()] == [
+        "missing_shape:screw.cpu_cooler.03"]
     session.confirm_result = True
     panel.confirm()
     assert panel.problems_visible() is False
@@ -835,3 +843,51 @@ def test_review_snap_back_only_touches_the_list_that_was_clicked(session) -> Non
     assert conflicts.currentRow() == 1, "another tab's selection was cleared"
     assert unexplained.currentRow() != 0 or int(
         unexplained.item(0).data(STEP_ROLE)) == session.current().step
+
+
+# ---------------------------------------------------------------------------
+# problem codes and their sentences (F3 round 2, item 3)
+# ---------------------------------------------------------------------------
+MIXED_PROBLEMS = [
+    "bench_missing:b.01",
+    "missing_shape:c.01",
+    "zorder_cycle:a.01,b.01",
+    "empty_visible:d.01",
+    "shape_size_mismatch:e.01/main",
+    "pose_segment_ambiguous:f.01",
+    "gremlins:g.01",
+    "Draw c.01 on this frame",          # the session's only sentence
+]
+
+
+def test_a_sentence_only_pairs_with_the_code_it_was_written_for():
+    """It popped one sentence per code, in order, and the session writes them
+    only for ``missing_shape:`` -- so on a mixed frame the sentence landed on
+    ``bench_missing:b.01`` and the real missing shape showed its raw code."""
+    rows = {row["code"]: row for row in pair_problems(MIXED_PROBLEMS)}
+
+    assert rows["missing_shape:c.01"]["text"] == "Draw c.01 on this frame"
+    assert rows["bench_missing:b.01"]["text"] != "Draw c.01 on this frame"
+    assert "b.01" in rows["bench_missing:b.01"]["text"]
+    assert len(rows) == len(MIXED_PROBLEMS) - 1     # the sentence is not a row
+
+
+def test_every_known_code_has_a_human_sentence():
+    rows = {row["code"]: row for row in pair_problems(MIXED_PROBLEMS)}
+    for code in ("bench_missing:b.01", "zorder_cycle:a.01,b.01", "empty_visible:d.01",
+                 "shape_size_mismatch:e.01/main", "pose_segment_ambiguous:f.01"):
+        text = rows[code]["text"]
+        assert text != code, code
+        assert instance_of(code) in text, f"{code} -> {text!r}"
+        assert len(text) > len(instance_of(code)) + 4, f"{code} -> {text!r}"
+
+
+def test_an_unknown_code_is_shown_as_it_is():
+    rows = {row["code"]: row for row in pair_problems(MIXED_PROBLEMS)}
+    assert rows["gremlins:g.01"]["text"] == "gremlins:g.01"
+
+
+def test_the_instance_of_a_problem_is_the_key_not_the_tail():
+    rows = {row["code"]: row for row in pair_problems(MIXED_PROBLEMS)}
+    assert rows["shape_size_mismatch:e.01/main"]["instance"] == "e.01"
+    assert rows["zorder_cycle:a.01,b.01"]["instance"] == "a.01"
