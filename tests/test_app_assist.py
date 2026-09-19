@@ -488,3 +488,30 @@ def test_holding_pgdn_does_not_queue_a_comparison_per_frame(window):
     assert moved >= 5, "the repeats did not step the frame"
     assert window.assist.queued() <= 1
     assert window.sam_queue.pending() == 0
+
+
+def test_a_blob_covering_most_of_the_roi_is_not_a_prompt_box(window):
+    """"Everything changed" is not a prompt; it is the absence of one.
+
+    A box over 60 % of the ROI tells SAM nothing it did not already know, and
+    on the rehearsal that is exactly when the single candidate came back as the
+    whole chassis.
+    """
+    from tda.core.diffmap import DiffBlob
+
+    roi = window.roi()
+    assert roi is not None
+    x0, y0, x1, y1 = roi
+    window.act_tool("sam_point")
+
+    big = DiffBlob(box=(float(x0), float(y0), float(x1), float(y1)),
+                   area=(x1 - x0) * (y1 - y0), score=9.0)
+    window.begin_add_shape(big)
+    assert window.sam_point.prompt_box is None
+    assert "整块" in window.status_message() or "whole" in window.status_message()
+
+    w, h = (x1 - x0) // 4, (y1 - y0) // 4
+    small = DiffBlob(box=(float(x0), float(y0), float(x0 + w), float(y0 + h)),
+                     area=w * h, score=9.0)
+    window.begin_add_shape(small)
+    assert window.sam_point.prompt_box is not None

@@ -380,12 +380,15 @@ class SamToolBase(Tool):
             points=crop_points,
             box=crop_box,
             mask_input=mask_input,
-            # One point on its own is ambiguous (part vs. whole assembly), so
-            # let SAM propose three candidates for :meth:`cycle_candidate`. A
-            # box, a second point or a prior mask has already disambiguated it.
-            multimask=(
-                len(crop_points) == 1 and crop_box is None and mask_input is None
-            ),
+            # Every prompt without a prior mask is ambiguous -- "part or whole
+            # assembly?" is the question SAM cannot answer from geometry -- so
+            # ask for the three candidates and let ``C`` walk them.  Asking for
+            # one whenever a box was given measured badly on real frames: a
+            # correct but large box around the motherboard came back as the
+            # whole chassis (627k px) with no second answer to fall back on.
+            # A refinement is different: it already has the shape to improve,
+            # and only the blended result is a valid edit.
+            multimask=mask_input is None,
         )
         self._reset_candidates()
         self._token += 1

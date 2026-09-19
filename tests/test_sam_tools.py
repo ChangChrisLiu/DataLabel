@@ -276,7 +276,8 @@ def test_sam_point_tool_right_click_is_a_negative_point(zoomed):
     tool.on_press(20.0, 30.0, _press(0, 0, Qt.MouseButton.LeftButton))
     tool.on_press(40.0, 30.0, _press(0, 0, Qt.MouseButton.RightButton))
     assert queue.last.points == [(20.0, 30.0, 1), (40.0, 30.0, 0)]
-    assert queue.last.multimask is False
+    # candidates are offered for every prompt without a prior mask (item 15)
+    assert queue.last.multimask is True
 
 
 def test_sam_point_tool_downscales_a_large_crop_and_scales_points(qapp):
@@ -340,7 +341,7 @@ def test_sam_point_tool_sends_point_plus_box_when_a_prompt_box_is_set(zoomed):
     req = queue.last
     assert req.points == [(20.0, 30.0, 1)]
     assert req.box == (10.0, 12.0, 50.0, 52.0)
-    assert req.multimask is False, "point+box is unambiguous, so no candidates"
+    assert req.multimask is True, "a box narrows the question but does not answer it"
 
     tool.set_prompt_box(None)
     tool.clear_points()
@@ -988,3 +989,48 @@ def test_reset_prompt_forgets_the_points_and_the_drag(zoomed):
     assert box.box is None and box._dragging is False
     point.on_press(40.0, 20.0, None)
     assert len(queue.last.points) == 1
+
+
+# ---------------------------------------------------------------------------
+# candidates are offered whenever there is no prior mask (addendum, item 15)
+# ---------------------------------------------------------------------------
+def test_a_box_prompt_asks_for_candidates(zoomed):
+    """A single candidate for a box prompt was the whole chassis, twice.
+
+    Measured on the rehearsal: the motherboard (s41) and the PSU (s33) had a
+    correct but large diff box and SAM's one answer was 627k / 620k px of
+    machine, with no way out but the eraser.
+    """
+    canvas, ov = zoomed
+    queue = StubQueue(_multi_result)
+    tool = _box_tool(canvas, ov, queue)
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(40.0, 40.0, None)
+    tool.on_release(40.0, 40.0, None)
+
+    assert queue.last.multimask is True
+    assert _spin(lambda: tool.candidate_count >= 2), tool.candidate_count
+
+
+def test_a_point_and_box_prompt_asks_for_candidates(zoomed):
+    canvas, ov = zoomed
+    queue = StubQueue(_multi_result)
+    tool = _point_tool(canvas, ov, queue)
+    tool.set_prompt_box((8.0, 8.0, 44.0, 44.0))
+    tool.on_press(20.0, 30.0, None)
+
+    assert queue.last.multimask is True
+    assert _spin(lambda: tool.candidate_count >= 2)
+
+
+def test_a_refinement_still_asks_for_one(zoomed):
+    """With a prior mask the answer is not ambiguous, and blending needs one."""
+    canvas, ov = zoomed
+    ov.set_editing("inst-x", np.zeros((60, 80), dtype=bool))
+    ov.editing[20:30, 20:30] = True
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue, refine=True)
+    tool.on_press(25.0, 25.0, None)
+
+    assert queue.last.mask_input is not None
+    assert queue.last.multimask is False

@@ -40,6 +40,17 @@ class _SamLoader(QObject):
 #: How long ``Space`` waits for an unfinished comparison before giving up on it.
 ASSIST_CONFIRM_WAIT = 1.0
 
+#: A diff box bigger than this share of the ROI is not used as a prompt box:
+#: it says "everything changed", which narrows nothing for SAM.
+MAX_PROMPT_BOX_FRAC = 0.6
+
+
+def _covers_most(box, roi, limit: float = MAX_PROMPT_BOX_FRAC) -> bool:
+    """Does ``box`` take up more than ``limit`` of the ROI's area?"""
+    bw, bh = max(0.0, box[2] - box[0]), max(0.0, box[3] - box[1])
+    rw, rh = max(1.0, float(roi[2] - roi[0])), max(1.0, float(roi[3] - roi[1]))
+    return (bw * bh) > limit * (rw * rh)
+
 
 class AssistMixin:
     """The window half of the assist: SAM tools, prompt boxes, the heat map."""
@@ -327,9 +338,20 @@ class AssistMixin:
         scan-bed artefact at the edge as the part being drawn -- which is
         exactly what happened on 7 of 13 real frames.
         """
-        if self.roi() is None:
+        roi = self.roi()
+        if roi is None:
             return
         box = tuple(float(v) for v in blob.box)
+        if _covers_most(box, roi):
+            # "Everything changed" is not a prompt: it narrows nothing, and it
+            # is exactly when SAM's single answer came back as the whole
+            # chassis.  A point on its own does better.
+            self.clear_prompt_box()
+            for tool in (self.sam_point, self.sam_box):
+                tool.set_prompt_box(None)
+            self.report(f"差异覆盖了 ROI 的整块，不作为框提示 / the changed region "
+                        f"covers most of the ROI: point-only ({blob.area} px)")
+            return
         self._prompt_box = box
         for tool in (self.sam_point, self.sam_box):
             tool.set_prompt_box(box)
