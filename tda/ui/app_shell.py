@@ -501,13 +501,28 @@ class ShellMixin:
             self.report_error("no backup_dir in paths.yaml: no exit backup was made")
             return
         try:
-            out = Path(self.db.backup(str(dest)))
+            keep = self._backup_keep()
+            out = Path(self.db.backup(str(dest), keep))
             if not out.exists() or out.stat().st_size <= 0:
                 raise OSError(f"{out} is empty")
         except Exception as exc:  # noqa: BLE001 - the annotator still gets to leave
             self.report_error(f"exit backup failed: {exc}")
             return
         self.report(f"backup written to {out}")
+
+    def _backup_keep(self):
+        """``backup_keep`` of paths.yaml, so exit backups are pruned like the CLI's.
+
+        A value that will not parse must not stand between the annotator and the
+        door: the copy is still made, nothing is pruned, and the status bar says why.
+        """
+        from tda import pipeline as P
+
+        try:
+            return P.backup_keep(self.paths)
+        except ValueError as exc:
+            self.report_error(f"{exc}; this exit backup was not pruned")
+            return None
 
 
 # --------------------------------------------------------------------------- #

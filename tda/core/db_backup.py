@@ -93,6 +93,11 @@ def _backup_day(name: str) -> str:
     return name[4:12]
 
 
+def _is_plain_file(path: str) -> bool:
+    """A regular file that is not a link: the only thing pruning may remove."""
+    return os.path.isfile(path) and not os.path.islink(path)
+
+
 def prune_backups(dest_dir: str, keep: Optional[int] = DEFAULT_KEEP,
                   keep_daily_days: int = KEEP_DAILY_DAYS) -> list[str]:
     """Delete the oldest surplus backups; returns what was removed.
@@ -116,7 +121,8 @@ def prune_backups(dest_dir: str, keep: Optional[int] = DEFAULT_KEEP,
     if not keep or int(keep) < 1:
         return []
     try:
-        names = sorted(n for n in os.listdir(dest_dir) if BACKUP_RE.match(n))
+        names = sorted(n for n in os.listdir(dest_dir)
+                       if BACKUP_RE.match(n) and _is_plain_file(os.path.join(dest_dir, n)))
     except OSError as exc:
         log.warning("cannot list %s to prune backups: %s", dest_dir, exc)
         return []

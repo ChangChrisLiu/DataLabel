@@ -289,10 +289,37 @@ def test_close_backs_the_database_up_and_releases_the_lock(qapp, tmp_path):
     assert not lock_file.exists()
 
 
+def test_the_exit_backup_is_pruned_like_the_command_lines(qapp, tmp_path):
+    win = open_window(tmp_path)
+    folder = Path(win.paths["backup_dir"])
+    folder.mkdir(parents=True, exist_ok=True)
+    old = [f"tda_2025{month:02d}01_120000.sqlite" for month in (1, 2, 3)]
+    for name in old:
+        (folder / name).write_bytes(b"old backup")
+    (folder / "tda_pre_v3_20260918.sqlite").write_bytes(b"kept by hand")
+    win.paths["backup_keep"] = 2
+    win.close()
+    left = {p.name for p in folder.iterdir()}
+    assert "tda_pre_v3_20260918.sqlite" in left        # never a candidate
+    assert old[0] not in left and old[1] not in left   # the oldest went
+    assert old[2] in left                              # newest two: this one + the new copy
+    assert len([n for n in left if n.startswith("tda_2") and n not in old]) == 1
+
+
+def test_a_meaningless_backup_keep_does_not_block_the_exit(qapp, tmp_path):
+    win = open_window(tmp_path)
+    folder = Path(win.paths["backup_dir"])
+    win.paths["backup_keep"] = "forty"
+    win.close()
+    assert win.closed is True
+    assert list(folder.glob("tda_*.sqlite"))           # the copy was still made
+    assert "backup_keep" in win.status_message() or "backup" in win.status_message().lower()
+
+
 def test_a_failing_backup_warns_but_still_closes(qapp, tmp_path, monkeypatch):
     win = open_window(tmp_path)
     monkeypatch.setattr(type(win.session.db), "backup",
-                        lambda self, dest: (_ for _ in ()).throw(OSError("disk full")))
+                        lambda self, dest, keep=None: (_ for _ in ()).throw(OSError("disk full")))
     win.close()
     assert "backup" in win.status_message().lower()
     assert win.closed is True

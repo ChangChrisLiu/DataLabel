@@ -152,3 +152,24 @@ def test_a_meaningless_limit_prunes_nothing(tmp_path, keep):
         _make(tmp_path, _stamped(day))
     assert prune_backups(str(tmp_path), keep=keep) == []
     assert len(_names(tmp_path)) == 5
+
+
+def test_only_plain_files_are_candidates(tmp_path):
+    """A directory or a link that happens to carry a backup's name is left alone."""
+    days = _long_ago(4)
+    for day in days[1:]:
+        _make(tmp_path, _stamped(day))
+    (tmp_path / _stamped(days[0])).mkdir()                # oldest "name" is a folder
+    target = tmp_path / "elsewhere.bin"
+    target.write_bytes(b"not a backup")
+    link = tmp_path / _stamped(days[0], hour=13)
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):                # no privilege on this Windows
+        link = None
+    removed = prune_backups(str(tmp_path), keep=2)
+    assert (tmp_path / _stamped(days[0])).is_dir()
+    assert target.exists()
+    if link is not None:
+        assert os.path.islink(link)
+    assert removed == [_stamped(days[1])]                 # the oldest PLAIN file only
