@@ -24,6 +24,7 @@ from tda.core.model import FrameKey
 from tda.ui import session_api as api
 from tda.ui.commands import edit_editing_mask_op
 from tda.ui.session import AnnotationSession
+from tda.ui.session_api import SessionRefusal
 from session_scene import (
     CHASSIS,
     COOLER,
@@ -224,15 +225,17 @@ def test_commit_box_writes_a_bench_rectangle(session):
     assert result["affected"] == [13, 14]
 
 
-def test_a_bench_box_on_a_blind_view_reaches_only_the_frame_it_was_drawn_on(session):
-    """"影响 N 帧" promises pixels; on this view the compiler produces none.
+def test_a_bench_box_on_a_view_without_a_staging_area_is_refused(session):
+    """The scanner cannot see the bench, so there is nothing to box there.
 
-    The scanner has no staging-area ROI, so a part on the bench is not in its
-    picture at all -- the strip used to promise two frames the truth table then
-    had nothing to say about.
+    It used to be written and then reported as "affects 1 frame" -- a keyframe
+    the compiler will never select, on a frame the part is not in.
     """
     session.goto(14)
-    assert session.commit_box(COOLER, (2.0, 2.0, 12.0, 12.0))["affected"] == [14]
+    with pytest.raises(SessionRefusal, match="堆放区"):
+        session.commit_box(COOLER, (2.0, 2.0, 12.0, 12.0))
+    assert not [kf for kf in session.db.keyframes(DESKTOP, VIEW, COOLER)
+                if kf.geom_type == "box"]
 
 
 # --------------------------------------------------------------------------- #

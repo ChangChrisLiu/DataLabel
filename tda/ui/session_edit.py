@@ -185,7 +185,7 @@ def commit_edit(db: Db, truth: TruthService, key: FrameKey, instance: str,
         raise SessionRefusal(
             f"direction must be one of {DIRECTIONS}, got {direction!r}")
     cache = InputCache()
-    hw = frame_hw(db, key)
+    hw = frame_hw(db, key, truth.cache_dir)
     edited = as_mask(mask, hw)
     if scope == api.SCOPE_FRAME_OVERRIDE:
         return _commit_frame_override(db, truth, key, instance, edited, hw, annotator)
@@ -583,7 +583,7 @@ def commit_occluder(db: Db, truth: TruthService, key: FrameKey, mask: np.ndarray
     One layer per type, because the compiler subtracts each type separately and
     the database keys ``occluder_mask`` on it.
     """
-    layer = as_mask(mask, frame_hw(db, key))
+    layer = as_mask(mask, frame_hw(db, key, truth.cache_dir))
     previous = next((o for o in db.occluders(key) if o.occluder_type == occluder_type), None)
     common = {"desktop": key.desktop, "view": key.view, "step": key.step,
               "occluder_type": occluder_type, "steps": [key.step]}

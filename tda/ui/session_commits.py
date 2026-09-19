@@ -22,6 +22,7 @@ from tda.ui import session_api as api
 from tda.ui.session_api import SessionRefusal
 from tda.ui import session_edit as edit
 from tda.ui.session_ops import GEOM_BOX, ON_BENCH
+from tda.ui.session_tasks import has_bench_roi
 
 __all__ = ["CommitMixin"]
 
@@ -71,7 +72,7 @@ class CommitMixin:
         _refuse_draft(instance)
         found = self.compiled().instances.get(instance)
         self.layer.begin(instance, None if found is None else found.amodal,
-                         frame_hw(self.db, key))
+                         frame_hw(self.db, key, self.truth.cache_dir))
 
     @property
     def editing_instance(self) -> Optional[str]:
@@ -204,9 +205,19 @@ class CommitMixin:
             )
 
     def commit_box(self, instance: str, box, direction: str = edit.REVERSE) -> dict:
-        """Draw the staging-area rectangle of a part on the bench (spec 4.2 S4)."""
+        """Draw the staging-area rectangle of a part on the bench (spec 4.2 S4).
+
+        Refused on a view with no staging-area ROI: a part that has been taken
+        out is not in that picture at all (spec 4.2 item 1), so the keyframe
+        would be one the compiler never selects, on a frame the part is not in.
+        """
         key = self._editable_frame()
         _refuse_draft(instance)  # the one write that names its own instance
+        if not has_bench_roi(self.db, key):
+            raise SessionRefusal(
+                f"本视图没有堆放区 ROI，不能画桌面框：{self.view} 看不到堆放区，"
+                f"{instance} 离开机箱后不在这个画面里"
+            )
         result = edit.commit_box(self.db, self.truth, key, instance, box,
                                  direction=direction, annotator=self.annotator)
         return self._after_edit(result)

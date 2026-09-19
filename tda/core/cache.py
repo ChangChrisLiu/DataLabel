@@ -270,18 +270,34 @@ def cached_image_path(cache_dir, key: FrameKey) -> Optional[str]:
 
 
 @lru_cache(maxsize=8)
-def _configured_paths(paths_path: str) -> tuple[Optional[str], Optional[str]]:
-    """``(db_path, cache_dir)`` from a paths.yaml, or ``(None, None)``."""
+def _read_paths(path: str, _stamp: tuple) -> tuple[Optional[str], Optional[str]]:
+    """``(db_path, cache_dir)`` of one paths.yaml, memoised per file *version*.
+
+    ``_stamp`` is the file's size and modification time: it takes no part in the
+    read, it is what makes the memo expire. A plain cache keyed on the path
+    alone would answer from a configuration the file no longer has -- for the
+    lifetime of the process, which for the GUI is the working day.
+    """
     import yaml
 
-    path = paths_path if (os.path.isabs(paths_path) or os.path.exists(paths_path)) \
-        else os.path.join(REPO_ROOT, paths_path)
     try:
         with open(path, "r", encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh) or {}
     except (OSError, ValueError):
         return (None, None)
     return (cfg.get("db_path"), cfg.get("cache_dir"))
+
+
+def _configured_paths(paths_path: str) -> tuple[Optional[str], Optional[str]]:
+    """``(db_path, cache_dir)`` from a paths.yaml, or ``(None, None)``."""
+    path = paths_path if (os.path.isabs(paths_path) or os.path.exists(paths_path)) \
+        else os.path.join(REPO_ROOT, paths_path)
+    try:
+        stat = os.stat(path)
+        stamp: tuple = (stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return (None, None)
+    return _read_paths(path, stamp)
 
 
 def configured_cache_dir(db_path: Optional[str],

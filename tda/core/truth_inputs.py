@@ -185,9 +185,9 @@ def _image_path(row: Optional[dict], key: FrameKey,
     return None
 
 
-def _measure_hw(row: Optional[dict], key: FrameKey,
-                cache_dir: Optional[str]) -> Optional[tuple[int, int]]:
-    """``(H, W)`` read off the image file, or ``None`` when there is none to read."""
+def _measure_hw(row: Optional[dict], key: FrameKey, cache_dir: Optional[str]
+                ) -> Optional[tuple[tuple[int, int], str]]:
+    """``((H, W), path)`` read off the image file, or ``None`` when there is none."""
     path = _image_path(row, key, cache_dir)
     if not path:
         return None
@@ -198,16 +198,27 @@ def _measure_hw(row: Optional[dict], key: FrameKey,
     if image is None or getattr(image, "ndim", 0) < 2:
         return None
     height, width = (int(v) for v in image.shape[:2])
-    return (height, width) if height > 0 and width > 0 else None
+    return ((height, width), path) if height > 0 and width > 0 else None
 
 
 def _store_hw(
-    db: Db, key: FrameKey, row: Optional[dict], hw: tuple[int, int], source: str
+    db: Db, key: FrameKey, row: Optional[dict], hw: tuple[int, int], source: str,
+    measured_from: Optional[str] = None,
 ) -> None:
-    """Write a size and where it came from onto the frame row, keeping path/ts."""
+    """Write a size, where it came from and which file it was read off.
+
+    ``cache_path`` is the file the measurement was actually made on, which is
+    the only thing that makes ``hw_source="measured"`` auditable: a size that
+    does not match the image somebody is looking at is otherwise unattributable.
+    It is also the fallback :func:`_image_path` reads when no cache directory is
+    known, so a database measured once keeps working when it is opened without
+    one.
+    """
     aux = dict((row or {}).get("aux") or {})
     aux["hw"] = [int(hw[0]), int(hw[1])]
     aux["hw_source"] = source
+    if measured_from:
+        aux["cache_path"] = str(measured_from)
     db.upsert_frame(key, (row or {}).get("path"), aux, (row or {}).get("ts"))
 
 
@@ -233,8 +244,8 @@ def frame_hw(db: Db, key: FrameKey,
         return stored
     measured = _measure_hw(row, key, cache_dir)
     if measured is not None:
-        _store_hw(db, key, row, measured, HW_MEASURED)
-        return measured
+        _store_hw(db, key, row, measured[0], HW_MEASURED, measured[1])
+        return measured[0]
     if stored is not None:
         return stored
     inferred = infer_hw(key.view)

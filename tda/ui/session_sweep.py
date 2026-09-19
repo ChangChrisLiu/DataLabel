@@ -219,7 +219,10 @@ class TruthSweeper(QObject):
             self.sigError.emit(NO_STEP, f"{type(exc).__name__}: {exc}")
             return
         try:
-            truth = TruthService(db, self._tax, self._compiler_version)
+            # the same local cache the session reads from, so a re-check
+            # measures a frame's canvas off the copy rather than off F:
+            truth = TruthService(db, self._tax, self._compiler_version,
+                                 cache_dir=self._cache_dir)
             images = ImageCache(db, self._cache_dir)
             while True:
                 job = self._take()

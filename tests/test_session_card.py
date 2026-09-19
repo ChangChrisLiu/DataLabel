@@ -130,13 +130,10 @@ def test_a_drawn_instance_leaves_the_start_frame_card(session):
 
 
 def test_the_start_frame_asks_for_a_confirmation_once_it_is_drawn(qapp, tmp_path):
+    # the scanner sees no staging area, so the card asks for no bench box and
+    # none may be drawn (`commit_box` refuses): the chassis masks are all of it
     session = make_session(tmp_path)
     seed_shapes(session, LAST_STEP)
-    session.commit_box(COOLER, (2.0, 2.0, 12.0, 12.0))
-    for screw in SCREWS:
-        session.commit_box(screw, (14.0, 2.0, 22.0, 12.0))
-    for key in ("storage_drive.ssd.01", "drive_cage.01"):
-        session.commit_box(key, (24.0, 2.0, 34.0, 12.0))
 
     kinds = {item["kind"] for item in session.task_card()}
     assert kinds == {api.KIND_CONFIRM}
