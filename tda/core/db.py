@@ -269,14 +269,37 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
                      R.instance_data(inst), desktop=inst.desktop)
 
     def delete_instance(self, desktop: int, key: str) -> None:
-        """Drop one instance identity row; unknown keys are a no-op.
+        """Drop one instance identity row and the **cache** derived from it.
 
-        Only the identity row goes: the caller decides what to do with the
-        geometry, events and relations that may still name the key (stage S1
-        refuses the deletion outright while any of them do, see
-        :meth:`instance_reference_counts`).
+        The identity row goes, and with it the instance's ``auto`` compiled rows
+        and the ``frame_digest`` of every frame they were part of. Those rows are
+        not annotator work: the compiler writes one per instance the frame needs
+        -- geometry or not -- and re-derives them from the instance table on the
+        next refresh, which is exactly why leaving them behind made every
+        instance the app had ever compiled undeletable. Dropping the digest is
+        what makes that next refresh actually happen.
+
+        A ``verified`` row is a human's signature and is never touched here;
+        stage S1 refuses the deletion outright while one exists, along with the
+        keyframes, overrides, conflicts, manual events, relation edges and
+        z-order entries that may still name the key
+        (:meth:`instance_reference_counts`). Unknown keys are a no-op.
         """
+        frames = self.conn.execute(
+            "SELECT DISTINCT view, step FROM compiled_mask "
+            "WHERE desktop=? AND instance=? AND status<>'verified'",
+            (desktop, key),
+        ).fetchall()
         with self._tx():
+            self.conn.execute(
+                "DELETE FROM compiled_mask WHERE desktop=? AND instance=? "
+                "AND status<>'verified'",
+                (desktop, key),
+            )
+            for row in frames:
+                self.clear_frame_digest(
+                    FrameKey(desktop, int(row["step"]), str(row["view"]))
+                )
             self.conn.execute(
                 'DELETE FROM instance WHERE desktop=? AND "key"=?', (desktop, key)
             )
@@ -296,6 +319,15 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
         -- the automatic ones are derived and go with
         :meth:`delete_auto_events`.
 
+        ``compiled_mask`` counts **verified** rows only. An ``auto`` row is a
+        cache: the compiler writes one per instance the frame needs, geometry or
+        not, and re-derives it on the next refresh, so counting those made every
+        instance the app had ever compiled in the background undeletable -- the
+        implied motherboard, whose whole purpose is to be said no to, most of
+        all. :meth:`delete_instance` drops them; :meth:`instance_cache_counts`
+        reports them for information, deliberately apart from this dict, which
+        is a list of *reasons to refuse*.
+
         ``zorder`` is counted from the JSON list rather than by a join: it holds
         one ``(instance_key, part)`` total order per ``(view, pose_segment)``,
         and a deleted key would sit in it as a layer the compiler can never
@@ -310,7 +342,8 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
                 "SELECT COUNT(*) FROM pair_override WHERE desktop=? AND (above=? OR below=?)",
                 (desktop, key, key)),
             "compiled_mask": self._count(
-                "SELECT COUNT(*) FROM compiled_mask WHERE desktop=? AND instance=?",
+                "SELECT COUNT(*) FROM compiled_mask WHERE desktop=? AND instance=? "
+                "AND status='verified'",
                 (desktop, key)),
             "conflict": self._count(
                 "SELECT COUNT(*) FROM conflict WHERE desktop=? AND instance=? AND status='open'",
@@ -319,6 +352,21 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
                 "SELECT COUNT(*) FROM state_event WHERE desktop=? AND target=? AND auto=0",
                 (desktop, key)),
             "zorder": self._zorder_references(desktop, key),
+        }
+        return {table: n for table, n in counts.items() if n}
+
+    def instance_cache_counts(self, desktop: int, key: str) -> dict[str, int]:
+        """Derived rows naming one instance: information, never a refusal.
+
+        Kept apart from :meth:`instance_reference_counts` on purpose -- that one
+        is read as "reasons this cannot be deleted", and these rows are not a
+        reason, they are what :meth:`delete_instance` cleans up.
+        """
+        counts = {
+            "compiled_mask_auto": self._count(
+                "SELECT COUNT(*) FROM compiled_mask WHERE desktop=? AND instance=? "
+                "AND status<>'verified'",
+                (desktop, key)),
         }
         return {table: n for table, n in counts.items() if n}
 

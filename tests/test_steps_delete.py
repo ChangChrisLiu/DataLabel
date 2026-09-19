@@ -188,12 +188,20 @@ def test_delete_instance_refuses_while_a_pair_override_references_it(db, orphane
     assert "pair_override" in str(err.value)
 
 
-def test_delete_instance_refuses_while_compiled_truth_references_it(db, orphaned):
+def test_delete_instance_refuses_while_verified_truth_references_it(db, orphaned):
+    """A frozen row is a signature. An ``auto`` row is a cache and goes with it."""
     db.put_compiled(FrameKey(13, 4, "scan"), ORPHAN, None, 0.0, "visible", "in_chassis",
-                    "auto", "hash")
+                    "verified", "hash", verified_by="chang")
     with pytest.raises(EditError) as err:
         orphaned.delete_instance(db, ORPHAN)
     assert "compiled_mask" in str(err.value)
+
+
+def test_delete_instance_clears_the_auto_truth_rows_instead_of_refusing(db, orphaned):
+    db.put_compiled(FrameKey(13, 4, "scan"), ORPHAN, None, 0.0, "visible", "in_chassis",
+                    "auto", "hash")
+    orphaned.delete_instance(db, ORPHAN)
+    assert ORPHAN not in db.compiled(FrameKey(13, 4, "scan"))
 
 
 def test_delete_instance_refuses_while_an_open_conflict_references_it(db, orphaned):
