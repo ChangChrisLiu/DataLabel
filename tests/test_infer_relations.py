@@ -915,8 +915,19 @@ def test_a_captive_screw_without_a_parent_is_an_issue(tax):
     assert list(unresolved_issues(instances, tax)) == []
 
 
-def test_the_step_table_asks_about_both_after_the_existing_questions(tmp_db_path, tax):
-    """A desktop the heuristic never reached must put both questions on screen."""
+def test_a_board_mounted_latch_without_a_parent_is_an_issue(tax):
+    """The same defect as the captive screw, on the classes with a ``host_class``."""
+    instances = _board_and_latches(boards=0)
+    lines = list(unresolved_issues(instances, tax))
+    assert [line for line in lines if "host-mounted instance without parent" in line]
+    assert all("ram_latch" in line or "cpu_socket_lever" in line for line in lines)
+    for key in BOARD_LATCHES:
+        instances[key].parent = "motherboard.01"
+    assert list(unresolved_issues(instances, tax)) == []
+
+
+def test_the_step_table_asks_about_them_after_the_existing_questions(tmp_db_path, tax):
+    """A desktop the heuristic never reached must put every question on screen."""
     from steps_fixtures import seeded_db
     from tda.ui.steps_model import StepTableData
 
@@ -926,11 +937,12 @@ def test_the_step_table_asks_about_both_after_the_existing_questions(tmp_db_path
         data = StepTableData.load(db, 13, tax)
     finally:
         db.close()
-    new = [
-        i for i, line in enumerate(data.orphans)
-        if "unresolved socket host" in line or "captive screw without parent" in line
-    ]
+    kinds = ("unresolved socket host", "captive screw without parent",
+             "host-mounted instance without parent")
+    new = [i for i, line in enumerate(data.orphans)
+           if any(kind in line for kind in kinds)]
     assert new
+    assert all(any(kind in data.orphans[i] for kind in kinds) for i in new)
     # the new kinds sit at the very end, after every pre-existing one
     assert new == list(range(len(data.orphans) - len(new), len(data.orphans)))
     text = "\n".join(data.orphans)

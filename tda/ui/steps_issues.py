@@ -156,6 +156,11 @@ def unresolved_issues(
       the part comes out (spec 7.1), which only happens if ``parent`` names it;
       without one the screw is left behind ``loosened`` and in the chassis, and
       the annotator is asked for its shape on every later frame.
+    * **host-mounted instance without parent** -- the same defect on the classes
+      that declare a ``host_class`` (``ram_latch`` and ``cpu_socket_lever`` ride
+      on the motherboard). The desktop has no unique host to hang it on, so the
+      latch stands in the chassis once the board is gone and is a missing shape
+      on every frame after it.
     * **implied instance** -- a part :mod:`tda.core.implied` created because the
       desktop clearly has one and the log simply stops before touching it (the
       motherboard of D49/D62/D63/D64). It is a judgement, so it is put to the
@@ -177,6 +182,13 @@ def unresolved_issues(
             yield (
                 f"captive screw without parent: {key} is captive but leaves the "
                 f"chassis with nothing - name the part it stays in"
+            )
+        mount = tax.host_class(inst.cls)
+        if mount and not inst.parent:
+            yield (
+                f"host-mounted instance without parent: {key} rides on the "
+                f"{mount} and has none - it will be asked for a shape on every "
+                f"frame after the {mount} is out"
             )
         if is_implied(inst):
             yield (
