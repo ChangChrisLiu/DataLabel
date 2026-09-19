@@ -32,6 +32,17 @@ from typing import Any, Callable, Iterable, Optional
 import cv2
 import numpy as np
 
+from tda.core.cache_roi_detect import (  # re-exported: suggest_roi's two strategies
+    ROI_MAX_AREA_FRAC,
+    ROI_MIN_AREA_FRAC,
+    best_candidate,
+    board_mask,
+    box_plausibility,
+    scan_bed_box,
+    scan_bed_candidates,
+    scan_chassis_box,
+    scan_chassis_candidates,
+)
 from tda.core.cache_thumbs import (DbRoiLookup, add_thumb_args, build_thumbs,  # re-exported
                                    run_thumb_cli, thumb_path)
 from tda.core.index import DEFAULT_PATHS_PATH, REPO_ROOT, DesktopIndex, FrameFile, load_index
@@ -39,7 +50,8 @@ from tda.core.model import FrameKey
 
 __all__ = [
     "DbRoiLookup", "build_cache", "build_thumbs", "burst_metrics", "cache_path",
-    "choose_scan_image", "suggest_roi", "thumb_path",
+    "choose_scan_image", "scan_bed_candidates", "scan_chassis_candidates",
+    "suggest_roi", "thumb_path",
 ]
 
 # --- burst metrics -------------------------------------------------------
@@ -68,43 +80,6 @@ METRICS_VERSION = 1  # bump whenever burst_metrics changes what it measures (a n
 #                      re-decided from stale numbers.  A record written before the
 #                      stamp existed counts as version 1.
 SINGLE_REASON = "only"  # views without a burst have nothing to choose
-
-# --- ROI suggestion ------------------------------------------------------
-YELLOW_LO = (10, 60, 60)  # HSV bounds of the yellow/orange tape square
-YELLOW_HI = (40, 255, 255)
-TAPE_MIN_AREA_FRAC = 0.005  # ignore yellow specks: no tape found -> fallback
-TAPE_MIN_SPAN_FRAC = 0.5  # ... and a tape square frames the board, so it has to
-#                           span at least half the frame; a smaller yellow blob is
-#                           something else (a label, a cable) -> fallback
-DARK_MAX = 90  # gray below this counts as "dark object" (chassis)
-DARK_MIN_AREA_FRAC = 0.005
-ROI_PAD_FRAC = 0.03  # pad the chassis box by 3% of its own size
-CENTRAL_FRAC = 0.70  # fallback / non-scan views: central 70% box
-
-# --- ROI plausibility (shared by both scanner strategies) ----------------
-# A box outside these bounds is not a chassis seen from above.  The area bounds
-# are the ones `cache_thumbs` already applied after the fact; they are applied
-# here as well so the two strategies can be *chosen between* rather than only
-# vetoed.  Aspect is width/height of the box: the 66 real scanner frames run
-# 0.75-1.55, and a box thinner than 1:2 either way is a panel or a cable run.
-# Rectangularity is the fraction of the box the detected region actually fills.
-# It is deliberately a *loose* floor: an opened chassis shows its internals, so
-# neither stage produces a solid rectangle and the 66 real frames score 0.20 to
-# 0.76 on the boxes that are right.  Anything below a sixth is a spray of specks
-# whose bounding box means nothing.
-ROI_MIN_AREA_FRAC = 0.20
-ROI_MAX_AREA_FRAC = 0.95
-ROI_MIN_ASPECT = 0.5
-ROI_MAX_ASPECT = 2.0
-ROI_MIN_RECTANGULARITY = 0.15
-
-# --- the scan-bed background strategy ------------------------------------
-# The bed is a bright, low-saturation board, so a chassis of *any* colour is
-# what differs from it -- which is what the dark-object stage above cannot say
-# about a light or silver chassis (D64: it finds the PCB, 13% of the frame).
-BED_RING_FRAC = 0.03  # width of the border ring the background is modelled from
-BED_MIN_DIST = 18.0  # CIE-Lab distance at which a pixel stops being "the bed"
-BED_MIN_AREA_FRAC = 0.02  # a region smaller than this is not a chassis
 
 _P_RE = re.compile(r"P_(\d+)", re.IGNORECASE)
 
@@ -235,6 +210,9 @@ def choose_scan_image(metrics: list[dict]) -> tuple[int, str]:
 # ---------------------------------------------------------------------------
 # ROI suggestion
 # ---------------------------------------------------------------------------
+CENTRAL_FRAC = 0.70  # fallback / non-scan views: central 70% box
+
+
 def _central_box(width: int, height: int) -> tuple[int, int, int, int]:
     """The central :data:`CENTRAL_FRAC` box of a ``width`` x ``height`` image."""
     bw, bh = int(round(width * CENTRAL_FRAC)), int(round(height * CENTRAL_FRAC))
@@ -242,217 +220,30 @@ def _central_box(width: int, height: int) -> tuple[int, int, int, int]:
     return (x0, y0, x0 + bw, y0 + bh)
 
 
-def _pad_box(box: tuple[int, int, int, int], width: int, height: int,
-             frac: float = ROI_PAD_FRAC) -> tuple[int, int, int, int]:
-    """Grow ``box`` by ``frac`` of its own size, clipped to the image."""
-    x0, y0, x1, y1 = box
-    px, py = int(round((x1 - x0) * frac)), int(round((y1 - y0) * frac))
-    return (max(0, x0 - px), max(0, y0 - py), min(width, x1 + px), min(height, y1 + py))
-
-
-def _odd(value: float, minimum: int = 3) -> int:
-    """Nearest odd kernel size >= ``minimum``."""
-    return max(minimum, int(round(value)) | 1)
-
-
-def _largest_component(mask: np.ndarray) -> tuple[Optional[int], np.ndarray, np.ndarray]:
-    """Label of the biggest non-background blob in ``mask`` plus the label image."""
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
-    if count <= 1:
-        return None, labels, stats
-    return 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA])), labels, stats
-
-
-#: One strategy's answer: the padded box and how many pixels of the region it
-#: was measured from lie inside it (what :func:`_box_plausibility` scores).
-Candidate = tuple[tuple[int, int, int, int], int]
-
-
-def _board_mask(bgr: np.ndarray) -> Optional[np.ndarray]:
-    """The scan bed inside the yellow tape square, or None when there is none.
-
-    The board is framed by a yellow tape square. Small gaps in the tape (and the
-    loose corner scraps) are bridged by a dilation, the filled convex hull of
-    the bridged square gives the board region, and the tape band itself is then
-    removed from it. Nine of the 66 machines cover enough of the tape that no
-    square is found at all; for them this is ``None`` and every stage that needs
-    a board has to say so rather than guess one.
-    """
-    height, width = bgr.shape[:2]
-    small_k = _odd(min(height, width) * 0.005)
-    bridge_k = _odd(min(height, width) * 0.02)
-
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    yellow = cv2.inRange(hsv, YELLOW_LO, YELLOW_HI)
-    yellow = cv2.morphologyEx(yellow, cv2.MORPH_CLOSE, np.ones((small_k, small_k), np.uint8))
-    bridged = cv2.dilate(yellow, np.ones((bridge_k, bridge_k), np.uint8))
-
-    label, labels, stats = _largest_component(bridged)
-    if label is None or stats[label, cv2.CC_STAT_AREA] < TAPE_MIN_AREA_FRAC * height * width:
-        return None
-    if (stats[label, cv2.CC_STAT_WIDTH] < TAPE_MIN_SPAN_FRAC * width
-            or stats[label, cv2.CC_STAT_HEIGHT] < TAPE_MIN_SPAN_FRAC * height):
-        return None  # not a square framing the board
-
-    contours, _ = cv2.findContours((labels == label).astype(np.uint8),
-                                   cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-    board = np.zeros((height, width), np.uint8)
-    cv2.fillConvexPoly(board, cv2.convexHull(max(contours, key=cv2.contourArea)), 255)
-    board = cv2.erode(board, np.ones((bridge_k, bridge_k), np.uint8))  # undo the bridging
-    board[yellow > 0] = 0  # the tape band is not part of the inner region
-    return board
-
-
-def _scan_chassis_box(bgr: np.ndarray) -> Optional[Candidate]:
-    """Chassis box of a scanner frame: the largest **dark** object on the board.
-
-    ``None`` when the tape square is absent or nothing dark enough is inside it.
-    """
-    height, width = bgr.shape[:2]
-    small_k = _odd(min(height, width) * 0.005)
-    board = _board_mask(bgr)
-    if board is None:
-        return None
-
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    dark = ((gray < DARK_MAX) & (board > 0)).astype(np.uint8)
-    dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, np.ones((small_k, small_k), np.uint8))
-
-    label, _, stats = _largest_component(dark)
-    if label is None or stats[label, cv2.CC_STAT_AREA] < DARK_MIN_AREA_FRAC * height * width:
-        return None
-    x, y, w, h = (int(v) for v in stats[label, :4])
-    return (_pad_box((x, y, x + w, y + h), width, height),
-            int(stats[label, cv2.CC_STAT_AREA]))
-
-
-def _box_plausibility(box: tuple[int, int, int, int], filled: int,
-                      width: int, height: int) -> Optional[float]:
-    """Is this box a chassis at all, and how convincingly? ``None`` when it is not.
-
-    Three cheap questions, all of them about shape rather than about colour, so
-    the two strategies can be compared on one scale: does the box cover a
-    plausible fraction of the frame, is it roughly as wide as it is tall, and
-    does the detected region actually *fill* it. The score is the
-    rectangularity, which is what tells a chassis (a filled rectangle seen from
-    above) from a sprawl of tape, shadow and cable that happens to span the
-    same corners.
-    """
-    x0, y0, x1, y1 = box
-    area = float((x1 - x0) * (y1 - y0))
-    if area <= 0:
-        return None
-    frac = area / float(max(width * height, 1))
-    if not ROI_MIN_AREA_FRAC <= frac <= ROI_MAX_AREA_FRAC:
-        return None
-    aspect = (x1 - x0) / float(max(y1 - y0, 1))
-    if not ROI_MIN_ASPECT <= aspect <= ROI_MAX_ASPECT:
-        return None
-    rectangularity = filled / area
-    return rectangularity if rectangularity >= ROI_MIN_RECTANGULARITY else None
-
-
-def _scan_bed_box(bgr: np.ndarray) -> Optional[Candidate]:
-    """Chassis box of a scanner frame as "whatever is not the scan bed".
-
-    The dark-object stage of :func:`_scan_chassis_box` assumes the chassis is
-    the darkest thing on the board.  On a light or silver machine it is not:
-    on D64 it finds the motherboard's PCB, 13% of the frame, with every sampled
-    step agreeing, so no median over steps can catch it either.
-
-    What *is* true of every machine is that the bed is a bright, low-saturation
-    board and the chassis is not it.  So: model the background from the frame's
-    border ring (which is bed on every one of the 66 real frames, whatever the
-    machine is made of), take the CIE-Lab distance of every pixel to it, drop
-    the orange tape - which differs from the bed too and would weld the chassis
-    to the frame's edge - and take the largest remaining region.  Its
-    ``minAreaRect`` is turned into the axis-aligned box the ROI is, because the
-    ROI crops an upright rectangle.
-
-    The search is confined to the board (:func:`_board_mask`) where there is
-    one: without that, the largest "not the bed" region grows through the tape
-    and the shadow at the frame's edge into everything, and the box it produces
-    is the whole scan. ``None`` when nothing survives; the caller decides
-    between this and the dark-object box by :func:`_box_plausibility`.
-    """
-    height, width = bgr.shape[:2]
-    ring = max(4, int(round(min(height, width) * BED_RING_FRAC)))
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
-
-    border = np.zeros((height, width), bool)
-    border[:ring, :] = border[-ring:, :] = True
-    border[:, :ring] = border[:, -ring:] = True
-    background = np.median(lab[border], axis=0)  # robust: the ring is mostly bed
-
-    distance = np.linalg.norm(lab - background, axis=2)
-    foreground = (distance >= BED_MIN_DIST).astype(np.uint8)
-
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    foreground[cv2.inRange(hsv, YELLOW_LO, YELLOW_HI) > 0] = 0  # the tape is not a part
-    board = _board_mask(bgr)
-    if board is not None:
-        foreground[board == 0] = 0
-
-    small_k = _odd(min(height, width) * 0.005)
-    foreground = cv2.morphologyEx(
-        foreground, cv2.MORPH_CLOSE, np.ones((small_k, small_k), np.uint8)
-    )
-    foreground = cv2.morphologyEx(
-        foreground, cv2.MORPH_OPEN, np.ones((small_k, small_k), np.uint8)
-    )
-
-    label, labels, stats = _largest_component(foreground)
-    if label is None or stats[label, cv2.CC_STAT_AREA] < BED_MIN_AREA_FRAC * height * width:
-        return None
-    contours, _ = cv2.findContours((labels == label).astype(np.uint8),
-                                   cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-    points = cv2.boxPoints(cv2.minAreaRect(max(contours, key=cv2.contourArea)))
-    x0, y0 = points.min(axis=0)
-    x1, y1 = points.max(axis=0)
-    box = (max(0, int(x0)), max(0, int(y0)), min(width, int(x1)), min(height, int(y1)))
-    if box[2] <= box[0] or box[3] <= box[1]:
-        return None
-    return _pad_box(box, width, height), int(stats[label, cv2.CC_STAT_AREA])
-
-
 def suggest_roi(img: np.ndarray, view: str) -> tuple[int, int, int, int]:
     """Suggest the chassis ROI ``(x0, y0, x1, y1)`` in original image pixels.
 
-    A scanner frame is measured twice and the better answer wins:
+    A scanner frame is measured twice by :mod:`tda.core.cache_roi_detect` -- as
+    the darkest object on the board and as whatever is not the scan bed -- and
+    the better answer wins.  The dark-object stage is asked first and kept
+    whenever it is plausible: it is the stage the thresholds were calibrated on,
+    it is tighter on the 55 machines it gets right, and preferring the
+    higher-scoring box instead re-cropped most of the 66 real frames for no
+    benefit.  The bed stage is the answer for a light or silver machine, where
+    the dark one measures something that is not a chassis at all.
 
-    * :func:`_scan_chassis_box` -- the largest **dark** object inside the yellow
-      tape square, which is what a black or dark-grey chassis is;
-    * :func:`_scan_bed_box` -- the largest region that is not the **scan bed**,
-      which is what a light or silver chassis is (D64, where the dark detector
-      returns the motherboard's PCB at 13% of the frame).
-
-    :func:`_box_plausibility` decides, **in order**: a box has to cover 20-95%
-    of the frame, be between 1:2 and 2:1, and actually be filled by the region
-    it came from.  The dark-object box is asked first and kept whenever it is
-    plausible -- it is the stage the thresholds were calibrated on and the right
-    answer for the great majority of the machines, and preferring the
-    higher-scoring box instead re-cropped 47 of the 66 real frames for no
-    benefit.  The bed box is the answer for the ones where the dark stage
-    measured something that is not a chassis.  Any other view, and a scanner
-    frame where neither strategy convinces, falls back to the central 70% box.
-    The suggestion is always confirmed by a human (spec 2.4).
+    Any other view, and a scanner frame where neither convinces, falls back to
+    the central 70 % box.  The suggestion is always confirmed by a human
+    (spec 2.4).
     """
     if img is None or getattr(img, "size", 0) == 0:
         raise ValueError("suggest_roi() needs a non-empty image")
     height, width = img.shape[:2]
     if view == "scan":
         bgr = img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        for strategy in (_scan_chassis_box, _scan_bed_box):
-            found = strategy(bgr)
-            if found is None:
-                continue
-            box, filled = found
-            if _box_plausibility(box, filled, width, height) is not None:
-                return box
+        for found in (scan_chassis_box(bgr), scan_bed_box(bgr)):
+            if found is not None:
+                return found[0]
     return _central_box(width, height)
 
 
