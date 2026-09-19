@@ -30,6 +30,8 @@ from tda.core.graph_plan import remaining_plan
 from tda.core.graph_rules import (
     BLOCKED_MODES,
     Edge,
+    GATED_VERBS,
+    GATES,
     HARD_TYPES,
     REMOVED,
     REQUIRED_STATES,
@@ -39,6 +41,7 @@ from tda.core.graph_rules import (
     cable_nodes,
     cable_owner,
     connector_owner,
+    gated_verbs,
     infer_relational_fields,
     is_provisional,
     propose_edges,
@@ -55,6 +58,8 @@ from tda.core.taxonomy import Taxonomy
 __all__ = [
     "BLOCKED_MODES",
     "Edge",
+    "GATED_VERBS",
+    "GATES",
     "HARD_TYPES",
     "REQUIRED_STATES",
     "apply_template",
@@ -65,6 +70,7 @@ __all__ = [
     "edges_from_db",
     "edges_to_db",
     "find_cycles",
+    "gated_verbs",
     "graph_version",
     "infer_relational_fields",
     "is_provisional",
@@ -83,10 +89,6 @@ __all__ = [
 #: every edge at least as strong as ``n``.
 NECESSITY_ORDER = ("required", "recommended")
 
-#: Verbs that a hard constraint can block (spec 7.2). ``reorient`` is a capture
-#: action on the chassis, not a disassembly step, so nothing gates it.
-GATED_VERBS = frozenset({"remove", "displace", "open", "unscrew", "disconnect", "release"})
-
 ActionLike = Union[ActionRec, VerbTarget]
 
 
@@ -103,11 +105,12 @@ def _verb_target(action: ActionLike) -> VerbTarget:
 def applicable_preconditions(edges: list[Edge], action: ActionLike) -> list[Edge]:
     """Which edges gate this ``(verb, target)``.
 
-    Spec 7.2 gates ``remove`` / ``displace`` / ``open`` on a part, cover or
-    latch, and ``unscrew`` / ``disconnect`` on a fastener or plug, on *every*
-    hard edge whose ``target`` is that node -- the edge type says what has to
-    give way, not which verb it applies to. A verb nothing can block (only
-    ``reorient`` today) has no preconditions at all.
+    Every hard edge whose ``target`` is that node **and whose type gates this
+    verb** -- see :data:`~tda.core.graph_rules.GATES`. The type says what has to
+    give way *and* what it holds up: a screw stops the part moving but not the
+    plug in its socket being pulled, and a plugged cable stops the part being
+    taken away but not swung aside. A verb nothing can block (only ``reorient``
+    today) has no preconditions at all.
 
     ``action`` is an :class:`~tda.core.model.ActionRec` or a plain
     ``(verb, target)`` pair. Rejected edges are dropped.
@@ -115,7 +118,8 @@ def applicable_preconditions(edges: list[Edge], action: ActionLike) -> list[Edge
     verb, target = _verb_target(action)
     if verb not in GATED_VERBS:
         return []
-    return [e for e in active_edges(edges) if e.target == target]
+    return [e for e in active_edges(edges)
+            if e.target == target and verb in gated_verbs(e.type)]
 
 
 def _necessity_rank(necessity: str) -> int:

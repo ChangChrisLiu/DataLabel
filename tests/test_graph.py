@@ -168,8 +168,11 @@ def test_applicable_preconditions_by_verb(bench, tax):
         ("connected_to", "motherboard.01", "connector.atx_24pin.01"),
         ("connected_to", "motherboard.01", "connector.sata_data.02"),
     }
-    # displace is gated exactly like remove
-    assert _triples(applicable_preconditions(edges, ("displace", "motherboard.01"))) == mb
+    # displace is gated by the structural edges only: a board whose cables are
+    # still plugged can be lifted clear of its standoffs, just not taken away
+    assert _triples(applicable_preconditions(edges, ("displace", "motherboard.01"))) == {
+        t for t in mb if t[0] != "connected_to"
+    }
     # a screw hidden under a cover cannot be unscrewed
     assert _triples(applicable_preconditions(edges, ("unscrew", "screw.motherboard.01"))) == {
         ("covered_by", "screw.motherboard.01", "cover.01")
@@ -270,12 +273,19 @@ def test_legal_actions_in_the_initial_state(bench, tax):
         ("remove", "connector.sata_data.01"),
         ("remove", "connector.sata_data.02"),
         ("remove", "cover.01"),
+        # its two SATA plugs gate taking the drive away, not sliding it out of
+        # the cage: `connected_to` gates `remove` only
+        ("displace", "storage_drive.hdd.01"),
         ("unscrew", "screw.cpu_cooler.01"),
         ("unscrew", "screw.cpu_cooler.02"),
     }
     # the motherboard is screwed down, plugged in, and its screws are covered
     assert ("remove", "motherboard.01") not in got
     assert ("unscrew", "screw.motherboard.01") not in got
+    # ... and still screwed down, so it cannot be moved at all
+    assert ("displace", "motherboard.01") not in got
+    # the drive may slide out of its cage, but not leave with its cables on
+    assert ("remove", "storage_drive.hdd.01") not in got
 
 
 def test_a_plugged_connector_can_be_removed_with_its_cable(bench, tax):

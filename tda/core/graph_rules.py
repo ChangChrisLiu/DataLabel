@@ -47,9 +47,12 @@ __all__ = [
     "SCREW_ROLE_CLASSES",
     "UNRESOLVED",
     "Edge",
+    "GATED_VERBS",
+    "GATES",
     "HARD_TYPES",
     "REQUIRED_STATES",
     "VerbTarget",
+    "gated_verbs",
     "active_edges",
     "blocker_state",
     "cable_nodes",
@@ -80,6 +83,45 @@ REQUIRED_STATES: dict[str, frozenset[str]] = {
 
 #: ``blocked_by`` is the only type that carries a mode (spec 7.1).
 BLOCKED_MODES = ("physical_path", "tool_access", "cable_tension")
+
+#: Verbs a hard constraint can block at all (spec 7.2). ``reorient`` is a
+#: capture action on the chassis, not a disassembly step, so nothing gates it.
+GATED_VERBS = frozenset({"remove", "displace", "open", "unscrew", "disconnect", "release"})
+
+#: Which of those verbs each edge type actually gates. One table, read by
+#: :func:`tda.core.graph.applicable_preconditions` (and so by ``legal_actions``
+#: and ``validate_sequence``) *and* by :mod:`tda.core.graph_plan`, so the
+#: checker and the planner cannot drift apart.
+#:
+#: Every type used to gate every verb, which said a slim-case PSU could not be
+#: swung out of the way until its whole harness was unplugged -- backwards, as
+#: swinging it out is how you reach the plugs. Across the 66 sheets that alone
+#: produced 34 ``displace psu.01 violates connected_to(...)`` lines, every one
+#: of them describing correct work. The distinction is *moving the part* versus
+#: *reaching it*:
+#:
+#: * ``fastened_by`` / ``locked_by`` -- a screwed-down or latched part does not
+#:   move, but you can still work on what is plugged into it;
+#: * ``covered_by`` / ``blocked_by`` -- no access at all, so every verb waits
+#:   (``blocked_by`` by its ``mode``, as before);
+#: * ``connected_to`` -- you may displace, open or unscrew a part whose cables
+#:   are still plugged; you may not take it away.
+GATES: dict[str, frozenset[str]] = {
+    "fastened_by": frozenset({"remove", "displace", "open"}),
+    "locked_by": frozenset({"remove", "displace", "open"}),
+    "covered_by": GATED_VERBS,
+    "blocked_by": GATED_VERBS,
+    "connected_to": frozenset({"remove"}),
+}
+
+
+def gated_verbs(edge_type: str) -> frozenset[str]:
+    """Which verbs an edge of this type gates; an unknown type gates them all.
+
+    Gating too much is noisy and visible; gating too little silently drops a
+    constraint out of the ground truth, so an unrecognised type errs the loud way.
+    """
+    return GATES.get(edge_type, GATED_VERBS)
 
 CABLE_PREFIX = "cable:"
 REMOVED = "removed"

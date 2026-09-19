@@ -111,12 +111,22 @@ class DesktopGraph:
 
     @property
     def hints(self) -> list[str]:
-        """Failed attempts nothing in the graph explains -- "missing edge?"."""
+        """Failed attempts nothing in the graph explains -- "missing edge?".
+
+        The annotator's move is the opposite of :attr:`breaches`: something
+        really was in the way and the graph does not know it, so the answer is a
+        manual ``blocked_by`` edge rather than a correction to the log.
+        """
         return [text for text in self.violations if text.endswith(MISSING_EDGE)]
 
     @property
     def breaches(self) -> list[str]:
-        """Successful actions that broke a hard constraint (spec 7.4)."""
+        """Successful actions that broke a hard constraint (spec 7.4).
+
+        Almost always a gap in the log rather than a physical impossibility: a
+        step that was done but never written down, so the replay reaches the
+        action with a blocker still in its original state.
+        """
         return [text for text in self.violations if not text.endswith(MISSING_EDGE)]
 
 
@@ -329,7 +339,10 @@ def constraints_report(run: GraphRun) -> str:
         + ", ".join(f"{t} {run.by_type.get(t, 0)}" for t in HARD_TYPES) + ")",
         f"- cycles: {run.cycles}",
         f"- violations: {run.violations}"
-        + ("" if run.validate else " (not checked; pass --validate)"),
+        + (f" ({sum(len(r.breaches) for r in applied)} likely log gaps, "
+           f"{sum(len(r.hints) for r in applied)} failed attempts wanting a "
+           f"manual blocked_by)" if run.validate
+           else " (not checked; pass --validate)"),
         "",
         "| desktop | edges | " + " | ".join(HARD_TYPES)
         + " | cycles | violations | graph_version |",
@@ -366,21 +379,29 @@ def _desktop_section(r: DesktopGraph) -> list[str]:
     lines.extend([f"- {' -> '.join(cycle)}" for cycle in r.cycles]
                  or ["- none (the graph is acyclic, as spec 7.4 requires)"])
     lines.append("")
-    lines.append("### violations")
+    lines.append("### likely log gaps")
     lines.append("")
     if not r.validated:
         lines.append("- not checked; re-run with --validate")
     else:
+        lines.append("A recorded action that broke a hard constraint. The graph "
+                     "says the blocker was still in its way, so a step was most "
+                     "likely done and never written down -- S1 work.")
+        lines.append("")
         lines.extend([f"- {text}" for text in r.breaches]
                      or ["- none: every recorded action was legal when it happened"])
     lines.append("")
-    lines.append("### failed attempts with no unmet constraint")
+    lines.append("### failed attempt without an unmet constraint (add a manual "
+                 "blocked_by?)")
     lines.append("")
     if not r.validated:
         lines.append("- not checked; re-run with --validate")
     else:
-        lines.extend([f"- {text}" for text in r.hints]
-                     or ["- none"])
+        lines.append("The annotator tried and could not. Something was in the way "
+                     "and the graph does not know what, so this wants a manual "
+                     "`blocked_by` edge -- S6 work.")
+        lines.append("")
+        lines.extend([f"- {text}" for text in r.hints] or ["- none"])
     lines.append("")
     if r.unresolved:
         lines.append("### unresolved references")
