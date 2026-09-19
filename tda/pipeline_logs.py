@@ -385,10 +385,14 @@ def _write_import(
 
 
 def dropped_notes_line(desktop: int, dropped: int) -> str:
-    """The one line that says a renumbered sheet cost this desktop its notes."""
+    """The one line that says a renumbered sheet cost this desktop its notes.
+
+    It counts *steps*: one step's notes are one carry-over, however many ``LS:``
+    lines the Label Studio import folded onto it.
+    """
     return (
-        f"D{desktop:02d}: {dropped} LS notes could not be carried over (sheet "
-        f"renumbered) - re-run import-ls"
+        f"D{desktop:02d}: {dropped} steps with LS notes could not be carried over "
+        f"(sheet renumbered) - re-run import-ls"
     )
 
 
@@ -408,7 +412,9 @@ def _force_warning(db: Db, desktop: int, previous: list[StepRec]) -> str:
     return (
         f"[import-logs] D{desktop:02d}: --force, replacing {len(previous)} steps / "
         f"{len(db.actions(desktop))} actions; {notes}every other manual edit to the step "
-        f"table is lost"
+        f"table is lost, and so is every relational field a human set on an instance "
+        f"(fastens, parent, mounted_on, socket_host): the instances are re-created from "
+        f"the sheet and the heuristic fills them again"
     )
 
 

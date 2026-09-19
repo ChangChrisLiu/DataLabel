@@ -89,9 +89,12 @@ def referencing_instances(instances: dict[str, InstanceRec], cls: str) -> list[s
     return out
 
 
-def _note(cls: str, referees: list[str]) -> str:
+def _note(referees: list[str]) -> str:
+    """The one line stage S1 shows about an implied instance."""
+    count = len(referees)
     return (
-        f"implied: referenced by {len(referees)} instances, never operated in the log"
+        f"implied: referenced by {count} instance{'' if count == 1 else 's'}, "
+        f"never operated in the log"
     )
 
 
@@ -143,6 +146,6 @@ def implied_instances(
             key=key,
             desktop=desktop,
             cls=cls,
-            attrs={IMPLIED_ATTR: True, NOTE_ATTR: _note(cls, referees)},
+            attrs={IMPLIED_ATTR: True, NOTE_ATTR: _note(referees)},
         ))
     return out

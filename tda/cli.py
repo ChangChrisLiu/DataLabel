@@ -151,13 +151,22 @@ def _add_build_index(sub) -> None:
 # load-index
 # --------------------------------------------------------------------------- #
 def cmd_load_index(args: argparse.Namespace) -> int:
-    """Write the frames and pose segments of ``index.json`` into the database."""
+    """Write the frames and pose segments of ``index.json`` into the database.
+
+    Destructive, quietly: a re-built index can move a ``reorient`` step, which
+    re-cuts the pose segments, and a segment whose reference frame leaves it
+    loses the corners, homography and ROI a human clicked (spec 2.4). So it
+    takes the same safety copy as the other three.
+    """
     with _session(args, lock=True) as (paths, db):
         target = args.index or P.index_path(paths)
         try:
             index = load_index(target)
         except OSError as exc:
             print(f"[load-index] cannot read {target}: {exc}; run build-index first")
+            return EXIT_ERROR
+        if not _safety_backup(paths, db, "load-index",
+                              "it re-cuts the pose segments"):
             return EXIT_ERROR
         counts = P.load_index_into_db(db, index, _desktops(args), log=print)
         failed = counts.get("failed") or []
@@ -244,6 +253,11 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
 
 def cmd_import_logs(args: argparse.Namespace) -> int:
     """Import the Drive sheets into steps, actions, instances and state events."""
+    if args.force_verified and not args.force:
+        print("[import-logs] --force-verified only means something with --force: "
+              "without --force a desktop that already has steps is skipped before "
+              "its verified frames are ever looked at.")
+        return EXIT_ERROR
     with _session(args, lock=True) as (paths, db):
         directory = args.dir or P.drive_dir(paths)
         index = P.read_index(paths, args.index)

@@ -382,7 +382,10 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
         ).fetchall()
         found = 0
         for row in rows:
-            order = R.loads(row["order_json"])
+            try:
+                order = R.loads(row["order_json"])
+            except (ValueError, TypeError):
+                continue  # not JSON at all: broken, and broken names nothing
             if not isinstance(order, list):
                 continue
             if any(isinstance(p, (list, tuple)) and p and p[0] == key for p in order):

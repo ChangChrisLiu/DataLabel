@@ -546,11 +546,12 @@ def test_import_ls_runs_once_the_desktops_have_steps(env):
 # backup / status
 # --------------------------------------------------------------------------- #
 def test_backup_writes_a_file(env):
-    assert run(env, "load-index") == 0
+    assert run(env, "load-index") == 0  # which takes a safety copy of its own
+    before = set(Path(env["cfg"]["backup_dir"]).glob("tda_*.sqlite"))
     assert run(env, "backup") == 0
-    made = list(Path(env["cfg"]["backup_dir"]).glob("tda_*.sqlite"))
+    made = set(Path(env["cfg"]["backup_dir"]).glob("tda_*.sqlite")) - before
     assert len(made) == 1
-    assert made[0].stat().st_size > 0
+    assert next(iter(made)).stat().st_size > 0
 
 
 def test_backup_dest_must_stay_inside_backup_dir(env, capsys, tmp_path):
@@ -639,14 +640,16 @@ def test_force_backs_the_database_up_first(env, capsys):
     assert run(env, "load-index") == EXIT_OK
     assert run(env, "import-logs") == EXIT_OK
     backups = Path(env["cfg"]["backup_dir"])
-    assert not backups.exists()
+    before = set(backups.glob("tda_*.sqlite"))  # load-index made one too
 
     capsys.readouterr()
     assert run(env, "import-logs", "--force") == EXIT_OK
     out = capsys.readouterr().out
-    made = list(backups.glob("tda_*.sqlite"))
-    assert len(made) == 1 and made[0].stat().st_size > 0
-    assert "backed the database up first" in out and made[0].name in out
+    made = set(backups.glob("tda_*.sqlite")) - before
+    assert len(made) == 1
+    one = next(iter(made))
+    assert one.stat().st_size > 0
+    assert "backed the database up first" in out and one.name in out
 
 
 def test_force_says_per_desktop_what_it_replaces(env, capsys):

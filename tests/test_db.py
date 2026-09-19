@@ -573,9 +573,25 @@ def test_another_desktops_order_list_is_not_a_reference(db: Db):
 
 
 def test_a_corrupt_order_list_does_not_break_the_count(db: Db):
+    """Three broken shapes, and one good row that still has to be counted."""
     _seed_instance(db)
     db.set_zorder(ZOrderRec(13, "scan", 1, [("psu.01", "main")]))
+    db.set_zorder(ZOrderRec(13, "oak1", 1, [("psu.01", "main")]))
     db.conn.execute("UPDATE zorder SET order_json='not json' WHERE view='oak1'")
     db.conn.execute(
         "INSERT INTO zorder(desktop, view, pose_segment, order_json) VALUES(13,'rs',1,'{}')")
+    db.conn.execute(
+        "INSERT INTO zorder(desktop, view, pose_segment, order_json) "
+        "VALUES(13,'oak2',1,'[\"psu.01\", 7, null]')")
     assert db.instance_reference_counts(13, "psu.01")["zorder"] == 1
+
+
+def test_an_unparsable_order_list_is_really_unparsable(db: Db):
+    """Guard the guard: the row the test breaks has to exist."""
+    _seed_instance(db)
+    db.set_zorder(ZOrderRec(13, "oak1", 1, [("psu.01", "main")]))
+    db.conn.execute("UPDATE zorder SET order_json='not json' WHERE view='oak1'")
+    stored = db.conn.execute(
+        "SELECT order_json FROM zorder WHERE view='oak1'").fetchone()
+    assert stored is not None and stored["order_json"] == "not json"
+    assert "zorder" not in db.instance_reference_counts(13, "psu.01")

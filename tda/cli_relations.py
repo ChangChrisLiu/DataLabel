@@ -96,6 +96,9 @@ class RelationsRun:
 
     dry_run: bool = False
     runs: list[DesktopRelations] = field(default_factory=list)
+    #: Desktops of the selection that carry nothing frozen, so a second run
+    #: narrowed to them would go through. Filled only when the run was refused.
+    rest: list[int] = field(default_factory=list)
 
     @property
     def applied(self) -> list[DesktopRelations]:
@@ -146,6 +149,25 @@ class RelationsRun:
 # --------------------------------------------------------------------------- #
 # what changed
 # --------------------------------------------------------------------------- #
+def refusal_line(run: RelationsRun) -> str:
+    """The one sentence a refused run ends with.
+
+    Said once, not once by the runner and again by the command, and it carries
+    the argument that acts on it: the exact ``--desktops`` list of everything in
+    the selection that *would* have gone through, ready to paste. Without that
+    the annotator's only offered move is ``--force``, which is the one thing the
+    refusal exists to slow down.
+    """
+    listed = ", ".join(f"D{r.desktop:02d}" for r in run.refused)
+    rest = (f", or run the rest with --desktops {','.join(str(d) for d in run.rest)}"
+            if run.rest else "")
+    return (
+        f"[infer-relations] refused before touching anything: {listed} carry verified "
+        f"frames, whose frozen rows would be re-checked and may raise conflicts. "
+        f"Re-run with --force to fill them anyway{rest}."
+    )
+
+
 def _snapshot(rec: InstanceRec) -> dict[str, Any]:
     """The tracked fields of one instance, deep enough to compare afterwards."""
     return {
@@ -322,10 +344,9 @@ def infer_relations_into_db(
                     desktop=desktop, status="refused",
                     error=f"{frozen} verified frames; re-run with --force to proceed",
                 ))
+        run.rest = [d for d in selected if not frozen_by_desktop[d]]
         if log:
-            listed = ", ".join(f"D{r.desktop:02d}" for r in run.refused)
-            log(f"{prefix} refused before touching anything: {listed} carry verified "
-                f"frames (use --force to proceed anyway)")
+            log(refusal_line(run))
         return run
 
     for desktop in selected:
@@ -400,11 +421,7 @@ def cmd_infer_relations(args: argparse.Namespace) -> int:
             db, load_taxonomy(), _desktops(args), args.dry_run, args.force, log=print,
             add_implied=args.add_implied, reset_declined=args.reset_declined,
         )
-        if run.refused:
-            listed = ", ".join(f"D{r.desktop:02d}" for r in run.refused)
-            print(f"[infer-relations] refused: {listed} carry verified frames. Re-run "
-                  f"with --force to fill them anyway (their frozen rows are then "
-                  f"re-checked), or select the other desktops with --desktops.")
+        # the refusal is printed by the runner itself (`log=print`), once
         if run.failed or run.refused:
             return EXIT_ERROR
         return EXIT_OK
