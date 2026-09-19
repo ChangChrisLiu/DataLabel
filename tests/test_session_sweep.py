@@ -163,6 +163,31 @@ def test_a_worker_that_cannot_open_its_database_says_so(qapp, tmp_path, monkeypa
     session.close()
 
 
+def test_a_worker_that_cannot_start_is_not_running_the_moment_it_says_so(
+    qapp, tmp_path, monkeypatch
+):
+    """The real race behind the intermittent failure, three hundred times over.
+
+    The failure path set ``_idle`` and *then* returned, so ``wait_idle`` -- which
+    keys on ``_idle`` -- could hand control back while the thread was still
+    unwinding. ``is_running`` then answered ``True`` for a worker that had
+    already given up, about once in two hundred runs, and a caller that
+    reasonably stops using the sweeper after that was racing a live thread on
+    the same database.
+    """
+    session = make_session(tmp_path)
+    monkeypatch.setattr("tda.ui.session_sweep.Db",
+                        lambda path: (_ for _ in ()).throw(RuntimeError("locked out")))
+    try:
+        for attempt in range(300):
+            session.sweeper.open(DESKTOP, VIEW)
+            session.sweeper.enqueue([3])
+            session.drain_sweeper(timeout=20.0)
+            assert session.sweeper.is_running is False, f"still alive on attempt {attempt}"
+    finally:
+        session.close()
+
+
 def test_stop_keeps_is_running_truthful_when_the_join_times_out(session):
     session.sweeper.open(DESKTOP, VIEW)
     holding = threading.Event()

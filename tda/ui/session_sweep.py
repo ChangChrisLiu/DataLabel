@@ -157,20 +157,53 @@ class TruthSweeper(QObject):
         return True
 
     def wait_idle(self, timeout: float = 30.0) -> bool:
-        """Block until the queue is empty; ``True`` when it drained in time."""
+        """Block until the queue is empty; ``True`` when it drained in time.
+
+        A worker that has **given up** is waited for as well as waited on.
+        ``_idle`` is set from inside the thread, so it becomes observable
+        before the thread has finished unwinding, and a caller that reasonably
+        stops using the sweeper the moment this returns was racing a thread
+        still holding a connection to the same database. Whenever the worker is
+        stopping, this joins it briefly before answering, so "not running" is
+        true by the time anybody can read it.
+        """
         deadline = time.monotonic() + timeout
         while True:
-            if self._idle.wait(min(0.05, max(0.0, deadline - time.monotonic()))):
+            idle = self._idle.wait(min(0.05, max(0.0, deadline - time.monotonic())))
+            self._settle(deadline)
+            if idle:
                 return True
             if not self.is_running:
                 return not self._rechecks  # the worker is gone; nothing will drain
             if time.monotonic() >= deadline:
                 return False
 
+    def _settle(self, deadline: float) -> None:
+        """Let a worker that is on its way out actually get out.
+
+        Only while ``_stopping`` is set -- the worker itself sets it when it
+        cannot start, and :meth:`stop` sets it on the way down -- so this never
+        waits on a sweeper that is simply busy.
+        """
+        thread = self._thread
+        if thread is None or not thread.is_alive():
+            return
+        with self._lock:
+            stopping = self._stopping
+        if not stopping:
+            return
+        thread.join(max(0.0, min(0.2, deadline - time.monotonic())))
+
     @property
     def is_running(self) -> bool:
-        """Is the worker thread alive? ``close()`` must leave this ``False``."""
-        return self._thread is not None and self._thread.is_alive()
+        """Is the worker thread alive? ``close()`` must leave this ``False``.
+
+        Always the thread's own answer, never a flag that stands in for it: a
+        flag is set at some point *inside* the thread and the thread is alive
+        for a while afterwards.
+        """
+        thread = self._thread
+        return thread is not None and thread.is_alive()
 
     # -- requests -----------------------------------------------------------
     def enqueue(self, steps: Iterable[int]) -> None:
