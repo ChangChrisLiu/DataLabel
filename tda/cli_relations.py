@@ -340,7 +340,11 @@ def infer_relations_into_db(
         run.runs.append(one)
         if log:
             _log_desktop(log, prefix, one)
-        if frozen and one.changed and not dry_run:
+        # A new implied instance is not in `changed` -- it is a row that did not
+        # exist, not one that was rewritten -- but it is the *biggest* change
+        # there is for a frozen frame: `needs_geom` gains an instance on every
+        # single frame of the desktop.
+        if frozen and (one.changed or one.implied) and not dry_run:
             _queue_rechecks(db, desktop, log)
     if log:
         log(f"{prefix} {len(run.applied)} desktops, {run.implied} implied instances, "
