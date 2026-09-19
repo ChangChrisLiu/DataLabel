@@ -434,6 +434,12 @@ class EditMixin:
         immediately (it is the window's buffer and the next stroke changes it)
         and written once the annotator pauses.
         """
+        if not self.has_uncommitted_edit():
+            # A stroke that changed nothing -- inside a shape that is already
+            # committed, or a net-zero brush-then-erase -- is not work to
+            # protect, and writing it meant later offering to "restore" a layer
+            # identical to what is already in the database.
+            return
         self._sidecar_pending = (key, str(instance), np.array(mask, dtype=bool, copy=True))
         self._sidecar_timer.start()
 

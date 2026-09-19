@@ -43,6 +43,13 @@ class CommitMixin:
             return
         if getattr(self.session, "editing_instance", None) is not None \
                 and self.session.editing_mask() is not None:
+            if not self.has_uncommitted_edit():
+                # Enter on a layer nobody has touched used to report
+                # "committed (keyframe): False", write nothing, and clear the
+                # layer -- so the annotator lost the instance they had just
+                # loaded and had to double-click it again.
+                self.report("没有可提交的修改 / nothing to commit on this layer")
+                return
             scope = self.session.suggest_scope()
             if scope == api.SCOPE_KEYFRAME:
                 self._commit(scope)

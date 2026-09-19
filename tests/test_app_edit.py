@@ -693,3 +693,60 @@ def test_no_prompt_box_while_the_segment_has_no_roi(qapp, tmp_path, monkeypatch)
         assert win.sam_point.prompt_box is None
     finally:
         close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# a commit with nothing to commit (addendum, item 16a)
+# --------------------------------------------------------------------------- #
+def test_enter_on_an_unchanged_layer_says_so_and_changes_nothing(window):
+    """21 of 21 dry-run Enters reported "committed (keyframe): False".
+
+    It also cleared the editing layer, so the annotator lost the instance they
+    had just loaded and had to double-click it again.
+    """
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    before = window.session.editing_mask().copy()
+    ops = len(window.session.undo_stack)
+
+    window.act_commit()
+
+    assert "没有可提交的修改" in window.status_message()
+    assert window.session.editing_instance == instance
+    assert np.array_equal(window.session.editing_mask(), before)
+    assert len(window.session.undo_stack) == ops
+    assert not window.session.db.keyframes(DESKTOP, VIEW, instance)
+
+
+def test_enter_after_a_stroke_still_commits(window):
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    window.act_commit()
+    assert window.session.db.keyframes(DESKTOP, VIEW, instance)
+
+
+# --------------------------------------------------------------------------- #
+# a stroke that changes nothing writes no sidecar (addendum, item 18)
+# --------------------------------------------------------------------------- #
+def test_a_stroke_that_changes_nothing_writes_no_sidecar(window):
+    """Then it offered to "restore" a layer identical to the committed shape."""
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    window.flush_sidecar()
+    before = window.sidecar_writes
+
+    window.queue_sidecar(window.session.current(), instance,
+                         window.session.editing_mask())
+    window.flush_sidecar()
+
+    assert window.sidecar_writes == before
+    assert window.sidecar.pending_for(window.session.current(), instance) is None
+
+
+def test_a_real_stroke_still_writes_a_sidecar(window):
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    window.flush_sidecar()
+    assert window.sidecar.pending_for(window.session.current(), instance) is not None
