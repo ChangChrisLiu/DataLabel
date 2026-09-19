@@ -202,6 +202,20 @@ def test_refresh_skips_every_row_when_the_input_hash_is_unchanged(scene: Scene, 
     assert calls == []
 
 
+def test_affected_steps_asks_the_same_need_set_the_compiler_does(scene: Scene):
+    """A view with no staging area is not asked for bench boxes -- everywhere.
+
+    ``affected_steps`` drives the canvas' "affects N frames" strip; it used to
+    count frames the compiler does not even put the instance in.
+    """
+    assert scene.svc.affected_steps(DESKTOP, VIEW, SCREW, scene.bench_kf) == [3]
+
+    scene.db.set_pose_segment_bench_roi(DESKTOP, VIEW, 1, None)
+
+    assert scene.svc.affected_steps(DESKTOP, VIEW, SCREW, scene.bench_kf) == []
+    assert scene.svc.affected_steps(DESKTOP, VIEW, PSU, scene.psu_kf) == [1, 2, 3]
+
+
 def test_an_ignore_step_is_never_compiled_or_stamped(scene: Scene):
     """Spec 6.6: an ``ignore`` step describes no moment of the teardown.
 

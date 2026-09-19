@@ -211,6 +211,10 @@ def test_commit_logs_a_source_level_operation(session):
 
 
 def test_commit_box_writes_a_bench_rectangle(session):
+    # the scene's view sees no staging area by default, and a bench box only
+    # reaches the frames the compiler would put the part on the bench in
+    session.db.set_pose_segment(DESKTOP, VIEW, 1, 1, LAST_STEP, LAST_STEP, None, None)
+    session.db.set_pose_segment_bench_roi(DESKTOP, VIEW, 1, (0, 0, 32, 32))
     session.goto(14)  # the cooler is on the bench from step 13 on
     result = session.commit_box(COOLER, (2.0, 2.0, 12.0, 12.0))
     kfs = [kf for kf in session.db.keyframes(DESKTOP, VIEW, COOLER) if kf.geom_type == "box"]
@@ -218,6 +222,17 @@ def test_commit_box_writes_a_bench_rectangle(session):
     assert kfs[0].placement == "on_bench"
     assert kfs[0].anchor_step == LAST_STEP
     assert result["affected"] == [13, 14]
+
+
+def test_a_bench_box_on_a_blind_view_reaches_only_the_frame_it_was_drawn_on(session):
+    """"影响 N 帧" promises pixels; on this view the compiler produces none.
+
+    The scanner has no staging-area ROI, so a part on the bench is not in its
+    picture at all -- the strip used to promise two frames the truth table then
+    had nothing to say about.
+    """
+    session.goto(14)
+    assert session.commit_box(COOLER, (2.0, 2.0, 12.0, 12.0))["affected"] == [14]
 
 
 # --------------------------------------------------------------------------- #

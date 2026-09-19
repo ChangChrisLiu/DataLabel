@@ -333,20 +333,6 @@ def pose_segment_of(db: Db, key: FrameKey, cache: Optional[InputCache] = None) -
 # --------------------------------------------------------------------------- #
 # the whole bundle
 # --------------------------------------------------------------------------- #
-def _seen_here(needs: dict[str, str], state: FrameState,
-               bench_roi: Optional[list]) -> dict[str, str]:
-    """Drop what this view cannot see: the staging area, when it has none.
-
-    A part lying on the bench is not annotated on a view without a bench ROI, so
-    it is not an instance of that frame at all -- not missing, not compiled, and
-    not something ``bench_annotated`` is about (spec 4.2 item 1).
-    """
-    if bench_roi is not None:
-        return needs
-    return {inst: kind for inst, kind in needs.items()
-            if state[inst].placement != ON_BENCH}
-
-
 @dataclass
 class FrameInputs:
     """Everything :func:`tda.core.compiler.compile_frame` needs for one frame."""
@@ -375,17 +361,17 @@ def gather(
 
     Spec 3.3 step 2 makes the staging area part of the geometry policy: an
     instance on the bench needs geometry *and only exists as a row* where the
-    view has a bench ROI to see it in. That gate lives here rather than in
-    :func:`tda.core.states.needs_geom`, which is pure and knows nothing about
-    views: the same state machine serves four of them, and only some can see
-    the bench.
+    view has a bench ROI to see it in. That gate is
+    :func:`tda.core.states.needs_geom`'s, handed the frame's bench ROI -- the
+    same call the queues, the task card and the "affects N frames" strip make,
+    so none of them can ask for a different set than the compiler gets.
     """
     cache = cache if cache is not None else InputCache()
     instances = instances_of(db, key.desktop, cache)
     state = state_of(db, tax, key.desktop, key.step, cache)
     seg = pose_segment_of(db, key, cache)
     bench_roi = db.bench_roi(key.desktop, key.view, seg)
-    needs = _seen_here(needs_geom(instances, state, tax), state, bench_roi)
+    needs = needs_geom(instances, state, tax, bench_roi=bench_roi)
     return FrameInputs(
         key=key,
         hw=frame_hw(db, key),

@@ -43,6 +43,7 @@ from tda.core.model import ActionRec, InstanceRec, Placement, StateEvent
 from tda.core.taxonomy import Taxonomy
 
 __all__ = [
+    "ANY_VIEW",
     "InstState",
     "FrameState",
     "diff_states",
@@ -65,6 +66,22 @@ IN_CHASSIS = Placement.IN_CHASSIS.value
 ON_BENCH = Placement.ON_BENCH.value
 _PLACEMENTS = frozenset(p.value for p in Placement)
 _SUCCESS = "success"
+
+
+class _AnyView:
+    """The default of :func:`needs_geom`'s ``bench_roi``: no view in mind.
+
+    ``None`` already means something -- *this view has no staging area* -- so
+    "not asked about a view at all" needs a value of its own rather than a
+    second flag nobody would remember to pass.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging only
+        return "ANY_VIEW"
+
+
+#: Sentinel for :func:`needs_geom`: ask the geometry policy with no view in mind.
+ANY_VIEW = _AnyView()
 
 
 @dataclass
@@ -352,8 +369,16 @@ def needs_geom(
     instances: dict[str, InstanceRec],
     fs: FrameState,
     tax: Taxonomy,
+    *,
+    bench_roi: object = ANY_VIEW,
 ) -> dict[str, str]:
     """Which instances need their own geometry in this frame state.
+
+    **The one answer to "what has to be drawn here".** The truth table, the
+    ``missing_shape`` queue, the task card, the default keyframe anchor and the
+    canvas' "affects N frames" strip all ask this question, and they each used
+    to compute their own version of it -- which is how a frame could be reported
+    complete by one of them and missing a shape by another.
 
     ``"mask"`` for an instance still in the chassis whose state is tracked by
     the per-class table of spec 6.2, ``"box"`` for one lying in the bench area
@@ -362,7 +387,15 @@ def needs_geom(
     placement, any key that is not a real instance (a ``cable:*`` node), and --
     see :func:`gone_with_parent` -- an attached child that went out inside its
     parent, which the annotator must not be asked to draw a second time.
+
+    ``bench_roi`` is the staging area **this view** can see at this frame (spec
+    3.3 step 2 / 4.2 item 1, 若该视角有堆放区 ROI). ``None`` means the view has
+    none, so a part lying on the bench is not in its picture at all and is not
+    its work; a rectangle means it is. Leaving the argument out asks the pure
+    policy, with no view in mind, which is what a caller that has not resolved a
+    frame yet wants -- the value is never read, only its presence.
     """
+    blind = bench_roi is None
     geom: dict[str, str] = {}
     for key, inst in fs.items():
         rec = instances.get(key)
@@ -371,6 +404,8 @@ def needs_geom(
         if inst.placement == IN_CHASSIS:
             kind = "mask"
         elif inst.placement == ON_BENCH:
+            if blind:
+                continue
             kind = "box"
         else:
             continue

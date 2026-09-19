@@ -409,10 +409,16 @@ class TruthService(FreshMixin, ResolveMixin):
         was drawn for, and :func:`tda.core.compiler.select_keyframe` picks this
         keyframe out of the chain -- i.e. exactly the frames an edit to this
         shape would change (spec 4.3).
+
+        "Needs geometry there" is asked of :func:`tda.core.states.needs_geom`
+        with this segment's bench ROI, exactly as :func:`gather` asks it: a
+        bench box on a view with no staging area reaches no frame at all, and
+        saying it reached four was a promise about pixels nobody compiles.
         """
         cache = InputCache()
         instances = instances_of(self.db, desktop, cache)
         events = events_of(self.db, self.tax, desktop, cache)
+        bench_roi = self.db.bench_roi(desktop, view, keyframe.pose_segment)
         chain = [
             kf
             for kf in self.db.keyframes(desktop, view, instance)
@@ -425,7 +431,8 @@ class TruthService(FreshMixin, ResolveMixin):
             if pose_segment_of(self.db, key, cache) != keyframe.pose_segment:
                 continue
             state = state_of(self.db, self.tax, desktop, step, cache)
-            if instance not in needs_geom(instances, state, self.tax):
+            if instance not in needs_geom(instances, state, self.tax,
+                                          bench_roi=bench_roi):
                 continue
             if state[instance].placement != keyframe.placement:
                 continue

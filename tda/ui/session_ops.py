@@ -198,15 +198,17 @@ def default_anchor(db: Db, tax: Taxonomy, key: FrameKey, instance: str, seg: int
     geometry nowhere (a shape drawn against the rules is still kept).
     """
     instances = instances_of(db, key.desktop, cache)
+    bench_roi = db.bench_roi(key.desktop, key.view, seg)
     best: Optional[int] = None
     for rec in db.steps(key.desktop):
         step = rec.step
         if pose_segment_of(db, FrameKey(key.desktop, step, key.view), cache) != seg:
             continue
-        held = state_of(db, tax, key.desktop, step, cache).get(instance)
+        state = state_of(db, tax, key.desktop, step, cache)
+        held = state.get(instance)
         if held is None or held.placement != placement:
             continue
-        if instance in needs_geom(instances, state_of(db, tax, key.desktop, step, cache), tax):
+        if instance in needs_geom(instances, state, tax, bench_roi=bench_roi):
             best = step
     return key.step if best is None else best
 
@@ -221,6 +223,7 @@ def chain_steps(db: Db, tax: Taxonomy, key: FrameKey, instance: str, seg: int,
     answer "影响 N 帧" (spec 4.3) before anything is written.
     """
     instances = instances_of(db, key.desktop, cache)
+    bench_roi = db.bench_roi(key.desktop, key.view, seg)
     out: list[int] = []
     for rec in db.steps(key.desktop):
         step = rec.step
@@ -230,7 +233,7 @@ def chain_steps(db: Db, tax: Taxonomy, key: FrameKey, instance: str, seg: int,
         held = state.get(instance)
         if held is None or held.placement != placement:
             continue
-        if instance not in needs_geom(instances, state, tax):
+        if instance not in needs_geom(instances, state, tax, bench_roi=bench_roi):
             continue
         if select_keyframe(chain, step) is target:
             out.append(step)
@@ -246,12 +249,14 @@ def segment_steps(db: Db, tax: Taxonomy, key: FrameKey, instance: str, seg: int,
     is a *layer*, which is the only place the layering can be argued about.
     """
     instances = instances_of(db, key.desktop, cache)
+    bench_roi = db.bench_roi(key.desktop, key.view, seg)
     out = []
     for rec in db.steps(key.desktop):
         step = rec.step
         if pose_segment_of(db, FrameKey(key.desktop, step, key.view), cache) != seg:
             continue
-        needs = needs_geom(instances, state_of(db, tax, key.desktop, step, cache), tax)
+        needs = needs_geom(instances, state_of(db, tax, key.desktop, step, cache), tax,
+                           bench_roi=bench_roi)
         if instance in needs and (geom is None or needs[instance] == geom):
             out.append(step)
     return annotatable_steps(db, key.desktop, key.view, out)
