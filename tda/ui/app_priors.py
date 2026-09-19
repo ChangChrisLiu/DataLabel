@@ -32,9 +32,14 @@ __all__ = ["MIN_PIXELS", "MIN_SIDE_PX", "AreaPriors", "area_warning", "load_prio
 MIN_PIXELS = 12
 #: ... and so is one whose bounding box is thinner than this on either side.
 MIN_SIDE_PX = 2
-#: How far outside its class band a mask has to fall before the bar appears.
-#: The band is already wide; this is the "by more than 10x" of the ruling.
-OUT_OF_BAND_FACTOR = 10.0
+#: How far *below* its class band a mask may fall before the bar appears.  Only
+#: the lower side has slack: tiny-but-valid happens (a screw head half behind a
+#: bracket), while "much bigger than this class has ever been" is the mistake
+#: the bar exists for.  Multiplying the **upper** bound by this as well put the
+#: ceiling for a screw at 1.9 ROIs and for a motherboard at 10 -- a mask of the
+#: whole frame is 3.5 ROIs, so the rule could not fire at all and the
+#: rehearsal's 1,502,386-pixel "screw" went in in silence.
+UNDERSIZE_SLACK = 10.0
 
 _DEFAULT_FILE = Path(__file__).resolve().parents[2] / "configs" / "area_priors.yaml"
 
@@ -62,10 +67,10 @@ class AreaPriors:
             return None
         low, high = band
         frac = float(pixels) / float(roi_area)
-        if frac > high * OUT_OF_BAND_FACTOR:
+        if frac > high:
             return (f"{cls} 通常占 ROI 的 {low:.4%}–{high:.4%}，这个掩码占 "
                     f"{frac:.4%}（{pixels} px）—— 是不是多选了别的零件？")
-        if low > 0 and frac * OUT_OF_BAND_FACTOR < low:
+        if low > 0 and frac * UNDERSIZE_SLACK < low:
             return (f"{cls} 通常占 ROI 的 {low:.4%}–{high:.4%}，这个掩码只占 "
                     f"{frac:.4%}（{pixels} px）—— 是不是只画到了一角？")
         return None

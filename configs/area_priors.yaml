@@ -6,87 +6,121 @@
 # nominal frame area (no ROI had been confirmed for that segment yet).
 classes:
   connector:
-    max_frac: 0.312472
+    max_frac: 0.041825
     median_frac: 0.001052
-    min_frac: 0.000125
+    min_frac: 7.4e-05
+    p05_frac: 0.000294
+    p95_frac: 0.004182
     samples: 3146
   cooler_bracket:
-    max_frac: 0.763306
+    max_frac: 1.0
     median_frac: 0.127218
-    min_frac: 0.015902
+    min_frac: 0.017831
+    p05_frac: 0.071324
+    p95_frac: 0.166168
     samples: 13
   cover:
-    max_frac: 0.073234
+    max_frac: 0.227944
     median_frac: 0.012206
-    min_frac: 0.001526
+    min_frac: 0.000451
+    p05_frac: 0.001806
+    p95_frac: 0.022794
     samples: 486
   cpu:
-    max_frac: 0.033835
+    max_frac: 0.092522
     median_frac: 0.005639
-    min_frac: 0.000705
+    min_frac: 0.000646
+    p05_frac: 0.002586
+    p95_frac: 0.009252
     samples: 197
   cpu_cooler:
-    max_frac: 0.438574
+    max_frac: 1.0
     median_frac: 0.073096
-    min_frac: 0.009137
+    min_frac: 0.003119
+    p05_frac: 0.012474
+    p95_frac: 0.150346
     samples: 172
   cpu_socket_lever:
-    max_frac: 0.120847
+    max_frac: 0.315583
     median_frac: 0.020141
-    min_frac: 0.002518
+    min_frac: 0.002486
+    p05_frac: 0.009944
+    p95_frac: 0.031558
     samples: 281
   drive_cage:
     max_frac: 1.0
     median_frac: 0.169155
-    min_frac: 0.013493
+    min_frac: 0.003373
+    p05_frac: 0.013493
+    p95_frac: 0.200773
     samples: 78
   drive_latch:
-    max_frac: 0.080935
+    max_frac: 0.144224
     median_frac: 0.013489
-    min_frac: 0.001686
+    min_frac: 0.003313
+    p05_frac: 0.013251
+    p95_frac: 0.014422
     samples: 25
   expansion_card:
-    max_frac: 0.011376
+    max_frac: 0.084364
     median_frac: 0.001896
-    min_frac: 0.000237
+    min_frac: 0.000458
+    p05_frac: 0.001832
+    p95_frac: 0.008436
     samples: 126
   motherboard:
-    max_frac: 1.0
+    max_frac: 1.2
     median_frac: 0.312472
-    min_frac: 0.039059
+    min_frac: 0.024653
+    p05_frac: 0.098612
+    p95_frac: 0.467719
     samples: 512
   optical_drive:
-    max_frac: 0.759298
+    max_frac: 1.0
     median_frac: 0.12655
-    min_frac: 0.000893
+    min_frac: 0.000276
+    p05_frac: 0.001104
+    p95_frac: 0.217465
     samples: 136
   psu:
-    max_frac: 0.666889
+    max_frac: 1.0
     median_frac: 0.111148
-    min_frac: 0.013894
+    min_frac: 0.007789
+    p05_frac: 0.031158
+    p95_frac: 0.173214
     samples: 333
   psu_latch:
-    max_frac: 0.092832
+    max_frac: 0.151925
     median_frac: 0.012031
-    min_frac: 0.001504
+    min_frac: 0.000822
+    p05_frac: 0.003289
+    p95_frac: 0.015193
     samples: 244
   ram_latch:
-    max_frac: 0.00304
+    max_frac: 0.006529
     median_frac: 0.000402
-    min_frac: 5.0e-05
+    min_frac: 4.7e-05
+    p05_frac: 0.000187
+    p95_frac: 0.000653
     samples: 2452
   ram_module:
-    max_frac: 0.017026
+    max_frac: 0.11122
     median_frac: 0.002838
-    min_frac: 0.000355
+    min_frac: 0.000321
+    p05_frac: 0.001285
+    p95_frac: 0.011122
     samples: 407
   screw:
-    max_frac: 0.191062
+    max_frac: 0.005455
     median_frac: 0.000392
-    min_frac: 2.7e-05
+    min_frac: 3.9e-05
+    p05_frac: 0.000155
+    p95_frac: 0.000545
     samples: 2527
   storage_drive:
-    max_frac: 0.196429
+    max_frac: 0.737709
     median_frac: 0.032738
-    min_frac: 0.004092
+    min_frac: 0.004002
+    p05_frac: 0.016009
+    p95_frac: 0.073771
     samples: 56

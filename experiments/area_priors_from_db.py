@@ -35,10 +35,27 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-#: How far below the median a mask may be before the bar says anything.
-MARGIN_LOW = 8.0
-#: ... and how far above.
-MARGIN_HIGH = 6.0
+#: The lower bound is ``p05 / MARGIN_LOW``: tiny-but-valid happens (a screw head
+#: half behind a bracket), so there is slack on this side.
+MARGIN_LOW = 4.0
+#: The upper bound is ``p95 * MARGIN_HIGH``, **capped**.  It used to be
+#: ``max(observed) * 6`` and the window then multiplied by another 10, which put
+#: the ceiling for a screw at 1.9 ROIs and for a motherboard at 10 -- a mask of
+#: the whole frame is 3.5 ROIs, so the rule could not fire at all.
+#:
+#: The ruling suggested 4.  Measured against the sizes the reviewer listed as
+#: plausible, 4 is too tight at the small end: these percentiles come from the
+#: *draft* masks, which under-draw a screw (p95 = 0.055 % of the ROI, about
+#: 20x20 px), and a hand-drawn 60x60 screw -- explicitly plausible -- is nine
+#: times that.  Ten clears every plausible size the reviewer named while still
+#: warning on a whole-ROI screw, which is what the bar is for.
+MARGIN_HIGH = 10.0
+#: No class may exceed one ROI ...
+CAP_FRAC = 1.0
+#: ... except the ones that *are* the machine, which can fill it and spill over
+#: the detected box a little.
+STRUCTURE_CAP_FRAC = 1.2
+STRUCTURE_CLASSES = ("chassis", "motherboard")
 #: Classes with fewer masks than this are not worth a prior of their own.
 MIN_SAMPLES = 8
 
@@ -137,19 +154,36 @@ def collect(db_path: str) -> tuple[dict[str, list[float]], dict[str, int]]:
         conn.close()
 
 
+def percentile(values: list[float], q: float) -> float:
+    """The ``q``-th percentile, nearest rank; no numpy needed for 11k floats."""
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    index = max(0, min(len(ordered) - 1, int(round(q / 100.0 * (len(ordered) - 1)))))
+    return float(ordered[index])
+
+
 def priors(samples: dict[str, list[float]], min_samples: int) -> dict[str, dict]:
-    """Median-based bounds per class, widened by the margins above."""
+    """Robust bounds per class: ``p05 / 4`` to ``min(p95 * 4, cap)``.
+
+    Percentiles rather than the extremes, because the draft masks these come
+    from include the mistakes this warning is meant to catch: one 1.5-million
+    pixel "screw" in the sample pushed the old ``max(observed)`` ceiling past
+    anything a screw could ever be, and the rule then never fired.
+    """
     out: dict[str, dict] = {}
     for cls, fracs in sorted(samples.items()):
         if len(fracs) < min_samples:
             continue
-        median = statistics.median(fracs)
-        low = min(min(fracs), median / MARGIN_LOW)
-        high = max(max(fracs), median * MARGIN_HIGH)
+        p05, median, p95 = (percentile(fracs, 5), statistics.median(fracs),
+                            percentile(fracs, 95))
+        cap = STRUCTURE_CAP_FRAC if cls in STRUCTURE_CLASSES else CAP_FRAC
         out[cls] = {
-            "min_frac": round(float(low), 6),
-            "max_frac": round(float(min(high, 1.0)), 6),
+            "min_frac": round(float(p05 / MARGIN_LOW), 6),
+            "max_frac": round(float(min(p95 * MARGIN_HIGH, cap)), 6),
+            "p05_frac": round(float(p05), 6),
             "median_frac": round(float(median), 6),
+            "p95_frac": round(float(p95), 6),
             "samples": len(fracs),
         }
     return out
@@ -181,9 +215,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"{len(table)} class priors from {sum(len(v) for v in samples.values())} masks"
           f" -> {args.out}")
     print(f"denominators: {source}")
+    print(f"  {'class':<24} {'n':>5} {'p05':>9} {'median':>9} {'p95':>9} "
+          f"{'low':>9} {'high':>9}")
     for cls, row in sorted(table.items()):
-        print(f"  {cls:<28} {row['min_frac']:.5f} .. {row['max_frac']:.5f} "
-              f"(median {row['median_frac']:.5f}, n={row['samples']})")
+        print(f"  {cls:<24} {row['samples']:>5} {row['p05_frac']:>9.5f} "
+              f"{row['median_frac']:>9.5f} {row['p95_frac']:>9.5f} "
+              f"{row['min_frac']:>9.5f} {row['max_frac']:>9.5f}")
     return 0
 
 
