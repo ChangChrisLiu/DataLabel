@@ -37,6 +37,7 @@ from tda.core.taxonomy import Taxonomy, load_taxonomy, parse_raw_name
 from tda.ui.steps_delete import delete_instance
 from tda.ui.steps_issues import (
     dangling_issues,
+    draft_issues,
     orphan_issues,
     row_issues,
     unresolved_issues,
@@ -441,6 +442,7 @@ class StepTableData:
             list(orphan_issues(self.instances, self.actions))
             + list(dangling_issues(self.instances, self.tax))
             + list(unresolved_issues(self.instances, self.tax))
+            + list(draft_issues(self.instances))  # last: it asks for nothing
         )
 
     # -- helpers ----------------------------------------------------------- #

@@ -178,6 +178,38 @@ def test_s1_deletes_a_draft_together_with_its_draft_keyframes(db: Db):
     assert sorted(db.instances(DESKTOP)) == [PSU, SCREW]
 
 
+def test_the_step_table_says_drafts_are_reference_material_once(db: Db):
+    """D13 got 63 lines telling the annotator to delete or retarget a draft.
+
+    They are not orphaned parts of the machine: nothing will ever reference
+    them, because they are the team's old tracings waiting to be adopted. One
+    collapsed line per desktop, last, says so without burying the real work.
+    """
+    from tda.ui.steps_model import StepTableData
+
+    scene = build_scene(db)
+    for n in (1, 2, 3):
+        add_draft(db, DESKTOP, VIEW, f"ls:Motherboard#{n}", "motherboard", 1,
+                  box=(n, n, n + 4, n + 4))
+    data = StepTableData.load(db, DESKTOP, scene.tax)
+
+    named = [line for line in data.orphans if "ls:" in line]
+    assert named == [
+        "3 Label Studio drafts (ls:*) on this desktop - they are reference "
+        "material and need no action"
+    ]
+    assert data.orphans[-1] == named[0]  # lowest priority, after the real work
+    assert not [line for line in data.orphans if "retarget" in line and "ls:" in line]
+
+
+def test_a_desktop_without_drafts_says_nothing_about_them(db: Db):
+    from tda.ui.steps_model import StepTableData
+
+    scene = build_scene(db)
+    data = StepTableData.load(db, DESKTOP, scene.tax)
+    assert not [line for line in data.orphans if "Label Studio" in line]
+
+
 def test_s1_still_refuses_a_real_instance_that_has_shapes(db: Db):
     from tda.ui.steps_delete import check_deletable
     from tda.ui.steps_model import StepTableData
