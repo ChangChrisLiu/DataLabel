@@ -657,3 +657,42 @@ def test_a_commit_repaints_the_timeline(window, monkeypatch):
     window.act_commit()
 
     assert seen, "the timeline was not asked to repaint"
+
+
+# --------------------------------------------------------------------------- #
+# the machine chooser's [done/total] (item 5)
+# --------------------------------------------------------------------------- #
+def chooser_text(win: MainWindow) -> str:
+    return win.desktop_combo.itemText(win.desktop_combo.currentIndex())
+
+
+def test_the_chooser_count_follows_a_confirmation(window):
+    """Computed once at launch and never again -- and the guide points at it."""
+    before = chooser_text(window)
+    assert "[0/" in before, before
+    seed_shapes(window.session, window.session.current().step)
+    window.task_card.refresh()
+
+    assert window.act_confirm() is True
+
+    assert chooser_text(window) != before
+    assert "[1/" in chooser_text(window), chooser_text(window)
+
+
+def test_the_chooser_count_follows_a_view_switch(window):
+    """The count is per view, so switching view has to re-read it."""
+    seed_shapes(window.session, window.session.current().step)
+    window.task_card.refresh()
+    window.act_confirm()
+    assert "[1/" in chooser_text(window)
+
+    window.act_set_view("oak1")
+
+    assert "[0/" in chooser_text(window), chooser_text(window)
+
+
+def test_the_chooser_count_follows_the_sweeper(window, monkeypatch):
+    seen: list[int] = []
+    monkeypatch.setattr(window, "refresh_desktop_counts", lambda: seen.append(1))
+    window._on_sweep_progress(4, 4, 0)
+    assert seen == [1]

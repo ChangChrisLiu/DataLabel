@@ -202,6 +202,9 @@ class CommitMixin:
         ok = self.task_card.confirm()
         if ok:
             self.hand_over_unexplained(step, blobs)
+            # One more frame is done: both places that count say so.
+            self.timeline.refresh_statuses()
+            self.refresh_desktop_counts()
             self.report(f"step {step} confirmed")
         else:
             problems = self.task_card.problems()

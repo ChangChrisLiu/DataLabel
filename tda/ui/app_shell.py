@@ -285,6 +285,24 @@ class ShellMixin:
         """
         return self.db.count_per_view("verified"), self.db.count_per_view("frames")
 
+    def refresh_desktop_counts(self) -> None:
+        """Re-read ``[done/total]`` for the machine that is open.
+
+        It was computed once at launch and never again, so the number the guide
+        tells the annotator to watch stood still all day -- and it is per view,
+        so switching view made it wrong rather than stale.  Only the current
+        row is rewritten: the other 65 cannot have changed, and the two
+        aggregate queries are the whole cost.
+        """
+        index = self.desktop_combo.currentIndex()
+        if index < 0 or self.session.desktop is None:
+            return
+        text = self._desktop_text(int(self.session.desktop))
+        if text != self.desktop_combo.itemText(index):
+            blocked = self.desktop_combo.blockSignals(True)
+            self.desktop_combo.setItemText(index, text)
+            self.desktop_combo.blockSignals(blocked)
+
     def _desktop_text(self, desktop: int, counts: Optional[tuple] = None) -> str:
         """``D13 Dell OptiPlex 7020 [12/38]`` -- brand, model and this view's count.
 

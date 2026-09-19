@@ -375,6 +375,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
                 self.session.goto(step, force=True)
             self._segment = None
             self.render_frame()
+            self.refresh_desktop_counts()   # the count is per view
 
         self.leave_frame(switch)
         for name, button in self.view_buttons.items():
@@ -687,8 +688,10 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         """The session's background re-check of frozen frames is making headway."""
         suffix = f", {failed} failed — F5 retries" if failed else ""
         self.report(f"re-checking verified frames: {done}/{total}{suffix}")
-        # Each verdict may repaint a row the annotator is not standing on.
+        # Each verdict may repaint a row the annotator is not standing on, and
+        # move the machine chooser's [done/total].
         self.timeline.refresh_statuses()
+        self.refresh_desktop_counts()
 
     @S.guard
     def _on_sweep_error(self, step: int, text: str) -> None:
