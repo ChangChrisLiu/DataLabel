@@ -85,15 +85,23 @@ def test_eroding_a_shape_conflicts_with_the_verified_row_only(scene: Scene):
 
 
 def test_the_same_disagreement_is_queued_only_once(scene: Scene):
+    """``conflicts`` counts what this refresh queued; ``standing`` what is open.
+
+    Reporting the de-duplicated disagreement as a conflict again told the
+    annotator that a sweep of fifty frames had "found 50 conflicts" when it had
+    found the same one fifty times and queued none of them.
+    """
     scene.refresh_all()
     scene.svc.verify_frame(scene.key(2), "lin")
     replace_parts(scene, scene.psu_kf, [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
-    scene.svc.refresh(scene.key(2))
+    first = scene.svc.refresh(scene.key(2))
+    assert (first["conflicts"], first["standing"]) == (1, 1)
 
     out = scene.svc.refresh(scene.key(2))
 
-    assert out["conflicts"] == 1  # still in disagreement
-    assert len(scene.db.conflicts(DESKTOP)) == 1  # but not queued twice
+    assert out["conflicts"] == 0  # nothing new was queued
+    assert out["standing"] == 1   # ... and it is still open
+    assert len(scene.db.conflicts(DESKTOP)) == 1
 
 
 def test_a_moved_bench_box_conflicts_only_beyond_two_pixels(scene: Scene):
@@ -298,6 +306,24 @@ def test_keeping_a_removed_override_pins_it_again(scene: Scene):
     assert scene.db.conflicts(DESKTOP, open_only=True) == []
 
 
+def test_a_row_with_no_visibility_recorded_is_not_treated_as_forced():
+    """``NULL`` is "nobody wrote one", which is not the same as "a human did".
+
+    ``was_forced`` compared it against the label the geometry implies and found
+    them different, so every legacy row without a visibility would have been
+    read as carrying a human's decision and queued the moment anything moved.
+    """
+    from tda.core.truth_conflicts import was_forced
+
+    assert not was_forced({"geom_type": "mask", "visible_rle": None,
+                           "visibility": None, "occlusion_ratio": 0.0})
+    assert not was_forced({"geom_type": "mask", "visible_rle": None,
+                           "visibility": "", "occlusion_ratio": 0.0})
+    # ... while a label that contradicts its own pixels still is one
+    assert was_forced({"geom_type": "mask", "visible_rle": None,
+                       "visibility": "occluded_full", "occlusion_ratio": 0.0})
+
+
 def test_a_frozen_row_the_pixels_agree_with_is_not_re_examined(scene: Scene):
     """The "was it forced" test must not fire on an ordinary derived label."""
     scene.refresh_all()
@@ -446,6 +472,181 @@ def test_verify_frame_refuses_a_frozen_row_whose_label_moved(scene: Scene):
 
     assert scene.row(1, PSU)["visibility"] == "visible"
     assert [c["instance"] for c in scene.db.conflicts(DESKTOP)] == [PSU]
+
+
+def test_verify_frame_leaves_an_agreeing_frozen_row_exactly_as_it_is(scene: Scene):
+    """A re-trace within tolerance is the same annotation, so nothing is written.
+
+    ``refresh`` skips such a row; the confirmation rewrote it -- new pixels, a
+    new ``verified_by``/``verified_at`` -- so pressing Space a second time moved
+    a signature the first Space had already made, and the stored geometry drifted
+    one pixel per confirmation away from what the human actually confirmed.
+    """
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    frozen = {inst: dict(row) for inst, row in scene.rows(2).items()}
+
+    # one pixel row off the PSU: inside the re-tracing tolerance of spec 3.4
+    replace_parts(scene, scene.psu_kf,
+                  [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 49)))])
+    assert scene.svc.refresh(scene.key(2))["conflicts"] == 0
+
+    scene.svc.verify_frame(scene.key(2), "bo")
+
+    assert scene.rows(2) == frozen  # byte for byte, "lin" included
+    assert scene.db.conflicts(DESKTOP) == []
+    assert scene.review_status(2) == "verified"
+    assert scene.db.frame_digest(scene.key(2)) is not None
+
+
+def test_confirming_an_unchanged_frame_again_writes_nothing(scene: Scene, monkeypatch):
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    frozen = {inst: dict(row) for inst, row in scene.rows(2).items()}
+    written: list = []
+    monkeypatch.setattr(scene.db, "put_compiled",
+                        lambda *a, **k: written.append(a))
+
+    scene.svc.verify_frame(scene.key(2), "bo")
+
+    assert written == []
+    assert scene.rows(2) == frozen
+    assert scene.db.frame_digest(scene.key(2)) is not None
+
+
+def test_verify_frame_still_writes_the_auto_rows_and_the_new_instances(scene: Scene):
+    """Only a *frozen* row is protected; everything else is the compiler's."""
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    scene.db.upsert_instance(InstanceRec(key=FAN, desktop=DESKTOP, cls="case_fan"))
+    scene.db.add_keyframe(mask_kf(FAN, FAN_RECT, anchor=3))
+    scene.svc.refresh(scene.key(2))
+    assert scene.row(2, FAN)["status"] == "auto"
+
+    scene.svc.verify_frame(scene.key(2), "bo")
+
+    assert scene.row(2, FAN)["status"] == "verified"
+    assert scene.row(2, FAN)["verified_by"] == "bo"
+    assert scene.row(2, PSU)["verified_by"] == "lin"  # the first confirmation stands
+
+
+# --------------------------------------------------------------------------- #
+# the handed-over compilation has to prove itself
+# --------------------------------------------------------------------------- #
+def _count_compiles(monkeypatch) -> list:
+    """Record every call to the pixel compiler, wherever it is reached from."""
+    import tda.core.truth as truth_mod
+
+    calls: list = []
+    real = truth_mod.compile_frame
+    monkeypatch.setattr(truth_mod, "compile_frame",
+                        lambda *a, **k: (calls.append(a[0]), real(*a, **k))[1])
+    return calls
+
+
+def test_a_handed_over_compilation_the_inputs_have_overtaken_is_not_used(
+    scene: Scene, monkeypatch
+):
+    """The session's epoch is the session's; the truth table proves it itself.
+
+    Arrive at a frame (the session compiles it), let anything outside that
+    session move a keyframe, then press Space: the handed-over compilation
+    describes pixels nobody is looking at any more, and freezing it would put a
+    human's name on them -- with the *old* ``input_hash``, so the next refresh
+    would see nothing to do either.
+    """
+    scene.refresh_all()
+    stale = scene.svc.compile(scene.key(2))
+    replace_parts(scene, scene.psu_kf,
+                  [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
+    fresh = scene.svc.compile(scene.key(2))
+    assert fresh.input_hash != stale.input_hash
+
+    scene.svc.verify_frame(scene.key(2), "lin", prepared=stale)
+
+    row = scene.row(2, PSU)
+    assert row["input_hash"] == fresh.input_hash
+    assert masks.bbox(masks.decode_rle(row["visible_rle"])) == (10, 10, 50, 34)
+    assert scene.db.frame_digest(scene.key(2))["digest"] == \
+        scene.svc.inputs_digest(scene.key(2))
+    out = scene.svc.refresh(scene.key(2))
+    assert (out["conflicts"], out["standing"], out["updated"]) == (0, 0, 0)
+
+
+def test_a_fresh_handed_over_compilation_is_not_compiled_again(
+    scene: Scene, monkeypatch
+):
+    scene.refresh_all()
+    ready = scene.svc.compile(scene.key(2))
+    calls = _count_compiles(monkeypatch)
+
+    scene.svc.verify_frame(scene.key(2), "lin", prepared=ready)
+
+    assert calls == []  # the inputs were gathered and hashed, never compiled
+    assert scene.row(2, PSU)["input_hash"] == ready.input_hash
+
+
+def test_confirming_with_a_handed_over_frame_writes_what_a_fresh_one_would(
+    db: Db, tmp_db_path: str
+):
+    """Byte for byte: the optimisation may not change a single stored value."""
+    from tda.core.db import Db as Database
+
+    handed = build_scene(db)
+    handed.refresh_all()
+    handed.svc.verify_frame(handed.key(2), "lin",
+                            prepared=handed.svc.compile(handed.key(2)))
+
+    other = Database(tmp_db_path + ".plain")
+    try:
+        plain = build_scene(other)
+        plain.refresh_all()
+        plain.svc.verify_frame(plain.key(2), "lin")
+        left = {k: dict(v) for k, v in handed.rows(2).items()}
+        right = {k: dict(v) for k, v in plain.rows(2).items()}
+        for rows in (left, right):
+            for row in rows.values():
+                row.pop("verified_at", None)  # a clock, not a value
+        assert left == right
+    finally:
+        other.close()
+
+
+def test_an_edit_landing_while_the_frame_is_confirmed_writes_nothing(
+    scene: Scene, monkeypatch
+):
+    """The window between reading the inputs and writing the rows.
+
+    The compilation is made outside any transaction -- it is pixels, and
+    holding the database for a third of a second at scanner resolution would
+    serialise the tool on it -- so an edit can land in between and the rows
+    written would describe inputs nobody has any more. ``refresh`` guards its
+    own write the same way.
+    """
+    scene.refresh_all()
+    edited: list[int] = []
+    real = scene.db.compiled
+
+    def move_the_shape(key):
+        if not edited:  # once, from inside the window
+            edited.append(1)
+            replace_parts(scene, scene.psu_kf,
+                          [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
+        return real(key)
+
+    monkeypatch.setattr(scene.db, "compiled", move_the_shape)
+
+    with pytest.raises(ValueError, match="press Space again"):
+        scene.svc.verify_frame(scene.key(2), "lin")
+
+    monkeypatch.undo()
+    assert scene.review_status(2) != "verified"
+    assert all(row["status"] == "auto" for row in scene.rows(2).values())
+    assert scene.db.conflicts(DESKTOP) == []
+    # nothing was stamped for the inputs that arrived mid-flight: the frame
+    # still carries the digest of the ones it was last actually compiled from
+    assert scene.db.frame_digest(scene.key(2))["digest"] != \
+        scene.svc.inputs_digest(scene.key(2))
 
 
 def test_verify_frame_still_drops_an_auto_row_the_inputs_lost(scene: Scene):

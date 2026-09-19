@@ -443,6 +443,27 @@ def test_f5_recompiles_this_frame_only(window, monkeypatch):
     assert "cli check" in window.status_message()
 
 
+def test_f5_reports_the_conflicts_still_open_not_only_the_new_ones(window):
+    """"0 conflicts" on a frame somebody is still arguing about.
+
+    The counter says what *this* recompile queued, and queueing the same
+    disagreement twice is exactly what the truth table refuses to do -- so on
+    the second F5 the line read as though the frame were settled.
+    """
+    from tda.core.masks import encode_rle
+    import numpy as np
+
+    key = window.session.current()
+    window.session.db.add_conflict(key, "chassis",
+                                   encode_rle(np.zeros((64, 64), bool)), None, 7)
+
+    window.act_refresh_all()
+
+    line = window.status_message()
+    assert "0 new conflicts" in line
+    assert "1 open" in line
+
+
 # --------------------------------------------------------------------------- #
 # steps mode
 # --------------------------------------------------------------------------- #

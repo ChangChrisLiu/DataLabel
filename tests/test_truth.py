@@ -13,7 +13,16 @@ import pytest
 
 from tda.core import masks
 from tda.core.db import Db
-from tda.core.model import FrameKey, FrameOverride, OccluderMask, Similarity, StateEvent
+from tda.core.model import (
+    FrameKey,
+    FrameOverride,
+    OccluderMask,
+    PairOverride,
+    ShapePart,
+    Similarity,
+    StateEvent,
+    ZOrderRec,
+)
 from tda.core.truth_inputs import VIEW_HW, frame_hw, state_of
 from truth_scenes import (
     BENCH_BOX,
@@ -165,7 +174,8 @@ def test_frame_hw_measures_the_cached_image_and_supersedes_a_guess(scene: Scene,
 def test_refresh_writes_one_auto_row_per_instance_and_step(scene: Scene):
     out = scene.refresh_all()
 
-    assert out == {"updated": 6, "conflicts": 0, "skipped": 0, "problems": []}
+    assert out == {"updated": 6, "conflicts": 0, "standing": 0, "skipped": 0,
+                   "problems": []}
     for step in (1, 2, 3):
         rows = scene.rows(step)
         assert sorted(rows) == [PSU, SCREW]
@@ -448,3 +458,56 @@ def test_affected_steps_is_limited_to_the_pose_segment(scene: Scene):
     scene.db.set_pose_segment(DESKTOP, VIEW, 2, 3, 3, 3, None, None)
 
     assert scene.svc.affected_steps(DESKTOP, VIEW, PSU, scene.psu_kf) == [1, 2]
+
+
+# --------------------------------------------------------------------------- #
+# the input hash a reader computes is the one the compiler wrote
+# --------------------------------------------------------------------------- #
+def _hashes_itself(scene: Scene, step: int) -> bool:
+    """Does :func:`hash_of_inputs` reproduce what the compilation carries?"""
+    from tda.core.truth_fresh import hash_of_inputs
+    from tda.core.truth_inputs import gather
+
+    key = scene.key(step)
+    inputs = gather(scene.db, scene.tax, key)
+    compiled = scene.svc.compile(key)
+    return hash_of_inputs(inputs, compiled.layers, "1") == compiled.input_hash
+
+
+def test_the_input_hash_can_be_recomputed_without_compiling(scene: Scene):
+    """Plain frames: a mask instance, a bench box, an instance that went out."""
+    assert all(_hashes_itself(scene, step) for step in (1, 2, 3))
+
+
+def test_the_input_hash_survives_a_multi_part_shape(scene: Scene):
+    scene.psu_kf.parts = [
+        ShapePart("floor", masks.encode_rle(rect(10, 10, 50, 30))),
+        ShapePart("wall", masks.encode_rle(rect(10, 30, 50, 50))),
+    ]
+    scene.db.update_keyframe(scene.psu_kf)
+    scene.db.set_zorder(ZOrderRec(DESKTOP, VIEW, 1,
+                                  [(PSU, "floor"), (PSU, "wall"), (SCREW, "main")],
+                                  version=2))
+
+    assert _hashes_itself(scene, 1)
+
+
+def test_the_input_hash_survives_occluders_overrides_and_a_transform(scene: Scene):
+    key = scene.key(1)
+    scene.db.set_occluder(OccluderMask(key, "hand", masks.encode_rle(rect(0, 10, 64, 30))))
+    scene.db.set_frame_override(FrameOverride(key, SCREW, visibility="occluded_full"))
+    scene.db.set_pair_override(PairOverride(DESKTOP, VIEW, 1, SCREW, PSU))
+    scene.db.set_transform(key, Similarity(scale=1.05, theta=0.02, tx=2.0, ty=-1.0))
+
+    assert _hashes_itself(scene, 1)
+
+
+def test_the_input_hash_survives_a_missing_shape_and_an_unlisted_layer(scene: Scene):
+    """A shape nobody drew, and a layer the z-order does not mention."""
+    scene.db.conn.execute("DELETE FROM shape_keyframe WHERE id=?", (scene.psu_kf.id,))
+    scene.db.conn.commit()
+    scene.db.set_zorder(ZOrderRec(DESKTOP, VIEW, 1, [], version=3))
+    scene.add_frame(4)  # beyond every anchor: nothing applies here at all
+
+    assert _hashes_itself(scene, 1)
+    assert _hashes_itself(scene, 4)

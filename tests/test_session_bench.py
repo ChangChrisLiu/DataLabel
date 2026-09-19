@@ -203,6 +203,41 @@ def test_setting_the_bench_roi_queues_the_frozen_frames_and_refuses_a_ghost(tmp_
     db.close()
 
 
+def test_setting_the_same_bench_roi_again_costs_nothing(tmp_path):
+    """Re-confirming the rectangle on screen is not a change to the view."""
+    db = Db(str(tmp_path / "roi.sqlite"))
+    db.set_pose_segment(7, "oak2", 1, 1, 9, 9, None, None)
+    db.upsert_frame(FrameKey(7, 2, "oak2"), None, {}, None,
+                    {"review_status": "verified"})
+    db.set_pose_segment_bench_roi(7, "oak2", 1, (0, 40, 64, 64))
+    db.clear_recheck(7, "oak2", 2)
+    logged = len(db.ops(7, "oak2"))
+
+    again = db.set_pose_segment_bench_roi(7, "oak2", 1, (0, 40, 64, 64))
+
+    assert again == [0, 40, 64, 64]
+    assert db.rechecks(7, "oak2") == []          # no frame's inputs moved
+    assert len(db.ops(7, "oak2")) == logged      # and nothing happened to log
+    db.close()
+
+
+def test_a_chassis_roi_that_cannot_be_logged_is_not_stored(tmp_path, monkeypatch):
+    """The write and its op log are one decision, as they are for the bench one."""
+    db = Db(str(tmp_path / "roi.sqlite"))
+    db.set_pose_segment(7, "oak2", 1, 1, 9, 9, None, None)
+    monkeypatch.setattr(db, "log_op", _explode)
+
+    with pytest.raises(RuntimeError, match="no room"):
+        db.set_pose_segment_roi(7, "oak2", 1, [1, 2, 30, 40], "tester")
+
+    assert db.pose_segments(7, "oak2")[0]["roi"] is None
+    db.close()
+
+
+def _explode(*a, **k):
+    raise RuntimeError("no room in the op log")
+
+
 def test_the_bench_roi_is_clamped_and_logged_like_the_chassis_one(tmp_path):
     """One validator owns both rectangles: same clamping, same audit trail."""
     db = Db(str(tmp_path / "roi.sqlite"))

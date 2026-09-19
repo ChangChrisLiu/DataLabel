@@ -27,9 +27,10 @@ from tda.core.truth_conflicts import (
     row_payload,
     row_values,
 )
-from tda.core.truth_fresh import digest_of
+from tda.core.truth_fresh import digest_of, hash_of_inputs
+from tda.core.truth_inputs import gather
 
-__all__ = ["BLOCKING_PROBLEMS", "VerifyMixin"]
+__all__ = ["BLOCKING_PROBLEMS", "VerifyMixin", "usable"]
 
 #: Problem prefixes that stop a frame from being verified (spec 3.3 step 3).
 #: Everything else -- ``bench_missing``, ``zorder_missing``, ``empty_visible``,
@@ -43,11 +44,46 @@ BENCH_MISSING = "bench_missing:"
 SYSTEM = "system"
 
 
+def usable(prepared, key: FrameKey, inputs, compiler_version: str) -> bool:
+    """Is a caller's compilation still the one these inputs make?
+
+    The only question asked of a handed-over frame, and it is asked of the
+    *inputs just read from the database*, never of the caller: it is right when
+    the compilation's own ``input_hash`` is the hash those inputs produce
+    (:func:`tda.core.truth_fresh.hash_of_inputs`), and wrong otherwise.
+
+    Nothing about who handed it over, how recently, or what they believed at
+    the time takes part. A session's edit epoch is a fact about that session;
+    anything else writing to the database -- another process, a repair script,
+    a second window -- moves the inputs without touching it, and a confirmation
+    that trusted the epoch would then freeze pixels nobody is looking at under
+    a human's name, stamped with the hash of the inputs they had *before*, so
+    that no later pass would find anything to do either.
+
+    Gathering and hashing costs about a millisecond; the compilation it saves
+    costs a third of a second at scanner resolution.
+    """
+    if prepared is None or getattr(prepared, "key", None) != key:
+        return False
+    return prepared.input_hash == hash_of_inputs(inputs, prepared.layers,
+                                                 compiler_version)
+
+
 class VerifyMixin:
     """Confirming and demoting one frame, for :class:`~tda.core.truth.TruthService`."""
 
-    def verify_frame(self, key: FrameKey, annotator: str) -> None:
+    def verify_frame(self, key: FrameKey, annotator: str, prepared=None) -> None:
         """Freeze every row of one frame after a human confirmed it (spec 4.2).
+
+        ``prepared`` is a :class:`~tda.core.compiler.CompiledFrame` the caller
+        already has for this frame -- the session keeps the one it compiled
+        when the annotator arrived, or the one the sweeper prefetched -- so that
+        pressing Space does not compile at 1600x1600 what was compiled a moment
+        ago. **Nothing about the caller is trusted.** The inputs are read from
+        the database here either way, and the handed-over frame is used only if
+        it is still the compilation those inputs make (:func:`usable`);
+        otherwise it is ignored and the frame is compiled. Passing a stale or
+        wrong frame can therefore cost a recompilation and nothing else.
 
         Raises :class:`ValueError` and writes no truth row in four cases, and
         the last two are the same rule twice: **a confirmation may never be how
@@ -74,10 +110,15 @@ class VerifyMixin:
 
         Either way the disagreement goes into the conflict queue and the frame
         is left for that decision. Only an ``auto`` row -- a cache the compiler
-        owns -- is ever rewritten or dropped by a confirmation.
+        owns -- is ever rewritten or dropped by a confirmation; a frozen row
+        that **agrees** is left exactly as it is, signature included, so
+        confirming an already-confirmed frame writes nothing but the digest.
 
-        Every write goes into one transaction: a frame is either confirmed
-        whole -- rows, flag and op log -- or not at all.
+        Every write goes into one transaction, which begins by taking the
+        frame's input digest again: a frame is either confirmed whole -- rows,
+        flag and op log -- against the inputs it was compiled from, or not at
+        all. An edit that landed while it was being compiled raises the same
+        ordinary ``ValueError`` and writes nothing.
         """
         refused = f"frame {key.desktop}/{key.view}/step {key.step} cannot be verified: "
         open_ids = self._open_conflict_ids(key)
@@ -87,7 +128,9 @@ class VerifyMixin:
                 + ", ".join(str(cid) for cid in open_ids)
                 + " are still open; settle them in the review queue first"
             )
-        inputs, compiled = self._compile(key)
+        inputs = gather(self.db, self.tax, key, cache_dir=self.cache_dir)
+        compiled = (prepared if usable(prepared, key, inputs, self.compiler_version)
+                    else self._compile_inputs(key, inputs))
         blocking = [p for p in compiled.problems if p.startswith(BLOCKING_PROBLEMS)]
         if blocking:
             raise ValueError(refused + ", ".join(blocking))
@@ -98,8 +141,27 @@ class VerifyMixin:
             raise ValueError(refused + "; ".join(disputed)
                              + "; the disagreement is now in the review queue")
         previous = self._review_status(key)
+        digest = digest_of(inputs, self.compiler_version)
         with self.db.transaction():
+            # The compilation happened outside this block -- it is pixels, and
+            # holding the database for a third of a second at scanner
+            # resolution would serialise the whole tool on it -- so an edit can
+            # have landed in between, and the rows about to be written would
+            # describe inputs nobody has any more. `refresh` guards its own
+            # write the same way.
+            if self.inputs_digest(key) != digest:
+                raise ValueError(refused + "the inputs changed while confirming; "
+                                 "press Space again")
             for instance in sorted(compiled.instances):
+                row = stored.get(instance)
+                if row is not None and row["status"] == VERIFIED:
+                    # It agrees -- the gate above proved it -- so it is the same
+                    # annotation and there is nothing to write. Rewriting it
+                    # moved a signature somebody else had already made, and a
+                    # re-trace within tolerance drifted the stored geometry one
+                    # pixel per confirmation away from what was confirmed.
+                    # `refresh` skips exactly this row for exactly this reason.
+                    continue
                 self._put_row(
                     key, instance, row_values(compiled.instances[instance]),
                     VERIFIED, compiled.input_hash, verified_by=annotator,
@@ -108,7 +170,7 @@ class VerifyMixin:
                 # `auto` only: the guard above turned every frozen one away
                 self.db.delete_compiled(key, instance)
             self._mark_bench(key, compiled)
-            self._stamp(key, digest_of(inputs, self.compiler_version))
+            self._stamp(key, digest)
             self.db.set_frame_flags(key, review_status=VERIFIED)
             self.db.log_op(
                 key.desktop, key.view, "verify_frame",
@@ -153,6 +215,14 @@ class VerifyMixin:
 
         Returns one sentence per instance, in key order, or ``[]`` when nothing
         a human signed is in dispute.
+
+        A row whose stored ``input_hash`` is this compilation's cannot disagree
+        with it -- it *is* this compilation -- so it is skipped without decoding
+        anything, which is the same short-circuit
+        :meth:`~tda.core.truth.TruthService._write_refresh` makes. Comparing
+        masks means decoding them, and Space on a forty-row frame at 1600x1600
+        was spending half a second of the GUI thread proving rows agree with
+        inputs they were derived from.
         """
         reasons: list[tuple[str, str, Optional[dict], Optional[dict], int]] = []
         for instance in gone:
@@ -163,7 +233,7 @@ class VerifyMixin:
                             payload, None, self._payload_area(payload)))
         for instance in sorted(set(stored) & set(compiled.instances)):
             row = stored[instance]
-            if row["status"] != VERIFIED:
+            if row["status"] != VERIFIED or row["input_hash"] == compiled.input_hash:
                 continue
             compiled_inst = compiled.instances[instance]
             diff = disagreement(row, compiled_inst)

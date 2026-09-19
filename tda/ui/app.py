@@ -470,8 +470,14 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, KeysMixin,
         # "queued" is only true when something is going to drain the queue.
         draining = bool(getattr(self.session, "sweeper_enabled", True))
         retry = f", {queued} re-check(s) queued" if queued and draining else ""
+        # Two counts, because `conflicts` is what *this* recompile queued and
+        # the truth table deliberately refuses to queue a disagreement twice:
+        # on the second F5 a frame somebody is still arguing about reported
+        # "0 conflicts". `open` is the same number the export and `cli check`
+        # gates read, narrowed to this frame.
         self.report(f"step {key.step} recompiled: {stats.get('updated', 0)} rows, "
-                    f"{stats.get('conflicts', 0)} conflicts{retry} — use "
+                    f"{stats.get('conflicts', 0)} new conflicts, "
+                    f"{compat.open_conflicts(self.session, key)} open{retry} — use "
                     f"'python -m tda.cli check' for the whole view")
 
     @S.guard

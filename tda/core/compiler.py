@@ -72,6 +72,7 @@ __all__ = [
     "above",
     "compile_frame",
     "derive_visibility",
+    "placements_for",
     "select_keyframe",
 ]
 
@@ -129,6 +130,14 @@ class CompiledFrame:
     problems: list[str]
     input_hash: str
     painted: dict[str, list[str]] = field(default_factory=dict)
+    #: The same order as the ``(instance, part)`` layer keys it was computed
+    #: from -- ``painted`` collapses a multi-part instance to one entry, and
+    #: that collapse cannot be undone. It is one of the ingredients of
+    #: :attr:`input_hash`, and the only one a reader cannot otherwise recover,
+    #: so a caller with a gathered input set can ask whether this compilation
+    #: is still the one they make (:func:`tda.core.truth_fresh.hash_of_inputs`)
+    #: instead of compiling to find out.
+    layers: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -290,6 +299,23 @@ def _placement_of(
     return ON_BENCH if needs.get(instance) == GEOM_BOX else IN_CHASSIS
 
 
+def placements_for(
+    needs: dict[str, str], placements: Optional[dict[str, str]]
+) -> dict[str, str]:
+    """Where each instance **this frame needs geometry for** is (spec 3.3 step 2).
+
+    Narrowed to ``needs``, and that narrowing is the point of the function
+    existing at all: :func:`tda.core.truth_inputs.gather` deliberately hands
+    over a superset -- an instance that needs nothing here still has a
+    placement, and the compiler's problem list and the bench flag both want to
+    know it -- while the frame's :func:`input_hash` is taken over *this* dict.
+    A second copy of the narrowing drifted from this one immediately: it read
+    the superset, so the hash it computed differed on every frame holding an
+    instance with nothing to draw, which on a real sheet is most of them.
+    """
+    return {inst: _placement_of(inst, needs, placements) for inst in sorted(needs)}
+
+
 def compile_frame(
     key: FrameKey,
     hw: tuple[int, int],
@@ -371,7 +397,7 @@ def compile_frame(
     canvas = (int(hw[0]), int(hw[1]))
     problems: list[str] = []
     instances = sorted(needs)
-    placement_of = {inst: _placement_of(inst, needs, placements) for inst in instances}
+    placement_of = placements_for(needs, placements)
 
     # --- step 3: pick the keyframe of each instance ------------------------ #
     selected: dict[str, Optional[ShapeKeyframe]] = {}
@@ -542,6 +568,7 @@ def compile_frame(
         key=key,
         instances=compiled,
         painted={group: _instance_order(layers) for group, layers in painted.items()},
+        layers={group: list(layers) for group, layers in painted.items()},
         problems=problems,
         input_hash=input_hash(
             key=key,

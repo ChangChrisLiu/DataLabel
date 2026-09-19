@@ -39,6 +39,7 @@ import time
 from collections import deque
 from typing import Iterable, Optional
 
+import shiboken6
 from PySide6.QtCore import QObject, Signal
 
 from tda.core.db import Db
@@ -157,20 +158,62 @@ class TruthSweeper(QObject):
         return True
 
     def wait_idle(self, timeout: float = 30.0) -> bool:
-        """Block until the queue is empty; ``True`` when it drained in time."""
+        """Block until the queue is empty; ``True`` when it drained in time.
+
+        A worker that has **given up** is waited for as well as waited on.
+        ``_idle`` is set from inside the thread, so it becomes observable
+        before the thread has finished unwinding, and a caller that reasonably
+        stops using the sweeper the moment this returns was racing a thread
+        still holding a connection to the same database. Whenever the worker is
+        stopping, this joins it briefly before answering, so "not running" is
+        true by the time anybody can read it.
+
+        Called **on** the worker -- by a slot running there -- it answers at
+        once instead of waiting: the caller is the thing that would drain the
+        queue, so anything still in it is work this very thread is holding, and
+        the wait could only ever end at the timeout.
+        """
+        if self._thread is threading.current_thread():
+            return self._idle.is_set()
         deadline = time.monotonic() + timeout
         while True:
-            if self._idle.wait(min(0.05, max(0.0, deadline - time.monotonic()))):
+            idle = self._idle.wait(min(0.05, max(0.0, deadline - time.monotonic())))
+            self._settle(deadline)
+            if idle:
                 return True
             if not self.is_running:
                 return not self._rechecks  # the worker is gone; nothing will drain
             if time.monotonic() >= deadline:
                 return False
 
+    def _settle(self, deadline: float) -> None:
+        """Let a worker that is on its way out actually get out.
+
+        Only while ``_stopping`` is set -- the worker itself sets it when it
+        cannot start, and :meth:`stop` sets it on the way down -- so this never
+        waits on a sweeper that is simply busy. :meth:`wait_idle` is the only
+        caller and has already turned the worker's own thread away, so the
+        join here can never be a thread waiting for itself.
+        """
+        thread = self._thread
+        if thread is None or not thread.is_alive():
+            return
+        with self._lock:
+            stopping = self._stopping
+        if not stopping:
+            return
+        thread.join(max(0.0, min(0.2, deadline - time.monotonic())))
+
     @property
     def is_running(self) -> bool:
-        """Is the worker thread alive? ``close()`` must leave this ``False``."""
-        return self._thread is not None and self._thread.is_alive()
+        """Is the worker thread alive? ``close()`` must leave this ``False``.
+
+        Always the thread's own answer, never a flag that stands in for it: a
+        flag is set at some point *inside* the thread and the thread is alive
+        for a while afterwards.
+        """
+        thread = self._thread
+        return thread is not None and thread.is_alive()
 
     # -- requests -----------------------------------------------------------
     def enqueue(self, steps: Iterable[int]) -> None:
@@ -220,11 +263,24 @@ class TruthSweeper(QObject):
         real exception surfaced as an unhandled one somewhere else entirely.
 
         There is nothing to do about a receiver that no longer exists except
-        note it: the work itself is in the database either way.
+        note it: the work itself is in the database either way. Every *other*
+        ``RuntimeError`` is a bug in a slot and is re-raised -- swallowing
+        those would make this guard the next place a failure goes missing.
+
+        Which of the two it was is asked of shiboken rather than read off the
+        exception: what PySide raises for a destroyed object is PySide's
+        business, it has been worded differently across versions, and the
+        version is not pinned. ``isValid`` is checked *after* the emit as well
+        as before, because the window can be torn down between the two.
         """
+        if not shiboken6.isValid(self):
+            log.debug("truth sweeper has no receiver left for %s", signal)
+            return
         try:
             signal.emit(*args)
-        except RuntimeError:  # the receiving object is gone
+        except RuntimeError:
+            if shiboken6.isValid(self):
+                raise  # the object is alive, so this is a slot's own failure
             log.debug("truth sweeper could not deliver %s", signal)
 
     def _run(self) -> None:

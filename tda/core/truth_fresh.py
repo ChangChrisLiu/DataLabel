@@ -24,15 +24,15 @@ a frozen frame nobody has compared.
 from __future__ import annotations
 
 import hashlib
+from typing import Optional
 
 from tda.core import masks
-from tda.core.compiler import select_keyframe
-from tda.core.model import FrameKey, Placement
+from tda.core.compiler import placements_for, select_keyframe
+from tda.core.compiler_visibility import input_hash
+from tda.core.model import FrameKey, ShapeKeyframe
 from tda.core.truth_inputs import FrameInputs, annotatable_steps
 
-__all__ = ["FreshMixin", "digest_of"]
-
-IN_CHASSIS = Placement.IN_CHASSIS.value
+__all__ = ["FreshMixin", "digest_of", "hash_of_inputs", "selected_keyframes"]
 
 
 def digest_of(inputs: FrameInputs, compiler_version: str) -> str:
@@ -73,12 +73,13 @@ def digest_of(inputs: FrameInputs, compiler_version: str) -> str:
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
 
-def _selected(inputs: FrameInputs) -> list[tuple]:
-    """``(instance, keyframe identity)`` for the shapes this frame actually uses.
+def selected_keyframes(inputs: FrameInputs) -> dict[str, Optional[ShapeKeyframe]]:
+    """The keyframe this frame would use for each instance that needs geometry.
 
     The same narrowing :func:`tda.core.compiler.compile_frame` does in its step
     3 -- view, desktop, placement, pose segment, then the smallest anchor at or
-    after this step -- so the digest moves exactly when the geometry would.
+    after this step -- and the only copy of it outside the compiler, so the
+    digest and the input hash both move exactly when the geometry would.
 
     Two of the compiler's branches are deliberately not mirrored, because
     :func:`tda.core.truth_inputs.gather` cannot produce them: it always resolves
@@ -90,20 +91,65 @@ def _selected(inputs: FrameInputs) -> list[tuple]:
     """
     key = inputs.key
     assert inputs.pose_segment is not None, "gather always resolves a pose segment"
-    out: list[tuple] = []
-    for instance in sorted(inputs.needs):
-        assert instance in inputs.placements, "gather fills placements for every need"
-        placement = inputs.placements.get(instance, IN_CHASSIS)
+    placement_of = placements_for(inputs.needs, inputs.placements)
+    out: dict[str, Optional[ShapeKeyframe]] = {}
+    for instance, placement in placement_of.items():
         chain = [
             kf for kf in inputs.keyframes.get(instance, ())
             if kf.view == key.view and kf.desktop == key.desktop
             and kf.placement == placement and kf.pose_segment == inputs.pose_segment
         ]
-        chosen = select_keyframe(chain, key.step)
-        out.append((instance, placement,
-                    None if chosen is None
-                    else (chosen.id, chosen.version, chosen.geom_type)))
+        out[instance] = select_keyframe(chain, key.step)
     return out
+
+
+def _selected(inputs: FrameInputs) -> list[tuple]:
+    """``(instance, placement, keyframe identity)`` for the digest."""
+    placement_of = placements_for(inputs.needs, inputs.placements)
+    return [
+        (instance, placement_of[instance],
+         None if kf is None else (kf.id, kf.version, kf.geom_type))
+        for instance, kf in sorted(selected_keyframes(inputs).items())
+    ]
+
+
+def hash_of_inputs(inputs: FrameInputs, layer_order: dict,
+                   compiler_version: str) -> str:
+    """:func:`tda.core.compiler_visibility.input_hash` for a gathered input set.
+
+    The compiler computes that hash at the end of a compilation, because one of
+    its ingredients -- the order the layers were actually painted in -- is
+    produced on the way. This is the same hash for inputs that have only been
+    *read*, which is what lets :meth:`~tda.core.truth.TruthService.verify_frame`
+    ask "is this compilation still the one these inputs make?" without paying
+    for the pixels.
+
+    ``layer_order`` is therefore taken from the compilation being checked
+    (:attr:`~tda.core.compiler.CompiledFrame.layers`) rather than derived, and
+    that is sound rather than circular: the layer order is a function of
+    ``needs``, ``placements``, the selected keyframes, the z-order and the
+    pairwise overrides, **all of which the hash already covers**. So an equal
+    hash means every one of those matched, and if they matched the layer order
+    could not have differed either; an unequal hash means something moved,
+    which is the answer the caller wanted anyway.
+    """
+    return input_hash(
+        key=inputs.key,
+        hw=inputs.hw,
+        needs=inputs.needs,
+        # narrowed to `needs`, which is the dict the compiler hashes: `gather`
+        # hands over the whole desktop's placements on purpose
+        placements=placements_for(inputs.needs, inputs.placements),
+        selected=selected_keyframes(inputs),
+        zorder=inputs.zorder,
+        layer_order=layer_order,
+        overrides=inputs.overrides,
+        occluders=inputs.occluders,
+        frame_overrides=inputs.frame_overrides,
+        transform=inputs.transform,
+        pose_segment=inputs.pose_segment,
+        compiler_version=compiler_version,
+    )
 
 
 class FreshMixin:
@@ -178,7 +224,7 @@ class FreshMixin:
             )
             swept = self.refresh_range(desktop, view, steps)
             total["refreshed"] = swept
-            for counter in ("updated", "conflicts", "skipped"):
+            for counter in ("updated", "conflicts", "standing", "skipped"):
                 total[counter] = total.get(counter, 0) + swept[counter]
             total["problems"] = list(total.get("problems") or []) + list(swept["problems"])
         left = self.pending_rechecks(desktop, view)

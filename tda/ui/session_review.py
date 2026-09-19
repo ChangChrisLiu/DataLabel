@@ -47,7 +47,9 @@ class ReviewMixin:
         self._refuse_if_editing("confirming the frame", force=False)
         key = self.current()
         try:
-            self.truth.verify_frame(key, self.annotator)
+            # the frame was compiled when the annotator arrived at it, and that
+            # is the one they are looking at: Space must not pay for it again
+            self.truth.verify_frame(key, self.annotator, self.prepared())
         except ValueError as refused:
             self._invalidate()
             problems = [str(refused)] + list(self.compiled().problems)

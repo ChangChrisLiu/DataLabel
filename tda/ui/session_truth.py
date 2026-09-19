@@ -14,6 +14,8 @@ of them run on the worker's thread; Qt queues them here.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 from PySide6.QtCore import QCoreApplication
 
@@ -45,6 +47,20 @@ class TruthCacheMixin:
         self._keep_compiled(key.step, self._epoch, compiled)
         return compiled
 
+    def prepared(self) -> Optional[CompiledFrame]:
+        """The compilation this session is holding for the current frame.
+
+        Offered to :meth:`~tda.core.truth.TruthService.verify_frame` so that
+        Space does not compile what arriving already compiled -- including the
+        frame the sweeper prefetched, which in reverse-order annotation is
+        every frame. Whether it is still the right answer is not decided here:
+        the truth service re-reads the inputs and checks the compilation
+        against them, so the worst an out-of-date offer can do is cost a
+        recompilation.
+        """
+        hit = self._compiled.get(self.current().step)
+        return None if hit is None else hit[1]
+
     def _compile_on_visit(self) -> None:
         """Bring the frame just opened up to date in the truth table (spec 3.4).
 
@@ -71,7 +87,7 @@ class TruthCacheMixin:
         self._keep_compiled(key.step, self._epoch, stats["compiled"])
 
     def _keep_compiled(self, step: int, epoch: int, compiled: CompiledFrame) -> None:
-        """Remember one compilation, and what the truth table owes because of it."""
+        """Remember one compilation and its problems."""
         if compiled is None:  # the refresh found nothing to do and made no frame
             return
         self._compiled[int(step)] = (int(epoch), compiled)

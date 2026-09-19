@@ -133,11 +133,11 @@ def settle(db: Db, truth: TruthService, desktop: int, view: str, steps: Iterable
     """
     wanted = annotatable_steps(db, desktop, view, steps)
     now = [int(current)] if current is not None and int(current) in wanted else wanted[:1]
-    stats: dict = {"updated": 0, "conflicts": 0, "skipped": 0, "problems": {},
-                   "frame": None}
+    stats: dict = {"updated": 0, "conflicts": 0, "standing": 0, "skipped": 0,
+                   "problems": {}, "frame": None}
     for step in now:
         one = truth.refresh(FrameKey(desktop, int(step), view), want_compiled=True)
-        for counter in ("updated", "conflicts", "skipped"):
+        for counter in ("updated", "conflicts", "standing", "skipped"):
             stats[counter] += one[counter]
         stats["problems"][int(step)] = list(one["problems"])
         stats["frame"] = one["compiled"]  # the caller installs it: no second compile

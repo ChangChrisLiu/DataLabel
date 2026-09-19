@@ -21,6 +21,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -161,6 +162,120 @@ def test_a_worker_that_cannot_open_its_database_says_so(qapp, tmp_path, monkeypa
     assert errors and "locked out" in errors[-1][1]
     assert session.sweeper.is_running is False
     session.close()
+
+
+def test_a_worker_that_cannot_start_is_not_running_the_moment_it_says_so(
+    qapp, tmp_path, monkeypatch
+):
+    """The real race behind the intermittent failure, three hundred times over.
+
+    The failure path set ``_idle`` and *then* returned, so ``wait_idle`` -- which
+    keys on ``_idle`` -- could hand control back while the thread was still
+    unwinding. ``is_running`` then answered ``True`` for a worker that had
+    already given up, about once in two hundred runs, and a caller that
+    reasonably stops using the sweeper after that was racing a live thread on
+    the same database.
+    """
+    session = make_session(tmp_path)
+    monkeypatch.setattr("tda.ui.session_sweep.Db",
+                        lambda path: (_ for _ in ()).throw(RuntimeError("locked out")))
+    try:
+        for attempt in range(300):
+            session.sweeper.open(DESKTOP, VIEW)
+            session.sweeper.enqueue([3])
+            session.drain_sweeper(timeout=20.0)
+            assert session.sweeper.is_running is False, f"still alive on attempt {attempt}"
+    finally:
+        session.close()
+
+
+def test_the_emit_guard_only_swallows_a_receiver_that_is_really_gone(qapp, tmp_path):
+    """Provoked with real Qt destruction, not with a hand-written message.
+
+    What PySide raises when the object behind a signal has been destroyed is
+    PySide's business and has been worded differently across versions, so the
+    guard asks shiboken whether the object is still there instead of reading
+    the exception. Everything else is a bug in a slot, and a bug has to be
+    reportable.
+    """
+    import shiboken6
+
+    sweeper = TruthSweeper(str(tmp_path / "x.sqlite"), None, str(tmp_path))
+    emit = sweeper._emit  # noqa: SLF001 - the guard is what is under test
+
+    class Broken:
+        def emit(self, *a):
+            raise RuntimeError("the slot raised")
+
+    with pytest.raises(RuntimeError, match="the slot raised"):
+        emit(Broken())
+
+    signal = sweeper.sigQueuesChanged
+    shiboken6.delete(sweeper)
+    assert not shiboken6.isValid(sweeper)
+
+    emit(signal)  # the C++ object is gone: noted, not raised
+
+    class Reworded:
+        """The same situation, in the wording PySide uses for other wrappers."""
+
+        def emit(self, *a):
+            raise RuntimeError(
+                "wrapped C/C++ object of type TruthSweeper has been deleted")
+
+    emit(Reworded())  # still the object being gone, whatever it is called
+
+
+def test_wait_idle_on_the_worker_thread_answers_instead_of_joining_itself(
+    session, monkeypatch
+):
+    """A thread cannot wait for itself to finish, and must not try.
+
+    ``wait_idle`` joins a worker that is on its way out, which is exactly what
+    a slot running *on* that worker would ask it to do to itself --
+    ``RuntimeError: cannot join current thread``, raised out of the sweep.
+    """
+    seen: dict = {}
+
+    def inside(self, *a, **k):
+        with self._lock:
+            self._stopping = True          # the branch that wants to join
+        try:
+            seen["value"] = self.wait_idle(timeout=0.2)
+        except RuntimeError as exc:        # noqa: BLE001 - recorded, not swallowed
+            seen["error"] = exc
+
+    monkeypatch.setattr(TruthSweeper, "_recheck", inside)
+    session.sweeper.open(DESKTOP, VIEW)
+    session.sweeper.enqueue([3])
+    session.drain_sweeper(timeout=20.0)
+
+    assert "error" not in seen, seen.get("error")
+    assert "value" in seen
+
+
+def test_wait_idle_on_the_worker_does_not_wait_for_work_it_is_holding(
+    session, monkeypatch
+):
+    """The caller is the drainer, so waiting for the queue is waiting for itself."""
+    seen: dict = {}
+
+    def inside(self, *a, **k):
+        with self._lock:
+            self._rechecks.append(99)   # still queued, and this thread has it
+        started = time.monotonic()
+        seen["value"] = self.wait_idle(timeout=10.0)
+        seen["waited"] = time.monotonic() - started
+        with self._lock:
+            self._rechecks.clear()
+
+    monkeypatch.setattr(TruthSweeper, "_recheck", inside)
+    session.sweeper.open(DESKTOP, VIEW)
+    session.sweeper.enqueue([3])
+    session.drain_sweeper(timeout=20.0)
+
+    assert seen.get("value") is False      # it will not drain while we stand here
+    assert seen["waited"] < 1.0, f"waited {seen['waited']:.1f}s for itself"
 
 
 def test_stop_keeps_is_running_truthful_when_the_join_times_out(session):

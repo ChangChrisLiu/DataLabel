@@ -159,12 +159,15 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
                 ignore_digest: bool = False) -> dict:
         """Bring one frame's truth rows up to date with the current inputs.
 
-        Returns ``{"updated", "conflicts", "skipped", "problems", "compiled",
-        "stale"}``: rows written (a deleted row counts as written), frozen rows
-        found in disagreement, rows left alone, the compiler's problem list, the
-        compilation the whole decision was made from -- handed back so that a
-        caller which also needs the frame does not compile it a second time --
-        and whether the write was abandoned.
+        Returns ``{"updated", "conflicts", "standing", "skipped", "problems",
+        "compiled", "stale"}``: rows written (a deleted row counts as
+        written), disagreements this refresh actually **queued**, frozen rows
+        in disagreement whether queued now or already open -- a sweep of fifty
+        frames over one unresolved conflict reported fifty conflicts when it
+        had queued none -- rows left alone, the compiler's
+        problem list, the compilation the whole decision was made from --
+        handed back so that a caller which also needs the frame does not
+        compile it a second time -- and whether the write was abandoned.
 
         ``cache`` is :meth:`refresh_range`'s way of reading the step-independent
         inputs once; callers outside this module leave it out.
@@ -192,7 +195,8 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
             # the rows already describe exactly these inputs: there is nothing
             # to derive and, since nothing moved, nothing a frozen row could
             # disagree with either
-            result = {"updated": 0, "conflicts": 0, "skipped": len(self.db.compiled(key)),
+            result = {"updated": 0, "conflicts": 0, "standing": 0,
+                      "skipped": len(self.db.compiled(key)),
                       "problems": [], "compiled": None, "stale": False}
             if want_compiled:
                 result["compiled"] = self._compile_inputs(key, inputs)
@@ -211,6 +215,7 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
         result: dict = {
             "updated": 0,
             "conflicts": 0,
+            "standing": 0,
             "skipped": 0,
             "problems": list(compiled.problems),
             "compiled": compiled,
@@ -250,12 +255,13 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
                     result["skipped"] += 1
                     continue
                 values = row_values(compiled_inst)
-                queued, _new = self._queue_conflict(
+                queued, inserted = self._queue_conflict(
                     key, instance, row_payload(row),
                     geom_payload(values.visible_rle, values.box, labels),
                     int(diff or 0), queued,
                 )
-                result["conflicts"] += 1
+                result["conflicts"] += int(inserted)
+                result["standing"] += 1
                 continue
             self._put_row(key, instance, row_values(compiled_inst), AUTO, new_hash)
             result["updated"] += 1
@@ -264,21 +270,24 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
             row = stored[instance]
             if row["status"] == VERIFIED:
                 old_payload = row_payload(row)
-                queued, _new = self._queue_conflict(
+                queued, inserted = self._queue_conflict(
                     key, instance, old_payload, None, self._payload_area(old_payload), queued
                 )
-                result["conflicts"] += 1
+                result["conflicts"] += int(inserted)
+                result["standing"] += 1
             else:
                 self.db.delete_compiled(key, instance)
                 result["updated"] += 1
 
         if verified_frame and (fresh - known or known - fresh):
             self.demote_frame(key, self._demotion_reason(fresh, known))
-        if result["conflicts"]:
+        if result["standing"]:
             # the frozen rows deliberately still hold their old value, so they
             # do NOT describe these inputs: stamping the digest here would make
             # the next pass skip the frame and the disagreement would never be
-            # raised again once the queue entry was resolved (spec 3.4)
+            # raised again once the queue entry was resolved (spec 3.4). It is
+            # `standing` and not `conflicts`: a disagreement the deduplication
+            # suppressed is every bit as unresolved as the one it matched
             self.db.clear_frame_digest(key)
         else:
             self._stamp(key, digest)
@@ -304,12 +313,12 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
         (spec 4.4 queues).
         """
         cache = InputCache()
-        total: dict = {"updated": 0, "conflicts": 0, "skipped": 0,
+        total: dict = {"updated": 0, "conflicts": 0, "standing": 0, "skipped": 0,
                        "problems": {} if per_step else []}
         for step in steps:
             one = self.refresh(FrameKey(desktop, int(step), view), cache,
                                ignore_digest=ignore_digest)
-            for counter in ("updated", "conflicts", "skipped"):
+            for counter in ("updated", "conflicts", "standing", "skipped"):
                 total[counter] += one[counter]
             if per_step:
                 total["problems"][int(step)] = list(one["problems"])
@@ -371,10 +380,11 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
         queued rather than being cleared unchecked.
         """
         cache = InputCache()
-        total: dict = {"updated": 0, "conflicts": 0, "skipped": 0, "problems": []}
+        total: dict = {"updated": 0, "conflicts": 0, "standing": 0, "skipped": 0,
+                       "problems": []}
         for step, gen in self.db.recheck_items(desktop, view):
             one = self.refresh(FrameKey(desktop, int(step), view), cache)
-            for counter in ("updated", "conflicts", "skipped"):
+            for counter in ("updated", "conflicts", "standing", "skipped"):
                 total[counter] += one[counter]
             total["problems"].extend(one["problems"])
             self.db.clear_recheck(desktop, view, step, gen)
