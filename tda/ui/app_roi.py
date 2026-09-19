@@ -71,8 +71,9 @@ class RoiMixin:
         if stored is not None:
             self.roi_draft = tuple(int(v) for v in stored)
         else:
-            self.roi_draft = tuple(int(v) for v in suggest_roi(
-                self._roi_reference_image(image), self.session.view))
+            reference, scale = self._roi_reference_image(image)
+            box = suggest_roi(reference, self.session.view)
+            self.roi_draft = self._scaled_box(box, scale, image.shape[:2])
         self.roi_editing = True
         # Arm the tool first: detaching a SAM tool clears the rubber band, so
         # painting the draft before the swap would erase it again.
@@ -85,26 +86,38 @@ class RoiMixin:
                         "drag the chassis box, Enter to accept")
 
     def _roi_reference_image(self, fallback):
-        """The frame the ROI is measured on: the segment's first available step.
+        """``(image, scale)`` the ROI is measured on: the segment's first step.
 
-        The same frame the offline thumbnails use.  Falls back to the open one
-        when the segment cannot be read or its reference has no image.
+        Full resolution, which is what the detector's thresholds were
+        calibrated on -- measuring the cached thumbnail instead was tried and
+        moved the proposal by 180 px on the real D13, which is more dragging
+        for the annotator than the 0.4 s it saves.  The cost is paid once per
+        pose segment, on the one frame where no ROI is stored yet; the
+        ``scale`` is kept in the signature so a future cheaper source can be
+        slotted in without touching the caller.
         """
         if not compat.is_open(self.session):
-            return fallback
+            return fallback, 1.0
         row = self.db.pose_segment_for(self.session.current()) or {}
-        start = row.get("start_step")
         steps = sorted(int(s) for s in self.session.steps())
+        start, end = row.get("start_step"), row.get("end_step")
         if start is not None:
             steps = [s for s in steps if s >= int(start)]
-        end = row.get("end_step")
         if end is not None:
             steps = [s for s in steps if s <= int(end)]
         for step in steps:
             image = self.session.image_at(step)
             if image is not None:
-                return image
-        return fallback
+                return image, 1.0
+        return fallback, 1.0
+
+    @staticmethod
+    def _scaled_box(box, scale: float, hw) -> tuple:
+        """A measured box in full-frame pixels, clamped to the frame."""
+        h, w = int(hw[0]), int(hw[1])
+        x0, y0, x1, y1 = (int(round(float(v) * float(scale))) for v in box)
+        return (max(0, min(x0, w - 1)), max(0, min(y0, h - 1)),
+                max(1, min(x1, w)), max(1, min(y1, h)))
 
     def _is_whole_frame(self, box) -> bool:
         """Is this rectangle "I could not find the chassis" rather than an answer?"""
