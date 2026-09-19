@@ -23,13 +23,17 @@ from pathlib import Path
 from typing import Optional
 
 from tda.core.db import Db
-from tda.core.graph_rules import infer_relational_fields, unresolved_relations
+from tda.core.graph_rules import (
+    infer_relational_fields,
+    is_provisional,
+    unresolved_relations,
+)
 from tda.core.implied import OP_KIND as IMPLIED_OP_KIND
 from tda.core.implied import implied_instances
 from tda.core.index import DesktopIndex
 from tda.core.log_report import _expected_steps
 from tda.core.logs import LogImport, import_log, iter_desktop_csvs, read_desktop_csv
-from tda.core.model import StepRec, StepType
+from tda.core.model import VIEWS, StepRec, StepType
 from tda.core.states import events_from_actions
 from tda.core.taxonomy import Taxonomy
 from tda.pipeline import Log, merge_desktop_meta, split_pose_segments, wanted
@@ -153,6 +157,9 @@ class DesktopRun:
     unresolved: list[str] = field(default_factory=list)
     #: One line per instance :mod:`tda.core.implied` created for this desktop.
     implied: list[str] = field(default_factory=list)
+    #: One line per instance a ``--force`` re-import removed because this sheet
+    #: no longer produces it (see :func:`_drop_vanished`).
+    dropped: list[str] = field(default_factory=list)
 
 
 def inferred_section(run: DesktopRun) -> list[str]:
@@ -349,13 +356,80 @@ def add_implied_instances(db: Db, li: LogImport, tax: Taxonomy) -> list[str]:
     return lines
 
 
+#: ``relation.source`` this pipeline owns. A derived edge naming a key that is
+#: about to go is machinery and goes with it; anything else is somebody's work.
+RULE_SOURCE = "rule"
+
+
+def _references(db: Db, desktop: int, key: str) -> dict[str, int]:
+    """Every reason not to delete one instance, per table; empty when there is none.
+
+    :meth:`~tda.core.db.Db.instance_reference_counts` leaves out the two tables
+    that have richer per-instance queries of their own, so they are asked here:
+    ``shape_keyframe`` across every view, and the ``relation`` rows a human or
+    the Label Studio import owns. A ``source="rule"`` edge is deliberately *not*
+    a reason -- it was derived from the instance and is re-derived without it.
+    """
+    counts = dict(db.instance_reference_counts(desktop, key))
+    shapes = sum(len(db.keyframes(desktop, view, key)) for view in VIEWS)
+    if shapes:
+        counts["shape_keyframe"] = shapes
+    held = [r for r in db.relations(desktop)
+            if key in (r["target"], r["blocker"]) and r["source"] != RULE_SOURCE]
+    if held:
+        counts["relation"] = len(held)
+    return counts
+
+
+def _drop_vanished(db: Db, li: LogImport) -> tuple[list[str], list[str]]:
+    """Remove the instances this re-import no longer produces; ``(dropped, issues)``.
+
+    The writer only ever upserted, so a key the sheet stopped naming simply
+    stayed -- harmless while the identity rule holds still, and fatal the moment
+    it changes. The thirteen PSU desktops of the real database were imported
+    under the old rule; re-importing them merges ``psu.01`` and ``psu.02``, and
+    without this the old ``psu.02`` would survive with no actions at all,
+    ``installed`` in the chassis for ever: a part the annotator must draw on
+    every frame, an ambiguous ``unique_of_class("psu")``, and 44 ``connected_to``
+    edges that ``constraints`` would go on not writing.
+
+    Two kinds of key are never touched. A provisional ``ls:*`` row belongs to
+    ``import-ls``, not here. And anything carrying a human's work -- a keyframe,
+    an override, a verified row, an open conflict, a hand-written event, a
+    hand-made edge, a z-order entry -- is kept and reported instead, because
+    deciding whether that work belongs to the merged instance is stage S1's job,
+    not a re-import's. An implied instance never reaches this at all:
+    :func:`add_implied_instances` has already put it back into ``li.instances``.
+    """
+    dropped: list[str] = []
+    issues: list[str] = []
+    for key in sorted(set(db.instances(li.desktop)) - set(li.instances)):
+        if is_provisional(key):
+            continue
+        counts = _references(db, li.desktop, key)
+        if counts:
+            held = ", ".join(f"{n} {table}" for table, n in sorted(counts.items()))
+            issues.append(
+                f"D{li.desktop:02d}: instance {key} vanished from the sheet but "
+                f"carries {held} - merge or delete it in S1"
+            )
+            continue
+        for row in db.relations(li.desktop):
+            if key in (row["target"], row["blocker"]) and row["source"] == RULE_SOURCE:
+                db.delete_relation(li.desktop, row["type"], row["target"],
+                                   row["blocker"])
+        db.delete_instance(li.desktop, key)
+        dropped.append(f"dropped instance {key} (no longer in the sheet)")
+    return dropped, issues
+
+
 def _write_import(
     db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec]
-) -> tuple[int, int, int, list[str], list[str], list[str]]:
+) -> tuple[int, int, int, list[str], list[str], list[str], list[str], list[str]]:
     """Write one desktop's import atomically.
 
     Returns ``(events, steps with LS notes, notes dropped, fills, unresolved,
-    implied)``.
+    implied, dropped instances, drop issues)``.
 
     The relational heuristic of spec 7.3 runs here, *before* the instances are
     written and inside the same transaction: ``logs.py`` leaves ``fastens``,
@@ -377,11 +451,16 @@ def _write_import(
         fills = infer_relational_fields(li.instances, tax, li.actions)
         for inst in li.instances.values():
             db.upsert_instance(inst)
+        # after the upserts, so what is left over is exactly what this sheet no
+        # longer produces -- and inside the same transaction, so a desktop that
+        # raises keeps both its old instances and its old steps
+        gone, drop_issues = _drop_vanished(db, li)
         events = events_from_actions(li.instances, li.actions, tax)
         db.replace_events(li.desktop, events, auto_only=True)
         split_pose_segments(db, li.desktop)
     return (len(events), kept, dropped, fills,
-            unresolved_relations(li.instances, tax, li.actions), implied)
+            unresolved_relations(li.instances, tax, li.actions), implied,
+            gone, drop_issues)
 
 
 def dropped_notes_line(desktop: int, dropped: int) -> str:
@@ -508,9 +587,11 @@ def _import_one(
             f"D{desktop:02d}: the sheet's own Desktop ID is {sheet_id}; "
             f"kept the file's number"
         )
-    events, kept, dropped, fills, unresolved, implied = _write_import(db, li, tax, previous)
+    (events, kept, dropped, fills, unresolved, implied,
+     gone, drop_issues) = _write_import(db, li, tax, previous)
     if dropped:
         issues.append(dropped_notes_line(desktop, dropped))
+    issues.extend(drop_issues)
     if log:
         extra = f", {len(implied)} implied instance(s)" if implied else ""
         log(f"[import-logs] D{desktop:02d}: {len(li.steps)} steps, {len(li.actions)} "
@@ -518,6 +599,8 @@ def _import_one(
             f"{filled} durations, {len(fills)} inferred relational fields, "
             f"{len(li.issues) + len(issues)} issues{extra}")
         for text in implied:
+            log(f"[import-logs]   {text}")
+        for text in gone:
             log(f"[import-logs]   {text}")
         if dropped:
             log(f"[import-logs]   {dropped_notes_line(desktop, dropped)}")
@@ -527,7 +610,7 @@ def _import_one(
         durations=filled, ls_notes=kept, ls_notes_dropped=dropped,
         brand=str(li.meta.get("brand_model_raw") or ""),
         issues=list(li.issues) + issues, fills=fills, unresolved=unresolved,
-        implied=implied,
+        implied=implied, dropped=gone,
     )
 
 

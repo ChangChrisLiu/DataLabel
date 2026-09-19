@@ -169,6 +169,8 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
         f"- state events: {sum(r.events for r in imported)}",
         f"- step durations from the index: {sum(r.durations for r in imported)}",
         f"- {L.INFERRED_HEADING}: {sum(len(r.fills) for r in imported)}",
+        f"- instances dropped (the sheet no longer names them): "
+        f"{sum(len(r.dropped) for r in imported)}",
         f"- issues: {sum(len(r.issues) for r in imported)}",
         "",
         "| desktop | brand | steps | n_logged_steps | match | actions | instances "
@@ -195,9 +197,11 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
     for r in imported:
         lines.append(f"## D{r.desktop:02d} - {r.brand}")
         lines.append("")
+        # the drops first: they are the only thing here that removed a row
+        lines.extend(f"- {text}" for text in r.dropped)
         if r.issues:
             lines.extend(f"- {text}" for text in r.issues)
-        else:
+        elif not r.dropped:
             lines.append("- no issues")
         lines.append("")
         lines.extend(L.inferred_section(r))
