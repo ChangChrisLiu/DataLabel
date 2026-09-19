@@ -146,14 +146,23 @@ class PoseSegmentMixin:
         return None if row is None else R.loads(row["roi_json"])
 
     def clear_pose_geometry(self, desktop: int, view: str, seg: int) -> None:
-        """Drop the corners, homography and ROI of one segment (they are stale)."""
+        """Drop the corners, homography and ROI of one segment (they are stale).
+
+        Every one of those columns is a compiler input -- the registration this
+        view's shapes are drawn against, and the staging area that decides
+        whether bench parts are in the frame at all -- so the frozen frames of
+        the view are queued for a re-check in the same transaction. Nothing else
+        would ever compare them: this runs from the pipeline, not from the
+        session's edit path.
+        """
         assignments = ", ".join(f'"{c}"=NULL' for c in POSE_GEOMETRY_COLUMNS)
-        with self._tx():
+        with self.transaction():
             self.conn.execute(
                 f"UPDATE pose_segment SET {assignments} "
                 "WHERE desktop=? AND view=? AND seg=?",
                 (desktop, view, seg),
             )
+            self.queue_rechecks_for_view(desktop, view)
 
     def set_pose_segment_bench_roi(self, desktop: int, view: str, seg: int,
                                    roi: Optional[Sequence[float]],
@@ -200,10 +209,18 @@ class PoseSegmentMixin:
         return None if row is None else R.loads(row["bench_roi_json"])
 
     def delete_pose_segments_from(self, desktop: int, view: str, first_seg: int) -> int:
-        """Delete segment ``first_seg`` and every segment after it; returns the count."""
-        with self._tx():
+        """Delete segment ``first_seg`` and every segment after it; returns the count.
+
+        The frames of those segments fall back to another segment's reference
+        frame, which is a different set of compiler inputs, so the view's frozen
+        frames are queued for a re-check in the same transaction.
+        """
+        with self.transaction():
             cur = self.conn.execute(
                 "DELETE FROM pose_segment WHERE desktop=? AND view=? AND seg>=?",
                 (desktop, view, first_seg),
             )
-        return int(cur.rowcount or 0)
+            removed = int(cur.rowcount or 0)
+            if removed:
+                self.queue_rechecks_for_view(desktop, view)
+        return removed

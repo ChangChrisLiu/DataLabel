@@ -322,6 +322,14 @@ class TruthService(FreshMixin, ResolveMixin):
             self.db.add_rechecks(desktop, view, wanted)
         return sorted(set(wanted))
 
+    def queue_rechecks_for_view(self, desktop: int, view: str) -> list[int]:
+        """Queue every frozen frame of one view (:meth:`tda.core.db.Db.queue_rechecks_for_view`).
+
+        The service's name for it, so a caller that already holds a
+        :class:`TruthService` does not have to reach past it into the database.
+        """
+        return self.db.queue_rechecks_for_view(desktop, view)
+
     def open_conflicts(self, desktop: int, view: Optional[str] = None) -> list[dict]:
         """Disagreements of one desktop (or one view) nobody has settled, oldest first.
 

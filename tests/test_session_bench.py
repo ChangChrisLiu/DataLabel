@@ -157,6 +157,25 @@ def test_a_malformed_bench_roi_is_refused(tmp_path):
     db.close()
 
 
+def test_dropping_a_pose_segment_queues_the_frozen_frames_for_a_recheck(tmp_path):
+    """Corners, homography and ROIs are compiler inputs of every frame they reach."""
+    db = Db(str(tmp_path / "pose.sqlite"))
+    db.set_pose_segment(7, "oak2", 1, 1, 9, 9, None, None)
+    db.set_pose_segment(7, "oak2", 2, 10, 20, 20, None, None)
+    for step, status in ((3, "verified"), (4, "unlabeled"), (11, "verified")):
+        db.upsert_frame(FrameKey(7, step, "oak2"), None, {}, None,
+                        {"review_status": status})
+
+    db.clear_pose_geometry(7, "oak2", 1)
+    assert db.rechecks(7, "oak2") == [3, 11]
+
+    for step in (3, 11):
+        db.clear_recheck(7, "oak2", step)
+    db.delete_pose_segments_from(7, "oak2", 2)
+    assert db.rechecks(7, "oak2") == [3, 11]
+    db.close()
+
+
 def test_the_bench_roi_is_clamped_and_logged_like_the_chassis_one(tmp_path):
     """One validator owns both rectangles: same clamping, same audit trail."""
     db = Db(str(tmp_path / "roi.sqlite"))

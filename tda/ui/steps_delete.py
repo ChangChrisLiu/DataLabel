@@ -136,7 +136,7 @@ def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
             if is_provisional(key):
                 # the draft and the shapes it was made of are one thing: a key
                 # nobody adopted leaves nothing behind but orphaned pixels
-                db.delete_draft_keyframes(data.desktop, key)
+                db.delete_keyframes_by_source(LS_SOURCE, [data.desktop], key)
             db.delete_auto_events(data.desktop, key)
             db.delete_instance(data.desktop, key)
             for rec in neighbours:

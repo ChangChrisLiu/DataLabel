@@ -49,6 +49,28 @@ class RecheckMixin:
             )
         return wanted
 
+    def queue_rechecks_for_view(self, desktop: int, view: str) -> list[int]:
+        """Queue **every frozen frame** of one view; returns the steps queued.
+
+        What a write that changes the compiler's inputs wholesale has to call:
+        deleting a pose segment, dropping its corners or ROI, purging a batch of
+        imported draft shapes. Those do not go through the session's edit path,
+        so nothing else would ever compare the frozen frames they reach against
+        what the inputs now say -- and a conflict that is never raised is the
+        one failure mode the queue exists to prevent (spec 3.4).
+
+        "Frozen" is the same notion :meth:`tda.core.truth.TruthService` works
+        with: the frame's own ``review_status``, or any compiled row a human
+        signed. Queueing is idempotent, so a caller may be generous.
+        """
+        rows = self.conn.execute(
+            "SELECT step FROM frame WHERE desktop=? AND view=? AND review_status='verified' "
+            "UNION "
+            "SELECT step FROM compiled_mask WHERE desktop=? AND view=? AND status='verified'",
+            (int(desktop), str(view), int(desktop), str(view)),
+        ).fetchall()
+        return self.add_rechecks(desktop, view, [int(r["step"]) for r in rows])
+
     def rechecks(self, desktop: int, view: Optional[str] = None) -> list[int]:
         """Logical steps still waiting for a re-check, ascending."""
         return [step for step, _gen in self.recheck_items(desktop, view)]
