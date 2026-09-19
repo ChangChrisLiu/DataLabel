@@ -202,6 +202,36 @@ def test_frame_override_touches_only_this_frame(session):
     assert np.array_equal(session.compiled().instances[COOLER].visible, cell(0))
 
 
+def test_commit_edit_carries_the_windows_own_note_into_the_op_log(session):
+    """``extra`` is what the window records about *why* it committed.
+
+    "The annotator was warned the shape is implausibly large and went ahead" is
+    not something the session can derive, and it belongs in the audit trail of
+    that commit rather than in a log nobody joins back to it.
+    """
+    session.goto(10)
+    session.begin_edit(COOLER)
+    session.set_editing_mask(cell(0))
+    session.commit_edit(api.SCOPE_KEYFRAME, extra={"area_warning_overridden": True})
+
+    op = session.db.ops(DESKTOP, VIEW)[0]
+    assert op["kind"] == "commit_keyframe"
+    assert op["payload"]["area_warning_overridden"] is True
+    assert op["payload"]["instance"] == COOLER  # and everything else is still there
+
+
+def test_commit_edit_refuses_a_note_that_cannot_be_logged(session):
+    session.goto(10)
+    session.begin_edit(COOLER)
+    session.set_editing_mask(cell(0))
+
+    with pytest.raises(ValueError, match="JSON"):
+        session.commit_edit(api.SCOPE_KEYFRAME, extra={"when": object()})
+
+    assert session.db.ops(DESKTOP, VIEW) == []  # nothing was written
+    assert session.editing_instance == COOLER   # and the layer is still there
+
+
 def test_commit_logs_a_source_level_operation(session):
     session.goto(10)
     draw(session, COOLER, cell(0), api.SCOPE_KEYFRAME)

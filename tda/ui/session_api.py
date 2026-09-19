@@ -12,7 +12,7 @@ types and strings only.
 """
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Optional, Protocol, runtime_checkable
 
 from PySide6.QtCore import Signal
 
@@ -229,11 +229,17 @@ class SessionLike(Protocol):
     def push_stroke(self, before, after) -> None:
         """Record one brush/eraser stroke on the undo stack."""
 
-    def commit_edit(self, scope: str) -> dict:
+    def commit_edit(self, scope: str, *, extra: Optional[dict] = None) -> dict:
         """Write the editing layer back; ``scope`` is one of :data:`COMMIT_SCOPES`.
 
         Also accepts ``zorder:above:<B>`` / ``zorder:below:<B>``, which write a
         layering exception rather than pixels (spec 4.3).
+
+        ``extra`` is merged into this commit's op-log payload -- what the window
+        knows about why it was made and the session cannot derive, such as
+        ``{"area_warning_overridden": True}``. Values must be JSON-serialisable
+        (the op log is JSON) or it raises :class:`ValueError` before anything is
+        written, and it never overwrites the payload's own keys.
         """
 
     def preview(self, scope: str) -> dict:

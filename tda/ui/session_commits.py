@@ -12,6 +12,7 @@ the :class:`~tda.ui.session_api.SessionLike` protocol.
 """
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 import numpy as np
@@ -25,6 +26,25 @@ from tda.ui.session_ops import GEOM_BOX, ON_BENCH
 from tda.ui.session_tasks import has_bench_roi
 
 __all__ = ["CommitMixin"]
+
+
+def _loggable_extra(extra: Optional[dict]) -> Optional[dict]:
+    """Check a caller's op-log note before anything is written.
+
+    The op log is JSON, so a value that cannot be serialised would fail deep
+    inside the write transaction -- after the keyframe, with the annotator's
+    pixels half in the database. Raising here costs one ``json.dumps`` of a
+    handful of flags and leaves the editing layer exactly as it was.
+    """
+    if extra is None:
+        return None
+    if not isinstance(extra, dict):
+        raise ValueError(f"extra must be a dict, got {type(extra).__name__}")
+    try:
+        json.dumps(extra)
+    except (TypeError, ValueError) as bad:
+        raise ValueError(f"extra must be JSON-serialisable: {bad}") from bad
+    return dict(extra)
 
 
 def _refuse_draft(instance: str) -> None:
@@ -104,8 +124,17 @@ class CommitMixin:
         """Drop the editing layer without writing anything."""
         self.layer.clear()
 
-    def commit_edit(self, scope: str, direction: str = edit.REVERSE) -> dict:
+    def commit_edit(self, scope: str, direction: str = edit.REVERSE, *,
+                    extra: Optional[dict] = None) -> dict:
         """Write the editing layer back with the scope the annotator chose.
+
+        ``extra`` is merged into the op-log payload of this commit: what the
+        *window* knows about why it was made and the session cannot derive --
+        "the annotator was warned the shape is implausibly large and went
+        ahead". It belongs in the audit trail of that commit rather than in a
+        log nobody joins back to it. Values must be JSON-serialisable, because
+        the op log is JSON; anything else raises :class:`ValueError` **before**
+        anything is written. Keys the payload already uses are not overwritten.
 
         ``scope`` is one of :data:`tda.ui.session_api.COMMIT_SCOPES`, or one of
         the two layering answers :func:`tda.ui.session_edit.suggest_scope` gives
@@ -127,6 +156,7 @@ class CommitMixin:
         """
         if not self.layer.active:
             raise RuntimeError("commit_edit() needs begin_edit() first")
+        extra = _loggable_extra(extra)
         key, instance = self._editable_frame(), self.layer.instance
         pair = edit.split_zorder_scope(scope)
         if pair is None and not self.layer.changed():
@@ -138,19 +168,20 @@ class CommitMixin:
             self._refuse_mask_on_bench(key, instance)
             result = edit.commit_edit(self.db, self.truth, key, instance,
                                       self.layer.mask(), self._shape_scope(scope),
-                                      direction, self.annotator, pair=other)
+                                      direction, self.annotator, pair=other,
+                                      extra=extra)
             self.layer.settle()   # the pixels went to the database with the pair
         elif pair is not None:
             other, above = pair
             result = edit.commit_pair_override(
                 self.db, self.truth, key,
                 instance if above else other, other if above else instance,
-                self.annotator, known=self._known_instances(),
+                self.annotator, known=self._known_instances(), extra=extra,
             )
         else:
             self._refuse_mask_on_bench(key, instance)
             result = edit.commit_edit(self.db, self.truth, key, instance, self.layer.mask(),
-                                      scope, direction, self.annotator)
+                                      scope, direction, self.annotator, extra=extra)
             # What was just written is no longer uncommitted: the layer's
             # baseline moves to the mask that went to the database, so the guard
             # on goto/open/close sees a settled layer rather than refusing to
