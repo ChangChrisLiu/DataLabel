@@ -89,7 +89,7 @@ def test_load_index_backs_the_database_up_first(env, capsys):
 
 def test_a_failing_backup_stops_load_index(env, capsys, monkeypatch):
     monkeypatch.setattr(Db, "backup",
-                        lambda self, dest: (_ for _ in ()).throw(OSError("no room")))
+                        lambda self, dest, keep=None: (_ for _ in ()).throw(OSError("no room")))
     capsys.readouterr()
     assert run(env, "load-index") == EXIT_ERROR
     out = capsys.readouterr().out

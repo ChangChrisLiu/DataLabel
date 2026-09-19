@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from tda.core.db import Db
+from tda.core.db_backup import DEFAULT_KEEP
 from tda.core.db_status import VIEW_COUNTERS
 from tda.core.index import DesktopIndex, load_index
 from tda.core.model import VIEWS, StepType
@@ -44,7 +45,7 @@ POSE_ISSUE_LIMIT = 50
 Log = Callable[[str], None]
 
 __all__ = [
-    "backup_dest", "cache_file", "desktops_without_steps", "drive_dir", "index_path",
+    "backup_dest", "backup_keep", "cache_file", "desktops_without_steps", "drive_dir", "index_path",
     "load_index_into_db", "load_paths", "ls_export_path", "merge_desktop_meta", "open_db",
     "parse_desktops", "read_index", "require", "split_pose_segments", "status_rows",
 ]
@@ -153,6 +154,23 @@ def backup_dest(paths: dict, dest: Optional[str] = None) -> str:
     if not _within(target, root):
         raise ValueError(f"--dest must be inside the configured backup_dir ({root})")
     return str(target)
+
+
+def backup_keep(paths: dict, prune: bool = True) -> Optional[int]:
+    """How many backups to keep: ``paths.yaml``'s ``backup_keep``, or the default.
+
+    ``prune=False`` (``backup --no-prune``) answers ``None``, which
+    :func:`tda.core.db_backup.prune_backups` reads as "no limit".
+    """
+    if not prune:
+        return None
+    try:
+        return int(paths.get("backup_keep", DEFAULT_KEEP))
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"paths.yaml's backup_keep must be a whole number of files, not "
+            f"{paths.get('backup_keep')!r}"
+        ) from None
 
 
 def open_db(paths: dict, override: Optional[str] = None) -> Db:

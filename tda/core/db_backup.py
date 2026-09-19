@@ -16,27 +16,48 @@ cannot match it.
 from __future__ import annotations
 
 import json
+import logging
+import os
+import re
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from tda.core import dbrows as R
 
 __all__ = [
+    "BACKUP_RE",
+    "DEFAULT_KEEP",
     "FINGERPRINT_TABLES",
+    "KEEP_DAILY_DAYS",
     "LOCK_SUFFIX",
     "LOCK_TTL",
     "BackupLockMixin",
     "acquire_lock_file",
     "lock_path_for",
+    "prune_backups",
     "read_lock_file",
     "release_lock_file",
 ]
 
+log = logging.getLogger(__name__)
+
 LOCK_TTL = timedelta(hours=12)
 #: Suffix of the single-user lock file, next to the database (spec 3.5).
 LOCK_SUFFIX = ".lock"
+
+#: Exactly the names :meth:`BackupLockMixin.backup` writes, and nothing else.
+#: Pruning deletes files, so it only ever looks at names it made itself: a
+#: hand-placed ``tda_pre_v3_20260918.sqlite`` is somebody's checkpoint and none
+#: of this code's business.
+BACKUP_RE = re.compile(r"^tda_\d{8}_\d{6}(?:_\d+)?\.sqlite$")
+#: How many copies ``backup_dir`` keeps when ``paths.yaml`` does not say.
+DEFAULT_KEEP = 40
+#: ... and, on top of that, the newest copy of every day this far back. Three
+#: runs in one afternoon must not push out the only copy of last Tuesday: what
+#: a restore usually wants is a *date*, not the 37th most recent file.
+KEEP_DAILY_DAYS = 14
 
 #: The tables whose row counts fingerprint a database. Five ``COUNT(*)`` over a
 #: 18 MB file cost milliseconds, and between them they cover every stage of the
@@ -67,6 +88,61 @@ def fingerprint(conn: sqlite3.Connection) -> tuple:
     return tuple(out)
 
 
+def _backup_day(name: str) -> str:
+    """The ``YYYYMMDD`` a backup's own name carries."""
+    return name[4:12]
+
+
+def prune_backups(dest_dir: str, keep: Optional[int] = DEFAULT_KEEP,
+                  keep_daily_days: int = KEEP_DAILY_DAYS) -> list[str]:
+    """Delete the oldest surplus backups; returns what was removed.
+
+    ``backup_dir`` is on the one drive this tool may write to, every destructive
+    command adds an 18 MB copy and nothing used to remove one, so the drive
+    filled up. Three rules keep the deleting narrow:
+
+    * only names matching :data:`BACKUP_RE` -- this function never considers a
+      file it did not write;
+    * the newest copy of each of the last ``keep_daily_days`` days is kept
+      whatever ``keep`` says, because a restore asks for a date;
+    * everything else beyond ``keep``, oldest first, by the *name's* timestamp,
+      which is what a reader sorts by anyway.
+
+    A ``keep`` of ``None`` or below 1 prunes nothing -- "no limit" has to be
+    expressible, and a mis-typed 0 must not empty the directory. Failures are
+    logged and swallowed: a backup directory that cannot be tidied is a nuisance,
+    and a command that dies after making a good copy is worse.
+    """
+    if not keep or int(keep) < 1:
+        return []
+    try:
+        names = sorted(n for n in os.listdir(dest_dir) if BACKUP_RE.match(n))
+    except OSError as exc:
+        log.warning("cannot list %s to prune backups: %s", dest_dir, exc)
+        return []
+    if len(names) <= int(keep):
+        return []
+
+    recent = {(date.today() - timedelta(days=d)).strftime("%Y%m%d")
+              for d in range(int(keep_daily_days))}
+    newest_of_day: dict[str, str] = {}
+    for name in names:  # sorted ascending, so the last wins
+        newest_of_day[_backup_day(name)] = name
+    protected = {name for day, name in newest_of_day.items() if day in recent}
+    protected.update(names[-int(keep):])  # the newest `keep`, whatever their day
+
+    removed: list[str] = []
+    for name in names:  # oldest first
+        if name in protected:
+            continue
+        try:
+            os.remove(os.path.join(dest_dir, name))
+            removed.append(name)
+        except OSError as exc:  # never fatal: the copy itself already succeeded
+            log.warning("could not prune the old backup %s: %s", name, exc)
+    return removed
+
+
 def _discard(out: Path) -> None:
     """Remove a backup that must not be left where a restore would find it."""
     try:
@@ -80,7 +156,7 @@ class BackupLockMixin:
 
     # ----------------------------------------------------------------- backup
 
-    def backup(self, dest_dir: str) -> str:
+    def backup(self, dest_dir: str, keep: Optional[int] = None) -> str:
         """Copy the live database with the SQLite backup API; returns the new path.
 
         The file name carries **local** time (``tda_YYYYmmdd_HHMMSS.sqlite``),
@@ -105,6 +181,14 @@ class BackupLockMixin:
         from the copy itself propagates unchanged. Every caller of the safety
         copy turns both into one printed line and exit 1
         (:func:`tda.cli._safety_backup`).
+
+        Only once all of that has passed is :func:`prune_backups` asked to drop
+        the surplus older copies (``keep``, ``None`` for no pruning). The order
+        matters: a run that deleted history and then failed to replace it would
+        be the one way this method could make things worse.
+
+        Never call this inside :meth:`~tda.core.dbconn.ConnectionMixin.transaction`
+        -- see :meth:`_read_snapshot`.
         """
         dest = Path(dest_dir)
         dest.mkdir(parents=True, exist_ok=True)
@@ -121,6 +205,7 @@ class BackupLockMixin:
         else:
             target.close()
         self._verify_backup(out, source)
+        prune_backups(str(dest), keep)  # only now: the new copy is known good
         return str(out)
 
     @staticmethod
@@ -135,25 +220,35 @@ class BackupLockMixin:
         return out
 
     def _read_snapshot(self):
-        """A read transaction around the fingerprint and the copy, when possible.
+        """A read transaction around the fingerprint and the copy.
 
-        It pins the source so the two cannot describe different moments. Inside
-        an open :meth:`~tda.core.dbconn.ConnectionMixin.transaction` there is
-        already one, and a driver that will not start a bare ``BEGIN`` here is
-        not worth failing the backup over: holding the single-user lock, nobody
-        else is writing anyway.
+        It pins the source so the two cannot describe different moments.
+
+        **Never call** :meth:`backup` from inside
+        :meth:`~tda.core.dbconn.ConnectionMixin.transaction`: ``Connection.backup``
+        on a source with an open *write* transaction blocks until it is
+        committed, and the only thing that could commit it is the caller that is
+        waiting -- the process hangs. This raises instead of hanging, and every
+        real caller takes the single-user lock and backs up *before* it starts
+        writing, which is the order that makes sense anyway.
         """
         from contextlib import contextmanager
+
+        if getattr(self, "_tx_depth", 0) or self.conn.in_transaction:
+            raise RuntimeError(
+                "Db.backup() cannot run inside an open transaction: the copy "
+                "would wait for a commit that only this caller can make. Take "
+                "the backup before the transaction."
+            )
 
         @contextmanager
         def _snapshot():
             started = False
-            if not getattr(self, "_tx_depth", 0):
-                try:
-                    self.conn.execute("BEGIN")
-                    started = True
-                except sqlite3.Error:
-                    started = False
+            try:
+                self.conn.execute("BEGIN")
+                started = True
+            except sqlite3.Error:  # a driver that will not: the lock is held anyway
+                started = False
             try:
                 yield
             finally:

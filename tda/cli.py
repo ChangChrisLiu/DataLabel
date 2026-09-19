@@ -108,7 +108,7 @@ def _safety_backup(paths: dict, db: Db, command: str, why: str) -> bool:
     annotator: there is nothing in it they could act on.
     """
     try:
-        out = db.backup(P.backup_dest(paths))
+        out = db.backup(P.backup_dest(paths), P.backup_keep(paths))
     except (OSError, sqlite3.Error, ValueError) as exc:
         print(f"[{command}] backup failed: {exc}; nothing was written")
         return False
@@ -392,7 +392,7 @@ def cmd_backup(args: argparse.Namespace) -> int:
     with _session(args) as (paths, db):
         dest = P.backup_dest(paths, args.dest)
         try:
-            out = db.backup(dest)
+            out = db.backup(dest, P.backup_keep(paths, prune=not args.no_prune))
         except (OSError, sqlite3.Error) as exc:
             print(f"[backup] backup failed: {exc}")
             return EXIT_ERROR
@@ -408,6 +408,11 @@ def _add_backup(sub) -> None:
                         "backup_dir in paths.yaml there is nowhere a backup may go, "
                         "and any --dest outside it is refused. A differently cased "
                         "or subst-mapped spelling of the same folder is accepted")
+    p.add_argument("--no-prune", action="store_true",
+                   help="keep every older backup. Normally the oldest copies "
+                        "beyond paths.yaml's backup_keep are removed once the new "
+                        "one is verified, except the newest of each of the last 14 "
+                        "days; no file this tool did not write is ever touched")
     p.set_defaults(func=cmd_backup)
 
 

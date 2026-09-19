@@ -543,7 +543,7 @@ def test_infer_relations_warns_about_a_desktop_the_database_does_not_have(env, c
 def test_a_failed_backup_stops_the_run_without_a_traceback(env, capsys, monkeypatch):
     imported(env)
 
-    def boom(self, dest_dir):
+    def boom(self, dest_dir, keep=None):
         raise OSError("the backup volume is full")
 
     monkeypatch.setattr(Db, "backup", boom)
