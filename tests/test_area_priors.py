@@ -50,6 +50,8 @@ def box_mask(w: int, h: int) -> np.ndarray:
     # for every class the ceiling reached the cap and this was not remarkable.
     ("psu", 619_923, "the rehearsal's 619,923 px psu"),
     ("ram_latch", int(ROI_AREA), "a whole-ROI latch"),
+    ("connector", int(ROI_AREA), "a whole-ROI connector"),
+    ("ram_module", int(ROI_AREA), "a whole-ROI ram_module"),
 ])
 def test_an_implausible_mask_warns(priors, cls, pixels, why):
     warning = area_warning(mask_of(pixels), cls, ROI_AREA, priors)
