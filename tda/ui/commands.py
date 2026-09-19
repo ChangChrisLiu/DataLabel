@@ -126,22 +126,36 @@ class UndoStack:
             del self._done[: len(self._done) - self._limit]
 
     def undo(self) -> Optional[Op]:
-        """Revert the newest op and return it (``None`` when there is none)."""
+        """Revert the newest op and return it (``None`` when there is none).
+
+        The op moves between the stacks **only once its handler has returned**.
+        Popping first and applying afterwards meant that a handler which raised
+        -- a write that failed half way -- took the op off the undo stack
+        without ever reaching the redo stack: it was neither redo-able nor
+        undo-able again, and nothing said so.  On a failure the stacks are
+        exactly as they were and the exception is re-raised, which is what the
+        window's guard reports.
+        """
         if not self._done:
             return None
-        op = self._done.pop()
+        op = self._done[-1]
         _, undo = self._handler(op.kind)
         undo(op.inverse)
+        self._done.pop()
         self._undone.append(op)
         return op
 
     def redo(self) -> Optional[Op]:
-        """Re-apply the most recently undone op and return it."""
+        """Re-apply the most recently undone op and return it.
+
+        Same rule as :meth:`undo`: the op changes stacks only on success.
+        """
         if not self._undone:
             return None
-        op = self._undone.pop()
+        op = self._undone[-1]
         do, _ = self._handler(op.kind)
         do(op.payload)
+        self._undone.pop()
         self._done.append(op)
         return op
 

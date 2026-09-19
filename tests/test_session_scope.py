@@ -512,3 +512,31 @@ def test_the_preview_of_a_layering_commit_covers_both_reaches(two_shapes):
                               COOLER, api.SCOPE_KEYFRAME)
     assert set(both["steps"]) == set(pair_only["steps"]) | set(shape_only["steps"])
     assert set(both["steps"]) > set(pair_only["steps"])
+
+
+def test_a_layering_answer_can_cut_a_new_version_instead_of_re_tracing(two_shapes):
+    """``Ctrl+K`` on a layering suggestion: split the shape *and* record the pair.
+
+    Splitting without the pair wrote the pixels and changed nothing on screen --
+    they stayed hidden under ``B``, which is the one outcome the annotator can
+    neither see nor explain.
+    """
+    two_shapes.goto(8)
+    versions = len(two_shapes.db.keyframes(DESKTOP, VIEW, COOLER))
+    added = rect(4, 4, 16, 16)
+    two_shapes.begin_edit(COOLER)
+    two_shapes.set_editing_mask(SMALL | added)
+
+    result = two_shapes.commit_edit(f"split+zorder:above:{CHASSIS}")
+
+    assert result["scope"] == api.SCOPE_SPLIT
+    kfs = two_shapes.db.keyframes(DESKTOP, VIEW, COOLER)
+    assert len(kfs) == versions + 1                       # a new version, not a re-trace
+    cut = max(kfs, key=lambda kf: kf.version)
+    assert cut.anchor_step == 8
+    assert not (added & ~masks.decode_rle(cut.parts[0].rle)).any()
+    assert [(p.above, p.below) for p in two_shapes.db.pair_overrides(DESKTOP, VIEW, 1)] \
+        == [(COOLER, CHASSIS)]
+    assert two_shapes.undo() is True                      # still one op
+    assert len(two_shapes.db.keyframes(DESKTOP, VIEW, COOLER)) == versions
+    assert two_shapes.db.pair_overrides(DESKTOP, VIEW, 1) == []

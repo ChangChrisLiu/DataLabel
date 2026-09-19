@@ -31,9 +31,6 @@ from tda.ui import session_api as api
 from tda.ui.app_widgets import Bar, BoxDragTool
 from tda.ui.canvas.tools import BrushTool, EraserTool, OccluderTool
 
-#: Where the timeline and the review panel keep a row's step number.
-_STEP_ROLE = int(Qt.ItemDataRole.UserRole)
-
 __all__ = ["BLOCK_HINT", "BoxDragTool", "EditMixin", "DESPECKLE_MIN_PX",
            "NO_INSTANCE_HINT", "REVIEW_READ_ONLY"]
 
@@ -121,14 +118,14 @@ class EditMixin:
         The panels report; the window acts.  Each of these has an answer only
         the window can give: a conflict resolution has three verdicts, opening
         another frame may not leave an uncommitted edit behind, and a refused
-        reorder must not escape a Qt slot as an exception.  The timeline's own
-        ``itemClicked`` is the last one still intercepted rather than emitted,
-        because the click *is* the panel's whole signal.
+        reorder must not escape a Qt slot as an exception.  Nothing is
+        *intercepted* any more -- every one of them is a signal the panel emits,
+        so a re-wire that is forgotten loses a gesture instead of letting one
+        through.
         """
         self.review.sigResolve.connect(self.resolve_selected)
         self.review.sigOpenStep.connect(self.timeline_goto)
-        self._reconnect(self.timeline.list_widget().itemClicked,
-                        lambda item: self.timeline_goto(int(item.data(_STEP_ROLE))))
+        self.timeline.sigOpenStep.connect(self.timeline_goto)
         self.instances.sigReorder.connect(self.move_instance)
         self.instances.sigHiddenToggled.connect(self.on_hidden_toggled)
         self.task_card.sigCommit.connect(self.on_panel_commit)
@@ -162,15 +159,6 @@ class EditMixin:
         self.session.set_hidden(str(instance), bool(hidden))
         self.instances.refresh()
         self.refresh_overlay()
-
-    @staticmethod
-    def _reconnect(signal, slot) -> None:
-        """Replace whatever a panel connected to one of its own signals."""
-        try:
-            signal.disconnect()
-        except (RuntimeError, TypeError):  # pragma: no cover - nothing was connected
-            pass
-        signal.connect(slot)
 
     # ------------------------------------------------------------ frame hook
     def on_frame_changed_edit(self, key) -> None:

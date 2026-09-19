@@ -293,6 +293,34 @@ def test_refresh_range_can_key_its_problems_by_step(qapp, tmp_path):
 # --------------------------------------------------------------------------- #
 # the budgets (ruling f)
 # --------------------------------------------------------------------------- #
+#: How many times each budgeted operation is measured.  The budget is asserted
+#: on the **best** of them: what is under test is what the code costs, and a run
+#: that was descheduled while another suite had the machine measures the machine
+#: instead.  A regression makes every one of the three slow, so best-of-3 is no
+#: weaker a guard -- it only stops the test failing for somebody else's CPU.
+BEST_OF = 3
+
+
+def best_of(measure, setup=None, times: int = BEST_OF) -> tuple[float, list[float]]:
+    """``(best, every run)`` for one budgeted operation."""
+    runs: list[float] = []
+    for attempt in range(times):
+        if setup is not None:
+            setup(attempt)
+        started = time.perf_counter()
+        measure(attempt)
+        runs.append(time.perf_counter() - started)
+    return min(runs), runs
+
+
+def _under(budget: float, what: str, runs: list[float]) -> None:
+    best = min(runs)
+    assert best <= budget, (
+        f"{what} took {best:.3f}s, over the {budget:.2f}s budget; "
+        f"all {len(runs)} runs: " + ", ".join(f"{r:.3f}s" for r in runs)
+    )
+
+
 @pytest.mark.slow
 def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path):
     """A chassis-sized commit at 1600x1600 over 40 steps, plus browsing."""
@@ -301,21 +329,33 @@ def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path):
     drawn = seed_shapes(session, 2, grid=8, anchor=40)
     assert len(drawn) >= 30
 
-    session.goto(20)
-    session.begin_edit(CHASSIS)
-    session.set_editing_mask(rect(100, 100, 1500, 1500, (1600, 1600)))
-    started = time.perf_counter()
-    result = session.commit_edit(api.SCOPE_KEYFRAME)
-    commit_s = time.perf_counter() - started
-    assert len(result["affected"]) >= 20  # it really does reach that far
+    reached: list[int] = []
 
-    session.goto(19)  # warms the prefetch of 18
-    session.drain_prefetch(timeout=20.0)
-    started = time.perf_counter()
-    session.goto(18)
-    session.compiled()
-    session.image()
-    warm_s = time.perf_counter() - started
+    def commit(attempt: int) -> None:
+        # a different mask each time: re-committing the same pixels is a no-op
+        result = session.commit_edit(api.SCOPE_KEYFRAME)
+        reached.append(len(result["affected"]))
+
+    def before_commit(attempt: int) -> None:
+        session.goto(20)
+        session.begin_edit(CHASSIS)
+        session.set_editing_mask(
+            rect(100, 100, 1500 - attempt, 1500 - attempt, (1600, 1600))
+        )
+
+    _, commit_runs = best_of(commit, before_commit)
+    assert min(reached) >= 20  # it really does reach that far
+
+    def warm(attempt: int) -> None:
+        session.goto(18)
+        session.compiled()
+        session.image()
+
+    def before_warm(attempt: int) -> None:
+        session.goto(19)  # warms the prefetch of 18
+        session.drain_prefetch(timeout=20.0)
+
+    _, warm_runs = best_of(warm, before_warm)
 
     # measure the cold arrival on its own: with the prefetch of k-1 running the
     # two compete for the same cores, and what is being asked here is how long
@@ -323,14 +363,20 @@ def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path):
     session.drain_prefetch(timeout=20.0)
     session.sweeper_enabled = False
     session.sweeper.stop()
-    session.images.clear()
-    started = time.perf_counter()
-    session.goto(10)
-    session.compiled()
-    session.image()
-    cold_s = time.perf_counter() - started
+
+    def cold(attempt: int) -> None:
+        session.goto(10)
+        session.compiled()
+        session.image()
+
+    def before_cold(attempt: int) -> None:
+        session.goto(30)          # so that arriving at 10 is a real move
+        session.images.clear()    # ... with neither its image nor its rows in hand
+        session._invalidate()
+
+    _, cold_runs = best_of(cold, before_cold)
 
     session.close()
-    assert commit_s <= 0.8, f"commit took {commit_s:.2f}s"
-    assert warm_s <= 0.15, f"warm goto took {warm_s:.2f}s"
-    assert cold_s <= 0.8, f"cold goto took {cold_s:.2f}s"
+    _under(0.8, "commit", commit_runs)
+    _under(0.15, "warm goto", warm_runs)
+    _under(0.8, "cold goto", cold_runs)

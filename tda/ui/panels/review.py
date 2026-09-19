@@ -74,6 +74,8 @@ class ReviewPanel(QWidget):
         super().__init__(parent)
         self._session: Optional[api.SessionLike] = None
         self._problems: list[str] = []
+        #: The queue list whose row was activated and not yet answered for.
+        self._activated: Optional[QListWidget] = None
 
         self._tabs = QTabWidget()
         self._lists: dict[str, QListWidget] = {}
@@ -205,15 +207,18 @@ class ReviewPanel(QWidget):
         """Put the highlight back on the frame that is open, after a refusal.
 
         Qt selects the row before the click is delivered, so a refused move left
-        the queue pointing at a step the canvas is not showing.
+        the queue pointing at a step the canvas is not showing.  Only the list
+        the annotator actually activated is touched: restoring all four cleared
+        a conflict they had picked in another tab, and the ``K`` / ``N`` keys
+        then had nothing to act on.
         """
-        if self._session is None:
+        lw, self._activated = self._activated, None
+        if self._session is None or lw is None:
             return
         step = int(self._session.current().step)
-        for lw in self._lists.values():
-            rows = [r for r in range(lw.count())
-                    if int(lw.item(r).data(STEP_ROLE)) == step]
-            lw.setCurrentRow(rows[0] if rows else -1)
+        rows = [r for r in range(lw.count())
+                if int(lw.item(r).data(STEP_ROLE)) == step]
+        lw.setCurrentRow(rows[0] if rows else -1)
 
     def rework(self) -> None:
         """Mark the selected step for rework (``R``)."""
@@ -232,10 +237,15 @@ class ReviewPanel(QWidget):
     # -- slots --------------------------------------------------------------
     def _on_item_activated(self, item: QListWidgetItem) -> None:
         step = item.data(STEP_ROLE)
-        if step is not None and int(step) >= 0:
-            self.sigOpenStep.emit(int(step))
+        if step is None or int(step) < 0:
+            return
+        # Remember which list asked, so that a refusal puts back that one and
+        # leaves the other three tabs' selections alone.
+        self._activated = item.listWidget()
+        self.sigOpenStep.emit(int(step))
 
     def _on_frame_changed(self, _key: object) -> None:
+        self._activated = None      # the move happened: there is nothing to put back
         self.refresh()
 
     def _on_problems(self, problems: list) -> None:
