@@ -938,7 +938,7 @@ def ls_reference_masks(path: str, view: str) -> Iterable[tuple[FrameKey, str, np
 ```python
 # tda/core/export/coco.py
 def export_coco(db: Db, tax: Taxonomy, desktops: list[int], view: str, out_json: str, only_verified=True, roi_crop=False) -> dict
-    # images: one per frame with a compiled row; annotations: segmentation RLE, bbox, area, category_id (23 classes), attributes {state, placement, visibility, occlusion_ratio, amodal_complete, quality: "gold"|"silver"|"bronze"|"auto"}
+    # images: one per frame with a compiled row; annotations: segmentation RLE, bbox, area, category_id (23 classes), attributes {state, placement, visibility, occlusion_ratio, amodal_complete, implied, tier: "gold"|"silver"|"bronze" (the VIEW's standard, from configs/taxonomy.yaml's view_tiers), verified: bool (a human confirmed this row)}
 # tda/core/export/vlm.py
 def export_vlm(db, tax, desktops, view, out_jsonl, tasks=("V1","V2","V3")) -> dict
     # V1: {"images":[frame], "q": "List all visible components with boxes", "a": {...}}

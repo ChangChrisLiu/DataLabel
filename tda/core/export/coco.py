@@ -342,7 +342,8 @@ def frame_is_verified(db: Db, key: FrameKey, rows: dict[str, dict]) -> bool:
     works with, narrowed the safe way: the frame's own ``review_status``, or
     **every** compiled row of it frozen. The truth service can settle for *any*
     frozen row because it only needs to know whether a demotion is due; a
-    quality grade cannot, or one confirmed screw would make the whole image gold.
+    tier is not a grade of the review, and one confirmed screw must not make the
+    whole image count as confirmed.
     """
     frame = db.get_frame(key)
     if frame is not None and frame.get("review_status") == VERIFIED:
@@ -350,16 +351,26 @@ def frame_is_verified(db: Db, key: FrameKey, rows: dict[str, dict]) -> bool:
     return bool(rows) and all(row.get("status") == VERIFIED for row in rows.values())
 
 
-def view_tier(view: str, tax: Taxonomy) -> Optional[str]:
-    """The annotation tier of one view (spec 8.1), or ``None`` for an unknown one.
+def view_tier(view: str, tax: Taxonomy) -> str:
+    """The annotation tier of one view (spec 8.1); raises for an unknown one.
 
     Read from ``configs/taxonomy.yaml``'s ``view_tiers`` and never written down
     in code: which camera is annotated to which standard is a decision about the
-    dataset, and it has already been changed once. ``None`` rather than a guess,
-    because a view the configuration does not describe is a configuration
-    problem, not a bronze one.
+    dataset, and it has already been changed once.
+
+    A view the configuration does not describe is a *configuration* problem, and
+    a loud one: returning ``None`` instead put ``"tier": null`` on every record
+    of that whole export and said nothing, which is the shape of a mistake
+    nobody notices until the data is somewhere else.
     """
-    return tax.view_tiers.get(str(view))
+    try:
+        return tax.view_tiers[str(view)]
+    except KeyError:
+        raise KeyError(
+            f"no annotation tier for view {view!r}: add it to the view_tiers "
+            f"table in configs/taxonomy.yaml (known views: "
+            f"{', '.join(sorted(tax.view_tiers)) or 'none'})"
+        ) from None
 
 
 def _attributes(ctx: DesktopCtx, instance: str, row: dict, step: int,
@@ -520,6 +531,12 @@ def export_coco(
                 "file_name": frame_file_name(frame, key),
                 "width": (roi[2] - roi[0]) if roi else hw[1],
                 "height": (roi[3] - roi[1]) if roi else hw[0],
+                # the frame-level answer to the same question the annotations
+                # answer per row, so a consumer picking whole frames does not
+                # have to read all of them; `review_status` is the raw column
+                # underneath and stays for whoever already reads it
+                "tier": tier,
+                "verified": frame_is_verified(db, key, db.compiled(key)),
                 "extra": {"desktop": desktop, "step": key.step, "view": view,
                           "review_status": frame.get("review_status")},
             }
