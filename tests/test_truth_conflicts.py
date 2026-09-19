@@ -184,6 +184,103 @@ def test_an_instance_dropped_from_an_auto_frame_deletes_its_row(scene: Scene):
 
 
 # --------------------------------------------------------------------------- #
+# labels are part of the frozen truth too
+# --------------------------------------------------------------------------- #
+def _verified_with_new_visibility(scene: Scene) -> dict:
+    """Confirm step 1, then press 2 on the PSU; returns the queued conflict."""
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(1), "lin")
+    scene.db.set_frame_override(
+        FrameOverride(scene.key(1), PSU, None, "occluded_partial")
+    )
+    scene.svc.refresh(scene.key(1))
+    return scene.db.conflicts(DESKTOP)[0]
+
+
+def test_a_label_change_on_a_verified_row_is_a_disagreement(scene: Scene):
+    """The reproduction: the 1-7 shortcut on a confirmed frame did nothing.
+
+    ``disagreement`` compared pixels only, so a changed ``visibility`` counted
+    as "no disagreement": the refresh reported 0 updated and 0 conflicts, left
+    the row saying ``visible`` and stamped the digest -- after which no pass
+    ever looked at the frame again. ``visibility`` is exported per annotation
+    and is the ground truth of a VLM task.
+    """
+    from tda.core.truth_conflicts import payload_labels
+
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(1), "lin")
+    scene.db.set_frame_override(
+        FrameOverride(scene.key(1), PSU, None, "occluded_partial")
+    )
+
+    out = scene.svc.refresh(scene.key(1))
+
+    assert out["conflicts"] == 1
+    conflict = scene.db.conflicts(DESKTOP)[0]
+    assert conflict["instance"] == PSU
+    assert payload_labels(conflict["new_rle"]) == [
+        {"field": "visibility", "old": "visible", "new": "occluded_partial"}
+    ]
+    assert scene.row(1, PSU)["visibility"] == "visible"  # frozen, not overwritten
+    assert scene.db.frame_digest(scene.key(1)) is None  # and not claimed as done
+
+
+def test_accepting_a_label_conflict_writes_the_new_label(scene: Scene):
+    conflict = _verified_with_new_visibility(scene)
+
+    scene.svc.resolve_conflict(conflict["id"], "accept_new", "lin")
+
+    row = scene.row(1, PSU)
+    assert row["visibility"] == "occluded_partial"
+    assert row["status"] == "verified"
+    assert scene.db.conflicts(DESKTOP) == []
+
+
+def test_keeping_the_old_label_pins_it_on_this_frame(scene: Scene):
+    conflict = _verified_with_new_visibility(scene)
+
+    scene.svc.resolve_conflict(conflict["id"], "keep_old", "lin")
+
+    override = scene.db.frame_overrides(scene.key(1))[PSU]
+    assert override.visibility == "visible"
+    scene.svc.refresh(scene.key(1))
+    assert scene.row(1, PSU)["visibility"] == "visible"
+    assert scene.db.conflicts(DESKTOP, open_only=True) == []
+
+
+def test_keeping_the_old_placement_is_refused(scene: Scene):
+    """Where a part is, is the step table's decision, not an override's."""
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    scene.db.replace_events(
+        DESKTOP,
+        [StateEvent(DESKTOP, 2, SCREW, "placement", "in_chassis", "on_bench", auto=False)],
+        auto_only=False,
+    )
+    scene.svc.refresh(scene.key(2))
+    conflict = scene.db.conflicts(DESKTOP)[0]
+
+    with pytest.raises(ValueError, match="state log"):
+        scene.svc.resolve_conflict(conflict["id"], "keep_old", "lin")
+
+    assert scene.row(2, SCREW)["placement"] == "in_chassis"
+    assert scene.db.conflicts(DESKTOP, open_only=True)
+
+
+def test_a_conflict_with_unchanged_labels_and_pixels_is_still_skipped(scene: Scene):
+    """The cheap path has to stay cheap: nothing moved, nothing is queued."""
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(1), "lin")
+
+    out = scene.svc.refresh(scene.key(1), ignore_digest=True)
+
+    assert out["conflicts"] == 0 and out["updated"] == 0
+    assert out["skipped"] == 2
+    assert scene.db.conflicts(DESKTOP) == []
+
+
+# --------------------------------------------------------------------------- #
 # verify_frame and the frozen-truth invariant
 # --------------------------------------------------------------------------- #
 def test_verify_frame_refuses_while_a_conflict_of_that_frame_is_open(scene: Scene):

@@ -128,6 +128,27 @@ def test_an_edited_resolution_leaves_the_frame_judged_again(session):
     assert session.db.frame_digest(key) is None
 
 
+def test_the_conflict_queue_names_the_field_a_label_change_is_about(session):
+    """0 differing pixels says nothing; "visibility: visible -> ..." says it all."""
+    from tda.core.model import FrameOverride
+
+    session.goto(12)
+    seed_shapes(session, 12)
+    assert session.confirm_frame() is True
+    key = FrameKey(DESKTOP, 12, VIEW)
+    session.db.set_frame_override(FrameOverride(key, CHASSIS, None, "occluded_partial"))
+    session.truth.refresh(key)
+
+    queued = session.queues()[api.QUEUE_CONFLICTS]
+
+    assert [row["instance"] for row in queued] == [CHASSIS]
+    assert [c["field"] for c in queued[0]["labels"]] == ["visibility"]
+    assert queued[0]["labels"][0]["new"] == "occluded_partial"
+    assert queued[0]["sym_diff_px"] == 0  # the pixels never moved
+    assert "visibility" in queued[0]["summary"]
+    assert "occluded_partial" in queued[0]["summary"]
+
+
 def test_confirming_a_frame_with_an_open_conflict_says_why(session):
     """Space on a demoted frame: the refusal is a problem line, not silence.
 

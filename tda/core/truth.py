@@ -51,7 +51,7 @@ import numpy as np
 from tda.core import masks
 from tda.core.compiler import CompiledFrame, compile_frame, select_keyframe
 from tda.core.db import RESOLUTIONS, Db
-from tda.core.model import FrameKey, Placement, ShapeKeyframe
+from tda.core.model import FrameKey, FrameOverride, Placement, ShapeKeyframe
 from tda.core.states import needs_geom
 from tda.core.taxonomy import Taxonomy
 from tda.core.truth_fresh import FreshMixin, digest_of
@@ -61,7 +61,9 @@ from tda.core.truth_conflicts import (
     GEOM_BOX,
     disagreement,
     geom_payload,
+    label_changes,
     payload_geometry,
+    payload_labels,
     row_payload,
     row_values,
 )
@@ -187,10 +189,12 @@ class TruthService(FreshMixin, ResolveMixin):
         # whole keyframe table again, which is most of a batch pass's time
         compiled = self._compile_inputs(key, inputs)  # no transaction: pixels only
         with self.db.transaction():
-            return self._write_refresh(key, compiled, guard, digest)
+            return self._write_refresh(key, compiled, guard, digest,
+                                       inputs.frame_overrides)
 
     def _write_refresh(self, key: FrameKey, compiled: CompiledFrame,
-                       guard: Optional[str], digest: str) -> dict:
+                       guard: Optional[str], digest: str,
+                       overrides: dict[str, FrameOverride]) -> dict:
         """The write half of :meth:`refresh`; the caller holds the transaction."""
         result: dict = {
             "updated": 0,
@@ -229,13 +233,15 @@ class TruthService(FreshMixin, ResolveMixin):
                 continue
             if row is not None and row["status"] == VERIFIED:
                 diff = disagreement(row, compiled_inst)
-                if diff is None:
+                labels = label_changes(row, compiled_inst, overrides.get(instance))
+                if diff is None and not labels:
                     result["skipped"] += 1
                     continue
                 values = row_values(compiled_inst)
                 queued, _new = self._queue_conflict(
                     key, instance, row_payload(row),
-                    geom_payload(values.visible_rle, values.box), diff, queued,
+                    geom_payload(values.visible_rle, values.box, labels),
+                    int(diff or 0), queued,
                 )
                 result["conflicts"] += 1
                 continue
@@ -582,12 +588,26 @@ class TruthService(FreshMixin, ResolveMixin):
 
     @staticmethod
     def _geom_id(payload: Optional[dict]) -> Optional[str]:
-        """The cheapest identity of a conflict side: its counts string or its box."""
+        """The cheapest identity of a conflict side: its geometry and its labels.
+
+        The labels are part of the identity because two disagreements about the
+        same unchanged outline -- "it is occluded_partial", then "no, it is
+        too_small" -- are two different things to decide, and deduplicating them
+        onto one queue entry would lose the second.
+        """
         if not payload:
             return None
         if "box" in payload:
-            return "box:" + ",".join(f"{float(v):.3f}" for v in payload["box"])
-        return masks.rle_counts(payload)
+            geom: Optional[str] = "box:" + ",".join(
+                f"{float(v):.3f}" for v in payload["box"]
+            )
+        else:
+            geom = masks.rle_counts(payload)
+        labels = payload_labels(payload)
+        if not labels:
+            return geom
+        tag = ";".join(f"{c.get('field')}={c.get('new')}" for c in labels)
+        return f"{geom or ''}|{tag}"
 
     def _review_status(self, key: FrameKey) -> Optional[str]:
         frame = self.db.get_frame(key)
