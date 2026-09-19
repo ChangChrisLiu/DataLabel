@@ -210,8 +210,12 @@ class CommitMixin:
             self.refresh_desktop_counts()
             self.report(f"step {step} confirmed")
         else:
-            problems = self.task_card.problems()
-            self.report(f"step {step} is not complete: {'; '.join(problems) or 'see the task card'}")
+            # One line, whatever the frame is missing.  A real start frame has
+            # 60+ missing shapes, which put 2,550 characters into the one-line
+            # status bar and asked the window to be 30,612 px wide.
+            count = len(self.task_card.problem_rows())
+            self.report(f"step {step} is not complete: {count} problem(s) — "
+                        f"见任务卡 / see the task card")
         return bool(ok)
 
     def _open_the_selected_entry(self) -> bool:

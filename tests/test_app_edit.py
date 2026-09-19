@@ -565,3 +565,59 @@ def test_review_enter_is_refused_with_an_uncommitted_edit(window, monkeypatch):
 
     assert window.session.current().step == here
     assert window.session.editing_instance == instance
+
+
+# --------------------------------------------------------------------------- #
+# a refused Space on a real start frame (item 11)
+# --------------------------------------------------------------------------- #
+def test_a_refused_confirm_is_one_short_line(window):
+    """60 missing shapes made a 2,550-character status line 30,612 px wide."""
+    window.act_confirm()
+
+    line = window.status_message()
+    assert len(line) < 120, f"{len(line)} characters in the status bar"
+    assert "problem" in line or "个问题" in line
+    assert "task card" in line or "任务卡" in line
+
+
+def test_the_hint_label_never_grows_the_window(window):
+    from PySide6.QtWidgets import QSizePolicy
+
+    window.report("x" * 4000)
+    hint = window.hint_label
+    assert hint.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Ignored
+    assert hint.minimumSizeHint().width() <= 200
+    assert hint.toolTip() == "x" * 4000       # the whole line is still readable
+
+
+def test_the_hint_is_cleared_on_a_frame_change(window):
+    """A stale line from two actions ago stayed on screen, still being read."""
+    window.report("something about the frame we are leaving")
+    window.session.goto(min(window.session.steps()), force=True)
+    QApplication.processEvents()
+    assert "the frame we are leaving" not in window.status_message()
+    assert len(window.status_message()) < 120
+
+
+def test_each_problem_appears_once_with_its_code_in_the_tooltip(window):
+    """The pane listed `missing_shape:x` AND "Draw x on this frame"."""
+    window.act_confirm()
+
+    rows = window.task_card.problem_rows()
+    assert rows, "no problems were shown"
+    assert len(rows) == len({r["instance"] for r in rows}), rows
+    for row in rows:
+        assert not row["text"].startswith("missing_shape:")
+        assert row["code"].startswith("missing_shape:")
+        assert row["instance"] and row["instance"] in row["code"]
+
+
+def test_clicking_a_problem_selects_that_instances_card_item(window):
+    window.act_confirm()
+    rows = window.task_card.problem_rows()
+    card = [str(x["instance"]) for x in window.session.task_card()]
+    wanted = next(r for r in rows if r["instance"] in card)
+
+    window.task_card.activate_problem(wanted["instance"])
+
+    assert window.task_card.current_instance() == wanted["instance"]

@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QLabel,
     QMessageBox,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QTabBar,
@@ -239,6 +240,14 @@ class ShellMixin:
         # The Chinese hints start with a full-width glyph, which Qt draws hard
         # against the window edge without this.
         self.hint_label.setContentsMargins(8, 0, 4, 0)
+        # A status line is one line: it elides, it never asks for width, and
+        # the whole text is in the tooltip.  A refused confirmation on a start
+        # frame put 2,550 characters here and the label's minimum width became
+        # 30,612 px, which is the window asking to be six screens wide.
+        self.hint_label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                      QSizePolicy.Policy.Preferred)
+        self.hint_label.setMinimumWidth(1)
+        self.hint_label.setTextFormat(Qt.TextFormat.PlainText)
         bar = self.statusBar()
         for label in (self.zoom_label, self.frame_label, self.tool_label,
                       self.sam_label):
@@ -329,9 +338,18 @@ class ShellMixin:
         return self._message
 
     def report(self, text: str) -> None:
-        """Show a transient line (a hint, a count, a refusal)."""
+        """Show a transient line (a hint, a count, a refusal), elided to fit."""
         self._message = str(text)
-        self.hint_label.setText(self._message)
+        self.hint_label.setToolTip(self._message)
+        self._paint_hint()
+
+    def _paint_hint(self) -> None:
+        """Put as much of the message on screen as the bar is wide."""
+        metrics = self.hint_label.fontMetrics()
+        room = max(40, self.hint_label.width() - 12)
+        self.hint_label.setText(
+            metrics.elidedText(self._message, Qt.TextElideMode.ElideRight, room)
+        )
 
     def last_error_message(self) -> str:
         """The last error shown, which a later hint does not erase."""

@@ -54,6 +54,34 @@ DONE_COLOR = QColor(128, 128, 132)
 #: :attr:`TaskCardPanel.sigCommit` payload meaning "ask the session".
 SUGGESTED = ""
 
+#: A compiler problem code looks like ``missing_shape:cpu_cooler.01`` -- one
+#: token, a colon, an instance key.  A "how to fix it" sentence has spaces.
+_CODE_CHARS = set("abcdefghijklmnopqrstuvwxyz_")
+
+
+def _is_code(problem: str) -> bool:
+    """Is this the compiler's own name for a problem rather than a sentence?"""
+    head, sep, rest = str(problem).partition(":")
+    return bool(sep) and bool(head) and set(head) <= _CODE_CHARS and " " not in head
+
+
+def pair_problems(problems: list[str]) -> list[dict]:
+    """``{"text", "code", "instance"}`` per problem, each one listed once.
+
+    ``confirm_frame`` emits the codes followed by one sentence per *blocking*
+    code, in the same order, so they pair up from the front; a code with no
+    sentence keeps its own text, and a sentence with no code is shown as it is.
+    """
+    codes = [p for p in problems if _is_code(p)]
+    sentences = [p for p in problems if not _is_code(p)]
+    rows: list[dict] = []
+    for code in codes:
+        instance = code.split(":", 1)[1]
+        text = sentences.pop(0) if sentences else code
+        rows.append({"text": text, "code": code, "instance": instance})
+    rows.extend({"text": text, "code": "", "instance": ""} for text in sentences)
+    return rows
+
 
 class TaskCardPanel(QWidget):
     """The per-frame instruction list with the commit and confirm actions."""
@@ -106,7 +134,12 @@ class TaskCardPanel(QWidget):
 
         self._problems_label = QLabel("Problems")
         self._problems_list = QListWidget()
-        self._problems_list.setMaximumHeight(90)
+        self._problems_list.setMaximumHeight(90)     # it scrolls; 60 of them fit
+        self._problems_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self._problems_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._problems_list.itemClicked.connect(self._on_problem_clicked)
+        self._problems_list.itemActivated.connect(self._on_problem_activated)
         self._problems_label.setVisible(False)
         self._problems_list.setVisible(False)
 
@@ -273,12 +306,52 @@ class TaskCardPanel(QWidget):
         self._problems = [str(p) for p in problems]
 
     def _show_problems(self, problems: list[str]) -> None:
+        """One row per problem: the sentence, with the code in the tooltip.
+
+        The session emits the compiler's codes *and* the "how to fix it"
+        sentences in one list, so a start frame with 60 missing shapes listed
+        every part twice -- once as ``missing_shape:cover.01`` and once as
+        "Draw cover.01 on this frame".  They are paired back up here: the
+        sentence is what the annotator reads, the code is what they quote in a
+        bug report, and the instance is what a click jumps to.
+        """
         self._problems_list.clear()
-        for problem in problems:
-            self._problems_list.addItem(problem)
+        for row in pair_problems(problems):
+            item = QListWidgetItem(row["text"])
+            item.setToolTip(row["code"] or row["text"])
+            item.setData(INSTANCE_ROLE, row["instance"])
+            self._problems_list.addItem(item)
         visible = bool(problems)
         self._problems_label.setVisible(visible)
         self._problems_list.setVisible(visible)
+
+    def problem_rows(self) -> list[dict]:
+        """``{"text", "code", "instance"}`` per row currently shown."""
+        out = []
+        for i in range(self._problems_list.count()):
+            item = self._problems_list.item(i)
+            out.append({"text": item.text(), "code": item.toolTip(),
+                        "instance": str(item.data(INSTANCE_ROLE) or "")})
+        return out
+
+    def activate_problem(self, instance: str) -> None:
+        """Jump to the card item a problem is about (a click in the pane)."""
+        if instance:
+            self.select_instance(instance)
+
+    def _on_problem_clicked(self, item: QListWidgetItem) -> None:
+        self.activate_problem(str(item.data(INSTANCE_ROLE) or ""))
+
+    def _on_problem_activated(self, item: QListWidgetItem) -> None:
+        """Double click / Enter on a problem: start editing that instance.
+
+        The window decides whether the edit may begin, as for every other way
+        of asking.
+        """
+        instance = str(item.data(INSTANCE_ROLE) or "")
+        if instance:
+            self.select_instance(instance)
+            self.sigRequestEdit.emit(instance)
 
     def _hide_problems(self) -> None:
         self._problems_list.clear()

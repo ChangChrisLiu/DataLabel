@@ -129,6 +129,10 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
 
     def render_frame(self) -> None:
         """Repaint everything that belongs to the frame the session is on."""
+        # A hint is about the frame it was said on.  "step 14 is not complete:
+        # 61 problems" stayed on screen two frames later, where it was simply
+        # untrue.
+        self.report("")
         # Whatever was being compared, this is not it; the tools are re-armed
         # below (or detached, when the frame has no image).
         self._flashing = None
@@ -796,8 +800,14 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
 
     @S.guard
     def _on_problems(self, problems: list) -> None:
+        """The compiler has something to say about the open frame.
+
+        The count and where to read them; the list itself is the task card's
+        problems pane.  Joining them into the status bar put 2,550 characters
+        into a one-line label.
+        """
         if problems:
-            self.report(f"{len(problems)} problem(s): {'; '.join(str(p) for p in problems)}")
+            self.report(f"{len(problems)} problem(s) — 见任务卡 / see the task card")
 
     @S.guard
     def _on_dirty(self, dirty: bool) -> None:
