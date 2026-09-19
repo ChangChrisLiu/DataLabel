@@ -692,6 +692,18 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
     # -------------------------------------------------------- session slots
     @S.guard
     def act_save(self) -> None:
+        """``Ctrl+S``: save what is on screen.
+
+        In Steps mode that is the step table, not the session: it used to save
+        the session and say "saved" while the annotator's row edits were still
+        sitting in the panel's model -- and "saved" is exactly the word that
+        stops somebody pressing Apply.  Same path as the button, same message.
+        """
+        if self.mode == A.MODE_STEPS:
+            self.steps_panel.apply()
+            self.save_window_state()
+            self.report(self.steps_panel.status.text() or "step table saved")
+            return
         self.session.save()
         self.save_window_state()
         self.report("saved")

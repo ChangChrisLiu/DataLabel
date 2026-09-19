@@ -792,3 +792,29 @@ def test_a_poisoned_last_frame_in_the_ini_cannot_stop_the_launch(qapp, tmp_path)
     assert int(target["desktop"]) == DESKTOP
     assert target["view"] == VIEW            # the only view the scene has frames for
     assert target["step"] in (None, LAST_STEP)
+
+
+def test_ctrl_s_in_steps_mode_applies_the_step_table(window, monkeypatch):
+    """It said "saved" while the step table's edits were still unsaved.
+
+    ``Ctrl+S`` saved the *session*, which in Steps mode is not what is on
+    screen: the annotator's row edits sat in the panel's model, and the word
+    "saved" is exactly the thing that stops somebody pressing Apply.
+    """
+    window.set_mode(A.MODE_STEPS)
+    applied: list[int] = []
+    monkeypatch.setattr(window.steps_panel, "apply", lambda: applied.append(1))
+    window.steps_panel.status.setText("Saved D13: 0 open question(s).")
+
+    window.act_save()
+
+    assert applied == [1]
+    assert "Saved D13" in window.status_message()
+
+
+def test_ctrl_s_outside_steps_mode_still_saves_the_session(window, monkeypatch):
+    saved: list[int] = []
+    monkeypatch.setattr(window.session, "save", lambda: saved.append(1))
+    window.set_mode(A.MODE_ANNOTATE)
+    window.act_save()
+    assert saved == [1]
