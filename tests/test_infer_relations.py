@@ -16,6 +16,7 @@ test reads F: or touches the real annotations file.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -441,6 +442,20 @@ def test_nothing_is_unresolved_once_the_latches_have_their_board(tax):
     instances = _board_and_latches()
     infer_relational_fields(instances, tax)
     assert unresolved_relations(instances, tax) == []
+
+
+def test_an_instance_is_never_made_its_own_parent(tax):
+    """Defence in depth: the loader rejects a self-host, this refuses to act on one.
+
+    ``load_taxonomy`` raises on a class naming itself, so this can only arrive
+    from a ``Taxonomy`` assembled in code -- and a parent cycle of length one is
+    not something to find out about through ``_close_attached_cascade``.
+    """
+    self_hosting = replace(tax, host_classes={"motherboard": "motherboard"})
+    instances = {"motherboard.01": inst("motherboard.01", "motherboard")}
+    assert infer_relational_fields(instances, self_hosting) == []
+    assert instances["motherboard.01"].parent is None
+    assert instances["motherboard.01"].attached is False
 
 
 # --------------------------------------------------------------------------- #
@@ -934,16 +949,26 @@ def test_the_step_table_asks_about_them_after_the_existing_questions(tmp_db_path
     db = seeded_db(tmp_db_path, tax, desktops=(13,))
     try:
         strip_relations(db, 13)
+        # stripping the relations leaves *only* the new kinds, so one question of
+        # an older kind goes in as well: "after the existing ones" needs one
+        db.upsert_instance(InstanceRec(key="misc_part.01", desktop=13, cls="misc_part"))
         data = StepTableData.load(db, 13, tax)
     finally:
         db.close()
+    assert data.orphans[0].startswith("no action references misc_part.01")
     kinds = ("unresolved socket host", "captive screw without parent",
              "host-mounted instance without parent")
+    # every kind really is asked about: D13 has connectors whose socket_host is
+    # back to the bare class, four captive cooler screws, and five latches
+    found = {kind for kind in kinds if any(kind in line for line in data.orphans)}
+    assert found == set(kinds), f"never asked: {sorted(set(kinds) - found)}"
+    hosted = [line for line in data.orphans
+              if "host-mounted instance without parent" in line]
+    assert len(hosted) == 5  # ram_latch.01-04 + cpu_socket_lever.01
+    # and they sit at the very end, after questions that really are there first
     new = [i for i, line in enumerate(data.orphans)
            if any(kind in line for kind in kinds)]
-    assert new
-    assert all(any(kind in data.orphans[i] for kind in kinds) for i in new)
-    # the new kinds sit at the very end, after every pre-existing one
+    assert 0 < len(new) < len(data.orphans)
     assert new == list(range(len(data.orphans) - len(new), len(data.orphans)))
     text = "\n".join(data.orphans)
     assert "unresolved socket host" in text and "captive screw without parent" in text

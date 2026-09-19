@@ -307,6 +307,19 @@ def test_they_come_back_into_the_chassis_with_the_board_on_the_frame_before(whol
     assert order[1:1 + len(BOARD_MOUNTED)] == sorted(BOARD_MOUNTED)
 
 
+def test_the_guide_quotes_the_card_text_the_app_really_emits(whole_sheet):
+    """A quoted string in the manual is a promise about what is on screen.
+
+    Whitespace is collapsed on both sides because the guide wraps its lines;
+    everything else, punctuation included, has to match character for character.
+    """
+    guide = Path(__file__).resolve().parents[1] / "docs" / "annotation_guide.md"
+    whole_sheet.goto(BOARD_STEP - 1)
+    emitted = " ".join(card(whole_sheet)["ram_latch.01"]["text"].split())
+    body = " ".join(guide.read_text(encoding="utf-8").split())
+    assert emitted in body, emitted
+
+
 def test_the_instance_panel_lists_them_among_the_parts_that_are_gone(whole_sheet):
     """They have no compiled row any more, so this is where they stay visible."""
     from tda.ui.app_compat import removed_rows
