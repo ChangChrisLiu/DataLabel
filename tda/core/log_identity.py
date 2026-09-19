@@ -172,6 +172,16 @@ class InstanceLedger:
         done = [v for _s, v, result in self._ops.get(key, []) if result == "success"]
         return done[-1] if done else None
 
+    def last_failed(self, key: str) -> Optional[str]:
+        """The verb of this instance's latest action, if that action failed.
+
+        ``None`` when the latest action succeeded, or when there is none.
+        """
+        ops = self._ops.get(key, [])
+        if ops and ops[-1][2] == "failed":
+            return ops[-1][1]
+        return None
+
     # -- lookup ----------------------------------------------------------- #
     def numbered_matches(self, cls: str, disc: str, number: int,
                          attrs: dict) -> list[str]:
@@ -192,29 +202,38 @@ def physical_reuse(
 ) -> Optional[tuple[str, str]]:
     """The one instance an unnumbered successful ``remove`` may operate again.
 
-    ``(key, the verb it was last successfully given)``, or ``None`` when the row
-    is a part of its own.  Every condition has to hold:
+    ``(key, how it was last acted on)``, or ``None`` when the row is a part of
+    its own.  Every condition has to hold:
 
     * an earlier **unnumbered** row created it with the same class and the same
       :func:`identity` discriminators -- a numbered candidate belongs to the
       strict test, and a different ``of`` or cable owner is a different part;
     * it is not removed already, so the row is not lifting out something that
       has gone (``state_of`` folds the verbs that succeeded);
-    * its latest successful verb is a non-terminal one, i.e. the sheet left it
-      mid-disassembly: swung aside, opened, unscrewed.  An instance nothing has
-      successfully happened to yet is *not* a candidate -- a failed attempt at
-      step 10 says the part is untouched, not that step 20 continues it;
+    * **and** the sheet left it in one of exactly two situations:
+
+      - its latest successful verb is a non-terminal one -- swung aside, opened,
+        unscrewed: D22's ``Open Power Module`` (step 12) then ``Power module``
+        (step 20);
+      - or its latest action is a **failed attempt**, whatever the verb. A
+        failed attempt changes no state, so the part is by definition still
+        where it was, and the later successful ``remove`` is the same part:
+        D35/D36/D45's ``Try to remove power module (failed)`` then
+        ``Power module``.
+
     * it is the only candidate on the desktop.  Two displaced power supplies and
       one ``Power module`` row is a question for a human, not a coin toss.
 
-    This is what turns D22's ``Open Power Module`` (step 12) and ``Power module``
-    (step 20) into one ``psu.01`` instead of a ``psu.01`` the annotator masks for
-    eight steps and a ``psu.02`` they mask for the rest.
+    Without this, each of those sheets drafted two keys for one physical power
+    supply, both needing an in-chassis mask on the same frames.
     """
-    found = [
-        (key, last)
-        for key in ledger.unnumbered_matches(cls, disc, attrs)
-        for last in [ledger.last_successful(key)]
-        if last in NON_TERMINAL_VERBS and state_of(key) != REMOVED
-    ]
+    found: list[tuple[str, str]] = []
+    for key in ledger.unnumbered_matches(cls, disc, attrs):
+        if state_of(key) == REMOVED:
+            continue
+        done, attempted = ledger.last_successful(key), ledger.last_failed(key)
+        if done in NON_TERMINAL_VERBS:
+            found.append((key, done))
+        elif attempted is not None:
+            found.append((key, f"failed {attempted}"))
     return found[0] if len(found) == 1 else None

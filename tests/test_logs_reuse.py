@@ -100,11 +100,43 @@ def test_a_failed_remove_row_does_not_reuse(tax):
     assert reuse_issues(li) == []
 
 
-def test_an_instance_with_no_successful_verb_is_not_a_candidate(tax):
-    """D45 style: a failed attempt leaves nothing to continue from."""
+def test_d45_a_failed_attempt_then_the_real_removal_is_one_instance(tax):
+    """A failed attempt changes no state, so the part is still there to remove."""
     li = synth(["Try to remove power module", "Power module"], tax=tax)
-    assert targets(li) == ["psu.01", "psu.02"]
+    assert targets(li) == ["psu.01", "psu.01"]
+    assert sorted(k for k in li.instances if k.startswith("psu")) == ["psu.01"]
+    assert any("reuses psu.01" in text and "failed remove" in text
+               for text in reuse_issues(li))
+
+
+def test_d36_the_bracketed_failed_marker_does_not_split_the_identity(tax):
+    """``(failed)`` is how the action went, not which part it was about."""
+    li = synth(["Try to remove the power module (failed)", "Power module"], tax=tax)
+    assert targets(li) == ["psu.01", "psu.01"]
+    assert "qualifier" not in li.instances["psu.01"].attrs
+
+
+def test_a_real_qualifier_still_splits_the_identity(tax):
+    """Only the result marker goes; a qualifier that names the part stays."""
+    li = synth(["Open RAM cover (left)", "Remove RAM cover"], tax=tax)
+    assert targets(li) == ["cover.01", "cover.02"]
+    assert li.instances["cover.01"].attrs["qualifier"] == "left"
     assert reuse_issues(li) == []
+
+
+def test_a_failed_attempt_on_something_already_removed_is_not_a_candidate(tax):
+    """"Still present" is a condition: a second candidate makes it ambiguous."""
+    li = synth(["Try to remove power module", "Try to remove power module",
+                "Power module"], tax=tax)
+    assert targets(li) == ["psu.01", "psu.02", "psu.03"]
+    assert reuse_issues(li) == []
+
+
+def test_the_step_type_of_a_failed_row_is_unchanged(tax):
+    """Dropping the qualifier must not stop the row counting as an attempt."""
+    li = synth(["Try to remove the power module (failed)"], tax=tax)
+    assert [s.step_type for s in li.steps][-1] == "failed"
+    assert [a.result for a in li.actions] == ["failed"]
 
 
 def test_a_different_discriminator_is_a_different_part(tax):
