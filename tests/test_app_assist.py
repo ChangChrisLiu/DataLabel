@@ -51,6 +51,11 @@ def window(qapp, tmp_path):
     QApplication.processEvents()
     win.set_mode(A.MODE_ANNOTATE)
     win.sam_queue = queue
+    # The diff map only proposes prompt boxes once the segment has an ROI, so
+    # accept the one the window offers -- which is what an annotator does on
+    # the first frame of a machine.
+    if win.roi_editing:
+        win.act_commit()
     yield win
     close_window(win)
 

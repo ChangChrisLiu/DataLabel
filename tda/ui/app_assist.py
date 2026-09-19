@@ -320,7 +320,15 @@ class AssistMixin:
             self.begin_add_shape(blob)
 
     def begin_add_shape(self, blob: DiffBlob) -> None:
-        """Feed a changed region's box to SAM as the box half of point+box."""
+        """Feed a changed region's box to SAM as the box half of point+box.
+
+        Only once the segment has a stored ROI.  Without one the difference map
+        covers the whole frame, and its strongest region is as likely to be a
+        scan-bed artefact at the edge as the part being drawn -- which is
+        exactly what happened on 7 of 13 real frames.
+        """
+        if self.roi() is None:
+            return
         box = tuple(float(v) for v in blob.box)
         self._prompt_box = box
         for tool in (self.sam_point, self.sam_box):

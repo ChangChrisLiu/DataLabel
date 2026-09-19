@@ -621,3 +621,75 @@ def test_clicking_a_problem_selects_that_instances_card_item(window):
     window.task_card.activate_problem(wanted["instance"])
 
     assert window.task_card.current_instance() == wanted["instance"]
+
+
+# --------------------------------------------------------------------------- #
+# the ROI is proposed from the segment's reference frame (item 14)
+# --------------------------------------------------------------------------- #
+def test_the_roi_is_proposed_from_the_segments_first_frame(qapp, tmp_path, monkeypatch):
+    """It was proposed from whatever frame happened to be open -- the LAST one.
+
+    On the real D13 that is the empty chassis with a bright interior, where both
+    scanner strategies fail and the proposal is the whole frame; the strongest
+    diff blob then sat on a scan-bed artefact at the right edge and *that*
+    became the SAM prompt box on 7 of 13 frames.
+    """
+    from tda.ui import app_roi
+
+    asked: list = []
+    win = open_window(tmp_path)
+    try:
+        def remember(img, view):
+            asked.append(np.array(img, copy=True))
+            return (4, 4, 40, 40)
+
+        monkeypatch.setattr(app_roi, "suggest_roi", remember)
+        win.start_roi_edit()
+
+        assert asked, "no proposal was made"
+        first = min(s for s in win.session.steps()
+                    if win.session.image_at(s) is not None)
+        assert np.array_equal(asked[-1], win.session.image_at(first)), (
+            "the proposal was measured on a frame other than the segment's first"
+        )
+        assert not np.array_equal(asked[-1], win.session.image())   # not the open one
+    finally:
+        close_window(win)
+
+
+def test_a_full_frame_proposal_is_not_stored_without_a_drag(qapp, tmp_path, monkeypatch):
+    """A full-frame ROI is "I could not find the chassis", not an answer."""
+    from tda.ui import app_roi
+
+    win = open_window(tmp_path)
+    try:
+        monkeypatch.setattr(app_roi, "suggest_roi", lambda img, view: (0, 0, 64, 64))
+        win.start_roi_edit()
+        assert "未能自动找到机箱" in win.status_message()
+
+        win.act_commit()                       # Enter, with nothing dragged
+
+        assert win.roi() is None, "the full frame was stored"
+        assert win.roi_editing is True         # still waiting for a rectangle
+
+        win.on_roi_box((8.0, 8.0, 40.0, 40.0))  # the annotator drags one
+        win.act_commit()
+
+        assert win.roi() == (8, 8, 40, 40)
+        assert win.roi_editing is False
+    finally:
+        close_window(win)
+
+
+def test_no_prompt_box_while_the_segment_has_no_roi(qapp, tmp_path, monkeypatch):
+    """A diff blob outside a known chassis is as likely to be a scan artefact."""
+    from tda.core.diffmap import DiffBlob
+
+    win = open_window(tmp_path)
+    try:
+        assert win.roi() is None
+        win.begin_add_shape(DiffBlob(box=(10.0, 10.0, 20.0, 20.0), area=100,
+                                     score=9.0))
+        assert win.sam_point.prompt_box is None
+    finally:
+        close_window(win)

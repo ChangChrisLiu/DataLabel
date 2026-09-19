@@ -21,6 +21,9 @@ __all__ = ["RoiMixin"]
 
 #: What :meth:`SessionLike.instance_rows` calls a part lying in the staging area.
 ON_BENCH = "on_bench"
+#: Shown when the detector returns the whole frame, which means "not found".
+NO_CHASSIS_FOUND = ("未能自动找到机箱：请拖一个框 / could not find the chassis: "
+                    "drag a box around it (Enter stores it)")
 
 
 class RoiMixin:
@@ -50,20 +53,66 @@ class RoiMixin:
         self.start_roi_edit()
 
     def start_roi_edit(self) -> None:
-        """Propose a rectangle and let the annotator drag it (``Enter`` accepts)."""
+        """Propose a rectangle and let the annotator drag it (``Enter`` accepts).
+
+        The proposal is measured on the pose segment's **reference frame** --
+        its first available step, the fully assembled machine -- and shown on
+        whatever frame is open.  Measuring the frame that happened to be open
+        meant measuring the *last* step: an empty chassis with a bright
+        interior, where both scanner strategies give up and return the whole
+        frame.  A whole-frame "ROI" then let the difference map pick scan-bed
+        artefacts at the edge, and on 7 of 13 real frames one of those became
+        the SAM prompt box.
+        """
         image = self.session.image()
         if image is None:
             return
         stored = self.roi()
-        self.roi_draft = tuple(int(v) for v in (
-            stored if stored is not None else suggest_roi(image, self.session.view)
-        ))
+        if stored is not None:
+            self.roi_draft = tuple(int(v) for v in stored)
+        else:
+            self.roi_draft = tuple(int(v) for v in suggest_roi(
+                self._roi_reference_image(image), self.session.view))
         self.roi_editing = True
         # Arm the tool first: detaching a SAM tool clears the rubber band, so
         # painting the draft before the swap would erase it again.
         self._attach_tool()
         self.canvas.set_rubber_band(self.roi_draft)
-        self.report("拖动框选机箱范围，Enter 确认 / drag the chassis box, Enter to accept")
+        if stored is None and self._is_whole_frame(self.roi_draft):
+            self.report(NO_CHASSIS_FOUND)
+        else:
+            self.report("拖动框选机箱范围，Enter 确认 / "
+                        "drag the chassis box, Enter to accept")
+
+    def _roi_reference_image(self, fallback):
+        """The frame the ROI is measured on: the segment's first available step.
+
+        The same frame the offline thumbnails use.  Falls back to the open one
+        when the segment cannot be read or its reference has no image.
+        """
+        if not compat.is_open(self.session):
+            return fallback
+        row = self.db.pose_segment_for(self.session.current()) or {}
+        start = row.get("start_step")
+        steps = sorted(int(s) for s in self.session.steps())
+        if start is not None:
+            steps = [s for s in steps if s >= int(start)]
+        end = row.get("end_step")
+        if end is not None:
+            steps = [s for s in steps if s <= int(end)]
+        for step in steps:
+            image = self.session.image_at(step)
+            if image is not None:
+                return image
+        return fallback
+
+    def _is_whole_frame(self, box) -> bool:
+        """Is this rectangle "I could not find the chassis" rather than an answer?"""
+        hw = None if self.overlay is None else self.overlay.hw
+        if hw is None or box is None:
+            return False
+        x0, y0, x1, y1 = (int(v) for v in box)
+        return x0 <= 0 and y0 <= 0 and x1 >= int(hw[1]) and y1 >= int(hw[0])
 
     @S.guard
     def on_roi_box(self, box: object) -> None:
@@ -81,11 +130,20 @@ class RoiMixin:
 
     @S.guard
     def accept_roi(self) -> None:
-        """Store the rectangle on the pose segment and zoom to it."""
+        """Store the rectangle on the pose segment and zoom to it.
+
+        A whole-frame rectangle is never stored: it is what the detector
+        returns when it has *not* found the chassis, and storing it silently is
+        what let the difference map treat the scan bed as part of the machine.
+        The annotator drags one instead, and the tool stays armed until they do.
+        """
         key = self.session.current()
         segment = self._pose_segment(key)
         if self.roi_draft is None or segment is None:
             self.cancel_roi_edit()
+            return
+        if self._is_whole_frame(self.roi_draft):
+            self.report(NO_CHASSIS_FOUND)
             return
         hw = None if self.overlay is None else self.overlay.hw
         accepted = tuple(self.db.set_pose_segment_roi(
