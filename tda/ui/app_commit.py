@@ -165,7 +165,9 @@ class CommitMixin:
         self._pending_scope = None
         self.scope_bar.hide()
         self.session.clear_edit()
-        self.drop_sidecar(key, instance)
+        # One of the three: what any copy of this instance held is in the
+        # database now, so even one from an earlier run is stale.
+        self.drop_sidecar(key, instance, foreign_ok=True)
         self.set_sam_instance(None)
         self._sync_editing_layer()
         self.refresh_overlay()
@@ -204,9 +206,11 @@ class CommitMixin:
         if instance is not None:
             key = self.session.current()
             self.session.clear_edit()
+            # Esc discards *the layer on screen*.  A crash copy from an earlier
+            # run is a question nobody has answered, so it -- and its offer --
+            # stay; only this window's own copy goes.
             self.drop_sidecar(key, instance)
-            self._restore_offer = None
-            self.restore_bar.hide()
+            self._offer_restore(key, instance)
             self._pending_scope = None
             self.scope_bar.hide()
             self.set_sam_instance(None)

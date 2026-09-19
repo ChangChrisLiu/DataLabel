@@ -473,10 +473,7 @@ class EditMixin:
             # else's unfinished work: it goes away when the annotator answers
             # the restore offer or commits the instance, never because their
             # first gesture on the frame happened to cancel itself out.
-            self._sidecar_timer.stop()
-            self._sidecar_pending = None
-            if self._wrote_sidecar_for(key, instance):
-                self.drop_sidecar(key, instance)
+            self.drop_sidecar(key, instance)
             return
         self._sidecar_pending = (key, str(instance), np.array(mask, dtype=bool, copy=True))
         self._sidecar_timer.start()
@@ -514,15 +511,28 @@ class EditMixin:
         """Did **this** window write the stored copy of that frame's instance?"""
         return self._sidecar_id(key, instance) in self._sidecar_written
 
-    def drop_sidecar(self, key, instance: Optional[str]) -> None:
+    def drop_sidecar(self, key, instance: Optional[str], *,
+                     foreign_ok: bool = False) -> None:
         """Forget a layer that has been committed or abandoned.
 
-        The deliberate path -- a commit, ``Esc``, an answered restore offer --
-        so it removes the file whoever wrote it.
+        The pending write and the debounce always go.  The **file** only goes
+        when this window wrote it, unless ``foreign_ok`` says the caller is one
+        of the three gestures that may speak for a copy left by an earlier run:
+
+        * ``Restore`` -- the annotator took it back into the layer;
+        * ``Discard`` -- they threw it away;
+        * committing that instance -- what it held is now in the database.
+
+        ``Esc`` is not one of them, which is what this argument exists for: it
+        discards *the layer on screen*, and a crash copy that is still being
+        offered belongs to a question nobody has answered yet.  Deleting it
+        there took the previous session's work away with no answer at all.
         """
         self._sidecar_timer.stop()
         self._sidecar_pending = None
-        if instance is not None:
+        if instance is None:
+            return
+        if foreign_ok or self._wrote_sidecar_for(key, instance):
             self.sidecar.clear(key, instance)
             self._sidecar_written.discard(self._sidecar_id(key, instance))
 

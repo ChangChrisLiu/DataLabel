@@ -940,3 +940,85 @@ def test_answering_the_restore_offer_still_removes_the_file(qapp, tmp_path):
         assert second.sidecar.pending_for(key, instance) is None
     finally:
         close_window(second)
+
+
+# --------------------------------------------------------------------------- #
+# Esc is not one of the three ways a foreign copy may go (F3 round 4, item 1)
+# --------------------------------------------------------------------------- #
+def leave_a_crash_copy(tmp_path: Path) -> tuple[str, object]:
+    """Window 1 paints, flushes and dies; returns ``(instance, key)``."""
+    first = open_window(tmp_path)
+    instance = first_task_instance(first)
+    try:
+        first.task_card.sigRequestEdit.emit(instance)
+        paint(first)
+        first.flush_sidecar()
+        key = first.session.current()
+        assert first.sidecar.pending_for(key, instance) is not None
+        return instance, key
+    finally:
+        close_window(first)
+
+
+@pytest.mark.parametrize("paint_first", [False, True],
+                         ids=["no-paint", "unflushed-stroke"])
+def test_escape_never_deletes_another_sessions_offer(qapp, tmp_path, paint_first):
+    """Walk (f): ``Esc`` deleted a crash copy that was still being offered.
+
+    Both variants of the reviewer's walk: straight after ``begin_edit`` with
+    nothing painted, and after an own stroke that has not been flushed yet.
+    The offer disappeared with the file, so the previous session's work was
+    gone with no answer from anybody.
+    """
+    instance, key = leave_a_crash_copy(tmp_path)
+    second = open_window(tmp_path)
+    try:
+        assert second.pending_restore() is not None, "nothing was offered"
+        second.task_card.sigRequestEdit.emit(instance)
+        if paint_first:
+            paint(second)
+
+        second.act_clear_edit()          # Esc
+
+        assert second.sidecar.pending_for(key, instance) is not None, (
+            "Esc deleted a crash copy that was still being offered"
+        )
+        assert second.pending_restore() is not None, "the offer is gone"
+        assert second.restore_bar.isVisibleTo(second)
+    finally:
+        close_window(second)
+
+
+def test_escape_still_deletes_this_windows_own_copy(qapp, tmp_path):
+    """Nothing changes for the layer the annotator was actually working on."""
+    win = open_window(tmp_path)
+    try:
+        instance = first_task_instance(win)
+        win.task_card.sigRequestEdit.emit(instance)
+        paint(win)
+        win.flush_sidecar()
+        key = win.session.current()
+        assert win.sidecar.pending_for(key, instance) is not None
+
+        win.act_clear_edit()
+
+        assert win.sidecar.pending_for(key, instance) is None
+    finally:
+        close_window(win)
+
+
+def test_committing_an_instance_clears_even_a_foreign_copy(qapp, tmp_path):
+    """One of the three ways: the instance is written, so the copy is stale."""
+    instance, key = leave_a_crash_copy(tmp_path)
+    second = open_window(tmp_path)
+    try:
+        second.task_card.sigRequestEdit.emit(instance)
+        paint(second)
+        second.act_commit()
+        if second.warn_bar.isVisibleTo(second):
+            second.act_commit()
+
+        assert second.session.db.keyframes(DESKTOP, VIEW, instance)
+        assert second.sidecar.pending_for(key, instance) is None
+    finally:
+        close_window(second)
