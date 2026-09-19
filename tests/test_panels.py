@@ -273,12 +273,35 @@ def texts(list_widget) -> list[str]:
     return [list_widget.item(i).text() for i in range(list_widget.count())]
 
 
+_SHOWN: list = []
+
+
 def show(panel, width: int = 260, height: int = 520):
-    """Show a panel offscreen so that item rectangles are laid out."""
+    """Show a panel offscreen so that item rectangles are laid out.
+
+    Remembered so that :func:`_hide_what_was_shown` can take it down again: a
+    panel shown on its own is its own top-level window, and Qt keeps the
+    application focus inside it after the test ends.  The main window then
+    treats that focus as "another visible window of ours" and switches its
+    whole keyboard off, which made every later shortcut test in the process
+    fail depending on file order.
+    """
     panel.resize(width, height)
     panel.show()
     QApplication.processEvents()
+    _SHOWN.append(panel)
     return panel
+
+
+@pytest.fixture(autouse=True)
+def _hide_what_was_shown():
+    yield
+    while _SHOWN:
+        panel = _SHOWN.pop()
+        panel.hide()
+        panel.setParent(None)
+        panel.deleteLater()
+    QApplication.processEvents()
 
 
 def click_item(view, item, double: bool = False) -> None:

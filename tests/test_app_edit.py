@@ -505,3 +505,63 @@ def test_a_blocked_card_activation_snaps_the_selection_back(window):
 
     assert window.session.editing_instance == instance
     assert window.task_card.current_instance() == instance
+
+
+# --------------------------------------------------------------------------- #
+# Review mode: Enter accepts the frame the queue points at (item 9)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("queue", list(api.QUEUE_NAMES))
+def test_review_enter_opens_the_selected_entry_then_confirms(window, monkeypatch, queue):
+    """The label said "the frame the queue points at"; it confirmed the open one.
+
+    The annotator clicks an entry, presses Enter, and a *different* frame --
+    whichever one happened to be on the canvas -- is marked verified.
+    """
+    here = window.session.current().step
+    target = min(s for s in window.session.steps() if s != here)
+    monkeypatch.setattr(window.session, "queues", lambda: {
+        q: ([{"step": target, "instance": "chassis", "id": 1}] if q == queue else [])
+        for q in api.QUEUE_NAMES
+    })
+    window.set_mode(A.MODE_REVIEW)
+    window.review.refresh()
+    window.review.tabs().setCurrentIndex(list(api.QUEUE_NAMES).index(queue))
+    window.review.list_for(queue).setCurrentRow(0)
+    confirmed: list[int] = []
+    monkeypatch.setattr(window.task_card, "confirm",
+                        lambda: confirmed.append(window.session.current().step) or True)
+
+    window.act_confirm()
+
+    assert confirmed == [target], "it confirmed the frame that was on screen"
+    assert window.session.current().step == target
+
+
+def test_review_enter_on_the_open_frame_confirms_it(window, monkeypatch):
+    """Nothing selected anywhere: Enter still means "accept this one"."""
+    monkeypatch.setattr(window.session, "queues",
+                        lambda: {q: [] for q in api.QUEUE_NAMES})
+    window.set_mode(A.MODE_REVIEW)
+    window.review.refresh()
+    here = window.session.current().step
+    confirmed: list[int] = []
+    monkeypatch.setattr(window.task_card, "confirm",
+                        lambda: confirmed.append(window.session.current().step) or True)
+
+    window.act_confirm()
+
+    assert confirmed == [here]
+
+
+def test_review_enter_is_refused_with_an_uncommitted_edit(window, monkeypatch):
+    """Opening another frame is a way out of the edit, wherever it is asked for."""
+    window.set_mode(A.MODE_ANNOTATE)
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    here = window.session.current().step
+
+    window.act_confirm()
+
+    assert window.session.current().step == here
+    assert window.session.editing_instance == instance

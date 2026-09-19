@@ -8,6 +8,7 @@ every one of them lands in.
 """
 from __future__ import annotations
 
+from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 from tda.ui import session_api as api
@@ -197,6 +198,8 @@ class CommitMixin:
         """
         if not self.can_leave_edit():
             return False      # confirming steps the frame back: same gate
+        if not self._open_the_selected_entry():
+            return False
         step = self.session.current().step
         blobs = self.unexplained_at_confirm()
         ok = self.task_card.confirm()
@@ -210,6 +213,25 @@ class CommitMixin:
             problems = self.task_card.problems()
             self.report(f"step {step} is not complete: {'; '.join(problems) or 'see the task card'}")
         return bool(ok)
+
+    def _open_the_selected_entry(self) -> bool:
+        """In Review mode, make ``Enter`` mean what its label says.
+
+        The binding reads "accept the frame the queue points at" and it
+        confirmed whatever was on the canvas: the annotator clicked an entry,
+        pressed ``Enter``, and a different frame was marked verified.  The
+        selected entry's frame is opened first -- through the same gate as any
+        other move -- and only then confirmed.  ``False`` means the move was
+        refused, so nothing is confirmed either.
+        """
+        if self.mode != A.MODE_REVIEW:
+            return True
+        step = self.review.selected_step()
+        if step is None or int(step) == int(self.session.current().step):
+            return True
+        return self.leave_frame(
+            lambda: self.session.goto(int(step), force=True)
+        )
 
     # ------------------------------------------------------------------ undo
     @S.guard

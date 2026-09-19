@@ -121,8 +121,11 @@ class ReviewPanel(QWidget):
         buttons.addWidget(self.accept_new_button)
         # The two other keys live in the tooltip and in the cheat sheet, not in
         # a 384 px label that decides how wide the dock has to be.
-        self.setToolTip("Enter: accept the frame    R: rework it in Annotate mode\n"
-                        "K: keep the frozen shape    N: take the edit")
+        self.setToolTip(
+            "Enter: open the selected entry's frame and accept it\n"
+            "R: rework it in Annotate mode\n"
+            "K: keep the frozen shape    N: take the edit"
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
