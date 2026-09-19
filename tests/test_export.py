@@ -521,6 +521,28 @@ def _queue_conflict(d: Db, step: int = 1) -> int:
                           encode_rle(PSU_MASK), encode_rle(SCREW_MASK), 400)
 
 
+def test_the_vlm_export_stamps_the_graph_version_when_the_tool_can_say(
+    db, tax, tmp_path: Path, monkeypatch
+):
+    """The field has always been in the schema so it could be filled in later."""
+    from tda.core import graph as graph_mod
+    from tda.core.export.vlm import graph_version_of
+
+    out = tmp_path / "v.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    assert {r["graph_version"] for r in _records(out)} == {None}
+
+    seen: list[int] = []
+    monkeypatch.setattr(graph_mod, "graph_version",
+                        lambda _db, desktop: (seen.append(desktop), "abc123")[1],
+                        raising=False)
+    assert graph_version_of(db, DESKTOP) == "abc123"
+
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    assert {r["graph_version"] for r in _records(out)} == {"abc123"}
+    assert seen == [DESKTOP, DESKTOP]
+
+
 def test_open_conflicts_is_the_services_own_question(db, tax):
     from tda.core.truth import TruthService
 
