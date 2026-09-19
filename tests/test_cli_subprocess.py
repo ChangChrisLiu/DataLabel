@@ -31,6 +31,7 @@ LOCKING_COMMANDS = [
     ("import-logs",),
     ("import-ls", "--export", "nowhere.json"),
     ("infer-relations",),
+    ("constraints",),
     ("check", "--desktop", "1"),
     ("export-coco", "--desktops", "1"),
     ("export-vlm", "--desktops", "1"),
@@ -100,6 +101,7 @@ def test_a_held_lock_is_one_line_and_exit_three(workspace, entry, command):
     ("build-index",),
     ("load-index",),
     ("build-cache", "--desktops", "1"),
+    ("constraints",),
     ("check", "--desktop", "1"),
     ("export-coco", "--desktops", "1"),
 ])

@@ -10,7 +10,8 @@ the dataset needs and the spec deliberately does *not* store (spec 7.1):
 * :func:`legal_actions`            -- "what can be removed now" (V-task truth);
 * :func:`validate_sequence`        -- the spec 7.4 replay check over a real log;
 * :func:`find_cycles`              -- the spec 7.4 acyclicity check;
-* :func:`remaining_plan`           -- "what next", as a shortest legal sequence.
+* :func:`remaining_plan`           -- "what next", as a shortest legal sequence;
+* :func:`graph_version`            -- which graph an export shipped.
 
 The graph stack is four modules, bottom up: :mod:`tda.core.graph_rules` (the
 vocabulary, the spec 7.2 semantics and the spec 7.3 derivation rules),
@@ -22,7 +23,8 @@ Everything is pure except :func:`edges_to_db` / :func:`edges_from_db`.
 """
 from __future__ import annotations
 
-from typing import Union
+import hashlib
+from typing import Optional, Union
 
 from tda.core.graph_plan import remaining_plan
 from tda.core.graph_rules import (
@@ -59,9 +61,11 @@ __all__ = [
     "applicable_preconditions",
     "cable_owner",
     "connector_owner",
+    "edge_digest",
     "edges_from_db",
     "edges_to_db",
     "find_cycles",
+    "graph_version",
     "infer_relational_fields",
     "is_provisional",
     "legal_actions",
@@ -337,22 +341,29 @@ def edges_to_db(db, desktop: int, edges: list[Edge]) -> list[int]:
 
     ``(desktop, type, target, blocker)`` is unique, so re-running this after a
     re-import updates the existing rows instead of doubling them.
+
+    One transaction for the whole list, not one per edge: a desktop's graph is a
+    set, and a run interrupted after two thousand of its two and a half thousand
+    edges would leave a graph that is neither the old one nor the new one. The
+    block is re-entrant, so a caller that is already inside a transaction of its
+    own still commits once, with everything else it did.
     """
-    return [
-        db.add_relation(
-            desktop,
-            edge.type,
-            edge.target,
-            edge.blocker,
-            necessity=edge.necessity,
-            mode=edge.mode,
-            reason=edge.reason or None,
-            source=edge.source,
-            evidence_step=edge.evidence_step,
-            status=edge.status,
-        )
-        for edge in edges
-    ]
+    with db.transaction():
+        return [
+            db.add_relation(
+                desktop,
+                edge.type,
+                edge.target,
+                edge.blocker,
+                necessity=edge.necessity,
+                mode=edge.mode,
+                reason=edge.reason or None,
+                source=edge.source,
+                evidence_step=edge.evidence_step,
+                status=edge.status,
+            )
+            for edge in edges
+        ]
 
 
 def edges_from_db(db, desktop: int) -> list[Edge]:
@@ -371,3 +382,38 @@ def edges_from_db(db, desktop: int) -> list[Edge]:
         )
         for row in db.relations(desktop)
     ]
+
+
+# --------------------------------------------------------------------------- #
+# 7. graph version
+# --------------------------------------------------------------------------- #
+def edge_digest(edges: list[Edge]) -> Optional[str]:
+    """A 16-hex-character content hash of an edge set, or ``None`` when it is empty.
+
+    What goes in is what changes the *meaning* of the graph -- type, target,
+    blocker, necessity, mode and status -- sorted, so two runs that derive the
+    same constraints agree whatever order they found them in. ``reason`` and
+    ``evidence_step`` are prose and provenance: re-wording a reason must not
+    look like a different graph. ``source`` is out for the same reason, so a
+    human accepting a rule edge by hand does not invalidate every export that
+    quoted the version.
+    """
+    if not edges:
+        return None
+    body = "\n".join(sorted(
+        f"{e.type}|{e.target}|{e.blocker}|{e.necessity}|{e.mode or ''}|{e.status}"
+        for e in edges
+    ))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+
+
+def graph_version(db, desktop: int) -> Optional[str]:
+    """The content hash of one desktop's stored constraint graph.
+
+    Computed from the ``relation`` rows rather than read back from the meta
+    stamp, so it cannot go stale: a hand-added edge changes the answer
+    immediately, and an export that quotes it is quoting what it shipped.
+    ``None`` for a desktop with no edges at all -- which is what
+    ``python -m tda.cli constraints`` is for.
+    """
+    return edge_digest(edges_from_db(db, desktop))

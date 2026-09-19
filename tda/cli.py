@@ -7,6 +7,7 @@
     python -m tda.cli import-logs [--desktops ...]    # Drive sheets -> steps/actions/...
     python -m tda.cli import-ls   [--export PATH]     # Label Studio export -> drafts
     python -m tda.cli infer-relations [--dry-run]     # fill empty relational fields
+    python -m tda.cli constraints [--validate]        # spec-7 edges -> relation rows
     python -m tda.cli backup                          # SQLite backup API -> backup_dir
     python -m tda.cli status      [--desktop N]       # what the database holds
 
@@ -57,6 +58,7 @@ from tda.cli_common import (
     safety_backup as _safety_backup,
     session as _session,
 )
+from tda.cli_graph import _add_constraints
 from tda.cli_relations import _add_infer_relations
 from tda.core.db import Db
 from tda.core.index import build_index, load_index, save_index
@@ -477,6 +479,7 @@ SUBCOMMANDS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
     _add_import_logs,
     _add_import_ls,
     _add_infer_relations,
+    _add_constraints,
     _add_backup,
     _add_status,
     *_APP_SUBCOMMANDS,
