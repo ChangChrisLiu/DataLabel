@@ -225,6 +225,34 @@ def test_the_emit_guard_only_swallows_a_receiver_that_is_really_gone(qapp, tmp_p
     emit(Reworded())  # still the object being gone, whatever it is called
 
 
+def test_wait_idle_on_the_worker_thread_answers_instead_of_joining_itself(
+    session, monkeypatch
+):
+    """A thread cannot wait for itself to finish, and must not try.
+
+    ``wait_idle`` joins a worker that is on its way out, which is exactly what
+    a slot running *on* that worker would ask it to do to itself --
+    ``RuntimeError: cannot join current thread``, raised out of the sweep.
+    """
+    seen: dict = {}
+
+    def inside(self, *a, **k):
+        with self._lock:
+            self._stopping = True          # the branch that wants to join
+        try:
+            seen["value"] = self.wait_idle(timeout=0.2)
+        except RuntimeError as exc:        # noqa: BLE001 - recorded, not swallowed
+            seen["error"] = exc
+
+    monkeypatch.setattr(TruthSweeper, "_recheck", inside)
+    session.sweeper.open(DESKTOP, VIEW)
+    session.sweeper.enqueue([3])
+    session.drain_sweeper(timeout=20.0)
+
+    assert "error" not in seen, seen.get("error")
+    assert "value" in seen
+
+
 def test_stop_keeps_is_running_truthful_when_the_join_times_out(session):
     session.sweeper.open(DESKTOP, VIEW)
     holding = threading.Event()

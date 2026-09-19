@@ -185,9 +185,16 @@ class TruthSweeper(QObject):
         Only while ``_stopping`` is set -- the worker itself sets it when it
         cannot start, and :meth:`stop` sets it on the way down -- so this never
         waits on a sweeper that is simply busy.
+
+        A thread cannot wait for itself to finish, so a :meth:`wait_idle`
+        called *on* the worker (by a slot running there) answers from what it
+        can see rather than raising ``cannot join current thread`` out of the
+        middle of a sweep.
         """
         thread = self._thread
-        if thread is None or not thread.is_alive():
+        if thread is None or thread is threading.current_thread():
+            return
+        if not thread.is_alive():
             return
         with self._lock:
             stopping = self._stopping
