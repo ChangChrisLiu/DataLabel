@@ -157,8 +157,7 @@ class SamToolBase(Tool):
         self._cancel()
 
     def _cancel(self) -> None:
-        """Invalidate the in-flight prompt and forget the per-prompt state."""
-        self._token += 1  # nothing already submitted can match again
+        """Invalidate the in-flight prompt, forget the state, clear the band."""
         self.reset_prompt()
         rubber_band = getattr(self.canvas, "set_rubber_band", None)
         if rubber_band is not None:
@@ -166,6 +165,12 @@ class SamToolBase(Tool):
 
     def reset_prompt(self) -> None:
         """Forget everything about the prompt being built, keeping the tool armed.
+
+        Including the request that is still **in flight**.  Forgetting the
+        points but leaving the token alone meant that click, ``Esc``,
+        re-activate the same instance painted 2,464 px into the layer the
+        annotator had just emptied: the answer to a prompt they had discarded
+        still matched the identity check and was applied.
 
         A prompt describes **one instance on one frame**: the points clicked so
         far, the box they are being sent with, and the candidates that came
@@ -178,6 +183,7 @@ class SamToolBase(Tool):
         and **nothing called it**, so every mask after the first commit was a
         union over everything the annotator had clicked that session.
         """
+        self._token += 1  # nothing already submitted can match again
         self._reset_candidates()
         self.prompt_box = None
 
@@ -438,7 +444,13 @@ class SamToolBase(Tool):
         result, rect, refine, stamp = payload  # type: ignore[misc]
         token, identity = stamp
         if token != self._token:
-            return  # superseded by a newer prompt; nothing to report
+            # Superseded.  By a newer prompt -- nothing to report, the annotator
+            # is already looking at what they asked for -- or by the prompt
+            # being cancelled, which for a frame or instance change is worth a
+            # line: they clicked and the answer went nowhere.
+            if identity != self._identity():
+                self.sigError.emit(ERR_FRAME_CHANGED)
+            return
         if self.overlay is None or identity != self._identity():
             self.sigError.emit(ERR_FRAME_CHANGED)
             return

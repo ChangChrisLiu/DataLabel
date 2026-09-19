@@ -1034,3 +1034,42 @@ def test_a_refinement_still_asks_for_one(zoomed):
 
     assert queue.last.mask_input is not None
     assert queue.last.multimask is False
+
+
+# ---------------------------------------------------------------------------
+# a prompt that was reset is a prompt that was cancelled (F3 round 2, item 1)
+# ---------------------------------------------------------------------------
+def test_a_reset_prompt_drops_a_result_that_is_still_in_flight(zoomed):
+    """Click, Esc, re-activate the SAME instance: the late mask landed anyway.
+
+    ``reset_prompt`` forgot the points and the candidates but left the token
+    alone, so the answer to a prompt the annotator had already discarded
+    painted 2,464 px into the layer they had just emptied.
+    """
+    canvas, ov = zoomed
+    queue = HoldingQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue, instance="part.a")
+    tool.on_press(20.0, 30.0, None)
+    assert queue.pending, "nothing was submitted"
+
+    tool.reset_prompt()          # what Esc does, through the window
+    ov.set_editing("part.a", np.zeros((60, 80), dtype=bool))
+    queue.flush()                # the answer arrives now
+    _drain()
+
+    assert not ov.editing.any(), "a discarded prompt painted the layer"
+
+
+def test_a_reset_prompt_does_not_stop_the_next_one(zoomed):
+    """The tool stays armed: the point after the reset must still work."""
+    canvas, ov = zoomed
+    queue = HoldingQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue)
+    tool.on_press(20.0, 30.0, None)
+    tool.reset_prompt()
+
+    tool.on_press(40.0, 20.0, None)
+    queue.flush()
+    _drain()
+
+    assert ov.editing.any(), "the prompt after the reset was dropped too"
