@@ -29,8 +29,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
 from tda.core.model import FrameKey
 from tda.ui import app_actions as A

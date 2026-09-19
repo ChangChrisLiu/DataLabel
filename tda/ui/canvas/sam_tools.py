@@ -430,6 +430,8 @@ class SamToolBase(CandidatesMixin, Tool):
         # the same starting point instead of compounding onto the previous one.
         self._candidate_base = self.overlay.editing.copy() if refine else None
         self._apply_candidate()
+
+
 class SamPointTool(SamToolBase):
     """Point prompts: left click = positive, right click = negative.
 

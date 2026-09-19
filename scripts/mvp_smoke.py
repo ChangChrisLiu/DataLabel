@@ -234,16 +234,19 @@ class Smoke:
             self.shoot(window, len(self.report["screenshots"]) + 1)
 
         started = time.perf_counter()
+        warned = False
         window.act_commit()
         # The two non-modal bars an annotator answers with a second Enter: the
-        # scope suggestion and the area warning.  Both are recorded, because
-        # "how often does the size warning fire on real masks?" is exactly what
-        # a smoke run should be able to answer.
-        frame["area_warned"] = bool(window.warn_bar.isVisible())
-        if window.scope_bar.isVisible() or window.warn_bar.isVisible():
+        # scope suggestion and the area warning.  Sampled over the *whole*
+        # sequence -- the warning follows an accepted scope, so looking only
+        # after the first Enter missed it -- because "how often does the size
+        # warning fire on real masks?" is what a smoke run should answer.
+        for _ in range(2):
+            warned = warned or bool(window.warn_bar.isVisible())
+            if not (window.scope_bar.isVisible() or window.warn_bar.isVisible()):
+                break
             window.act_commit()
-        if window.scope_bar.isVisible() or window.warn_bar.isVisible():
-            window.act_commit()
+        frame["area_warned"] = warned
         frame["commit_ms"] = (time.perf_counter() - started) * 1000
         frame["committed"] = window.session.editing_instance is None
         frame["refusal"] = window.last_error_message() if not frame["committed"] else ""

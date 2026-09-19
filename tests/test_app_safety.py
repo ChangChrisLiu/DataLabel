@@ -1136,3 +1136,25 @@ def test_the_zoom_slot_cannot_escape_into_qt(window, monkeypatch):
     window.canvas.set_zoom(2.0)        # emits sigZoomChanged
     QApplication.processEvents()
     assert "status went wrong" in window.last_error_message()
+
+
+def test_an_error_is_never_held_back_by_a_hint(window):
+    """The hold protects a hint from a background line, not from bad news."""
+    window.report(A_FLASH_HINT, hold_ms=5000)
+    window.report_error("SAM failed: out of memory")
+    assert "out of memory" in window.status_message()
+    assert "out of memory" in window.last_error_message()
+
+
+def test_one_candidate_is_not_worth_a_goodbye(window):
+    """``C`` offers nothing with a single proposal, so losing it says nothing."""
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush(multimask=False)       # one candidate
+    QApplication.processEvents()
+    assert window.sam_point.candidate_count <= 1
+
+    window.act_tool("brush")
+
+    assert "候选" not in window.status_message()

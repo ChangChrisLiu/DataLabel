@@ -38,11 +38,14 @@ class ToolsMixin:
             return
         if name != "bench_box":
             self.disarm_bench()   # the arm belongs to the box tool, not to the brush
-        if name not in ("sam_point", "sam_box") and self._candidate_tool() is not None:
+        losing = self._candidate_tool()
+        if (name not in ("sam_point", "sam_box") and losing is not None
+                and losing.candidate_count > 1):
             # ``detach()`` cancels the prompt, which takes the other proposals
             # with it.  That is the right thing to do -- they belong to a tool
             # that is no longer listening -- but it has to be said, or ``C``
-            # simply stops working after a detour through the brush.
+            # simply stops working after a detour through the brush.  With one
+            # proposal there is nothing to walk and nothing to say.
             self.report(CANDIDATES_DROPPED)
         self.cancel_roi_edit()
         self._tool_name = name

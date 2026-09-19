@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtCore import QEvent, QObject
 from PySide6.QtWidgets import QApplication, QWidget
 
 from tda.ui import app_actions as A

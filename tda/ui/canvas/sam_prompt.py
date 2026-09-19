@@ -15,12 +15,10 @@ edit is never overwritten.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 import cv2
 import numpy as np
-
-from tda.ui.canvas.tools import Rect
 
 #: Instance key used when neither the tool nor the overlay names one yet.
 FALLBACK_INSTANCE = "editing"

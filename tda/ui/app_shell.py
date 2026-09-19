@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QLabel,
     QMessageBox,
-    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QTabBar,

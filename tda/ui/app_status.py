@@ -13,7 +13,6 @@ launch.
 """
 from __future__ import annotations
 
-import time
 from typing import Optional
 
 from PySide6.QtCore import Qt
@@ -175,9 +174,15 @@ class StatusMixin:
         return self._last_error
 
     def report_error(self, text: str) -> None:
-        """Show an error line and log it."""
+        """Show an error line and log it.
+
+        Never held back: :meth:`report`'s hold keeps an important *hint* from
+        being wiped by a background job's answer, and an error is not the kind
+        of line that should wait behind one.
+        """
         self.logger.error("%s", text)
         self._last_error = str(text)
+        self._hint_until = 0.0
         self.report(str(text))
 
     def report_exception(self, exc: BaseException, where: str = "") -> None:
