@@ -57,6 +57,9 @@ OPACITY_STEP = 20
 GRID_OFF = 1e9
 #: ``_flashing`` when a neighbour is on screen but its step number is unknown.
 FLASH_UNNAMED = -1
+#: Said when a tool switch cancels a SAM prompt that still had proposals.
+CANDIDATES_DROPPED = ("切到画笔会丢弃其余候选 / switching tool discards the other "
+                      "SAM candidates")
 
 
 class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
@@ -613,6 +616,12 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
             return
         if name != "bench_box":
             self.disarm_bench()   # the arm belongs to the box tool, not to the brush
+        if name not in ("sam_point", "sam_box") and self._candidate_tool() is not None:
+            # ``detach()`` cancels the prompt, which takes the other proposals
+            # with it.  That is the right thing to do -- they belong to a tool
+            # that is no longer listening -- but it has to be said, or ``C``
+            # simply stops working after a detour through the brush.
+            self.report(CANDIDATES_DROPPED)
         self.cancel_roi_edit()
         self._tool_name = name
         self._attach_tool()

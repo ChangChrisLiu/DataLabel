@@ -38,6 +38,7 @@ from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
 from tda.ui import session_api as api
 from tda.ui.app import MainWindow
+from tda.ui.app_edit import FLASH_HINT as A_FLASH_HINT
 
 
 @pytest.fixture(scope="session")
@@ -780,6 +781,8 @@ def test_sequence_b_sam_then_brush_then_commit_then_confirm(window):
     window.act_tool("brush")
     paint(window)
     window.act_commit()
+    if window.warn_bar.isVisibleTo(window):
+        window.act_commit()      # a synthetic 64x64 part trips the area prior
     assert session.db.keyframes(DESKTOP, VIEW, instance)
     assert window.act_confirm() in (True, False)   # whatever the compiler says
     assert window.session.editing_instance is None
@@ -1082,3 +1085,54 @@ def test_editing_keys_on_a_removed_row_say_why_nothing_happened(window):
     window.act_toggle_hidden()
 
     assert "已移除" in window.status_message()
+
+
+# --------------------------------------------------------------------------- #
+# the small ones (F3 round 2, item 6)
+# --------------------------------------------------------------------------- #
+def test_the_flash_hint_is_not_overwritten_by_a_late_assist_line(window):
+    """The diff map answers a few ms later and took the hint off the screen."""
+    flashable(window)
+    start_edit(window)
+    window.act_flash_compare(True)
+    paint(window)                      # the hint appears
+    assert "Tab" in window.status_message()
+
+    window.report("prompt box from the difference map: (1, 2, 3, 4)")
+
+    assert "Tab" in window.status_message(), "the hint was overwritten"
+
+
+def test_a_held_hint_still_gives_way_to_a_frame_change(window):
+    flashable(window)
+    window.act_flash_compare(True)
+    window.report(A_FLASH_HINT, hold_ms=5000)
+    window.session.goto(min(window.session.steps()), force=True)
+    QApplication.processEvents()
+    assert "Tab" not in window.status_message()
+
+
+def test_switching_to_the_brush_says_the_candidates_go(window):
+    """``detach()`` drops them, which the SAM label's docstring did not admit."""
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush(multimask=True)
+    QApplication.processEvents()
+    assert window.sam_point.candidate_count == 3
+
+    window.act_tool("brush")
+
+    assert "候选" in window.status_message()
+    assert window.sam_point.candidate_count == 0
+
+
+def test_the_zoom_slot_cannot_escape_into_qt(window, monkeypatch):
+    """Every slot the window connects goes through the guard, this one too."""
+    def explode() -> None:
+        raise RuntimeError("status went wrong")
+
+    monkeypatch.setattr(window, "update_status", explode)
+    window.canvas.set_zoom(2.0)        # emits sigZoomChanged
+    QApplication.processEvents()
+    assert "status went wrong" in window.last_error_message()

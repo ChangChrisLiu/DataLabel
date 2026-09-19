@@ -53,6 +53,8 @@ _ON_BENCH = "on_bench"
 #: Shown when the canvas is clicked in Review mode, which is read-only.
 REVIEW_READ_ONLY = ("按 R 返工：切到标注模式处理这一帧  "
                     "(press R to rework: Review mode only shows the frame)")
+#: How long the flash hint stays put against an ordinary status line.
+FLASH_HINT_HOLD_MS = 2000
 #: Shown when the canvas is clicked while another frame is flashed over it.
 FLASH_HINT = ("松开 Tab 再操作：屏幕上是对照帧  "
               "(release Tab first: the canvas is showing the other frame)")
@@ -89,7 +91,7 @@ class EditMixin:
         self.canvas.sigMousePress.connect(self._on_canvas_press)
         # The wheel zooms without going through any action, so the percentage
         # in the status bar has to follow the canvas rather than the keyboard.
-        self.canvas.sigZoomChanged.connect(lambda _z: self.update_status())
+        self.canvas.sigZoomChanged.connect(self._on_zoom_changed)
         self._paint_blocked = False
         self._blocked_layer: Optional[np.ndarray] = None
 
@@ -132,6 +134,15 @@ class EditMixin:
         self._central_layout.addWidget(self.warn_bar)
         self._central_layout.addWidget(self.scope_bar)
         self._central_layout.addWidget(self.restore_bar)
+
+    @S.guard
+    def _on_zoom_changed(self, _factor: float) -> None:
+        """The canvas zoomed by any route; the percentage follows it.
+
+        Guarded like every other slot the window connects: an exception here
+        would go straight into the Qt event loop.
+        """
+        self.update_status()
 
     def _rewire_panels(self) -> None:
         """Every panel gesture the window has to be able to refuse, in one place.
@@ -285,8 +296,10 @@ class EditMixin:
         self._blocked_layer = None
         if self.is_flashing():
             # The tools are detached while flashing, so nothing is going to
-            # paint; this is only here to say why the click did nothing.
-            self.report(FLASH_HINT)
+            # paint; this is only here to say why the click did nothing.  Held,
+            # because the difference map answers a few milliseconds later and
+            # used to take it straight off the screen.
+            self.report(FLASH_HINT, hold_ms=FLASH_HINT_HOLD_MS)
             return
         if self.mode == "review":
             self.report(REVIEW_READ_ONLY)

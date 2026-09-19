@@ -360,8 +360,22 @@ class ShellMixin:
         """The last transient line shown in the status bar."""
         return self._message
 
-    def report(self, text: str) -> None:
-        """Show a transient line (a hint, a count, a refusal), elided to fit."""
+    def report(self, text: str, hold_ms: int = 0) -> None:
+        """Show a transient line (a hint, a count, a refusal), elided to fit.
+
+        ``hold_ms`` keeps it there against the *next* ordinary line: the flash
+        hint was written the moment the annotator clicked and wiped a few
+        milliseconds later by a difference-map result that had been running
+        since the frame change, so the one message they needed was the one they
+        never saw.  Clearing (an empty text) always wins -- that is a frame
+        change, which every hint is about.
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if text and hold_ms <= 0 and now < getattr(self, "_hint_until", 0.0):
+            return
+        self._hint_until = (now + hold_ms / 1000.0) if text and hold_ms > 0 else 0.0
         self._message = str(text)
         self.hint_label.setToolTip(self._message)
         self._paint_hint()
