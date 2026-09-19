@@ -23,7 +23,12 @@ __all__ = ["POSE_GEOMETRY_COLUMNS", "PoseSegmentMixin", "clean_roi"]
 
 def _clean_roi(roi: Sequence[float],
                hw: Optional[tuple[int, int]] = None) -> list[int]:
-    """Validate ``[x0, y0, x1, y1]`` and clamp it into a frame of size ``hw``."""
+    """Validate ``[x0, y0, x1, y1]`` and clamp it into a frame of size ``hw``.
+
+    The one validator for every rectangle stored against a pose segment -- the
+    chassis crop an export may cut to, and the staging area that decides whether
+    a view is asked for bench boxes at all.
+    """
     values = list(roi)
     if len(values) != 4:
         raise ValueError(f"an ROI is four numbers (x0, y0, x1, y1), got {roi!r}")
@@ -51,17 +56,6 @@ POSE_GEOMETRY_COLUMNS = ("corners_json", "homography_json", "roi_json",
                          "bench_roi_json")
 #: What :meth:`PoseSegmentMixin.update_pose_segment` accepts.
 POSE_UPDATABLE = ("start_step", "end_step", "ref_step")
-
-
-def _valid_roi(roi) -> list[int]:
-    """``[x0, y0, x1, y1]`` with a positive area, or ``ValueError``."""
-    try:
-        x0, y0, x1, y1 = (int(v) for v in roi)
-    except (TypeError, ValueError):
-        raise ValueError(f"an ROI is four numbers (x0, y0, x1, y1), got {roi!r}") from None
-    if x1 <= x0 or y1 <= y0:
-        raise ValueError(f"an ROI must have a positive area, got {roi!r}")
-    return [x0, y0, x1, y1]
 
 
 class PoseSegmentMixin:
@@ -162,22 +156,40 @@ class PoseSegmentMixin:
             )
 
     def set_pose_segment_bench_roi(self, desktop: int, view: str, seg: int,
-                                   roi) -> None:
+                                   roi: Optional[Sequence[float]],
+                                   annotator: str = "system",
+                                   hw: Optional[tuple[int, int]] = None
+                                   ) -> Optional[list[int]]:
         """Record (or clear with ``None``) the staging area this view can see.
 
         Spec 4.2 asks for a part on the bench to be boxed only 若该视角有堆放区
         ROI -- *if this view has a staging area*. The scanner looks straight down
         at the board and never will, so this stays NULL on most views, and the
         task card asks for no bench work until somebody draws one.
+
+        The rectangle goes through :func:`clean_roi`, the same validator the
+        chassis ROI uses, and the change is logged the same way. A frame has one
+        notion of "a rectangle in its coordinates": a second validator that
+        rounded differently and clamped nothing is how the two drifted apart, and
+        which of them a bench box was measured against is as answerable a
+        question as it is for the chassis crop.
+
+        Returns the rectangle as stored, or ``None`` when it was cleared.
         """
-        if roi is not None:
-            roi = _valid_roi(roi)
+        payload = None if roi is None else _clean_roi(roi, hw)
+        before = self.bench_roi(desktop, view, seg)
         with self._tx():
             self.conn.execute(
                 "UPDATE pose_segment SET bench_roi_json=? WHERE desktop=? AND view=? "
                 "AND seg=?",
-                (R.dumps(roi), desktop, view, seg),
+                (R.dumps(payload), desktop, view, seg),
             )
+        self.log_op(
+            desktop, view, "set_bench_roi",
+            {"seg": int(seg), "roi": payload}, {"seg": int(seg), "roi": before},
+            annotator,
+        )
+        return payload
 
     def bench_roi(self, desktop: int, view: str, seg: int) -> Optional[list]:
         """The staging area of one pose segment, or ``None`` when it has none."""

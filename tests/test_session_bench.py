@@ -155,3 +155,20 @@ def test_a_malformed_bench_roi_is_refused(tmp_path):
         with pytest.raises(ValueError):
             db.set_pose_segment_bench_roi(7, "oak2", 1, bad)
     db.close()
+
+
+def test_the_bench_roi_is_clamped_and_logged_like_the_chassis_one(tmp_path):
+    """One validator owns both rectangles: same clamping, same audit trail."""
+    db = Db(str(tmp_path / "roi.sqlite"))
+    db.set_pose_segment(7, "oak2", 1, 1, 9, 9, None, None)
+
+    stored = db.set_pose_segment_bench_roi(7, "oak2", 1, (-5, 39.6, 10_000, 64),
+                                           hw=(64, 64))
+
+    assert stored == [0, 40, 64, 64]
+    assert db.bench_roi(7, "oak2", 1) == stored
+    logged = [op for op in db.ops(7, "oak2") if op["kind"] == "set_bench_roi"]
+    assert logged and logged[0]["payload"]["roi"] == stored
+    assert logged[0]["inverse"]["roi"] is None
+    assert db.set_pose_segment_bench_roi(7, "oak2", 1, None) is None
+    db.close()
