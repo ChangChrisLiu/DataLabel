@@ -513,6 +513,7 @@ class ShellMixin:
                 pass
         if self._cheat_sheet is not None:
             self._cheat_sheet.close()
+        self.logger.info("window closed (%s)", self.annotator)
         sys.excepthook = self._previous_hook
         S.close_logger(self.logger)
 

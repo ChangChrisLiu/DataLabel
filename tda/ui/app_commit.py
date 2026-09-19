@@ -8,6 +8,8 @@ every one of them lands in.
 """
 from __future__ import annotations
 
+import time
+
 from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
@@ -141,13 +143,22 @@ class CommitMixin:
             self.report("nothing is being edited")
             return
         key = self.session.current()
+        mask = self.session.editing_mask()
+        pixels = int(mask.sum()) if mask is not None else 0
+        started = time.perf_counter()
         try:
             result = self.session.commit_edit(scope) or {}
         except ValueError as refused:
             self._pending_scope = None
             self.scope_bar.hide()
+            self.logger.info("refused commit %s %s step %s: %s",
+                             instance, scope, key.step, refused)
             self.report_error(f"refused: {refused}")
             return
+        self.logger.info("commit %s scope=%s step=%s px=%d ms=%.0f affected=%d",
+                         instance, scope, key.step, pixels,
+                         (time.perf_counter() - started) * 1000.0,
+                         len(result.get("affected") or []))
         self._pending_scope = None
         self.scope_bar.hide()
         self.session.clear_edit()
@@ -210,6 +221,7 @@ class CommitMixin:
         step = self.session.current().step
         blobs = self.unexplained_at_confirm()
         ok = self.task_card.confirm()
+        self.logger.info("confirm step %s: %s", step, "ok" if ok else "refused")
         if ok:
             self.hand_over_unexplained(step, blobs)
             # One more frame is done: both places that count say so.

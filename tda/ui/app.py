@@ -100,6 +100,8 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         self._connect_session()
 
         self.setWindowTitle(f"Teardown Annotator — {self.annotator}")
+        self.logger.info("window open: annotator=%s db=%s", self.annotator,
+                         self.paths.get("db_path", ""))
         self.restore_window_state()
         QApplication.instance().installEventFilter(self)
         for name, why in compat.ADAPTED.items():
@@ -170,6 +172,12 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
             self._restore_view(keep, zoom, centre)
             self._attach_tool()
         self._segment = segment
+
+        # One line per frame the annotator actually arrives on: with the
+        # commits below it reconstructs a whole session, and it is the only
+        # thing a 0-byte log file was not doing.
+        self.logger.info("frame D%s/%s step %s (%s)", key.desktop, key.view,
+                         key.step, self.session.frame_status(key.step))
 
         self.on_frame_changed_edit(key)
         self.on_frame_changed_assist(key)

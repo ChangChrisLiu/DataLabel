@@ -864,3 +864,41 @@ def test_the_cheat_sheet_does_not_switch_the_keyboard_off(window):
         assert window._shortcut_context_ok() is True
     finally:
         window._cheat_sheet.close()
+
+
+# --------------------------------------------------------------------------- #
+# the log file is worth reading (addendum, item 17)
+# --------------------------------------------------------------------------- #
+def log_text(win: MainWindow) -> str:
+    for handler in win.logger.handlers:
+        handler.flush()
+    return Path(S.log_path(win.paths)).read_text(encoding="utf-8")
+
+
+def test_the_log_records_the_session_the_frames_and_the_commits(qapp, tmp_path):
+    """30 minutes of driving left a 0-byte tda_app.log."""
+    win = open_window(tmp_path)
+    try:
+        win.resize(900, 700)
+        win.show()
+        QApplication.processEvents()
+        assert "window open" in log_text(win)
+        assert f"D{DESKTOP}" in log_text(win) and VIEW in log_text(win)
+
+        card = [r for r in win.session.task_card() if r.get("instance")]
+        instance = str(card[0]["instance"])
+        win.task_card.sigRequestEdit.emit(instance)
+        win.set_editing_mask(np.ones((64, 64), dtype=bool))
+        win.act_commit()
+        text = log_text(win)
+        assert "commit" in text and instance in text
+        assert "px" in text and "ms" in text
+
+        win.act_step(-1)
+        assert "frame" in log_text(win)
+
+        win.act_confirm()
+        assert "confirm" in log_text(win)
+    finally:
+        close_window(win)
+    assert "window closed" in log_text(win)

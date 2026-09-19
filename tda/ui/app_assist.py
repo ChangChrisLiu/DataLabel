@@ -108,6 +108,7 @@ class AssistMixin:
         dropped *result* (the frame moved on) is not a failure of the tool, so
         it only gets the line.
         """
+        self.logger.info("SAM: %s", text)
         self.report_error(text)
         if not str(text).startswith("SAM result dropped"):
             self.note_sam_failure(text)
@@ -445,6 +446,7 @@ class AssistMixin:
             return
         self._sam_loading = True
         self.sam_reason = "loading"
+        self.logger.info("SAM: loading the checkpoint")
         self.update_status()
         loader = self._sam_loader
         paths = dict(self.paths)
@@ -471,6 +473,7 @@ class AssistMixin:
         """The background load finished -- possibly after the window closed."""
         self._sam_loading = False
         if isinstance(outcome, str):
+            self.logger.info("SAM: unavailable (%s)", outcome)
             self.set_sam_unavailable(outcome)
             return
         if self.closed:
@@ -479,6 +482,7 @@ class AssistMixin:
             outcome.stop()
             return
         self.set_sam_queue(outcome, owns=True)
+        self.logger.info("SAM: ready")
         self.report("SAM ready")
 
     # -------------------------------------------------------------- actions
