@@ -55,6 +55,9 @@ REVIEW_READ_ONLY = ("按 R 返工：切到标注模式处理这一帧  "
 #: Shown when the canvas is clicked while another frame is flashed over it.
 FLASH_HINT = ("松开 Tab 再操作：屏幕上是对照帧  "
               "(release Tab first: the canvas is showing the other frame)")
+#: Shown, and kept on screen, when the crash sidecar cannot be written.
+SIDECAR_BROKEN = ("崩溃保护已失效：{why} —— 请尽快提交，崩溃会丢失当前图层 "
+                  "(the crash sidecar cannot be written)")
 
 
 def _is_right(ev: Any) -> bool:
@@ -92,6 +95,9 @@ class EditMixin:
         self.refusal = compat.session_refusal()
         self.sidecar_writes = 0
         self._sidecar_pending: Optional[tuple] = None
+        #: Set once the sidecar cannot be written, and kept: it is the crash
+        #: protection, so it outranks every other hint until the run ends.
+        self._sidecar_broken = ""
         self._sidecar_timer = QTimer(self)
         self._sidecar_timer.setSingleShot(True)
         self._sidecar_timer.setInterval(SIDECAR_DEBOUNCE_MS)
@@ -224,6 +230,11 @@ class EditMixin:
         if not self.has_uncommitted_edit():
             return True
         self.flush_sidecar()
+        if self._sidecar_broken:
+            # The worse of the two messages wins: "press Enter" is advice,
+            # "your work is no longer being protected" is news.
+            self.report(self._sidecar_broken)
+            return False
         self.report(BLOCK_HINT)
         return False
 
@@ -428,13 +439,26 @@ class EditMixin:
 
     @S.guard
     def flush_sidecar(self) -> None:
-        """Write the pending editing layer now (the debounce timer, or on close)."""
+        """Write the pending editing layer now (the debounce timer, or on close).
+
+        A failure here is the **crash protection** failing, which is worse news
+        than anything else on the status bar: it is said once, in a plain
+        sentence, and it stays there -- ``BLOCK_HINT`` used to overwrite it on
+        the very next gesture, so the annotator was told to press Enter and
+        never told that a crash would now cost them the layer.
+        """
         self._sidecar_timer.stop()
         pending, self._sidecar_pending = self._sidecar_pending, None
         if pending is None:
             return
         key, instance, mask = pending
-        self.sidecar.save(key, instance, mask)
+        try:
+            self.sidecar.save(key, instance, mask)
+        except Exception as exc:  # noqa: BLE001 - reported, never raised at a stroke
+            self._sidecar_broken = SIDECAR_BROKEN.format(why=exc)
+            self.logger.error("sidecar write failed: %s", exc)
+            self.report_error(self._sidecar_broken)
+            return
         self.sidecar_writes += 1
 
     def drop_sidecar(self, key, instance: Optional[str]) -> None:

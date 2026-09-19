@@ -993,3 +993,92 @@ def _key_event(key, press: bool = True):
         QEvent.Type.KeyPress if press else QEvent.Type.KeyRelease,
         key, Qt.KeyboardModifier.NoModifier,
     )
+
+
+# --------------------------------------------------------------------------- #
+# every failure has to reach the annotator (item 12)
+# --------------------------------------------------------------------------- #
+def test_a_tool_that_raises_does_not_escape_into_qt(window, monkeypatch):
+    """``queue.submit`` raising left the label saying "SAM ready" for ever.
+
+    The three tool slots were unguarded, so the exception went into the Qt
+    event loop, the status bar said nothing, and every further click repeated
+    it.
+    """
+    start_edit(window)
+    window.act_tool("sam_point")
+
+    def explode(*_a, **_k):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr(window.sam_queue, "submit", explode)
+    viewport = window.canvas.viewport()
+    QTest.mousePress(viewport, Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, viewport.rect().center())
+    QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton,
+                       Qt.KeyboardModifier.NoModifier, viewport.rect().center())
+    QApplication.processEvents()
+
+    assert "CUDA out of memory" in window.last_error_message()
+    assert "error" in window.sam_label.text().lower()
+    assert "S" in window.sam_label.text()
+
+
+def test_an_exception_in_a_slot_is_reported_as_an_error(window):
+    """``report_exception`` wrote to the hint line only, so nothing recorded it."""
+    window.report_exception(RuntimeError("boom"), "act_commit")
+    assert "boom" in window.last_error_message()
+
+
+def test_a_locked_database_is_explained_in_words(window):
+    import sqlite3
+
+    window.report_exception(sqlite3.OperationalError("database is locked"),
+                            "act_commit")
+    assert "数据库正忙" in window.last_error_message()
+
+
+def test_a_failed_sidecar_write_is_said_once_and_survives_the_block(window, monkeypatch):
+    """The crash protection failing is worse news than the edit being blocked."""
+    instance = start_edit(window)
+
+    def explode(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(window.sidecar, "save", explode)
+    paint(window)
+    window.flush_sidecar()
+    assert "崩溃保护已失效" in window.status_message()
+
+    window.act_step(-1)          # blocked: BLOCK_HINT used to overwrite it
+    assert "崩溃保护已失效" in window.status_message()
+
+    said = window.status_message()
+    window.flush_sidecar()
+    assert window.status_message() == said     # not repeated every stroke
+
+
+def test_a_step_with_no_image_says_so_on_arrival(qapp, tmp_path):
+    """The placeholder is silent; the status bar has to say which step."""
+    win = open_window(tmp_path, missing=(3,))
+    try:
+        win.session.goto(3, force=True)
+        QApplication.processEvents()
+        assert win.session.image() is None
+        assert "没有图像" in win.status_message() or "no image" in win.status_message()
+    finally:
+        close_window(win)
+
+
+def test_editing_keys_on_a_removed_row_say_why_nothing_happened(window):
+    """A removed part is listed read-only; H / V / 1-7 must not be silent."""
+    window.instances.show_removed.setChecked(True)
+    QApplication.processEvents()
+    table = window.instances.table()
+    if table.rowCount() <= len(window.instances.rows()):
+        pytest.skip("this frame has no removed parts")
+    table.setCurrentCell(table.rowCount() - 1, 1)
+
+    window.act_toggle_hidden()
+
+    assert "已移除" in window.status_message()

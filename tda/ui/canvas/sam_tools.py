@@ -103,7 +103,6 @@ class SamToolBase(Tool):
     """
 
     sigHint = Signal(str)
-    sigError = Signal(str)
 
     def __init__(
         self,

@@ -111,6 +111,29 @@ def take_lock(target, annotator: str) -> Optional[str]:
     return None
 
 
+#: Failures the annotator can do something about, in words they can act on.
+#: Everything else keeps the exception's own text, which is what a bug report
+#: needs; these three are the ones that are *not* a bug.
+KNOWN_FAILURES: tuple[tuple[str, str], ...] = (
+    ("database is locked",
+     "数据库正忙，稍后重试（另一个 tda 进程在写？）/ the database is busy"),
+    ("disk full",
+     "磁盘已满：先腾出空间再继续 / the disk is full"),
+    ("out of memory",
+     "显存/内存不足：关掉别的程序，或缩小视野再试 / out of memory"),
+)
+
+
+def explain_exception(exc: BaseException) -> str:
+    """One sentence for the status bar, human where we know how to be."""
+    text = str(exc)
+    low = text.lower()
+    for needle, sentence in KNOWN_FAILURES:
+        if needle in low:
+            return f"{sentence}（{type(exc).__name__}: {text}）"
+    return f"{type(exc).__name__}: {text}"
+
+
 def confirm_discard_dialog(parent, why: str) -> bool:
     """Ask before throwing unsaved S1 edits away."""
     answer = QMessageBox.question(
@@ -374,7 +397,10 @@ class ShellMixin:
                 self.db.conn.rollback()
         except Exception:  # pragma: no cover - a rollback failure is terminal
             self.logger.exception("rollback after %s failed", where)
-        self.report(f"{type(exc).__name__}: {exc}")
+        # Through report_error, so that last_error_message() records it: a
+        # failure that only reached the hint line was erased by the next hint
+        # and there was no way to find out what had happened.
+        self.report_error(explain_exception(exc))
 
     # ------------------------------------------------------------- lifecycle
     def save_window_state(self) -> None:

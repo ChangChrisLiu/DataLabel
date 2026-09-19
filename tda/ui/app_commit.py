@@ -264,16 +264,34 @@ class CommitMixin:
     # ------------------------------------------------------------ visibility
     @S.guard
     def act_set_visibility(self, value: str) -> None:
+        if not self._editable_row():
+            return
         self.instances.set_visibility(value)
         self.refresh_overlay()
 
     @S.guard
     def act_cycle_visibility(self) -> None:
+        if not self._editable_row():
+            return
         self.instances.cycle_visibility()
         self.refresh_overlay()
 
     @S.guard
     def act_toggle_hidden(self) -> None:
+        if not self._editable_row():
+            return
         self.instances.toggle_hidden()
         self.refresh_overlay()
+
+    def _editable_row(self) -> bool:
+        """Is the instance table pointing at something these keys can change?
+
+        The ``Removed`` toggle lists parts the frame no longer has; they are
+        read-only, and ``H`` / ``V`` / ``1``-``7`` on one of them did nothing at
+        all -- which reads exactly like the key not working.
+        """
+        if self.instances.selected_is_removed():
+            self.report("已移除的零件不可编辑 / this part has been removed")
+            return False
+        return True
 

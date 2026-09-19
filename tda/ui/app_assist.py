@@ -55,10 +55,14 @@ class AssistMixin:
         self.sam_reason = "" if sam_queue is not None else "not loaded yet"
         self.sam_point = SamPointTool(self.canvas, None, queue=sam_queue, refine=True)
         self.sam_box = SamBoxTool(self.canvas, None, queue=sam_queue)
+        #: Why the last prompt failed, until one is armed again.  Empty means
+        #: the label may say "SAM ready" -- which it used to say after a submit
+        #: raised, so the annotator clicked the same broken thing over and over.
+        self._sam_failure = ""
         for tool in (self.sam_point, self.sam_box):
             tool.sigStroke.connect(self.on_stroke)
             tool.sigHint.connect(self.report)
-            tool.sigError.connect(self.report_error)
+            tool.sigError.connect(self.on_sam_error)
 
         self.assist = AssistController(self)
         self.assist.sigBlobs.connect(self._on_blobs)
@@ -83,6 +87,19 @@ class AssistMixin:
 
     def _sam_tool(self):
         return self.sam_box if self._tool_name == "sam_box" else self.sam_point
+
+    @S.guard
+    def on_sam_error(self, text: str) -> None:
+        """A SAM tool could not do what was asked; say it in both places.
+
+        The status line is transient and the label is not: a prompt that failed
+        has to leave a mark on the label, or the next click repeats it.  A
+        dropped *result* (the frame moved on) is not a failure of the tool, so
+        it only gets the line.
+        """
+        self.report_error(text)
+        if not str(text).startswith("SAM result dropped"):
+            self.note_sam_failure(text)
 
     def set_sam_instance(self, instance: Optional[str]) -> None:
         """Name the instance an applied mask belongs to.
@@ -125,6 +142,7 @@ class AssistMixin:
         tool = self._sam_tool()
         if not self.sam_available or self._tool_name not in ("sam_point", "sam_box"):
             return
+        self.clear_sam_failure()     # arming a SAM tool is "try again"
         if compat.is_open(self.session) and self.session.image() is not None:
             tool.set_frame_token(self.session.current())
         if self._prompt_box is not None:
@@ -342,10 +360,25 @@ class AssistMixin:
         """
         if not self.sam_available:
             return f"SAM unavailable: {self.sam_reason}"
+        if self._sam_failure:
+            # A failed prompt with "SAM ready" still on the label is how an
+            # annotator clicks the same broken thing twenty times.
+            return f"SAM error: {self._sam_failure} (S to retry)"
         tool = self._candidate_tool()
         if tool is not None:
             return f"SAM ready · {tool.candidate_index + 1}/{tool.candidate_count}"
         return "SAM ready"
+
+    def note_sam_failure(self, text: str) -> None:
+        """Remember that the last prompt failed, until the next one is armed."""
+        self._sam_failure = str(text).strip()[:60]
+        self.update_status()
+
+    def clear_sam_failure(self) -> None:
+        """``S`` (or any fresh arming) means "try again"."""
+        if self._sam_failure:
+            self._sam_failure = ""
+            self.update_status()
 
     def _candidate_tool(self):
         """The SAM tool holding candidates right now, preferring the armed one."""

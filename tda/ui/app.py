@@ -155,6 +155,9 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
             if self.mode != A.MODE_STEPS:
                 self.stack.setCurrentWidget(self.placeholder_label)
             self._detach_tool()
+            # The placeholder is in the middle of the window and easy to miss
+            # while reading the task card; the status bar says which step.
+            self.report(f"step {key.step}: 本视图没有图像 / no image in this view")
         else:
             self.stack.setCurrentWidget(
                 self.steps_panel if self.mode == A.MODE_STEPS else self.canvas

@@ -294,6 +294,15 @@ class InstanceListPanel(QWidget):
             return None
         return str(self._rows[row].get("key", ""))
 
+    def selected_is_removed(self) -> bool:
+        """Is the selected row one of the read-only "already removed" ones?
+
+        They are listed so the annotator can see what has come out of the
+        machine; there is nothing about them to reorder, hide or re-label.
+        """
+        row = self._table.currentRow()
+        return bool(self._gone) and len(self._rows) <= row < self._table.rowCount()
+
     def select_instance(self, instance: str) -> bool:
         """Select the row of ``instance``; ``False`` when it is not in the table."""
         for row, data in enumerate(self._rows):
