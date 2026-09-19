@@ -113,7 +113,8 @@ class FreshMixin:
         """:func:`digest_of` for one frame, gathering its inputs first."""
         from tda.core.truth_inputs import gather
 
-        return digest_of(gather(self.db, self.tax, key, cache), self.compiler_version)
+        return digest_of(gather(self.db, self.tax, key, cache, self.cache_dir),
+                         self.compiler_version)
 
     def _digest_is_current(self, key: FrameKey, digest: str) -> bool:
         """Do the stored rows already describe exactly these inputs?

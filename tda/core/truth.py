@@ -49,6 +49,7 @@ from typing import Iterable, Optional
 import numpy as np
 
 from tda.core import masks
+from tda.core.cache import configured_cache_dir
 from tda.core.compiler import CompiledFrame, compile_frame, select_keyframe
 from tda.core.db import RESOLUTIONS, Db
 from tda.core.model import FrameKey, FrameOverride, Placement, ShapeKeyframe
@@ -93,6 +94,9 @@ OPEN = "open"
 #: :meth:`TruthService.resolve_conflict` itself.
 BY_HAND = tuple(r for r in RESOLUTIONS if r != SUPERSEDED)
 
+#: ``cache_dir`` was not given: resolve it from the configuration.
+_CONFIGURED = object()
+
 AUTO = "auto"
 VERIFIED = "verified"
 NEEDS_REVIEW = "needs_review"
@@ -104,10 +108,24 @@ SYSTEM = "system"
 class TruthService(FreshMixin, ResolveMixin):
     """Reads the annotations, compiles frames and owns the ``compiled_mask`` table."""
 
-    def __init__(self, db: Db, tax: Taxonomy, compiler_version: str = "1"):
+    def __init__(self, db: Db, tax: Taxonomy, compiler_version: str = "1",
+                 cache_dir: object = _CONFIGURED):
+        """``cache_dir`` is where this database's frames are cached locally.
+
+        Every compilation needs the frame's canvas size, and measuring it off
+        the read-only source drive costs a 12 MP decode per frame; the local
+        copy costs nothing. Left out, it is resolved from ``configs/paths.yaml``
+        -- but only for the database that file names
+        (:func:`tda.core.cache.configured_cache_dir`), because a cache belongs
+        to the annotations it was built for. Pass it explicitly (``None`` to opt
+        out) when the caller knows better.
+        """
         self.db = db
         self.tax = tax
         self.compiler_version = compiler_version
+        if cache_dir is _CONFIGURED:
+            cache_dir = configured_cache_dir(getattr(db, "path", None))
+        self.cache_dir: Optional[str] = None if cache_dir is None else str(cache_dir)
 
     # ------------------------------------------------------------------ compile
 
@@ -119,7 +137,7 @@ class TruthService(FreshMixin, ResolveMixin):
         self, key: FrameKey, cache: Optional[InputCache] = None
     ) -> tuple[FrameInputs, CompiledFrame]:
         """The frame's inputs and its compilation; ``hw`` is needed by callers."""
-        inputs = gather(self.db, self.tax, key, cache)
+        inputs = gather(self.db, self.tax, key, cache, self.cache_dir)
         return inputs, self._compile_inputs(key, inputs)
 
     def _compile_inputs(self, key: FrameKey, inputs: FrameInputs) -> CompiledFrame:
@@ -174,7 +192,7 @@ class TruthService(FreshMixin, ResolveMixin):
         it has now, and a conflict describing the old ones would be a conflict
         nobody caused.
         """
-        inputs = gather(self.db, self.tax, key, cache)
+        inputs = gather(self.db, self.tax, key, cache, self.cache_dir)
         digest = digest_of(inputs, self.compiler_version)
         if not ignore_digest and self._digest_is_current(key, digest):
             # the rows already describe exactly these inputs: there is nothing

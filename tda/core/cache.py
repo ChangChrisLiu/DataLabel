@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import time
+from functools import lru_cache
 from typing import Any, Callable, Iterable, Optional
 
 import cv2
@@ -45,8 +46,8 @@ from tda.core.model import FrameKey
 
 __all__ = [
     "DbRoiLookup", "build_cache", "build_thumbs", "burst_metrics", "cache_path",
-    "choose_scan_image", "full_frame", "scan_bed_candidates", "scan_chassis_candidates",
-    "suggest_roi", "thumb_path",
+    "cached_image_path", "choose_scan_image", "configured_cache_dir", "full_frame",
+    "scan_bed_candidates", "scan_chassis_candidates", "suggest_roi", "thumb_path",
 ]
 
 # --- burst metrics -------------------------------------------------------
@@ -249,6 +250,65 @@ def cache_path(cache_dir, key: FrameKey, ext: str) -> str:
     """Where the image of ``key`` lives in the cache, e.g. ``.../scan/D13/s042.png``."""
     root = _norm(cache_dir).rstrip("/")
     return f"{root}/{key.view}/D{key.desktop:02d}/s{key.step:03d}.{ext}"
+
+
+def cached_image_path(cache_dir, key: FrameKey) -> Optional[str]:
+    """The local copy of one frame, by the convention :func:`build_cache` writes.
+
+    **The one answer to "where are this frame's pixels, locally".** The image
+    cache the canvas draws from and the size measurement the compiler makes both
+    ask it, so neither can look somewhere the other does not -- which is how
+    ``frame_hw`` came to read 12 MP stills off the read-only source drive on the
+    first compile of every view, and to fall back to the view's nominal size
+    whenever that drive was detached.
+
+    ``None`` when no cache directory is known; the file may or may not exist.
+    """
+    if not cache_dir:
+        return None
+    return cache_path(cache_dir, key, VIEW_EXT.get(key.view, "png"))
+
+
+@lru_cache(maxsize=8)
+def _configured_paths(paths_path: str) -> tuple[Optional[str], Optional[str]]:
+    """``(db_path, cache_dir)`` from a paths.yaml, or ``(None, None)``."""
+    import yaml
+
+    path = paths_path if (os.path.isabs(paths_path) or os.path.exists(paths_path)) \
+        else os.path.join(REPO_ROOT, paths_path)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except (OSError, ValueError):
+        return (None, None)
+    return (cfg.get("db_path"), cfg.get("cache_dir"))
+
+
+def configured_cache_dir(db_path: Optional[str],
+                         paths_path: str = DEFAULT_PATHS_PATH) -> Optional[str]:
+    """The cache directory ``configs/paths.yaml`` names **for this database**.
+
+    A cache belongs to the annotations it was built for. Answering with the
+    configured directory for *any* database would point a test's temporary file
+    -- or a probe copy under ``.cache/tmp`` -- at the machine's real cache,
+    whose images would then be measured into it: the run's results would depend
+    on what happens to be on that disk.
+
+    So the match is on the database path itself, and every other database gets
+    ``None``, which simply means "no local cache known" (see
+    :func:`cached_image_path`).
+    """
+    if not db_path:
+        return None
+    configured_db, cache_dir = _configured_paths(str(paths_path))
+    if not configured_db or not cache_dir:
+        return None
+    try:
+        same = os.path.normcase(os.path.abspath(str(db_path))) == os.path.normcase(
+            os.path.abspath(str(configured_db)))
+    except (OSError, ValueError):  # pragma: no cover - defensive
+        return None
+    return str(cache_dir) if same else None
 
 
 def _load_manifest(path: str) -> dict:

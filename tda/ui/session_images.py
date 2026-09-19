@@ -19,7 +19,7 @@ from typing import Iterable, Optional
 import cv2
 import numpy as np
 
-from tda.core.cache import VIEW_EXT, cache_path
+from tda.core.cache import cached_image_path
 from tda.core.db import Db
 from tda.core.model import FrameKey
 
@@ -71,13 +71,15 @@ class ImageCache:
     def image_path(self, key: FrameKey) -> Optional[str]:
         """The full-resolution image of one frame, or ``None`` when it has none.
 
-        The cache layout is :func:`tda.core.cache.cache_path`'s; the frame row's
-        own path is the fallback for a database whose images were never copied
-        into the local cache.
+        Where the local copy lives is :func:`tda.core.cache.cached_image_path`'s
+        answer -- the same one :func:`tda.core.truth_inputs.frame_hw` measures
+        the canvas from, so the two cannot look in different places. The frame
+        row's own path is the fallback for a database whose images were never
+        copied into the local cache.
         """
         row = self.db.get_frame(key) or {}
         return _first_readable([
-            cache_path(self.cache_dir, key, VIEW_EXT.get(key.view, "png")),
+            cached_image_path(self.cache_dir, key),
             (row.get("aux") or {}).get("cache_path"),
             row.get("path"),
         ])

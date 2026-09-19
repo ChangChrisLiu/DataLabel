@@ -26,6 +26,7 @@ from typing import Optional
 
 import cv2
 
+from tda.core.cache import cached_image_path
 from tda.core.db import Db
 from tda.core.model import (
     FrameKey,
@@ -54,6 +55,7 @@ __all__ = [
     "annotatable_steps",
     "HW_INFERRED",
     "HW_MEASURED",
+    "TRUTH_AUX_KEYS",
     "VIEW_HW",
     "FrameInputs",
     "InputCache",
@@ -82,6 +84,16 @@ VIEW_HW: dict[str, tuple[int, int]] = {
 #: Values of ``aux["hw_source"]``: the view's nominal size vs. the real image's.
 HW_INFERRED = "inferred"
 HW_MEASURED = "measured"
+
+#: The ``aux`` keys the truth table owns rather than the index.
+#:
+#: ``aux`` has two writers: :func:`tda.pipeline.load_index_into_db` puts what it
+#: found on the source drive there, and :func:`frame_hw` puts back the size it
+#: measured and where it measured it. Re-building the index used to replace the
+#: whole object, so every measurement was thrown away and the next compile went
+#: to the source drive again -- and produced a different canvas whenever that
+#: drive was detached. These keys survive a re-load.
+TRUTH_AUX_KEYS = ("hw", "hw_source", "cache_path")
 
 ON_BENCH = Placement.ON_BENCH.value
 
@@ -148,25 +160,38 @@ def _read_hw(row: Optional[dict]) -> Optional[tuple[int, int]]:
     return None
 
 
-def _image_path(row: Optional[dict]) -> Optional[str]:
-    """Where this frame's pixels are: the cached copy, else the frame's own path."""
-    if not row:
-        return None
-    aux = row.get("aux") or {}
-    for candidate in (aux.get("cache_path"), row.get("path")):
-        if candidate:
-            return str(candidate)
+def _image_path(row: Optional[dict], key: FrameKey,
+                cache_dir: Optional[str]) -> Optional[str]:
+    """The first of this frame's pixels that is actually there.
+
+    The local cache first (:func:`tda.core.cache.cached_image_path`, the same
+    convention the canvas' image cache follows), then a ``cache_path`` a caller
+    recorded on the row, and only then the frame's own path -- which is on the
+    read-only source drive. That order is the point: measuring the size used to
+    decode a 12 MP still off F: for every frame of a view on its first compile,
+    and to fall back to the view's nominal size whenever F: was detached.
+    """
+    aux = (row or {}).get("aux") or {}
+    for candidate in (cached_image_path(cache_dir, key),
+                      aux.get("cache_path"),
+                      (row or {}).get("path")):
+        if not candidate:
+            continue
+        try:
+            if Path(str(candidate)).exists():
+                return str(candidate)
+        except (OSError, ValueError):
+            continue
     return None
 
 
-def _measure_hw(row: Optional[dict]) -> Optional[tuple[int, int]]:
+def _measure_hw(row: Optional[dict], key: FrameKey,
+                cache_dir: Optional[str]) -> Optional[tuple[int, int]]:
     """``(H, W)`` read off the image file, or ``None`` when there is none to read."""
-    path = _image_path(row)
+    path = _image_path(row, key, cache_dir)
     if not path:
         return None
     try:
-        if not Path(path).exists():
-            return None
         image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     except (OSError, ValueError):
         return None
@@ -186,7 +211,8 @@ def _store_hw(
     db.upsert_frame(key, (row or {}).get("path"), aux, (row or {}).get("ts"))
 
 
-def frame_hw(db: Db, key: FrameKey) -> tuple[int, int]:
+def frame_hw(db: Db, key: FrameKey,
+             cache_dir: Optional[str] = None) -> tuple[int, int]:
     """The frame's image size: measured from the image, or inferred from the view.
 
     The canvas enters every compiled mask and the frame's ``input_hash``, so it
@@ -195,13 +221,17 @@ def frame_hw(db: Db, key: FrameKey) -> tuple[int, int]:
     (:data:`HW_MEASURED` or :data:`HW_INFERRED`). The image is read at most
     once -- a measured size is never questioned again -- and a measurement
     supersedes an earlier guess as soon as the cached image is there.
+
+    ``cache_dir`` is where the local copies live; with it the measurement is a
+    fast local read instead of one off the source drive (:func:`_image_path`).
+    :class:`~tda.core.truth.TruthService` carries it for every compile.
     """
     row = db.get_frame(key)
     stored = _read_hw(row)
     source = ((row or {}).get("aux") or {}).get("hw_source")
     if stored is not None and source == HW_MEASURED:
         return stored
-    measured = _measure_hw(row)
+    measured = _measure_hw(row, key, cache_dir)
     if measured is not None:
         _store_hw(db, key, row, measured, HW_MEASURED)
         return measured
@@ -356,7 +386,8 @@ class FrameInputs:
 
 
 def gather(
-    db: Db, tax: Taxonomy, key: FrameKey, cache: Optional[InputCache] = None
+    db: Db, tax: Taxonomy, key: FrameKey, cache: Optional[InputCache] = None,
+    cache_dir: Optional[str] = None,
 ) -> FrameInputs:
     """Read one frame's compiler inputs from the database.
 
@@ -381,7 +412,7 @@ def gather(
     needs = needs_geom(instances, state, tax, bench_roi=bench_roi)
     return FrameInputs(
         key=key,
-        hw=frame_hw(db, key),
+        hw=frame_hw(db, key, cache_dir),
         needs=needs,
         keyframes=_keyframes_of(db, key.desktop, key.view, cache),
         zorder=_zorder_of(db, key.desktop, key.view, seg, cache),

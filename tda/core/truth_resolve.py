@@ -207,7 +207,9 @@ class ResolveMixin:
             )
         geom_type, visible_rle, box = payload_geometry(conflict["old_rle"])
         if geom_type == GEOM_BOX and box is not None:
-            visible_rle = masks.encode_rle(self._box_mask(box, frame_hw(self.db, key)))
+            visible_rle = masks.encode_rle(
+                self._box_mask(box, frame_hw(self.db, key, self.cache_dir))
+            )
         existing = self.db.frame_overrides(key).get(instance)
         held = None if existing is None else existing.visibility
         if visible_rle is None:

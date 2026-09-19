@@ -84,6 +84,35 @@ def test_load_index_reports_the_failure_and_exits_one(env, capsys, monkeypatch, 
     assert "Traceback" not in out
 
 
+def test_reloading_the_index_keeps_what_the_truth_table_measured(env, d13_steps):
+    """``aux`` has two owners, and ``load-index`` used to be the only one.
+
+    The image size the truth table measured, where it measured it, and the
+    cached copy it found all live in ``aux``; rebuilding the index replaced the
+    whole object, so the next compile went back to the source drive for every
+    frame -- and produced a different canvas whenever F: was detached.
+    """
+    db = Db(env["db_path"])
+    try:
+        index = {13: make_index(13, d13_steps)}
+        load_index_into_db(db, index)
+        key = FrameKey(13, 2, "oak1")
+        aux = dict(db.get_frame(key)["aux"])
+        aux |= {"hw": [3040, 4032], "hw_source": "measured",
+                "cache_path": "D:/cache/oak1/D13/s002.jpg"}
+        db.upsert_frame(key, db.get_frame(key)["path"], aux, db.get_frame(key)["ts"])
+
+        load_index_into_db(db, index)
+
+        after = db.get_frame(key)["aux"]
+        assert after["hw"] == [3040, 4032]
+        assert after["hw_source"] == "measured"
+        assert after["cache_path"] == "D:/cache/oak1/D13/s002.jpg"
+        assert db.get_frame(key)["path"] == index[13].frames[key].path
+    finally:
+        db.close()
+
+
 # --------------------------------------------------------------------------- #
 # a reference step that never existed did not "move"
 # --------------------------------------------------------------------------- #
