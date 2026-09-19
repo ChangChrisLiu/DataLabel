@@ -30,6 +30,7 @@ __all__ = [
     "flash_step",
     "is_open",
     "layer_changed",
+    "open_conflicts",
     "overlay_layers",
     "preview",
     "push_stroke",
@@ -287,6 +288,32 @@ def close_session(session: Any, force: bool = True) -> None:
     except TypeError:
         _note("close(force=...)", "the session's close takes no force flag")
         closer()
+
+
+def open_conflicts(session: Any, key: Any = None) -> int:
+    """Disagreements nobody has settled, on one frame or on the whole view.
+
+    The same source the export and ``cli check`` gates read
+    (:meth:`~tda.core.truth.TruthService.open_conflicts`), so the window cannot
+    call a frame settled that they would refuse to publish. Falls back to the
+    database, and to 0 when neither is there.
+    """
+    truth = getattr(session, "truth", None)
+    db = getattr(session, "db", None)
+    desktop, view = getattr(session, "desktop", None), getattr(session, "view", "")
+    if desktop is None:
+        return 0
+    found = getattr(truth, "open_conflicts", None)
+    if callable(found):
+        rows = found(desktop, view)
+    elif db is not None and callable(getattr(db, "conflicts", None)):
+        _note("open_conflicts", "read from db.conflicts(open_only=True)")
+        rows = db.conflicts(desktop, view, open_only=True)
+    else:
+        return 0
+    if key is None:
+        return len(rows)
+    return sum(1 for row in rows if int(row["step"]) == int(key.step))
 
 
 def retry_rechecks(session: Any) -> int:
