@@ -206,6 +206,17 @@ class TimelinePanel(QWidget):
         item = self._list.currentItem()
         return None if item is None else int(item.data(STEP_ROLE))
 
+    def refresh_statuses(self) -> None:
+        """Re-read every row's status colour without rebuilding the list.
+
+        Cheap -- it asks the session for one status per row and repaints -- and
+        it is the only way a frame *other than the open one* ever changes
+        colour: a commit that reaches a verified frame queues a re-check, the
+        sweeper then turns it into a conflict, and until this ran the row still
+        said what it said when the annotator last stood on it.
+        """
+        self._refresh_statuses()
+
     def select_current_step(self) -> None:
         """Put the highlight back on the frame that is actually open.
 

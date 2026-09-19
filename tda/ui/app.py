@@ -687,6 +687,8 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         """The session's background re-check of frozen frames is making headway."""
         suffix = f", {failed} failed — F5 retries" if failed else ""
         self.report(f"re-checking verified frames: {done}/{total}{suffix}")
+        # Each verdict may repaint a row the annotator is not standing on.
+        self.timeline.refresh_statuses()
 
     @S.guard
     def _on_sweep_error(self, step: int, text: str) -> None:
@@ -702,7 +704,14 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
 
     @S.guard
     def _on_queues_changed(self) -> None:
+        """A queue moved: the review panel and the timeline colours both follow.
+
+        The timeline only ever repainted on a frame change, so a frame that
+        became a conflict while the annotator worked two steps away kept its
+        old colour until they happened to visit it.
+        """
         self.review.refresh()
+        self.timeline.refresh_statuses()
 
     @S.guard
     def _on_problems(self, problems: list) -> None:

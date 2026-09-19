@@ -147,6 +147,9 @@ class CommitMixin:
         self.set_sam_instance(None)
         self._sync_editing_layer()
         self.refresh_overlay()
+        # An edit reaches other frames: those rows change colour now, not when
+        # the annotator next happens to stand on one of them.
+        self.timeline.refresh_statuses()
         # No re_explain() here: committing re-renders the frame, which clears
         # assist_result, so a re-split would run against nothing.  The real one
         # happens at confirm time, where the answer is actually used.
@@ -220,6 +223,7 @@ class CommitMixin:
             return
         self.refresh_overlay()
         self._sync_editing_layer()
+        self.timeline.refresh_statuses()   # it takes back other frames too
         self.update_status()
         self.report(what)
 

@@ -614,3 +614,46 @@ def test_no_panel_reaches_the_session_behind_the_window(window):
     assert not hasattr(window.review, "confirm")
     assert not hasattr(window.review, "open_selected")
     assert not hasattr(window.review, "_goto")
+
+
+# --------------------------------------------------------------------------- #
+# the timeline shows the status of every frame, not only the open one (item 4)
+# --------------------------------------------------------------------------- #
+def test_the_timeline_repaints_other_rows_when_the_queues_change(window, monkeypatch):
+    """`_refresh_statuses` only ran on a frame change.
+
+    After a commit that touched a verified frame its row stayed amber
+    ``recheck`` although ``frame_status`` already said ``conflict`` -- the
+    annotator had no way of knowing where the work was.
+    """
+    from tda.ui import session_api as api
+
+    other = min(window.session.steps())
+    before = window.timeline.step_brush(other).color().name()
+    monkeypatch.setattr(window.session, "frame_status",
+                        lambda step: (api.STATUS_CONFLICT if step == other
+                                      else api.STATUS_AUTO))
+
+    window._on_queues_changed()
+
+    assert window.timeline.step_brush(other).color().name() != before
+
+
+def test_the_sweeper_reporting_progress_repaints_the_timeline(window, monkeypatch):
+    seen: list[int] = []
+    monkeypatch.setattr(window.timeline, "refresh_statuses", lambda: seen.append(1))
+    window._on_sweep_progress(1, 4, 0)
+    assert seen == [1]
+
+
+def test_a_commit_repaints_the_timeline(window, monkeypatch):
+    """A commit is exactly when another frame's status changes."""
+    seen: list[int] = []
+    card = [r for r in window.session.task_card() if r.get("instance")]
+    window.task_card.sigRequestEdit.emit(str(card[0]["instance"]))
+    window.set_editing_mask(np.ones((64, 64), dtype=bool))
+    monkeypatch.setattr(window.timeline, "refresh_statuses", lambda: seen.append(1))
+
+    window.act_commit()
+
+    assert seen, "the timeline was not asked to repaint"
