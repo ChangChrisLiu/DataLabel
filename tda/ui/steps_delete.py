@@ -21,9 +21,10 @@ Two halves:
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from tda.core.db import Db
+from tda.core.implied import is_implied
 from tda.core.logs import CHASSIS_KEY
 from tda.core.model import VIEWS, InstanceRec
 from tda.ui.steps_values import RELATION_FIELDS, EditError
@@ -55,12 +56,22 @@ def check_deletable(data: "StepTableData", db: Db, key: str) -> None:
         raise EditError(f"{key!r} is still referenced by {named}")
 
 
-def stored_neighbours(db: Db, desktop: int, key: str) -> list[InstanceRec]:
+def stored_neighbours(
+    db: Db, desktop: int, key: str, revert_to: Optional[str] = None
+) -> list[InstanceRec]:
     """The **stored** instances pointing at ``key``, with that pointer cleared.
 
     Read back from the database on purpose: writing the in-memory copies would
     flush whatever else the annotator has changed on those rows but not applied
     yet.
+
+    ``revert_to`` is the taxonomy *class* to leave in the field instead of
+    nothing. It is what deleting an **implied** instance does: the importer had
+    written ``socket_host = "motherboard"`` there, and the implied board was
+    what resolved it to a key. Clearing it to ``None`` instead would quietly
+    throw that reference away -- the desktop would no longer look like one that
+    is missing a motherboard, and re-creating the instance later
+    (``--reset-declined``) would find nothing to hang on.
     """
     cleaned: list[InstanceRec] = []
     for other_key, stored in db.instances(desktop).items():
@@ -68,7 +79,7 @@ def stored_neighbours(db: Db, desktop: int, key: str) -> list[InstanceRec]:
             continue
         for name in RELATION_FIELDS:
             if getattr(stored, name) == key:
-                setattr(stored, name, None)
+                setattr(stored, name, revert_to)
         cleaned.append(stored)
     return cleaned
 
@@ -76,17 +87,27 @@ def stored_neighbours(db: Db, desktop: int, key: str) -> list[InstanceRec]:
 def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
     """Delete one instance and every pointer to it, atomically.
 
+    Deleting an **implied** instance (:mod:`tda.core.implied`) also records its
+    class as declined for this desktop, in the same transaction: the importer
+    creates implied instances from scratch on every run, so without a durable
+    "no" the deleted motherboard is back after the next ``import-logs``, with a
+    mask on every frame. A delete that rolls back therefore declines nothing
+    either.
+
     On any failure the transaction rolls back, the in-memory session is left
     exactly as it was, and the reason comes back as an :class:`EditError`.
     """
     check_deletable(data, db, key)
-    neighbours = stored_neighbours(db, data.desktop, key)
+    implied_cls = data.instances[key].cls if is_implied(data.instances[key]) else None
+    neighbours = stored_neighbours(db, data.desktop, key, revert_to=implied_cls)
     try:
         with db.transaction():
             db.delete_auto_events(data.desktop, key)
             db.delete_instance(data.desktop, key)
             for rec in neighbours:
                 db.upsert_instance(rec)
+            if implied_cls:
+                db.decline_implied(data.desktop, implied_cls)
     except Exception as error:  # the database rolled back; so must memory
         raise EditError(f"could not delete {key!r}: {error}") from error
 
@@ -94,5 +115,5 @@ def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
     for other in data.instances.values():
         for name in RELATION_FIELDS:
             if getattr(other, name) == key:
-                setattr(other, name, None)
+                setattr(other, name, implied_cls)
     data.refresh_issues()

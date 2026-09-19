@@ -331,9 +331,14 @@ def add_implied_instances(db: Db, li: LogImport, tax: Taxonomy) -> list[str]:
     four never-lifted boards leave behind then resolve onto it. Each one gets
     an ``op_log`` row of kind :data:`~tda.core.implied.OP_KIND`, so the run is
     auditable and a single record can be undone. Returns one report line each.
+
+    A class the annotator has already deleted in S1 is skipped: the desktop's
+    ``implied_declined`` meta is the one part of it a ``--force`` re-import does
+    not rewrite, which is exactly why the refusal lives there.
     """
     lines = []
-    for rec in implied_instances(li.instances, li.actions, tax):
+    declined = db.declined_implied(li.desktop)  # survives --force, by design
+    for rec in implied_instances(li.instances, li.actions, tax, declined):
         li.instances[rec.key] = rec
         db.log_op(
             li.desktop, OP_VIEW, IMPLIED_OP_KIND,

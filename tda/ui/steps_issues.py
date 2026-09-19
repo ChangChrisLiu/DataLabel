@@ -159,7 +159,8 @@ def unresolved_issues(
         if is_implied(inst):
             yield (
                 f"implied instance {key}: never operated in the log - keep it (it "
-                f"gets a mask on every frame) or delete it in the Instances tab"
+                f"gets a mask on every frame) or delete it in the Instances tab; "
+                f"deleting it is remembered, so no re-import brings it back"
             )
 
 

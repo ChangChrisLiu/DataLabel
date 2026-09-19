@@ -164,7 +164,7 @@ def _diff(before: dict[str, Any], after: dict[str, Any]) -> tuple[dict, dict]:
 # one desktop
 # --------------------------------------------------------------------------- #
 def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
-               add_implied: bool = False) -> DesktopRelations:
+               add_implied: bool = False, reset_declined: bool = False) -> DesktopRelations:
     """Infer, and (unless ``dry_run``) write, one desktop's relational fields.
 
     The whole desktop lands in one transaction: the implied instances, the
@@ -179,11 +179,17 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
     ``add_implied`` runs :func:`tda.core.implied.implied_instances` **before**
     the heuristic, exactly as ``import-logs`` does, so the references the four
     never-lifted motherboards leave behind resolve onto the new instance in the
-    same pass.
+    same pass. A class the annotator deleted in S1 stays refused unless
+    ``reset_declined`` takes that back -- which it does first, and only for the
+    desktops this run was pointed at.
     """
+    if reset_declined and not dry_run:
+        db.reset_declined_implied(desktop)
+    declined = set() if reset_declined else db.declined_implied(desktop)
     instances = db.instances(desktop)
     actions = db.actions(desktop)
-    new_instances = implied_instances(instances, actions, tax) if add_implied else []
+    new_instances = (implied_instances(instances, actions, tax, declined)
+                     if add_implied else [])
     for rec in new_instances:
         instances[rec.key] = rec
     before = {key: _snapshot(rec) for key, rec in instances.items()}
@@ -285,6 +291,7 @@ def infer_relations_into_db(
     force: bool = False,
     log=None,
     add_implied: bool = False,
+    reset_declined: bool = False,
 ) -> RelationsRun:
     """Run the heuristic over every desktop in the database, one transaction each.
 
@@ -324,7 +331,7 @@ def infer_relations_into_db(
     for desktop in selected:
         frozen = frozen_by_desktop[desktop]
         try:
-            one = _apply_one(db, tax, desktop, dry_run, add_implied)
+            one = _apply_one(db, tax, desktop, dry_run, add_implied, reset_declined)
         except Exception as exc:  # one bad desktop must not end the run
             one = DesktopRelations(
                 desktop=desktop, status="failed",
@@ -374,6 +381,12 @@ def cmd_infer_relations(args: argparse.Namespace) -> int:
     # late import: tda.cli imports this module to register the subcommand
     from tda.cli import EXIT_ERROR, EXIT_OK, _desktops, _safety_backup, _session
 
+    if args.reset_declined and not args.add_implied:
+        print("[infer-relations] --reset-declined only means something with "
+              "--add-implied: it forgets the implied instances S1 deleted so "
+              "that they can be created again.")
+        return EXIT_ERROR
+
     with _session(args, lock=True) as (paths, db):
         if not args.dry_run and not _safety_backup(
                 paths, db, "infer-relations",
@@ -381,7 +394,7 @@ def cmd_infer_relations(args: argparse.Namespace) -> int:
             return EXIT_ERROR  # the line is printed and nothing was written
         run = infer_relations_into_db(
             db, load_taxonomy(), _desktops(args), args.dry_run, args.force, log=print,
-            add_implied=args.add_implied,
+            add_implied=args.add_implied, reset_declined=args.reset_declined,
         )
         if run.refused:
             listed = ", ".join(f"D{r.desktop:02d}" for r in run.refused)
@@ -413,4 +426,9 @@ def _add_infer_relations(sub) -> None:
                         "has (the motherboard of D49/D62/D63/D64) that its log never "
                         "operates on. OFF here because this command exists to repair "
                         "a database in place; import-logs always does it")
+    p.add_argument("--reset-declined", action="store_true",
+                   help="with --add-implied, first forget which implied instances "
+                        "were deleted in S1 on the selected desktops, so they are "
+                        "created again. Without it a deleted one stays deleted, "
+                        "through every re-import")
     p.set_defaults(func=cmd_infer_relations)

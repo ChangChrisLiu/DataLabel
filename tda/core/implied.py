@@ -99,11 +99,18 @@ def implied_instances(
     instances: dict[str, InstanceRec],
     actions: Optional[Iterable[ActionRec]],
     tax: Taxonomy,
+    declined: Optional[Iterable[str]] = None,
 ) -> list[InstanceRec]:
     """The instances this desktop obviously has but its log never names.
 
     One record per class of ``tax.implied_when_referenced`` that
 
+    * is not in ``declined`` -- the classes whose implied instance this
+      desktop's annotator has already deleted in S1
+      (:meth:`tda.core.db.Db.declined_implied`). Implying is a judgement, and
+      "no" is an answer that has to outlive the next ``import-logs``: without
+      this, the deleted board came back on every re-import with a mask on every
+      frame;
     * has **no** real (non-``ls:``) instance on this desktop -- a Label Studio
       draft is a draft, not a settled identity, and cannot stand in for one;
     * is referenced by at least one other instance
@@ -121,9 +128,12 @@ def implied_instances(
         return []
     desktop = next(iter(instances.values())).desktop
     targeted = {a.target for a in (actions or ())}
+    refused = {str(c) for c in (declined or ())}
     out: list[InstanceRec] = []
     for cls in tax.implied_when_referenced:
         key = f"{cls}.01"
+        if cls in refused:
+            continue
         if key in instances or real_instances(instances, cls) or key in targeted:
             continue
         referees = referencing_instances(instances, cls)

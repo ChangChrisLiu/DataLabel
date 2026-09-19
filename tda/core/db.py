@@ -53,6 +53,11 @@ from tda.core.model import (
 )
 
 SCHEMA_VERSION = 3
+#: ``desktop`` meta key holding the classes whose implied instance the annotator
+#: has deleted (:meth:`Db.declined_implied`). Meta rather than a table: it is one
+#: short list per desktop and it has to survive a ``--force`` re-import, which
+#: rewrites every row this desktop has *except* its meta.
+DECLINED_IMPLIED_KEY = "implied_declined"
 #: How a conflict may be closed. The first three are a human's decision;
 #: ``superseded`` is what the truth service records when the inputs moved on
 #: before anybody got to the conflict (spec 3.4).
@@ -149,6 +154,44 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
         out.update({c: row[c] for c in R.DESKTOP_COLUMNS if row[c] is not None})
         out.update(R.loads(row["meta_json"]) or {})
         return out
+
+    def _merge_desktop_meta(self, desktop: int, updates: dict) -> None:
+        """Change part of one desktop's meta, keeping what everything else wrote."""
+        meta = self.get_desktop(desktop) or {}
+        meta.pop("id", None)
+        meta.update(updates)
+        self.upsert_desktop(desktop, {k: v for k, v in meta.items() if v is not None})
+
+    def declined_implied(self, desktop: int) -> set[str]:
+        """Classes this desktop's annotator has refused an implied instance for.
+
+        An implied instance (:mod:`tda.core.implied`) is a judgement about what
+        the dataset should contain, so deleting one in S1 is an answer, not an
+        accident -- and it has to outlive the next ``import-logs``, which implies
+        again from scratch every time. The refusal is kept per class rather than
+        per key: the whole point is that ``motherboard.01`` would be created
+        again under exactly that name.
+        """
+        stored = (self.get_desktop(desktop) or {}).get(DECLINED_IMPLIED_KEY) or []
+        return {str(c) for c in stored} if isinstance(stored, list) else set()
+
+    def decline_implied(self, desktop: int, cls: str) -> None:
+        """Record that no implied instance of ``cls`` is wanted here. Idempotent."""
+        found = self.declined_implied(desktop)
+        if cls in found:
+            return
+        with self._tx():
+            self._ensure_desktop(desktop)
+            self._merge_desktop_meta(
+                desktop, {DECLINED_IMPLIED_KEY: sorted(found | {str(cls)})}
+            )
+
+    def reset_declined_implied(self, desktop: int) -> None:
+        """Forget every refusal of this desktop (``--reset-declined``)."""
+        if not self.declined_implied(desktop):
+            return
+        with self._tx():
+            self._merge_desktop_meta(desktop, {DECLINED_IMPLIED_KEY: None})
 
     def upsert_frame(
         self, key: FrameKey, path: str, aux: dict, ts: str | None, flags: dict | None = None
