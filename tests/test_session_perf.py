@@ -380,3 +380,41 @@ def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path):
     _under(0.8, "commit", commit_runs)
     _under(0.15, "warm goto", warm_runs)
     _under(0.8, "cold goto", cold_runs)
+
+
+@pytest.mark.slow
+def test_confirming_a_frame_is_under_budget_at_full_scanner_resolution(qapp, tmp_path):
+    """Space is the commonest key in the tool, and it now guards frozen rows.
+
+    ``verify_frame`` compares every frozen row of the frame against a fresh
+    compilation before it will confirm anything (the I1 gate), and comparing
+    masks means decoding them: at 1600x1600 with forty-odd rows that is half a
+    second the first time and more the second, on the GUI thread, between the
+    annotator pressing Space and the frame changing.
+
+    The short-circuit is the stored ``input_hash``: a row derived from exactly
+    these inputs cannot disagree with them, so it is not decoded at all -- the
+    same reasoning ``refresh`` uses. What is left to pay for is the compilation
+    the confirmation needs anyway.
+    """
+    session = make_session(tmp_path, last_step=40, hw=(1600, 1600))
+    session.goto(2)
+    drawn = seed_shapes(session, 2, grid=8, anchor=40)
+    assert len(drawn) >= 30
+    session.sweeper_enabled = False
+    session.sweeper.stop()
+
+    def confirm(attempt: int) -> None:
+        assert session.confirm_frame() is True
+
+    def before_confirm(attempt: int) -> None:
+        session.goto(2)
+        session.db.set_frame_flags(FrameKey(DESKTOP, 2, VIEW), review_status=None)
+
+    _, confirm_runs = best_of(confirm, before_confirm)
+    # the second and third runs are the ones that matter: by then every row of
+    # the frame is frozen, which is the case the gate is about
+    assert len(session.db.compiled(FrameKey(DESKTOP, 2, VIEW))) >= 30
+
+    session.close()
+    _under(0.6, "confirm_frame", confirm_runs)

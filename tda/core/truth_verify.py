@@ -43,11 +43,37 @@ BENCH_MISSING = "bench_missing:"
 SYSTEM = "system"
 
 
+def _prepared_for(key: FrameKey, prepared):
+    """A caller's ``(inputs, compilation)`` pair, when it really is this frame's.
+
+    Cheap paranoia around an optimisation: confirming the wrong frame's
+    compilation would freeze somebody else's pixels under this annotator's
+    name, so the pair is checked against the key rather than trusted.
+    """
+    if not prepared:
+        return None
+    inputs, compiled = prepared
+    if inputs is None or compiled is None:
+        return None
+    if inputs.key != key or compiled.key != key:
+        return None
+    return inputs, compiled
+
+
 class VerifyMixin:
     """Confirming and demoting one frame, for :class:`~tda.core.truth.TruthService`."""
 
-    def verify_frame(self, key: FrameKey, annotator: str) -> None:
+    def verify_frame(self, key: FrameKey, annotator: str, prepared=None) -> None:
         """Freeze every row of one frame after a human confirmed it (spec 4.2).
+
+        ``prepared`` is an ``(inputs, compilation)`` pair the caller already
+        has for **this** frame, from
+        :meth:`~tda.core.truth.TruthService.compile_with_inputs` or a
+        :meth:`~tda.core.truth.TruthService.refresh`. The session keeps the one
+        it made when the annotator arrived at the frame and hands it back here,
+        so pressing Space does not compile at 1600x1600 what was compiled on
+        arrival -- and confirms exactly the pixels that were on screen. It is
+        used only when it is for this frame; anything else is compiled afresh.
 
         Raises :class:`ValueError` and writes no truth row in four cases, and
         the last two are the same rule twice: **a confirmation may never be how
@@ -89,7 +115,7 @@ class VerifyMixin:
                 + ", ".join(str(cid) for cid in open_ids)
                 + " are still open; settle them in the review queue first"
             )
-        inputs, compiled = self._compile(key)
+        inputs, compiled = _prepared_for(key, prepared) or self._compile(key)
         blocking = [p for p in compiled.problems if p.startswith(BLOCKING_PROBLEMS)]
         if blocking:
             raise ValueError(refused + ", ".join(blocking))
@@ -164,6 +190,14 @@ class VerifyMixin:
 
         Returns one sentence per instance, in key order, or ``[]`` when nothing
         a human signed is in dispute.
+
+        A row whose stored ``input_hash`` is this compilation's cannot disagree
+        with it -- it *is* this compilation -- so it is skipped without decoding
+        anything, which is the same short-circuit
+        :meth:`~tda.core.truth.TruthService._write_refresh` makes. Comparing
+        masks means decoding them, and Space on a forty-row frame at 1600x1600
+        was spending half a second of the GUI thread proving rows agree with
+        inputs they were derived from.
         """
         reasons: list[tuple[str, str, Optional[dict], Optional[dict], int]] = []
         for instance in gone:
@@ -174,7 +208,7 @@ class VerifyMixin:
                             payload, None, self._payload_area(payload)))
         for instance in sorted(set(stored) & set(compiled.instances)):
             row = stored[instance]
-            if row["status"] != VERIFIED:
+            if row["status"] != VERIFIED or row["input_hash"] == compiled.input_hash:
                 continue
             compiled_inst = compiled.instances[instance]
             diff = disagreement(row, compiled_inst)

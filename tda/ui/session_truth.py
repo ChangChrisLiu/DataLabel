@@ -41,9 +41,24 @@ class TruthCacheMixin:
         hit = self._compiled.get(key.step)
         if hit is not None and hit[0] == self._epoch:
             return hit[1]
-        compiled = self.truth.compile(key)
-        self._keep_compiled(key.step, self._epoch, compiled)
+        inputs, compiled = self.truth.compile_with_inputs(key)
+        self._keep_compiled(key.step, self._epoch, compiled, inputs)
         return compiled
+
+    def prepared(self):
+        """``(inputs, compilation)`` for the current frame, or ``None``.
+
+        What :meth:`~tda.core.truth.TruthService.verify_frame` may be given
+        instead of compiling the frame again: the pair this session made when
+        the annotator arrived, still describing the inputs of this edit epoch.
+        ``None`` whenever anything about that is uncertain -- a different epoch,
+        a frame compiled by a path that did not keep the inputs -- and then the
+        truth service compiles it itself.
+        """
+        hit = self._compiled.get(self.current().step)
+        if hit is None or hit[0] != self._epoch or hit[2] is None:
+            return None
+        return (hit[2], hit[1])
 
     def _compile_on_visit(self) -> None:
         """Bring the frame just opened up to date in the truth table (spec 3.4).
@@ -68,13 +83,20 @@ class TruthCacheMixin:
         stats = self.truth.refresh(key, want_compiled=True)
         self.review.problems[key.step] = list(stats["problems"])
         self.review.invalidate()
-        self._keep_compiled(key.step, self._epoch, stats["compiled"])
+        self._keep_compiled(key.step, self._epoch, stats["compiled"],
+                            stats.get("inputs"))
 
-    def _keep_compiled(self, step: int, epoch: int, compiled: CompiledFrame) -> None:
-        """Remember one compilation, and what the truth table owes because of it."""
+    def _keep_compiled(self, step: int, epoch: int, compiled: CompiledFrame,
+                       inputs=None) -> None:
+        """Remember one compilation, the inputs it came from, and its problems.
+
+        The inputs travel with it so that a confirmation can reuse the pair
+        (:meth:`prepared`); they are ``None`` when the compilation came from
+        somewhere that did not keep them, which only costs a recompilation.
+        """
         if compiled is None:  # the refresh found nothing to do and made no frame
             return
-        self._compiled[int(step)] = (int(epoch), compiled)
+        self._compiled[int(step)] = (int(epoch), compiled, inputs)
         self.review.problems[int(step)] = list(compiled.problems)
         while len(self._compiled) > COMPILED_CACHE_SIZE:
             self._compiled.pop(next(iter(self._compiled)))
