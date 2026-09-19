@@ -202,11 +202,10 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
     the heuristic, exactly as ``import-logs`` does, so the references the four
     never-lifted motherboards leave behind resolve onto the new instance in the
     same pass. A class the annotator deleted in S1 stays refused unless
-    ``reset_declined`` takes that back -- which it does first, and only for the
-    desktops this run was pointed at.
+    ``reset_declined`` takes that back, for the desktops this run was pointed at
+    and inside each desktop's own transaction: a desktop whose inference then
+    raises must not come out of it having forgotten a refusal it never acted on.
     """
-    if reset_declined and not dry_run:
-        db.reset_declined_implied(desktop)
     declined = set() if reset_declined else db.declined_implied(desktop)
     instances = db.instances(desktop)
     actions = db.actions(desktop)
@@ -229,9 +228,13 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
         implied=[f"implied instance {rec.key}: {rec.attrs.get('note', '')}"
                  for rec in new_instances],
     )
-    if dry_run or not (changes or new_instances):
+    if dry_run or not (changes or new_instances or reset_declined):
         return out
     with db.transaction():
+        if reset_declined:
+            # inside the desktop's own transaction: a desktop that then raises
+            # must not have forgotten a refusal it did not act on
+            db.reset_declined_implied(desktop)
         for rec in new_instances:
             db.upsert_instance(instances[rec.key])
             db.log_op(

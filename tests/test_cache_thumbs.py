@@ -379,17 +379,17 @@ def test_build_thumbs_falls_back_to_the_whole_frame_when_no_roi_can_be_measured(
     assert (stats["written"], stats["failed"]) == (0, 1)
 
 
-def test_build_thumbs_degrades_a_chassis_box_that_is_too_small_to_the_central_crop(tmp_path):
-    # a light-coloured chassis leaves suggest_roi() on the motherboard (~13% of
-    # the frame, the real D64): below ROI_MIN_AREA_FRAC, so the central box wins
+def test_build_thumbs_leaves_a_desktop_uncropped_when_no_box_is_plausible(tmp_path):
+    # a box below ROI_MIN_AREA_FRAC is not a chassis, and a crop that cuts the
+    # machine is worse than none: the whole frame is the answer (source "none")
     tiny, real = _scan_frame((450, 450, 800, 800)), _scan_frame((350, 350, 850, 850))
     cache = _make_cache(tmp_path, desktop=7, steps=(1,), images={1: tiny})
     _make_cache(tmp_path, desktop=8, steps=(1,), images={1: real})
 
     stats = build_thumbs(cache)
 
-    assert _groups(stats, 0) == [{"source": "auto", "segment": None, "steps": [[1, 1]],
-                                  "box": [150, 150, 850, 850]}]  # the central 70%
+    assert _groups(stats, 0) == [{"source": "none", "segment": None, "steps": [[1, 1]],
+                                  "box": None}]
     assert _groups(stats, 1)[0]["box"] == list(suggest_roi(real, "scan"))  # its own chassis
 
 
@@ -653,8 +653,10 @@ def test_build_thumbs_gives_a_segment_without_a_roi_the_automatic_box(tmp_path):
         stats = build_thumbs(cache, roi_lookup=lookup)
 
     groups = _groups(stats)
-    assert [(g["source"], g["steps"]) for g in groups] == [("db", [[1, 2]]), ("auto", [[3, 4]])]
-    assert groups[1]["box"] == list(suggest_roi(_two_box_frame(), "scan"))  # not the red box
+    # nothing on this synthetic frame is chassis-shaped, so the second segment
+    # is cut from the whole frame rather than from a box that means nothing
+    assert [(g["source"], g["steps"]) for g in groups] == [("db", [[1, 2]]), ("none", [[3, 4]])]
+    assert groups[1]["box"] is None
     for step in (3, 4):
         thumb = _imread(thumb_path(cache, FrameKey(7, step, "scan")))
         assert _red_fraction(thumb) < 0.10 and _green_fraction(thumb) < 0.30

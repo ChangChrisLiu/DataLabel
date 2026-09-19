@@ -15,9 +15,7 @@ Conventions
 """
 from __future__ import annotations
 
-import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -268,7 +266,7 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
         self._upsert("instance", {"desktop": inst.desktop, "key": inst.key},
                      R.instance_data(inst), desktop=inst.desktop)
 
-    def delete_instance(self, desktop: int, key: str) -> None:
+    def delete_instance(self, desktop: int, key: str) -> int:
         """Drop one instance identity row and the **cache** derived from it.
 
         The identity row goes, and with it the instance's ``auto`` compiled rows
@@ -284,6 +282,8 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
         keyframes, overrides, conflicts, manual events, relation edges and
         z-order entries that may still name the key
         (:meth:`instance_reference_counts`). Unknown keys are a no-op.
+
+        Returns how many cached rows went with it, so a caller can say so.
         """
         frames = self.conn.execute(
             "SELECT DISTINCT view, step FROM compiled_mask "
@@ -303,6 +303,7 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
             self.conn.execute(
                 'DELETE FROM instance WHERE desktop=? AND "key"=?', (desktop, key)
             )
+        return len(frames)
 
     def _count(self, sql: str, args: tuple) -> int:
         return int(self.conn.execute(sql, args).fetchone()[0])
@@ -324,9 +325,9 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
         not, and re-derives it on the next refresh, so counting those made every
         instance the app had ever compiled in the background undeletable -- the
         implied motherboard, whose whole purpose is to be said no to, most of
-        all. :meth:`delete_instance` drops them; :meth:`instance_cache_counts`
-        reports them for information, deliberately apart from this dict, which
-        is a list of *reasons to refuse*.
+        all. This dict is a list of *reasons to refuse*, and a cache entry is
+        not one: :meth:`delete_instance` drops them and returns how many, so a
+        caller can say what went with the instance.
 
         ``zorder`` is counted from the JSON list rather than by a join: it holds
         one ``(instance_key, part)`` total order per ``(view, pose_segment)``,
@@ -352,21 +353,6 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
                 "SELECT COUNT(*) FROM state_event WHERE desktop=? AND target=? AND auto=0",
                 (desktop, key)),
             "zorder": self._zorder_references(desktop, key),
-        }
-        return {table: n for table, n in counts.items() if n}
-
-    def instance_cache_counts(self, desktop: int, key: str) -> dict[str, int]:
-        """Derived rows naming one instance: information, never a refusal.
-
-        Kept apart from :meth:`instance_reference_counts` on purpose -- that one
-        is read as "reasons this cannot be deleted", and these rows are not a
-        reason, they are what :meth:`delete_instance` cleans up.
-        """
-        counts = {
-            "compiled_mask_auto": self._count(
-                "SELECT COUNT(*) FROM compiled_mask WHERE desktop=? AND instance=? "
-                "AND status<>'verified'",
-                (desktop, key)),
         }
         return {table: n for table, n in counts.items() if n}
 

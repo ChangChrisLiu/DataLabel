@@ -52,8 +52,21 @@ def test_view_tier_reads_the_table(view: str, want: str):
     assert view_tier(view, load_taxonomy()) == want
 
 
-def test_an_unknown_view_has_no_tier_rather_than_a_guessed_one():
-    assert view_tier("webcam", load_taxonomy()) is None
+def test_an_unknown_view_is_a_clear_error_not_a_silent_none():
+    """A view the configuration does not describe is a configuration problem.
+
+    It used to come back as ``None`` and travel into every record of the export
+    as ``"tier": null`` -- a whole view's worth of data with no tier on it, and
+    nothing said.
+    """
+    with pytest.raises(KeyError) as err:
+        view_tier("webcam", load_taxonomy())
+    assert "webcam" in str(err.value) and "view_tiers" in str(err.value)
+
+
+def test_a_new_view_fails_the_export_rather_than_silently_untiered(db, tax, tmp_path: Path):
+    with pytest.raises(KeyError):
+        export_vlm(db, tax, [DESKTOP], "webcam", str(tmp_path / "v.jsonl"))
 
 
 # --------------------------------------------------------------------------- #
@@ -130,6 +143,33 @@ def test_only_verified_keeps_exactly_the_confirmed_records(db, tax, tmp_path: Pa
 # --------------------------------------------------------------------------- #
 def _annotations(path: Path) -> list[dict]:
     return json.loads(path.read_text(encoding="utf-8"))["annotations"]
+
+
+def _images(path: Path) -> list[dict]:
+    return json.loads(path.read_text(encoding="utf-8"))["images"]
+
+
+def test_every_coco_image_says_whether_the_frame_was_confirmed(db, tax, tmp_path: Path):
+    """A consumer picking whole frames should not have to read every annotation."""
+    out = tmp_path / "coco.json"
+    export_coco(db, tax, [DESKTOP], VIEW, str(out))
+    images = {img["id"]: img for img in _images(out)}
+    assert images
+    for img in images.values():
+        assert isinstance(img["verified"], bool)
+        assert "review_status" in img["extra"]  # kept for whoever reads it
+    assert images[image_id(DESKTOP, 1, VIEW)]["verified"] is True
+    assert {img["tier"] for img in images.values()} == {"gold"}
+
+
+def test_a_coco_image_is_unverified_once_any_of_its_rows_is(db, tax, tmp_path: Path):
+    db.upsert_instance(InstanceRec(key="chassis.01", desktop=DESKTOP, cls="chassis"))
+    db.put_compiled(FrameKey(DESKTOP, 1, VIEW), "chassis.01", encode_rle(PSU_MASK),
+                    0.0, "visible", "in_chassis", "auto", "h9")
+    out = tmp_path / "coco.json"
+    export_coco(db, tax, [DESKTOP], VIEW, str(out))
+    images = {img["id"]: img for img in _images(out)}
+    assert images[image_id(DESKTOP, 1, VIEW)]["verified"] is False
 
 
 def test_every_coco_annotation_carries_the_tier_and_the_confirmation(

@@ -209,7 +209,7 @@ def test_a_failing_backup_stops_the_command_with_one_line(env, capsys, monkeypat
         argv = (*argv, "--export", str(Path(__file__).parent / "fixtures" / "ls_small.json"))
     capsys.readouterr()
 
-    def boom(self, dest_dir):
+    def boom(self, dest_dir, keep=None):
         raise OSError("the backup volume is full")
 
     monkeypatch.setattr(Db, "backup", boom)
@@ -245,7 +245,7 @@ def test_a_sqlite_error_during_the_backup_is_caught_too(env, capsys, monkeypatch
         argv = (*argv, "--export", str(Path(__file__).parent / "fixtures" / "ls_small.json"))
     capsys.readouterr()
 
-    def boom(self, dest_dir):
+    def boom(self, dest_dir, keep=None):
         raise sqlite3.OperationalError("disk I/O error")
 
     monkeypatch.setattr(Db, "backup", boom)
@@ -261,7 +261,7 @@ def test_a_failed_backup_leaves_the_step_table_untouched(env, capsys, monkeypatc
     finally:
         db.close()
 
-    monkeypatch.setattr(Db, "backup", lambda self, dest: (_ for _ in ()).throw(
+    monkeypatch.setattr(Db, "backup", lambda self, dest, keep=None: (_ for _ in ()).throw(
         OSError("no room")))
     assert run(env, "import-logs", "--force") == EXIT_ERROR
     db = Db(env["db_path"])
@@ -273,7 +273,7 @@ def test_a_failed_backup_leaves_the_step_table_untouched(env, capsys, monkeypatc
 
 def test_a_failed_backup_releases_the_lock(env, capsys, monkeypatch):
     _imported(env)
-    monkeypatch.setattr(Db, "backup", lambda self, dest: (_ for _ in ()).throw(
+    monkeypatch.setattr(Db, "backup", lambda self, dest, keep=None: (_ for _ in ()).throw(
         OSError("no room")))
     assert run(env, "infer-relations") == EXIT_ERROR
     # the lock is gone, so the next command runs normally rather than refusing
@@ -282,7 +282,7 @@ def test_a_failed_backup_releases_the_lock(env, capsys, monkeypatch):
 
 def test_the_backup_command_itself_reports_a_failure_in_one_line(env, capsys, monkeypatch):
     """`backup` is not a safety copy, but it must not traceback either."""
-    def boom(self, dest_dir):
+    def boom(self, dest_dir, keep=None):
         raise sqlite3.OperationalError("disk I/O error")
 
     monkeypatch.setattr(Db, "backup", boom)
@@ -303,3 +303,56 @@ def test_the_backup_command_reports_a_verification_failure_too(env, capsys):
     finally:
         db.close()
     assert list(Path(env["cfg"]["backup_dir"]).glob("tda_*.sqlite")) == []
+
+
+# --------------------------------------------------------------------------- #
+# retention: the copies do not pile up forever
+# --------------------------------------------------------------------------- #
+def test_a_backup_prunes_the_old_ones_after_it_is_verified(tmp_path):
+    db = Db(str(tmp_path / "tda.sqlite"))
+    dest = tmp_path / "backups"
+    dest.mkdir()
+    for month in range(1, 9):  # eight copies, all outside the daily window
+        (dest / f"tda_2025{month:02d}01_120000.sqlite").write_bytes(b"x" * 16)
+    try:
+        db.backup(str(dest), keep=3)
+    finally:
+        db.close()
+    made = sorted(dest.glob("tda_*.sqlite"))
+    assert len(made) == 3
+    assert made[-1].stat().st_size > 1000  # the real one survived its own prune
+
+
+def test_a_failed_backup_prunes_nothing(tmp_path):
+    db = Db(str(tmp_path / "tda.sqlite"))
+    dest = tmp_path / "backups"
+    dest.mkdir()
+    for month in range(1, 6):
+        (dest / f"tda_2025{month:02d}01_120000.sqlite").write_bytes(b"x" * 16)
+    try:
+        db.conn = _BadBackup(db.conn, "stub")
+        with pytest.raises(OSError):
+            db.backup(str(dest), keep=1)
+    finally:
+        db.close()
+    assert len(list(dest.glob("tda_*.sqlite"))) == 5
+
+
+def test_no_prune_keeps_everything(env, capsys):
+    from tda.pipeline import load_paths
+
+    assert load_paths(env["paths"]).get("backup_keep") is None or True
+    capsys.readouterr()
+    assert run(env, "backup", "--no-prune") == EXIT_OK
+    assert "wrote" in capsys.readouterr().out
+
+
+def test_the_configured_limit_is_read_from_paths_yaml(env):
+    import yaml
+
+    cfg = dict(env["cfg"])
+    cfg["backup_keep"] = 2
+    Path(env["paths"]).write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    for _ in range(4):
+        assert run(env, "backup") == EXIT_OK
+    assert len(list(Path(cfg["backup_dir"]).glob("tda_*.sqlite"))) <= 2

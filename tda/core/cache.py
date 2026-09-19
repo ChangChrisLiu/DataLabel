@@ -33,11 +33,6 @@ import cv2
 import numpy as np
 
 from tda.core.cache_roi_detect import (  # re-exported: suggest_roi's two strategies
-    ROI_MAX_AREA_FRAC,
-    ROI_MIN_AREA_FRAC,
-    best_candidate,
-    board_mask,
-    box_plausibility,
     scan_bed_box,
     scan_bed_candidates,
     scan_chassis_box,
@@ -50,7 +45,7 @@ from tda.core.model import FrameKey
 
 __all__ = [
     "DbRoiLookup", "build_cache", "build_thumbs", "burst_metrics", "cache_path",
-    "choose_scan_image", "scan_bed_candidates", "scan_chassis_candidates",
+    "choose_scan_image", "full_frame", "scan_bed_candidates", "scan_chassis_candidates",
     "suggest_roi", "thumb_path",
 ]
 
@@ -210,14 +205,9 @@ def choose_scan_image(metrics: list[dict]) -> tuple[int, str]:
 # ---------------------------------------------------------------------------
 # ROI suggestion
 # ---------------------------------------------------------------------------
-CENTRAL_FRAC = 0.70  # fallback / non-scan views: central 70% box
-
-
-def _central_box(width: int, height: int) -> tuple[int, int, int, int]:
-    """The central :data:`CENTRAL_FRAC` box of a ``width`` x ``height`` image."""
-    bw, bh = int(round(width * CENTRAL_FRAC)), int(round(height * CENTRAL_FRAC))
-    x0, y0 = (width - bw) // 2, (height - bh) // 2
-    return (x0, y0, x0 + bw, y0 + bh)
+def full_frame(width: int, height: int) -> tuple[int, int, int, int]:
+    """The whole image as a box -- what "no crop" means in ROI coordinates."""
+    return (0, 0, int(width), int(height))
 
 
 def suggest_roi(img: np.ndarray, view: str) -> tuple[int, int, int, int]:
@@ -232,9 +222,14 @@ def suggest_roi(img: np.ndarray, view: str) -> tuple[int, int, int, int]:
     benefit.  The bed stage is the answer for a light or silver machine, where
     the dark one measures something that is not a chassis at all.
 
-    Any other view, and a scanner frame where neither convinces, falls back to
-    the central 70 % box.  The suggestion is always confirmed by a human
-    (spec 2.4).
+    Any other view, and a scanner frame where neither strategy convinces, gets
+    the **whole frame**: not a crop at all.  It used to be the central 70 % box,
+    on the theory that some crop beats none -- and on all four tape-less real
+    desktops that were looked at (D46, D47, D63, D66) it cut the machine in half,
+    because a chassis that covers its own tape square is exactly a chassis that
+    fills the frame.  A timeline picture of the whole bench is a nuisance; one
+    that hides the part being removed is a wrong answer.  The suggestion is
+    always confirmed by a human anyway (spec 2.4).
     """
     if img is None or getattr(img, "size", 0) == 0:
         raise ValueError("suggest_roi() needs a non-empty image")
@@ -244,7 +239,7 @@ def suggest_roi(img: np.ndarray, view: str) -> tuple[int, int, int, int]:
         for found in (scan_chassis_box(bgr), scan_bed_box(bgr)):
             if found is not None:
                 return found[0]
-    return _central_box(width, height)
+    return full_frame(width, height)
 
 
 # ---------------------------------------------------------------------------

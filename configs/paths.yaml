@@ -6,5 +6,10 @@ rs_root: "F:/PHD Data Backup/Desktop Dataset/Realsense Capture/Dataset Informati
 cache_dir: "D:/DataSet/cache"
 db_path: "D:/DataSet/annotations/tda.sqlite"
 backup_dir: "F:/PHD Data Backup/Desktop Dataset/TDA_backups"
+# How many copies backup_dir keeps. Every destructive command and every app exit
+# adds an ~18 MB one, so without a limit the drive fills up. The newest copy of
+# each of the last 14 days is kept on top of this (tda.core.db_backup), and no
+# file whose name this tool did not write is ever touched.
+backup_keep: 40
 raw_logs_dir: "D:/DataSet/raw_logs"
 weights_dir: "D:/DataSet/models/weights"

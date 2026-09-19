@@ -17,8 +17,8 @@ the scan-bed box in green and the chosen box in white.
 The last column of the table, ``bed?``, is what the bed strategy *would* have
 proposed for the desktops that fall back to the central box. It is printed for
 information only: nine machines cover the tape square entirely, their chassis
-fills the whole frame, and "no crop" - which the ROI cannot express - is the
-right answer for them. Deciding that is not this script's job.
+fills the whole frame, and "no crop" is the right answer for them - which is
+what ``suggest_roi`` returns for them now (pick ``none``, the full frame).
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from tda.core.cache import _central_box, suggest_roi
+from tda.core.cache import full_frame, suggest_roi
 from tda.core.cache_roi_detect import (
     BED_MIN_RECTANGULARITY,
     box_plausibility,
@@ -92,14 +92,14 @@ def measure(bgr) -> dict:
         "bed_raw": bed_all[0] if bed_all else None,
         "chosen": chosen,
         "pick": ("dark" if dark is not None and chosen == dark[0]
-                 else "bed" if bed is not None and chosen == bed[0] else "central"),
+                 else "bed" if bed is not None and chosen == bed[0] else "none"),
     }
 
 
 def old_box(bgr, m: dict) -> tuple:
     """What the *previous* build returned: the largest dark object, or central."""
     raw = m["dark_raw"]
-    return _central_box(m["w"], m["h"]) if raw is None else raw[0]
+    return full_frame(m["w"], m["h"]) if raw is None else raw[0]
 
 
 def main(argv=None) -> int:
@@ -129,7 +129,7 @@ def main(argv=None) -> int:
         rows.append((desktop, m["pick"]))
         # what the bed strategy would have said where nothing convinced
         would = ""
-        if m["pick"] == "central" and m["bed_raw"] is not None:
+        if m["pick"] == "none" and m["bed_raw"] is not None:
             box, rect = m["bed_raw"]
             would = (f"largest not-bed region {frac(box, m['w'], m['h']):.3f} "
                      f"of the frame, fill {rect:.2f} "

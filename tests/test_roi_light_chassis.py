@@ -26,7 +26,7 @@ import cv2
 import numpy as np
 import pytest
 
-from tda.core.cache import _central_box, suggest_roi
+from tda.core.cache import full_frame, suggest_roi
 from tda.core.cache_roi_detect import (
     BED_MIN_RECTANGULARITY,
     DARK_MIN_RECTANGULARITY,
@@ -110,7 +110,7 @@ def test_the_bed_stage_finds_the_light_chassis():
 def test_suggest_roi_prefers_the_bed_box_when_the_dark_one_is_a_speck():
     box = suggest_roi(_light_machine(), "scan")
     assert _contains(box, CHASSIS)
-    assert box != _central_box(SIZE, SIZE)
+    assert box != full_frame(SIZE, SIZE)
 
 
 def test_a_dark_chassis_still_wins_with_the_dark_stage():
@@ -122,14 +122,16 @@ def test_a_dark_chassis_still_wins_with_the_dark_stage():
     assert _contains(suggest_roi(img, "scan"), (250, 210, 760, 790))
 
 
-def test_a_bare_bed_suggests_nothing_and_falls_back():
-    assert suggest_roi(_bed(), "scan") == _central_box(SIZE, SIZE)
+def test_a_bare_bed_suggests_nothing_and_falls_back_to_the_whole_frame():
+    """A crop that cuts the machine is worse than no crop: the nine tape-less
+    real desktops all had their chassis clipped by the old central-70% box."""
+    assert suggest_roi(_bed(), "scan") == (0, 0, SIZE, SIZE)
 
 
-def test_a_frame_that_is_all_chassis_falls_back_rather_than_crop_nothing():
-    """A box covering 100% of the frame is not a crop; the central box is."""
+def test_a_frame_that_is_all_chassis_is_not_cropped_at_all():
+    """A box covering 100% of the frame is vetoed, and the answer is the frame."""
     img = np.full((SIZE, SIZE, 3), 60, np.uint8)
-    assert suggest_roi(img, "scan") == _central_box(SIZE, SIZE)
+    assert suggest_roi(img, "scan") == (0, 0, SIZE, SIZE)
 
 
 # --------------------------------------------------------------------------- #
@@ -217,7 +219,7 @@ def test_the_real_d64_no_longer_returns_the_motherboard():
 
     box = suggest_roi(img, "scan")
     assert box != old[0][0]
-    assert box != _central_box(width, height)
+    assert box != full_frame(width, height)
     assert 0.40 <= _frac(box, width) <= 0.55  # the chassis: ~46%
 
 
@@ -227,7 +229,7 @@ def test_the_real_d55_is_cropped_at_all():
     height, width = img.shape[:2]
     assert scan_chassis_candidates(img) == []
     box = suggest_roi(img, "scan")
-    assert box != _central_box(width, height)
+    assert box != full_frame(width, height)
     assert _frac(box, width) > 0.8
 
 
