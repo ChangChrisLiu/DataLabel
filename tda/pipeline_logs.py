@@ -55,6 +55,12 @@ OP_VIEW = "-"
 #: ``op_log.annotator`` of an implied instance -- this is machinery, not a person.
 IMPLIED_ANNOTATOR = "cli:import-logs"
 
+#: Why a desktop was refused. The two have different answers -- one wants
+#: ``--force-verified`` and the other ``--force-drop`` -- so the run-level line
+#: has to tell them apart rather than assume the older of the two.
+REFUSED_VERIFIED = "verified_frames"
+REFUSED_IMPLAUSIBLE = "implausible_shrink"
+
 __all__ = [
     "DesktopRun", "INFERRED_HEADING", "LogsRun", "add_implied_instances", "brand_model",
     "chassis_type", "desktop_fields", "expected_steps", "import_logs_into_db",
@@ -150,6 +156,9 @@ class DesktopRun:
     #: Notes the re-imported sheet had no matching row for (it was renumbered).
     ls_notes_dropped: int = 0
     brand: str = ""
+    #: For a ``refused`` run, which refusal it was: :data:`REFUSED_VERIFIED` or
+    #: :data:`REFUSED_IMPLAUSIBLE`. Empty for every other status.
+    reason: str = ""
     issues: list[str] = field(default_factory=list)
     #: ``"<key>.<field> = <value>"`` per relational field the heuristic filled.
     fills: list[str] = field(default_factory=list)
@@ -160,9 +169,11 @@ class DesktopRun:
     #: One line per instance a ``--force`` re-import removed because this sheet
     #: no longer produces it (see :func:`_plan_drops`).
     dropped: list[str] = field(default_factory=list)
-    #: Vanished instances kept because a human's work still names them. Counted
-    #: separately because they are the ones somebody has to act on.
+    #: Vanished instances kept rather than dropped, for any reason.
     kept_for_review: int = 0
+    #: Of those, the ones held by work of their own; the rest are held only
+    #: because a kept one names them, and need no decision of their own.
+    kept_carrying_work: int = 0
 
 
 def inferred_section(run: DesktopRun) -> list[str]:
@@ -207,8 +218,19 @@ class LogsRun:
 
     @property
     def refused(self) -> list[DesktopRun]:
-        """Desktops skipped because they carry verified frames (see ``--force-verified``)."""
+        """Desktops the run would not touch, for either of two reasons.
+
+        Each carries a ``reason``: :data:`REFUSED_VERIFIED` (frozen frames were
+        compiled from the step table this would replace -- ``--force-verified``)
+        or :data:`REFUSED_IMPLAUSIBLE` (the re-imported sheet would shrink the
+        desktop past believing -- ``--force-drop``). They want different answers,
+        so a caller listing them must group by ``reason``.
+        """
         return self._with("refused")
+
+    def refused_of(self, reason: str) -> list[DesktopRun]:
+        """The refused desktops of one :data:`REFUSED_VERIFIED`-style reason."""
+        return [r for r in self.refused if r.reason == reason]
 
     @property
     def with_ls_notes(self) -> list[int]:
@@ -412,6 +434,9 @@ class DropPlan:
 
     dropping: list[str] = field(default_factory=list)
     holding: dict[str, str] = field(default_factory=dict)
+    #: Of ``holding``, the keys held by work of their own rather than by another
+    #: kept key. Counted apart because they are the ones S1 has to look at.
+    carrying_work: int = 0
     refusal: str = ""
     #: Set when drops were found on a path that may not take them (no --force).
     deferred: int = 0
@@ -429,7 +454,7 @@ def _would_exist(db: Db, li: LogImport, tax: Taxonomy) -> set[str]:
     return set(li.instances) | {rec.key for rec in implied}
 
 
-def _hold_reasons(db: Db, desktop: int, vanished: set[str]) -> dict[str, str]:
+def _hold_reasons(db: Db, desktop: int, vanished: set[str]) -> tuple[dict[str, str], int]:
     """Which vanished keys stay, and why -- including the ones they point at.
 
     A key carrying a human's work stays. So does any *other* vanished key that a
@@ -439,6 +464,9 @@ def _hold_reasons(db: Db, desktop: int, vanished: set[str]) -> dict[str, str]:
     function exists to avoid. A surviving *imported* instance can never point at
     a vanished key -- the importer has just rewritten every one of its
     relational fields from the sheet -- so only the vanished set is walked.
+
+    Returns ``(key -> why, how many are held by work of their own)``. The second
+    number is the one a human has to act on; the rest are along for the ride.
     """
     stored = db.instances(desktop)
     holding = {
@@ -447,6 +475,7 @@ def _hold_reasons(db: Db, desktop: int, vanished: set[str]) -> dict[str, str]:
         for counts in [_references(db, desktop, key)]
         if counts
     }
+    carrying_work = len(holding)
     growing = True
     while growing:
         growing = False
@@ -457,7 +486,7 @@ def _hold_reasons(db: Db, desktop: int, vanished: set[str]) -> dict[str, str]:
                 if ref in vanished and ref not in holding:
                     holding[ref] = f"named by {key}.{field_name}, which is kept"
                     growing = True
-    return holding
+    return holding, carrying_work
 
 
 def _plan_drops(db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec],
@@ -493,30 +522,44 @@ def _plan_drops(db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec],
                 if key not in _would_exist(db, li, tax) and not is_provisional(key)}
     if not vanished:
         return DropPlan()
-    holding = _hold_reasons(db, li.desktop, vanished)
+    holding, carrying = _hold_reasons(db, li.desktop, vanished)
     dropping = sorted(vanished - set(holding))
     if not dropping:
-        return DropPlan(holding=holding)
+        return DropPlan(holding=holding, carrying_work=carrying)
     if not force:
-        return DropPlan(holding=holding, deferred=len(dropping))
+        return DropPlan(holding=holding, carrying_work=carrying,
+                        deferred=len(dropping))
     if not force_drop:
         refusal = _implausible(li, previous, stored, dropping)
         if refusal:
             return DropPlan(refusal=refusal)
-    return DropPlan(dropping=dropping, holding=holding)
+    return DropPlan(dropping=dropping, holding=holding, carrying_work=carrying)
 
 
 def _implausible(li: LogImport, previous: list[StepRec], stored: dict,
                  dropping: list[str]) -> str:
-    """Why this re-import is not believable, or ``""`` when it is."""
-    if not previous:  # a first import has nothing to lose
-        return ""
+    """Why this re-import is not believable, or ``""`` when it is.
+
+    The exemption is "there is nothing to lose", and that is a fact about the
+    *instances*, not about the step table. Keying it on ``previous`` alone
+    skipped all three checks on exactly the state the ``--force`` gate above was
+    written for -- steps gone, instances still there -- so a header-only sheet
+    could delete 36 of a desktop's 37 instances and exit 0. A desktop is exempt
+    only when it holds neither steps nor real instances.
+
+    The step-ratio check needs a previous step count to be a ratio of; the two
+    instance-count checks need only stored real instances, and run whenever
+    there are any.
+    """
     real = [key for key, rec in stored.items()
             if not is_provisional(key) and not is_implied(rec)]
+    if not previous and not real:  # a genuine first import: nothing to lose
+        return ""
+    drafts = sum(1 for key in stored if is_provisional(key))
     reasons = []
-    if len(li.steps) < MIN_STEP_RATIO * len(previous):
+    if previous and len(li.steps) < MIN_STEP_RATIO * len(previous):
         reasons.append(f"{len(li.steps)} steps against {len(previous)} before")
-    if len(dropping) > MAX_DROP_COUNT:
+    if real and len(dropping) > MAX_DROP_COUNT:
         reasons.append(f"{len(dropping)} instances would be dropped, more than "
                        f"{MAX_DROP_COUNT}")
     if real and len(dropping) > MAX_DROP_RATIO * len(real):
@@ -527,9 +570,10 @@ def _implausible(li: LogImport, previous: list[StepRec], stored: dict,
     shown = ", ".join(dropping[:REFUSAL_KEYS_SHOWN])
     more = (f" and {len(dropping) - REFUSAL_KEYS_SHOWN} more"
             if len(dropping) > REFUSAL_KEYS_SHOWN else "")
+    drafted = f" (+{drafts} Label Studio drafts)" if drafts else ""
     return (
         f"D{li.desktop:02d}: the re-imported sheet is not believable "
-        f"({'; '.join(reasons)}); {len(stored)} instances stored, "
+        f"({'; '.join(reasons)}); {len(real)} real instances stored{drafted}, "
         f"{len(li.instances)} in the sheet. Nothing was written. At risk: "
         f"{shown}{more}. Re-run with --force-drop if the sheet really is right."
     )
@@ -554,9 +598,16 @@ def _apply_drops(db: Db, li: LogImport, plan: DropPlan) -> tuple[list[str], list
             f"D{li.desktop:02d}: {plan.deferred} instances are no longer in the "
             f"sheet; re-run with --force to drop them"
         )
+    if not plan.dropping:
+        return dropped, issues
+    # one read of each table for the whole desktop: the loop below only ever
+    # removes rows, so re-reading per key would cost a query per drop to learn
+    # nothing the first read did not already say
+    stored = db.instances(li.desktop)
+    relations = [dict(row) for row in db.relations(li.desktop)]
     for key in plan.dropping:
-        rec = db.instances(li.desktop).get(key)
-        edges = [dict(row) for row in db.relations(li.desktop)
+        rec = stored.get(key)
+        edges = [row for row in relations
                  if key in (row["target"], row["blocker"])
                  and row["source"] == RULE_SOURCE]
         for row in edges:
@@ -668,7 +719,7 @@ def _verified_refusal(db: Db, desktop: int, frozen: int, log: Optional[Log]) -> 
             f"re-import would rewrite the step table underneath them. Refused, "
             f"nothing written - pass --force-verified to do it anyway")
     return DesktopRun(
-        desktop, "", "refused",
+        desktop, "", "refused", reason=REFUSED_VERIFIED,
         issues=[f"D{desktop:02d}: {frozen} verified frames; re-run with "
                 f"--force-verified to re-import anyway"],
     )
@@ -745,7 +796,8 @@ def _import_one(
     if plan.refusal:
         if log:
             log(f"[import-logs] refused: {plan.refusal}")
-        return DesktopRun(desktop, str(path), "refused", issues=[plan.refusal])
+        return DesktopRun(desktop, str(path), "refused",
+                          reason=REFUSED_IMPLAUSIBLE, issues=[plan.refusal])
     filled, issues = _apply_index(li.steps, index.get(desktop))
     sheet_id = meta.get("desktop_id")
     if sheet_id is not None and int(sheet_id) != desktop:
@@ -779,6 +831,7 @@ def _import_one(
         brand=str(li.meta.get("brand_model_raw") or ""),
         issues=list(li.issues) + issues, fills=fills, unresolved=unresolved,
         implied=implied, dropped=gone, kept_for_review=len(plan.holding),
+        kept_carrying_work=plan.carrying_work,
     )
 
 
