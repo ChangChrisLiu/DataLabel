@@ -173,3 +173,59 @@ def test_a_reused_instance_receives_no_verb_twice(tax):
     """The one-operation-per-instance invariant must stay quiet after a reuse."""
     li = synth(["Open Power Module", "Power module"], tax=tax)
     assert not any("INVARIANT" in text for text in li.issues)
+
+
+def test_a_failed_attempt_does_not_trip_the_one_verb_invariant(tax):
+    """D35/D36/D45: `failed remove` then `remove` is one part acted on once.
+
+    The invariant guards against two different parts being merged onto one key,
+    and an attempt that did not happen is not an operation -- so counting it
+    made the check cry wolf at exactly the three merges ruling A asked for.
+    """
+    li = synth(["Try to remove power module", "Power module"], tax=tax)
+    assert targets(li) == ["psu.01", "psu.01"]
+    assert not any("INVARIANT" in text for text in li.issues)
+
+
+def _checked(tax, ops) -> list[str]:
+    """Run the one-verb-per-instance guard over a hand-made history."""
+    from tda.core.logs import _Importer
+    from tda.core.model import InstanceRec
+
+    importer = _Importer(99, {}, tax)
+    importer.out.instances["psu.01"] = InstanceRec(key="psu.01", desktop=99, cls="psu")
+    for step, verb, result in ops:
+        importer.ledger.record("psu.01", step, verb, result)
+    importer._check_operations()
+    return [text for text in importer.out.issues if "INVARIANT" in text]
+
+
+def test_the_invariant_still_fires_for_two_successful_removes(tax):
+    """A real double-remove on one key can only mean two parts were merged."""
+    found = _checked(tax, [(3, "remove", "success"), (9, "remove", "success")])
+    assert len(found) == 1
+    assert "psu.01" in found[0] and "remove" in found[0]
+
+
+def test_the_invariant_ignores_an_attempt_that_did_not_happen(tax):
+    assert _checked(tax, [(3, "remove", "failed"), (9, "remove", "success")]) == []
+    assert _checked(tax, [(3, "remove", "failed"), (9, "remove", "failed")]) == []
+
+
+# --------------------------------------------------------------------------- #
+# ambiguity is reported, not silently declined
+# --------------------------------------------------------------------------- #
+def test_several_candidates_raise_an_issue_instead_of_going_quiet(tax):
+    """Declining is right; declining in silence is how a part grows unnoticed."""
+    li = synth(["Open Power Module", "Open Power Module", "Power module"], tax=tax)
+    assert targets(li) == ["psu.01", "psu.02", "psu.03"]
+    assert reuse_issues(li) == []
+    ambiguous = [t for t in li.issues if "candidates for an unnumbered remove" in t]
+    assert len(ambiguous) == 1
+    assert "psu.01" in ambiguous[0] and "psu.02" in ambiguous[0]
+    assert "left unmerged" in ambiguous[0]
+
+
+def test_no_candidates_says_nothing(tax):
+    li = synth(["Power module"], tax=tax)
+    assert not any("candidates for an unnumbered remove" in t for t in li.issues)

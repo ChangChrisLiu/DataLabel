@@ -44,8 +44,8 @@ from .log_identity import (
     instance_key,
     is_captive as _is_captive,
     merge_attrs as _merge_attrs,
-    physical_reuse,
     placeholder_key as _placeholder_key,
+    reuse_candidates,
 )
 from .model import ActionRec, InstanceRec, StepRec
 from .taxonomy import (
@@ -406,11 +406,19 @@ class _Importer:
         """
         if verb != "remove" or result != "success":
             return None
-        found = physical_reuse(self.ledger, cls, disc, attrs, self._state_of)
-        if found is None:
+        found = reuse_candidates(self.ledger, cls, disc, attrs, self._state_of)
+        if len(found) != 1:
+            if len(found) > 1:
+                # saying nothing here is how a sheet could quietly grow a part:
+                # the annotator sees one row and the draft holds several keys
+                self.issue(
+                    step,
+                    f"{len(found)} candidates for an unnumbered remove of {cls} "
+                    f"({', '.join(key for key, _last in found)}) - left unmerged",
+                )
             return None
-        key, last = found
-        self.issue(step, f"reuses {key}: {last} → {verb} (one physical part, not two)")
+        key, last = found[0]
+        self.issue(step, f"reuses {key}: {last} -> {verb} (one physical part, not two)")
         self._absorb(step, key, attrs)
         return key
 
@@ -459,10 +467,17 @@ class _Importer:
         merged two different parts, so it is reported loudly.  The ledger only
         holds the instances ``_instance`` created, so the implicit chassis --
         whose ``reorient`` legitimately repeats -- never reaches this check.
+
+        Only operations that **happened** count. An attempt that failed changed
+        nothing, so "failed remove at step 21, remove at step 42" is one part
+        acted on once -- and counting it made this cry wolf on D35, D36 and D45,
+        which are exactly the three merges the narrow reuse rule exists for.
         """
         for key, ops in self.ledger.ops().items():
             seen: dict[str, int] = {}
-            for step, verb, _result in ops:
+            for step, verb, result in ops:
+                if result != "success":
+                    continue
                 if verb in seen:
                     self.issue(
                         None,
