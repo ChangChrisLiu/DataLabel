@@ -27,9 +27,10 @@ from tda.core.truth_conflicts import (
     row_payload,
     row_values,
 )
-from tda.core.truth_fresh import digest_of
+from tda.core.truth_fresh import digest_of, hash_of_inputs
+from tda.core.truth_inputs import gather
 
-__all__ = ["BLOCKING_PROBLEMS", "VerifyMixin"]
+__all__ = ["BLOCKING_PROBLEMS", "VerifyMixin", "usable"]
 
 #: Problem prefixes that stop a frame from being verified (spec 3.3 step 3).
 #: Everything else -- ``bench_missing``, ``zorder_missing``, ``empty_visible``,
@@ -43,21 +44,29 @@ BENCH_MISSING = "bench_missing:"
 SYSTEM = "system"
 
 
-def _prepared_for(key: FrameKey, prepared):
-    """A caller's ``(inputs, compilation)`` pair, when it really is this frame's.
+def usable(prepared, key: FrameKey, inputs, compiler_version: str) -> bool:
+    """Is a caller's compilation still the one these inputs make?
 
-    Cheap paranoia around an optimisation: confirming the wrong frame's
-    compilation would freeze somebody else's pixels under this annotator's
-    name, so the pair is checked against the key rather than trusted.
+    The only question asked of a handed-over frame, and it is asked of the
+    *inputs just read from the database*, never of the caller: it is right when
+    the compilation's own ``input_hash`` is the hash those inputs produce
+    (:func:`tda.core.truth_fresh.hash_of_inputs`), and wrong otherwise.
+
+    Nothing about who handed it over, how recently, or what they believed at
+    the time takes part. A session's edit epoch is a fact about that session;
+    anything else writing to the database -- another process, a repair script,
+    a second window -- moves the inputs without touching it, and a confirmation
+    that trusted the epoch would then freeze pixels nobody is looking at under
+    a human's name, stamped with the hash of the inputs they had *before*, so
+    that no later pass would find anything to do either.
+
+    Gathering and hashing costs about a millisecond; the compilation it saves
+    costs a third of a second at scanner resolution.
     """
-    if not prepared:
-        return None
-    inputs, compiled = prepared
-    if inputs is None or compiled is None:
-        return None
-    if inputs.key != key or compiled.key != key:
-        return None
-    return inputs, compiled
+    if prepared is None or getattr(prepared, "key", None) != key:
+        return False
+    return prepared.input_hash == hash_of_inputs(inputs, prepared.layers,
+                                                 compiler_version)
 
 
 class VerifyMixin:
@@ -66,14 +75,15 @@ class VerifyMixin:
     def verify_frame(self, key: FrameKey, annotator: str, prepared=None) -> None:
         """Freeze every row of one frame after a human confirmed it (spec 4.2).
 
-        ``prepared`` is an ``(inputs, compilation)`` pair the caller already
-        has for **this** frame, from
-        :meth:`~tda.core.truth.TruthService.compile_with_inputs` or a
-        :meth:`~tda.core.truth.TruthService.refresh`. The session keeps the one
-        it made when the annotator arrived at the frame and hands it back here,
-        so pressing Space does not compile at 1600x1600 what was compiled on
-        arrival -- and confirms exactly the pixels that were on screen. It is
-        used only when it is for this frame; anything else is compiled afresh.
+        ``prepared`` is a :class:`~tda.core.compiler.CompiledFrame` the caller
+        already has for this frame -- the session keeps the one it compiled
+        when the annotator arrived, or the one the sweeper prefetched -- so that
+        pressing Space does not compile at 1600x1600 what was compiled a moment
+        ago. **Nothing about the caller is trusted.** The inputs are read from
+        the database here either way, and the handed-over frame is used only if
+        it is still the compilation those inputs make (:func:`usable`);
+        otherwise it is ignored and the frame is compiled. Passing a stale or
+        wrong frame can therefore cost a recompilation and nothing else.
 
         Raises :class:`ValueError` and writes no truth row in four cases, and
         the last two are the same rule twice: **a confirmation may never be how
@@ -115,7 +125,9 @@ class VerifyMixin:
                 + ", ".join(str(cid) for cid in open_ids)
                 + " are still open; settle them in the review queue first"
             )
-        inputs, compiled = _prepared_for(key, prepared) or self._compile(key)
+        inputs = gather(self.db, self.tax, key, cache_dir=self.cache_dir)
+        compiled = (prepared if usable(prepared, key, inputs, self.compiler_version)
+                    else self._compile_inputs(key, inputs))
         blocking = [p for p in compiled.problems if p.startswith(BLOCKING_PROBLEMS)]
         if blocking:
             raise ValueError(refused + ", ".join(blocking))

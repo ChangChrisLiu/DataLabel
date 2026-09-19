@@ -129,6 +129,14 @@ class CompiledFrame:
     problems: list[str]
     input_hash: str
     painted: dict[str, list[str]] = field(default_factory=dict)
+    #: The same order as the ``(instance, part)`` layer keys it was computed
+    #: from -- ``painted`` collapses a multi-part instance to one entry, and
+    #: that collapse cannot be undone. It is one of the ingredients of
+    #: :attr:`input_hash`, and the only one a reader cannot otherwise recover,
+    #: so a caller with a gathered input set can ask whether this compilation
+    #: is still the one they make (:func:`tda.core.truth_fresh.hash_of_inputs`)
+    #: instead of compiling to find out.
+    layers: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -542,6 +550,7 @@ def compile_frame(
         key=key,
         instances=compiled,
         painted={group: _instance_order(layers) for group, layers in painted.items()},
+        layers={group: list(layers) for group, layers in painted.items()},
         problems=problems,
         input_hash=input_hash(
             key=key,

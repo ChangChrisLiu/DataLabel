@@ -127,16 +127,6 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
         """Compile one frame from the database's current state (spec 3.3)."""
         return self._compile(key)[1]
 
-    def compile_with_inputs(self, key: FrameKey) -> tuple[FrameInputs, CompiledFrame]:
-        """The same, with the inputs it was made from.
-
-        For a caller that will hand the pair back -- the session keeps it for
-        the frame the annotator is looking at and gives it to
-        :meth:`verify_frame`, so pressing Space does not compile a frame that
-        was compiled on arrival.
-        """
-        return self._compile(key)
-
     def _compile(
         self, key: FrameKey, cache: Optional[InputCache] = None
     ) -> tuple[FrameInputs, CompiledFrame]:
@@ -170,16 +160,14 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
         """Bring one frame's truth rows up to date with the current inputs.
 
         Returns ``{"updated", "conflicts", "standing", "skipped", "problems",
-        "compiled", "inputs", "stale"}``: rows written (a deleted row counts as
+        "compiled", "stale"}``: rows written (a deleted row counts as
         written), disagreements this refresh actually **queued**, frozen rows
         in disagreement whether queued now or already open -- a sweep of fifty
         frames over one unresolved conflict reported fifty conflicts when it
         had queued none -- rows left alone, the compiler's
         problem list, the compilation the whole decision was made from --
         handed back so that a caller which also needs the frame does not
-        compile it a second time -- the inputs it was made from, for a caller
-        that will hand the pair to :meth:`verify_frame`, and whether the write
-        was abandoned.
+        compile it a second time -- and whether the write was abandoned.
 
         ``cache`` is :meth:`refresh_range`'s way of reading the step-independent
         inputs once; callers outside this module leave it out.
@@ -209,8 +197,7 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
             # disagree with either
             result = {"updated": 0, "conflicts": 0, "standing": 0,
                       "skipped": len(self.db.compiled(key)),
-                      "problems": [], "compiled": None, "inputs": inputs,
-                      "stale": False}
+                      "problems": [], "compiled": None, "stale": False}
             if want_compiled:
                 result["compiled"] = self._compile_inputs(key, inputs)
             return result
@@ -218,10 +205,8 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
         # whole keyframe table again, which is most of a batch pass's time
         compiled = self._compile_inputs(key, inputs)  # no transaction: pixels only
         with self.db.transaction():
-            result = self._write_refresh(key, compiled, guard, digest,
-                                         inputs.frame_overrides)
-        result["inputs"] = inputs
-        return result
+            return self._write_refresh(key, compiled, guard, digest,
+                                       inputs.frame_overrides)
 
     def _write_refresh(self, key: FrameKey, compiled: CompiledFrame,
                        guard: Optional[str], digest: str,

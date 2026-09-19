@@ -14,6 +14,8 @@ of them run on the worker's thread; Qt queues them here.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 from PySide6.QtCore import QCoreApplication
 
@@ -41,24 +43,23 @@ class TruthCacheMixin:
         hit = self._compiled.get(key.step)
         if hit is not None and hit[0] == self._epoch:
             return hit[1]
-        inputs, compiled = self.truth.compile_with_inputs(key)
-        self._keep_compiled(key.step, self._epoch, compiled, inputs)
+        compiled = self.truth.compile(key)
+        self._keep_compiled(key.step, self._epoch, compiled)
         return compiled
 
-    def prepared(self):
-        """``(inputs, compilation)`` for the current frame, or ``None``.
+    def prepared(self) -> Optional[CompiledFrame]:
+        """The compilation this session is holding for the current frame.
 
-        What :meth:`~tda.core.truth.TruthService.verify_frame` may be given
-        instead of compiling the frame again: the pair this session made when
-        the annotator arrived, still describing the inputs of this edit epoch.
-        ``None`` whenever anything about that is uncertain -- a different epoch,
-        a frame compiled by a path that did not keep the inputs -- and then the
-        truth service compiles it itself.
+        Offered to :meth:`~tda.core.truth.TruthService.verify_frame` so that
+        Space does not compile what arriving already compiled -- including the
+        frame the sweeper prefetched, which in reverse-order annotation is
+        every frame. Whether it is still the right answer is not decided here:
+        the truth service re-reads the inputs and checks the compilation
+        against them, so the worst an out-of-date offer can do is cost a
+        recompilation.
         """
         hit = self._compiled.get(self.current().step)
-        if hit is None or hit[0] != self._epoch or hit[2] is None:
-            return None
-        return (hit[2], hit[1])
+        return None if hit is None else hit[1]
 
     def _compile_on_visit(self) -> None:
         """Bring the frame just opened up to date in the truth table (spec 3.4).
@@ -83,20 +84,13 @@ class TruthCacheMixin:
         stats = self.truth.refresh(key, want_compiled=True)
         self.review.problems[key.step] = list(stats["problems"])
         self.review.invalidate()
-        self._keep_compiled(key.step, self._epoch, stats["compiled"],
-                            stats.get("inputs"))
+        self._keep_compiled(key.step, self._epoch, stats["compiled"])
 
-    def _keep_compiled(self, step: int, epoch: int, compiled: CompiledFrame,
-                       inputs=None) -> None:
-        """Remember one compilation, the inputs it came from, and its problems.
-
-        The inputs travel with it so that a confirmation can reuse the pair
-        (:meth:`prepared`); they are ``None`` when the compilation came from
-        somewhere that did not keep them, which only costs a recompilation.
-        """
+    def _keep_compiled(self, step: int, epoch: int, compiled: CompiledFrame) -> None:
+        """Remember one compilation and its problems."""
         if compiled is None:  # the refresh found nothing to do and made no frame
             return
-        self._compiled[int(step)] = (int(epoch), compiled, inputs)
+        self._compiled[int(step)] = (int(epoch), compiled)
         self.review.problems[int(step)] = list(compiled.problems)
         while len(self._compiled) > COMPILED_CACHE_SIZE:
             self._compiled.pop(next(iter(self._compiled)))

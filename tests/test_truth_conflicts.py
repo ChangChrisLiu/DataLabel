@@ -530,6 +530,88 @@ def test_verify_frame_still_writes_the_auto_rows_and_the_new_instances(scene: Sc
     assert scene.row(2, PSU)["verified_by"] == "lin"  # the first confirmation stands
 
 
+# --------------------------------------------------------------------------- #
+# the handed-over compilation has to prove itself
+# --------------------------------------------------------------------------- #
+def _count_compiles(monkeypatch) -> list:
+    """Record every call to the pixel compiler, wherever it is reached from."""
+    import tda.core.truth as truth_mod
+
+    calls: list = []
+    real = truth_mod.compile_frame
+    monkeypatch.setattr(truth_mod, "compile_frame",
+                        lambda *a, **k: (calls.append(a[0]), real(*a, **k))[1])
+    return calls
+
+
+def test_a_handed_over_compilation_the_inputs_have_overtaken_is_not_used(
+    scene: Scene, monkeypatch
+):
+    """The session's epoch is the session's; the truth table proves it itself.
+
+    Arrive at a frame (the session compiles it), let anything outside that
+    session move a keyframe, then press Space: the handed-over compilation
+    describes pixels nobody is looking at any more, and freezing it would put a
+    human's name on them -- with the *old* ``input_hash``, so the next refresh
+    would see nothing to do either.
+    """
+    scene.refresh_all()
+    stale = scene.svc.compile(scene.key(2))
+    replace_parts(scene, scene.psu_kf,
+                  [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
+    fresh = scene.svc.compile(scene.key(2))
+    assert fresh.input_hash != stale.input_hash
+
+    scene.svc.verify_frame(scene.key(2), "lin", prepared=stale)
+
+    row = scene.row(2, PSU)
+    assert row["input_hash"] == fresh.input_hash
+    assert masks.bbox(masks.decode_rle(row["visible_rle"])) == (10, 10, 50, 34)
+    assert scene.db.frame_digest(scene.key(2))["digest"] == \
+        scene.svc.inputs_digest(scene.key(2))
+    out = scene.svc.refresh(scene.key(2))
+    assert (out["conflicts"], out["standing"], out["updated"]) == (0, 0, 0)
+
+
+def test_a_fresh_handed_over_compilation_is_not_compiled_again(
+    scene: Scene, monkeypatch
+):
+    scene.refresh_all()
+    ready = scene.svc.compile(scene.key(2))
+    calls = _count_compiles(monkeypatch)
+
+    scene.svc.verify_frame(scene.key(2), "lin", prepared=ready)
+
+    assert calls == []  # the inputs were gathered and hashed, never compiled
+    assert scene.row(2, PSU)["input_hash"] == ready.input_hash
+
+
+def test_confirming_with_a_handed_over_frame_writes_what_a_fresh_one_would(
+    db: Db, tmp_db_path: str
+):
+    """Byte for byte: the optimisation may not change a single stored value."""
+    from tda.core.db import Db as Database
+
+    handed = build_scene(db)
+    handed.refresh_all()
+    handed.svc.verify_frame(handed.key(2), "lin",
+                            prepared=handed.svc.compile(handed.key(2)))
+
+    other = Database(tmp_db_path + ".plain")
+    try:
+        plain = build_scene(other)
+        plain.refresh_all()
+        plain.svc.verify_frame(plain.key(2), "lin")
+        left = {k: dict(v) for k, v in handed.rows(2).items()}
+        right = {k: dict(v) for k, v in plain.rows(2).items()}
+        for rows in (left, right):
+            for row in rows.values():
+                row.pop("verified_at", None)  # a clock, not a value
+        assert left == right
+    finally:
+        other.close()
+
+
 def test_verify_frame_still_drops_an_auto_row_the_inputs_lost(scene: Scene):
     """Only a frozen row is a signature; an ``auto`` row is a cache."""
     scene.refresh_all()
