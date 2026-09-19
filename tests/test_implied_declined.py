@@ -126,6 +126,82 @@ def test_deleting_the_implied_board_hands_the_references_back(env):
         db.close()
 
 
+def test_only_socket_host_goes_back_to_the_class_name(env):
+    """``socket_host`` has a documented placeholder state; the others do not.
+
+    ``fastens`` and ``parent`` are filled by the heuristic *only when blank*, so
+    leaving the class name in them would make them permanently coarse -- and a
+    captive screw whose ``parent`` reads "motherboard" is one stage S1 stops
+    asking about.
+    """
+    _imported(env)
+    db = open_db(env)
+    try:
+        db.upsert_instance(InstanceRec(
+            "screw.motherboard.09", 63, "screw",
+            attrs={"role": "motherboard", "captive": True},
+            fastens=BOARD, parent=BOARD, mounted_on=BOARD, attached=True,
+        ))
+    finally:
+        db.close()
+
+    _delete_board(env)
+    db = open_db(env)
+    try:
+        screw = db.instances(63)["screw.motherboard.09"]
+        assert screw.fastens is None
+        assert screw.parent is None
+        assert screw.mounted_on is None
+        hosts = {r.socket_host for r in db.instances(63).values() if r.cls == "connector"}
+        assert "motherboard" in hosts  # the one field with a placeholder state
+    finally:
+        db.close()
+
+
+def test_a_round_trip_narrows_every_field_again(env):
+    """decline -> reset -> every relation points at the instance once more."""
+    _imported(env)
+    db = open_db(env)
+    try:
+        db.upsert_instance(InstanceRec(
+            "screw.motherboard.09", 63, "screw",
+            attrs={"role": "motherboard", "captive": True},
+            fastens=BOARD, parent=BOARD, attached=True,
+        ))
+    finally:
+        db.close()
+
+    _delete_board(env)
+    assert run(env, "infer-relations", "--add-implied", "--reset-declined",
+               "--desktops", "63") == EXIT_OK
+    db = open_db(env)
+    try:
+        screw = db.instances(63)["screw.motherboard.09"]
+        assert screw.fastens == BOARD
+        assert screw.parent == BOARD
+        hosts = {r.socket_host for r in db.instances(63).values() if r.cls == "connector"}
+        assert BOARD in hosts
+        assert "motherboard" not in hosts  # every placeholder narrowed again
+    finally:
+        db.close()
+
+
+def test_a_failed_desktop_does_not_forget_the_refusal(env, monkeypatch):
+    """``--reset-declined`` rides in the desktop's own transaction."""
+    import tda.cli_relations as CR
+
+    _imported(env)
+    _delete_board(env)
+    monkeypatch.setattr(CR, "infer_relational_fields",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    run(env, "infer-relations", "--add-implied", "--reset-declined", "--desktops", "63")
+    db = open_db(env)
+    try:
+        assert db.declined_implied(63) == {"motherboard"}
+    finally:
+        db.close()
+
+
 def test_a_failed_delete_declines_nothing(env, monkeypatch):
     """The marker rides in the delete's own transaction, so it rolls back too."""
     _imported(env)

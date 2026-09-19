@@ -56,6 +56,16 @@ def check_deletable(data: "StepTableData", db: Db, key: str) -> None:
         raise EditError(f"{key!r} is still referenced by {named}")
 
 
+#: The one relational field with a documented *placeholder* state: the log
+#: importer writes the bare class name into it when the step says which part
+#: carries the socket but not which one, and stage S1 narrows it down. Reverting
+#: any other field to a class name would make it permanently coarse -- the
+#: heuristic fills ``fastens``/``parent`` only when they are blank -- and would
+#: silence the "captive screw without parent" question with an answer that is
+#: not one.
+REVERTIBLE_FIELD = "socket_host"
+
+
 def stored_neighbours(
     db: Db, desktop: int, key: str, revert_to: Optional[str] = None
 ) -> list[InstanceRec]:
@@ -65,13 +75,14 @@ def stored_neighbours(
     flush whatever else the annotator has changed on those rows but not applied
     yet.
 
-    ``revert_to`` is the taxonomy *class* to leave in the field instead of
-    nothing. It is what deleting an **implied** instance does: the importer had
-    written ``socket_host = "motherboard"`` there, and the implied board was
-    what resolved it to a key. Clearing it to ``None`` instead would quietly
-    throw that reference away -- the desktop would no longer look like one that
-    is missing a motherboard, and re-creating the instance later
-    (``--reset-declined``) would find nothing to hang on.
+    ``revert_to`` is the taxonomy *class* to leave in :data:`REVERTIBLE_FIELD`
+    instead of nothing, and it is what deleting an **implied** instance does:
+    the importer had written ``socket_host = "motherboard"`` there, and the
+    implied board was only what resolved it to a key. Clearing it would throw
+    that reference away -- the desktop would stop looking like one that is
+    missing a motherboard, and re-creating the instance later
+    (``--reset-declined``) would find nothing to hang on. Every other field is
+    cleared, exactly as an ordinary delete clears it.
     """
     cleaned: list[InstanceRec] = []
     for other_key, stored in db.instances(desktop).items():
@@ -79,7 +90,7 @@ def stored_neighbours(
             continue
         for name in RELATION_FIELDS:
             if getattr(stored, name) == key:
-                setattr(stored, name, revert_to)
+                setattr(stored, name, revert_to if name == REVERTIBLE_FIELD else None)
         cleaned.append(stored)
     return cleaned
 
@@ -115,5 +126,6 @@ def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
     for other in data.instances.values():
         for name in RELATION_FIELDS:
             if getattr(other, name) == key:
-                setattr(other, name, implied_cls)
+                setattr(other, name,
+                        implied_cls if name == REVERTIBLE_FIELD else None)
     data.refresh_issues()
