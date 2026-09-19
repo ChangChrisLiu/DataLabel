@@ -1,0 +1,82 @@
+# Four chassis corners per (desktop, view), clicked by hand on the frames
+# rendered by make_corner_sheets.py. Coordinates are pixels in the view's
+# NATIVE resolution (scan 1600x1600, oak1/oak2 4032x3040, rs 1280x720) -- the
+# same frame tda.core.ls_import rasterises the Label Studio drafts into.
+#
+# TWO PLANES ARE CLICKED, because M2 asks which one a hint should ride on:
+#   rim   -- the four outer corners of the CHASSIS OPENING RIM, i.e. the lip the
+#            side cover seats on. This is the top of the case.
+#   floor -- the four corners of the MOTHERBOARD PCB, which lies on the chassis
+#            floor. Chosen over the bare sheet-metal floor because the PCB edge
+#            is a crisp, high-contrast straight line in every view, and because
+#            it is the plane most annotated parts actually sit on.
+# A homography is exact for one plane only; the gap between these two is the
+# parallax M2 measures.
+#
+# NAMING: s_tl / s_tr / s_br / s_bl name the corner by where it appears in that
+# desktop's SCAN frame. In the other views the SAME PHYSICAL corner is clicked,
+# found through the rotation between views that the M0 overlays establish from
+# where the annotated parts sit:
+#     rs   = scan orientation
+#     oak1 = scan rotated 90 degrees anticlockwise
+#     oak2 = scan rotated 180 degrees
+# (verified per desktop on the M0 overlays: the PSU, the chassis screw cover and
+# the CPU socket all move as that rotation predicts.)
+#
+# STEP: every view is clicked on step 41, the last step on which the motherboard
+# is still in the chassis in all three desktops -- late enough that the chassis
+# is empty and the rim is unobstructed, early enough that the floor plane still
+# has the PCB to click. m1a_pose_check.py found no camera or chassis bump inside
+# any sequence (largest sustained displacement 16 px on a 4032 px OAK frame, at
+# D24 step 9), so one segment per (desktop, view) covers the whole sequence and
+# one set of clicks is valid for every step.
+#
+# CLICK UNCERTAINTY: read off labelled grids at roughly one screen pixel per
+# native pixel. My own residual is about +/-10 px on scan and rs and +/-25 px on
+# the 12 MP OAK frames; M3 brackets exactly this by jittering the clicks.
+
+meta:
+  clicked_by: "claude (automated probe), by eye on make_corner_sheets.py output"
+  step: 41
+  rim_plane: "chassis opening rim (top of case)"
+  floor_plane: "motherboard PCB outline (chassis floor)"
+
+views:
+  # --- desktop 13 (Dell small-form-factor, board on the scan's right half) ---
+  "13/scan":
+    rim:   {s_tl: [646, 306],  s_tr: [1390, 297],  s_br: [1381, 1072], s_bl: [648, 1077]}
+    floor: {s_tl: [790, 365],  s_tr: [1345, 365],  s_br: [1345, 1030], s_bl: [790, 1030]}
+  "13/oak1":
+    rim:   {s_tl: [1492, 1690], s_tr: [1433, 678], s_br: [2783, 688],  s_bl: [2770, 1655]}
+    floor: {s_tl: [1610, 1620], s_tr: [1605, 840], s_br: [2554, 845],  s_bl: [2554, 1613]}
+  "13/oak2":
+    rim:   {s_tl: [2473, 1903], s_tr: [1559, 1914], s_br: [1567, 1044], s_bl: [2473, 1054]}
+    floor: {s_tl: [2253, 1850], s_tr: [1608, 1855], s_br: [1613, 1250], s_bl: [2237, 1237]}
+  "13/rs":
+    rim:   {s_tl: [660, 288],  s_tr: [990, 258],  s_br: [1010, 596], s_bl: [655, 604]}
+    floor: {s_tl: [765, 324],  s_tr: [972, 311],  s_br: [978, 554],  s_bl: [768, 558]}
+
+  # --- desktop 24 (larger desktop, drive cage below the board in the scan) ---
+  "24/scan":
+    rim:   {s_tl: [325, 224],  s_tr: [1337, 213],  s_br: [1337, 1063], s_bl: [328, 1069]}
+    floor: {s_tl: [429, 245],  s_tr: [1049, 238],  s_br: [1053, 777],  s_bl: [432, 781]}
+  "24/oak1":
+    rim:   {s_tl: [1202, 1903], s_tr: [1269, 162], s_br: [3016, 302],  s_bl: [3011, 1914]}
+    floor: {s_tl: [1290, 1850], s_tr: [1323, 820], s_br: [2226, 845],  s_bl: [2245, 1882]}
+  "24/oak2":
+    rim:   {s_tl: [2890, 2030], s_tr: [1538, 2016], s_br: [1554, 1043], s_bl: [2935, 1081]}
+    floor: {s_tl: [2755, 2030], s_tr: [1688, 2016], s_br: [1720, 1474], s_bl: [2774, 1506]}
+  "24/rs":
+    rim:   {s_tl: [548, 244],  s_tr: [992, 238],  s_br: [1005, 562], s_bl: [562, 578]}
+    floor: {s_tl: [568, 286],  s_tr: [965, 271],  s_br: [968, 471],  s_bl: [572, 478]}
+
+  # --- desktop 33 (same family as 24) ---
+  "33/scan":
+    rim:   {s_tl: [385, 171],  s_tr: [1458, 166],  s_br: [1456, 1050], s_bl: [383, 1052]}
+    floor: {s_tl: [465, 186],  s_tr: [1155, 180],  s_br: [1158, 724],  s_bl: [468, 730]}
+  "33/oak1":
+    rim:   {s_tl: [1151, 1885], s_tr: [1215, 108], s_br: [2940, 178],  s_bl: [2917, 1900]}
+    floor: {s_tl: [1215, 1775], s_tr: [1231, 785], s_br: [2237, 820],  s_bl: [2245, 1775]}
+  "33/rs":
+    rim:   {s_tl: [556, 236],  s_tr: [1002, 228], s_br: [1008, 560], s_bl: [566, 550]}
+    floor: {s_tl: [585, 281],  s_tr: [948, 266],  s_br: [950, 466],  s_bl: [588, 474]}
