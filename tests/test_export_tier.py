@@ -32,7 +32,7 @@ from test_export import (  # noqa: F401  (re-used fixtures and constants)
 from tda.core.export import export_coco, export_vlm
 from tda.core.export.coco import image_id, view_tier
 from tda.core.masks import encode_rle
-from tda.core.model import FrameKey, InstanceRec
+from tda.core.model import FrameKey, InstanceRec, ShapeKeyframe, ShapePart
 from tda.core.taxonomy import load_taxonomy
 
 
@@ -118,8 +118,18 @@ def test_an_answer_with_no_evidence_rows_follows_its_frame():
 def test_a_counting_answer_of_zero_is_exported_as_verified(db, tax, tmp_path: Path):
     """The whole frame is signed off; the count of visible screws is 0."""
     key = FrameKey(DESKTOP, 2, VIEW)
-    db.put_compiled(key, SCREW, encode_rle(PSU_MASK), 0.0, "visible", "in_chassis",
-                    "verified", "h2", verified_by="tester")
+    # The screw is out of the chassis by step 2, so its frozen row is the bench
+    # rectangle the keyframe draws -- anything else would be a standing conflict
+    # with what the state machine compiles, and an export refuses those.
+    box = [2.0, 3.0, 12.0, 15.0]
+    db.add_keyframe(ShapeKeyframe(
+        id=None, instance=SCREW, desktop=DESKTOP, view=VIEW, pose_segment=1,
+        anchor_step=2, placement="on_bench", geom_type="box",
+        parts=[ShapePart("main", box=tuple(box))],
+    ))
+    db.put_compiled(key, SCREW, None, 0.0, "visible", "on_bench",
+                    "verified", "h2", verified_by="tester",
+                    geom_type="box", box=box)
     db.upsert_frame(key, "F:/scan/019/002/P_0.png", {"hw": [64, 64]},
                     "2025-05-31T10:00:00", flags={"review_status": "verified"})
     out = tmp_path / "vlm.jsonl"

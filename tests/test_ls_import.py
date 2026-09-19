@@ -625,6 +625,20 @@ def test_purge_all_clears_every_desktop(tmp_db_path):
     db.close()
 
 
+def test_a_reimport_queues_a_recheck_for_every_frozen_frame_it_touched(tmp_db_path):
+    """Purging draft shapes changes compiler inputs of frames a human froze."""
+    db = Db(tmp_db_path)
+    import_ls_export(str(FIXTURE), db, load_taxonomy(), {})
+    db.set_frame_flags(FrameKey(19, 7, "scan"), review_status="verified")
+    db.set_frame_flags(FrameKey(19, 8, "scan"), review_status="unlabeled")
+    db.clear_recheck(19, "scan", 7)
+
+    import_ls_export(str(FIXTURE), db, load_taxonomy(), {})
+
+    assert db.rechecks(19, "scan") == [7]
+    db.close()
+
+
 def test_purge_counts_report_what_was_actually_deleted(tmp_db_path):
     db = Db(tmp_db_path)
     first = import_ls_export(str(FIXTURE), db, load_taxonomy(), {})

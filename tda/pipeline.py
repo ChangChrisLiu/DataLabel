@@ -28,6 +28,7 @@ from tda.core.db_backup import DEFAULT_KEEP
 from tda.core.db_status import VIEW_COUNTERS
 from tda.core.index import DesktopIndex, load_index
 from tda.core.model import VIEWS, StepType
+from tda.core.truth_inputs import TRUTH_AUX_KEYS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PATHS_PATH = "configs/paths.yaml"
@@ -259,6 +260,23 @@ def load_index_into_db(
     return counts
 
 
+def _merged_aux(db: Db, ff) -> dict:
+    """The index's ``aux`` for one frame, with the truth table's keys kept.
+
+    ``aux`` has two writers. The index puts there what it found on the source
+    drive; :func:`tda.core.truth_inputs.frame_hw` puts back the image size it
+    measured, where it measured it, and the cached copy it read
+    (:data:`~tda.core.truth_inputs.TRUTH_AUX_KEYS`). Re-building the index
+    replaced the whole object, so every measurement was thrown away and the next
+    compile went to the source drive again -- and inferred the view's nominal
+    size instead whenever that drive was detached, which silently changes the
+    canvas every compiled mask is in.
+    """
+    held = (db.get_frame(ff.key) or {}).get("aux") or {}
+    kept = {k: held[k] for k in TRUTH_AUX_KEYS if k in held}
+    return dict(ff.aux or {}) | kept
+
+
 def _load_one(
     db: Db, desktop: int, di: DesktopIndex, counts: dict, log: Optional[Log]
 ) -> None:
@@ -269,7 +287,8 @@ def _load_one(
         )
         frames = di.frames
         for ff in frames.values():
-            db.upsert_frame(ff.key, ff.path, ff.aux, ff.ts, {"missing": False})
+            db.upsert_frame(ff.key, ff.path, _merged_aux(db, ff), ff.ts,
+                            {"missing": False})
         for key in di.missing:
             db.upsert_frame(key, None, {}, None, {"missing": True})
         if di.n_steps < 1:

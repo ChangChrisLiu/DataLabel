@@ -26,6 +26,7 @@ from typing import Optional
 
 import cv2
 
+from tda.core.cache import cached_image_path
 from tda.core.db import Db
 from tda.core.model import (
     FrameKey,
@@ -38,6 +39,8 @@ from tda.core.model import (
     Similarity,
     StateEvent,
     ZOrderRec,
+    is_provisional,
+    step_is_annotatable,
 )
 from tda.core.states import (
     FrameState,
@@ -52,6 +55,7 @@ __all__ = [
     "annotatable_steps",
     "HW_INFERRED",
     "HW_MEASURED",
+    "TRUTH_AUX_KEYS",
     "VIEW_HW",
     "FrameInputs",
     "InputCache",
@@ -81,6 +85,16 @@ VIEW_HW: dict[str, tuple[int, int]] = {
 HW_INFERRED = "inferred"
 HW_MEASURED = "measured"
 
+#: The ``aux`` keys the truth table owns rather than the index.
+#:
+#: ``aux`` has two writers: :func:`tda.pipeline.load_index_into_db` puts what it
+#: found on the source drive there, and :func:`frame_hw` puts back the size it
+#: measured and where it measured it. Re-building the index used to replace the
+#: whole object, so every measurement was thrown away and the next compile went
+#: to the source drive again -- and produced a different canvas whenever that
+#: drive was detached. These keys survive a re-load.
+TRUTH_AUX_KEYS = ("hw", "hw_source", "cache_path")
+
 ON_BENCH = Placement.ON_BENCH.value
 
 
@@ -88,15 +102,27 @@ ON_BENCH = Placement.ON_BENCH.value
 # image size
 # --------------------------------------------------------------------------- #
 def annotatable_steps(db: Db, desktop: int, view: str, steps) -> list[int]:
-    """The subset of ``steps`` that has an image to compile against.
+    """The subset of ``steps`` this view is actually asked to annotate.
 
-    A logical step whose frame row is absent, or flagged ``missing``, carries no
-    canvas: compiling it would fall back to the view's nominal size and produce
-    masks in the wrong coordinates. The state machine and the shape anchors
-    still run through it (spec 4.2, 缺帧处理), only the truth table skips it.
+    Two gates, and both leave the step where it is -- the state machine and the
+    shape anchors still run through it (spec 4.2, 缺帧处理):
+
+    * a logical step whose frame row is absent, or flagged ``missing``, carries
+      no canvas: compiling it would fall back to the view's nominal size and
+      produce masks in the wrong coordinates;
+    * a step the step table types ``ignore`` is no moment of the teardown
+      (:func:`tda.core.model.step_is_annotatable`). The exports have always
+      dropped it; compiling and confirming it first only produced work with
+      nowhere to go.
     """
+    wanted = sorted({int(s) for s in steps})
+    if not wanted:
+        return []
+    types = {rec.step: rec.step_type for rec in db.steps(desktop)}
     out = []
-    for step in sorted({int(s) for s in steps}):
+    for step in wanted:
+        if not step_is_annotatable(types.get(step)):
+            continue
         row = db.get_frame(FrameKey(desktop, step, view))
         if row is not None and not row.get("missing"):
             out.append(step)
@@ -134,45 +160,70 @@ def _read_hw(row: Optional[dict]) -> Optional[tuple[int, int]]:
     return None
 
 
-def _image_path(row: Optional[dict]) -> Optional[str]:
-    """Where this frame's pixels are: the cached copy, else the frame's own path."""
-    if not row:
-        return None
-    aux = row.get("aux") or {}
-    for candidate in (aux.get("cache_path"), row.get("path")):
-        if candidate:
-            return str(candidate)
+def _image_path(row: Optional[dict], key: FrameKey,
+                cache_dir: Optional[str]) -> Optional[str]:
+    """The first of this frame's pixels that is actually there.
+
+    The local cache first (:func:`tda.core.cache.cached_image_path`, the same
+    convention the canvas' image cache follows), then a ``cache_path`` a caller
+    recorded on the row, and only then the frame's own path -- which is on the
+    read-only source drive. That order is the point: measuring the size used to
+    decode a 12 MP still off F: for every frame of a view on its first compile,
+    and to fall back to the view's nominal size whenever F: was detached.
+    """
+    aux = (row or {}).get("aux") or {}
+    for candidate in (cached_image_path(cache_dir, key),
+                      aux.get("cache_path"),
+                      (row or {}).get("path")):
+        if not candidate:
+            continue
+        try:
+            if Path(str(candidate)).exists():
+                return str(candidate)
+        except (OSError, ValueError):
+            continue
     return None
 
 
-def _measure_hw(row: Optional[dict]) -> Optional[tuple[int, int]]:
-    """``(H, W)`` read off the image file, or ``None`` when there is none to read."""
-    path = _image_path(row)
+def _measure_hw(row: Optional[dict], key: FrameKey, cache_dir: Optional[str]
+                ) -> Optional[tuple[tuple[int, int], str]]:
+    """``((H, W), path)`` read off the image file, or ``None`` when there is none."""
+    path = _image_path(row, key, cache_dir)
     if not path:
         return None
     try:
-        if not Path(path).exists():
-            return None
         image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     except (OSError, ValueError):
         return None
     if image is None or getattr(image, "ndim", 0) < 2:
         return None
     height, width = (int(v) for v in image.shape[:2])
-    return (height, width) if height > 0 and width > 0 else None
+    return ((height, width), path) if height > 0 and width > 0 else None
 
 
 def _store_hw(
-    db: Db, key: FrameKey, row: Optional[dict], hw: tuple[int, int], source: str
+    db: Db, key: FrameKey, row: Optional[dict], hw: tuple[int, int], source: str,
+    measured_from: Optional[str] = None,
 ) -> None:
-    """Write a size and where it came from onto the frame row, keeping path/ts."""
+    """Write a size, where it came from and which file it was read off.
+
+    ``cache_path`` is the file the measurement was actually made on, which is
+    the only thing that makes ``hw_source="measured"`` auditable: a size that
+    does not match the image somebody is looking at is otherwise unattributable.
+    It is also the fallback :func:`_image_path` reads when no cache directory is
+    known, so a database measured once keeps working when it is opened without
+    one.
+    """
     aux = dict((row or {}).get("aux") or {})
     aux["hw"] = [int(hw[0]), int(hw[1])]
     aux["hw_source"] = source
+    if measured_from:
+        aux["cache_path"] = str(measured_from)
     db.upsert_frame(key, (row or {}).get("path"), aux, (row or {}).get("ts"))
 
 
-def frame_hw(db: Db, key: FrameKey) -> tuple[int, int]:
+def frame_hw(db: Db, key: FrameKey,
+             cache_dir: Optional[str] = None) -> tuple[int, int]:
     """The frame's image size: measured from the image, or inferred from the view.
 
     The canvas enters every compiled mask and the frame's ``input_hash``, so it
@@ -181,16 +232,20 @@ def frame_hw(db: Db, key: FrameKey) -> tuple[int, int]:
     (:data:`HW_MEASURED` or :data:`HW_INFERRED`). The image is read at most
     once -- a measured size is never questioned again -- and a measurement
     supersedes an earlier guess as soon as the cached image is there.
+
+    ``cache_dir`` is where the local copies live; with it the measurement is a
+    fast local read instead of one off the source drive (:func:`_image_path`).
+    :class:`~tda.core.truth.TruthService` carries it for every compile.
     """
     row = db.get_frame(key)
     stored = _read_hw(row)
     source = ((row or {}).get("aux") or {}).get("hw_source")
     if stored is not None and source == HW_MEASURED:
         return stored
-    measured = _measure_hw(row)
+    measured = _measure_hw(row, key, cache_dir)
     if measured is not None:
-        _store_hw(db, key, row, measured, HW_MEASURED)
-        return measured
+        _store_hw(db, key, row, measured[0], HW_MEASURED, measured[1])
+        return measured[0]
     if stored is not None:
         return stored
     inferred = infer_hw(key.view)
@@ -320,20 +375,6 @@ def pose_segment_of(db: Db, key: FrameKey, cache: Optional[InputCache] = None) -
 # --------------------------------------------------------------------------- #
 # the whole bundle
 # --------------------------------------------------------------------------- #
-def _seen_here(needs: dict[str, str], state: FrameState,
-               bench_roi: Optional[list]) -> dict[str, str]:
-    """Drop what this view cannot see: the staging area, when it has none.
-
-    A part lying on the bench is not annotated on a view without a bench ROI, so
-    it is not an instance of that frame at all -- not missing, not compiled, and
-    not something ``bench_annotated`` is about (spec 4.2 item 1).
-    """
-    if bench_roi is not None:
-        return needs
-    return {inst: kind for inst, kind in needs.items()
-            if state[inst].placement != ON_BENCH}
-
-
 @dataclass
 class FrameInputs:
     """Everything :func:`tda.core.compiler.compile_frame` needs for one frame."""
@@ -356,26 +397,33 @@ class FrameInputs:
 
 
 def gather(
-    db: Db, tax: Taxonomy, key: FrameKey, cache: Optional[InputCache] = None
+    db: Db, tax: Taxonomy, key: FrameKey, cache: Optional[InputCache] = None,
+    cache_dir: Optional[str] = None,
 ) -> FrameInputs:
     """Read one frame's compiler inputs from the database.
 
     Spec 3.3 step 2 makes the staging area part of the geometry policy: an
     instance on the bench needs geometry *and only exists as a row* where the
-    view has a bench ROI to see it in. That gate lives here rather than in
-    :func:`tda.core.states.needs_geom`, which is pure and knows nothing about
-    views: the same state machine serves four of them, and only some can see
-    the bench.
+    view has a bench ROI to see it in. That gate is
+    :func:`tda.core.states.needs_geom`'s, handed the frame's bench ROI -- the
+    same call the queues, the task card and the "affects N frames" strip make,
+    so none of them can ask for a different set than the compiler gets.
+
+    Label Studio drafts are left out of ``placements`` as well as of ``needs``:
+    the state snapshot still carries them (they *are* rows of the instance
+    table), but nothing this function hands the compiler may, or the digest of
+    every frame of fourteen desktops would move the moment an export is
+    re-imported (:func:`tda.core.model.is_provisional`).
     """
     cache = cache if cache is not None else InputCache()
     instances = instances_of(db, key.desktop, cache)
     state = state_of(db, tax, key.desktop, key.step, cache)
     seg = pose_segment_of(db, key, cache)
     bench_roi = db.bench_roi(key.desktop, key.view, seg)
-    needs = _seen_here(needs_geom(instances, state, tax), state, bench_roi)
+    needs = needs_geom(instances, state, tax, bench_roi=bench_roi)
     return FrameInputs(
         key=key,
-        hw=frame_hw(db, key),
+        hw=frame_hw(db, key, cache_dir),
         needs=needs,
         keyframes=_keyframes_of(db, key.desktop, key.view, cache),
         zorder=_zorder_of(db, key.desktop, key.view, seg, cache),
@@ -384,7 +432,8 @@ def gather(
         frame_overrides=db.frame_overrides(key),
         transform=db.transform(key),
         placements={inst: st.placement for inst, st in state.items()
-                    if inst in needs or st.placement != ON_BENCH},
+                    if not is_provisional(inst)
+                    and (inst in needs or st.placement != ON_BENCH)},
         pose_segment=seg,
         bench_roi=bench_roi,
     )

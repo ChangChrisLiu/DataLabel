@@ -14,6 +14,7 @@ from typing import Callable, Optional
 from tda.core.db import Db
 from tda.core.model import FrameKey
 from tda.core.truth import NEEDS_REVIEW, VERIFIED
+from tda.core.truth_conflicts import label_text, payload_labels
 from tda.ui import session_api as api
 
 __all__ = ["ReviewState"]
@@ -130,6 +131,24 @@ class ReviewState:
         else:
             self.unexplained.pop(int(step), None)
 
+    @staticmethod
+    def _conflict_row(row: dict) -> dict:
+        """One queue entry: which frame, which instance, and what disagrees.
+
+        ``sym_diff_px`` alone says nothing about a disagreement whose pixels
+        never moved -- a changed ``visibility`` is 0 differing pixels -- so the
+        entry carries the label changes as well, both structured (``labels``)
+        and as the line a panel shows (``summary``).
+        """
+        labels = payload_labels(row["new_rle"])
+        return {
+            "id": row["id"], "step": row["step"], "instance": row["instance"],
+            "sym_diff_px": row["sym_diff_px"],
+            "labels": labels,
+            "summary": label_text(labels) if labels
+            else f"{row['sym_diff_px']} px differ",
+        }
+
     def queues(self) -> dict[str, list[dict]]:
         """The four review queues of spec 4.4, keyed by :data:`QUEUE_NAMES`.
 
@@ -141,9 +160,7 @@ class ReviewState:
         """
         return {
             api.QUEUE_CONFLICTS: [
-                {"id": row["id"], "step": row["step"], "instance": row["instance"],
-                 "sym_diff_px": row["sym_diff_px"]}
-                for row in self.open_conflicts()
+                self._conflict_row(row) for row in self.open_conflicts()
             ],
             api.QUEUE_NEEDS_REVIEW: [
                 {"step": row["step"]}

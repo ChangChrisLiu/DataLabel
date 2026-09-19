@@ -32,10 +32,14 @@ class ReviewMixin:
     def confirm_frame(self) -> bool:
         """Freeze the frame and step back (spec 4.2 step 5).
 
-        ``False`` means the compilation still has a blocking problem -- a
-        chassis instance without a shape, a contradictory layer order; the
-        problem list is emitted on :attr:`sigProblems` first, so a panel can
-        show exactly what the annotator has to fix.
+        ``False`` means the truth service refused the confirmation -- a chassis
+        instance without a shape, a contradictory layer order, or an open
+        disagreement about this frame that only a human can settle (spec 3.4).
+        The reason it gave is the first line emitted on :attr:`sigProblems`,
+        followed by the compilation's own problems and the card's words for
+        them, so a panel can show exactly what the annotator has to do. A
+        refusal the compilation cannot explain by itself -- an open conflict --
+        would otherwise have shown an empty list.
         """
         # The step back at the end would drop an uncommitted layer, and this
         # method must not depend on its caller having checked: a panel button
@@ -44,9 +48,9 @@ class ReviewMixin:
         key = self.current()
         try:
             self.truth.verify_frame(key, self.annotator)
-        except ValueError:
+        except ValueError as refused:
             self._invalidate()
-            problems = list(self.compiled().problems)
+            problems = [str(refused)] + list(self.compiled().problems)
             self.review.problems[key.step] = problems
             self.sigProblems.emit(problems + self._how_to_fix(problems))
             return False

@@ -23,7 +23,12 @@ __all__ = ["POSE_GEOMETRY_COLUMNS", "PoseSegmentMixin", "clean_roi"]
 
 def _clean_roi(roi: Sequence[float],
                hw: Optional[tuple[int, int]] = None) -> list[int]:
-    """Validate ``[x0, y0, x1, y1]`` and clamp it into a frame of size ``hw``."""
+    """Validate ``[x0, y0, x1, y1]`` and clamp it into a frame of size ``hw``.
+
+    The one validator for every rectangle stored against a pose segment -- the
+    chassis crop an export may cut to, and the staging area that decides whether
+    a view is asked for bench boxes at all.
+    """
     values = list(roi)
     if len(values) != 4:
         raise ValueError(f"an ROI is four numbers (x0, y0, x1, y1), got {roi!r}")
@@ -51,17 +56,6 @@ POSE_GEOMETRY_COLUMNS = ("corners_json", "homography_json", "roi_json",
                          "bench_roi_json")
 #: What :meth:`PoseSegmentMixin.update_pose_segment` accepts.
 POSE_UPDATABLE = ("start_step", "end_step", "ref_step")
-
-
-def _valid_roi(roi) -> list[int]:
-    """``[x0, y0, x1, y1]`` with a positive area, or ``ValueError``."""
-    try:
-        x0, y0, x1, y1 = (int(v) for v in roi)
-    except (TypeError, ValueError):
-        raise ValueError(f"an ROI is four numbers (x0, y0, x1, y1), got {roi!r}") from None
-    if x1 <= x0 or y1 <= y0:
-        raise ValueError(f"an ROI must have a positive area, got {roi!r}")
-    return [x0, y0, x1, y1]
 
 
 class PoseSegmentMixin:
@@ -152,32 +146,75 @@ class PoseSegmentMixin:
         return None if row is None else R.loads(row["roi_json"])
 
     def clear_pose_geometry(self, desktop: int, view: str, seg: int) -> None:
-        """Drop the corners, homography and ROI of one segment (they are stale)."""
+        """Drop the corners, homography and ROI of one segment (they are stale).
+
+        Every one of those columns is a compiler input -- the registration this
+        view's shapes are drawn against, and the staging area that decides
+        whether bench parts are in the frame at all -- so the frozen frames of
+        the view are queued for a re-check in the same transaction. Nothing else
+        would ever compare them: this runs from the pipeline, not from the
+        session's edit path.
+        """
         assignments = ", ".join(f'"{c}"=NULL' for c in POSE_GEOMETRY_COLUMNS)
-        with self._tx():
+        with self.transaction():
             self.conn.execute(
                 f"UPDATE pose_segment SET {assignments} "
                 "WHERE desktop=? AND view=? AND seg=?",
                 (desktop, view, seg),
             )
+            self.queue_rechecks_for_view(desktop, view)
 
     def set_pose_segment_bench_roi(self, desktop: int, view: str, seg: int,
-                                   roi) -> None:
+                                   roi: Optional[Sequence[float]],
+                                   annotator: str = "system",
+                                   hw: Optional[tuple[int, int]] = None
+                                   ) -> Optional[list[int]]:
         """Record (or clear with ``None``) the staging area this view can see.
 
         Spec 4.2 asks for a part on the bench to be boxed only 若该视角有堆放区
         ROI -- *if this view has a staging area*. The scanner looks straight down
         at the board and never will, so this stays NULL on most views, and the
         task card asks for no bench work until somebody draws one.
+
+        The rectangle goes through :func:`clean_roi`, the same validator the
+        chassis ROI uses, and the change is logged the same way. A frame has one
+        notion of "a rectangle in its coordinates": a second validator that
+        rounded differently and clamped nothing is how the two drifted apart, and
+        which of them a bench box was measured against is as answerable a
+        question as it is for the chassis crop.
+
+        Drawing (or clearing) a staging area changes what **every frame of the
+        view** compiles to: a part on the bench becomes an instance of the frame
+        that was not in it before, so ``needs``, ``placements`` and the digest
+        all move (spec 3.3 step 2). The view's frozen frames are therefore
+        queued for a re-check, in the same transaction as the write and the op
+        log -- without it they kept rows describing a machine with nothing on
+        the bench, and an export published them.
+
+        Returns the rectangle as stored, or ``None`` when it was cleared.
+
+        Raises:
+            ValueError: ``roi`` is malformed, or the segment does not exist.
         """
-        if roi is not None:
-            roi = _valid_roi(roi)
-        with self._tx():
-            self.conn.execute(
+        payload = None if roi is None else _clean_roi(roi, hw)
+        before = self.bench_roi(desktop, view, seg)
+        with self.transaction():
+            cur = self.conn.execute(
                 "UPDATE pose_segment SET bench_roi_json=? WHERE desktop=? AND view=? "
                 "AND seg=?",
-                (R.dumps(roi), desktop, view, seg),
+                (R.dumps(payload), desktop, view, seg),
             )
+            if not cur.rowcount:
+                raise ValueError(
+                    f"no pose segment {seg} for desktop {desktop} view {view!r}"
+                )
+            self.queue_rechecks_for_view(desktop, view)
+            self.log_op(
+                desktop, view, "set_bench_roi",
+                {"seg": int(seg), "roi": payload}, {"seg": int(seg), "roi": before},
+                annotator,
+            )
+        return payload
 
     def bench_roi(self, desktop: int, view: str, seg: int) -> Optional[list]:
         """The staging area of one pose segment, or ``None`` when it has none."""
@@ -188,10 +225,18 @@ class PoseSegmentMixin:
         return None if row is None else R.loads(row["bench_roi_json"])
 
     def delete_pose_segments_from(self, desktop: int, view: str, first_seg: int) -> int:
-        """Delete segment ``first_seg`` and every segment after it; returns the count."""
-        with self._tx():
+        """Delete segment ``first_seg`` and every segment after it; returns the count.
+
+        The frames of those segments fall back to another segment's reference
+        frame, which is a different set of compiler inputs, so the view's frozen
+        frames are queued for a re-check in the same transaction.
+        """
+        with self.transaction():
             cur = self.conn.execute(
                 "DELETE FROM pose_segment WHERE desktop=? AND view=? AND seg>=?",
                 (desktop, view, first_seg),
             )
-        return int(cur.rowcount or 0)
+            removed = int(cur.rowcount or 0)
+            if removed:
+                self.queue_rechecks_for_view(desktop, view)
+        return removed

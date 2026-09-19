@@ -11,6 +11,7 @@ from tda.core import masks
 from tda.core.db import Db
 from tda.core.model import FrameOverride, InstanceRec, ShapePart, StateEvent, ZOrderRec
 from tda.core.truth import StaleConflictError
+from tda.core.truth_conflicts import payload_labels
 from truth_scenes import (
     BENCH_BOX,
     DESKTOP,
@@ -181,6 +182,287 @@ def test_an_instance_dropped_from_an_auto_frame_deletes_its_row(scene: Scene):
     assert out["conflicts"] == 0
     assert out["updated"] == 2  # the PSU row rewritten, the screw row deleted
     assert scene.db.conflicts(DESKTOP) == []
+
+
+# --------------------------------------------------------------------------- #
+# labels are part of the frozen truth too
+# --------------------------------------------------------------------------- #
+def _verified_with_new_visibility(scene: Scene) -> dict:
+    """Confirm step 1, then press 2 on the PSU; returns the queued conflict."""
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(1), "lin")
+    scene.db.set_frame_override(
+        FrameOverride(scene.key(1), PSU, None, "occluded_partial")
+    )
+    scene.svc.refresh(scene.key(1))
+    return scene.db.conflicts(DESKTOP)[0]
+
+
+def test_a_label_change_on_a_verified_row_is_a_disagreement(scene: Scene):
+    """The reproduction: the 1-7 shortcut on a confirmed frame did nothing.
+
+    ``disagreement`` compared pixels only, so a changed ``visibility`` counted
+    as "no disagreement": the refresh reported 0 updated and 0 conflicts, left
+    the row saying ``visible`` and stamped the digest -- after which no pass
+    ever looked at the frame again. ``visibility`` is exported per annotation
+    and is the ground truth of a VLM task.
+    """
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(1), "lin")
+    scene.db.set_frame_override(
+        FrameOverride(scene.key(1), PSU, None, "occluded_partial")
+    )
+
+    out = scene.svc.refresh(scene.key(1))
+
+    assert out["conflicts"] == 1
+    conflict = scene.db.conflicts(DESKTOP)[0]
+    assert conflict["instance"] == PSU
+    assert payload_labels(conflict["new_rle"]) == [
+        {"field": "visibility", "old": "visible", "new": "occluded_partial"}
+    ]
+    assert scene.row(1, PSU)["visibility"] == "visible"  # frozen, not overwritten
+    assert scene.db.frame_digest(scene.key(1)) is None  # and not claimed as done
+
+
+def test_accepting_a_label_conflict_writes_the_new_label(scene: Scene):
+    conflict = _verified_with_new_visibility(scene)
+
+    scene.svc.resolve_conflict(conflict["id"], "accept_new", "lin")
+
+    row = scene.row(1, PSU)
+    assert row["visibility"] == "occluded_partial"
+    assert row["status"] == "verified"
+    assert scene.db.conflicts(DESKTOP) == []
+
+
+def test_keeping_the_old_label_pins_it_on_this_frame(scene: Scene):
+    conflict = _verified_with_new_visibility(scene)
+
+    scene.svc.resolve_conflict(conflict["id"], "keep_old", "lin")
+
+    override = scene.db.frame_overrides(scene.key(1))[PSU]
+    assert override.visibility == "visible"
+    scene.svc.refresh(scene.key(1))
+    assert scene.row(1, PSU)["visibility"] == "visible"
+    assert scene.db.conflicts(DESKTOP, open_only=True) == []
+
+
+def test_removing_a_visibility_override_is_a_disagreement_too(scene: Scene):
+    """Ctrl+Z on the 1-7 shortcut, on a frame somebody had already confirmed.
+
+    The row then carries a label neither a human nor its own pixels stand
+    behind -- and COCO writes that label beside a segmentation that contradicts
+    it. The refresh saw no override to compare against, called it skipped and
+    stamped the digest, so no pass ever looked again.
+    """
+    scene.refresh_all()
+    scene.db.set_frame_override(
+        FrameOverride(scene.key(1), PSU, None, "occluded_full")
+    )
+    scene.svc.refresh(scene.key(1))
+    scene.svc.verify_frame(scene.key(1), "lin")
+    assert scene.row(1, PSU)["visibility"] == "occluded_full"
+
+    scene.db.delete_frame_override(scene.key(1), PSU)
+    out = scene.svc.refresh(scene.key(1))
+
+    assert out["conflicts"] == 1
+    conflict = scene.db.conflicts(DESKTOP)[0]
+    assert payload_labels(conflict["new_rle"]) == [
+        {"field": "visibility", "old": "occluded_full", "new": "visible"}
+    ]
+    assert scene.row(1, PSU)["visibility"] == "occluded_full"  # still frozen
+    assert scene.db.frame_digest(scene.key(1)) is None
+
+    scene.svc.resolve_conflict(conflict["id"], "accept_new", "lin")
+    assert scene.row(1, PSU)["visibility"] == "visible"  # what the pixels say
+
+
+def test_keeping_a_removed_override_pins_it_again(scene: Scene):
+    scene.refresh_all()
+    scene.db.set_frame_override(
+        FrameOverride(scene.key(1), PSU, None, "occluded_full")
+    )
+    scene.svc.refresh(scene.key(1))
+    scene.svc.verify_frame(scene.key(1), "lin")
+    scene.db.delete_frame_override(scene.key(1), PSU)
+    scene.svc.refresh(scene.key(1))
+    cid = scene.db.conflicts(DESKTOP)[0]["id"]
+
+    scene.svc.resolve_conflict(cid, "keep_old", "lin")
+
+    assert scene.db.frame_overrides(scene.key(1))[PSU].visibility == "occluded_full"
+    scene.svc.refresh(scene.key(1))
+    assert scene.row(1, PSU)["visibility"] == "occluded_full"
+    assert scene.db.conflicts(DESKTOP, open_only=True) == []
+
+
+def test_a_frozen_row_the_pixels_agree_with_is_not_re_examined(scene: Scene):
+    """The "was it forced" test must not fire on an ordinary derived label."""
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(1), "lin")
+
+    assert scene.svc.refresh(scene.key(1), ignore_digest=True)["conflicts"] == 0
+    assert scene.db.conflicts(DESKTOP) == []
+
+
+def test_keeping_the_old_placement_is_refused(scene: Scene):
+    """Where a part is, is the step table's decision, not an override's."""
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    scene.db.replace_events(
+        DESKTOP,
+        [StateEvent(DESKTOP, 2, SCREW, "placement", "in_chassis", "on_bench", auto=False)],
+        auto_only=False,
+    )
+    scene.svc.refresh(scene.key(2))
+    conflict = scene.db.conflicts(DESKTOP)[0]
+
+    with pytest.raises(ValueError, match="state log"):
+        scene.svc.resolve_conflict(conflict["id"], "keep_old", "lin")
+
+    assert scene.row(2, SCREW)["placement"] == "in_chassis"
+    assert scene.db.conflicts(DESKTOP, open_only=True)
+
+
+def test_a_conflict_with_unchanged_labels_and_pixels_is_still_skipped(scene: Scene):
+    """The cheap path has to stay cheap: nothing moved, nothing is queued."""
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(1), "lin")
+
+    out = scene.svc.refresh(scene.key(1), ignore_digest=True)
+
+    assert out["conflicts"] == 0 and out["updated"] == 0
+    assert out["skipped"] == 2
+    assert scene.db.conflicts(DESKTOP) == []
+
+
+# --------------------------------------------------------------------------- #
+# verify_frame and the frozen-truth invariant
+# --------------------------------------------------------------------------- #
+def test_verify_frame_refuses_while_a_conflict_of_that_frame_is_open(scene: Scene):
+    """The exact reproduction: Space in the review queue wiped a frozen row.
+
+    Verify the frame; the screw then leaves it, so the refresh queues one
+    conflict and demotes the frame. The annotator meets it in the
+    ``needs_review`` queue and presses Space: ``verify_frame`` recompiled, found
+    the frozen row missing from the compilation, **deleted** it and marked the
+    frame verified again. The disagreement stayed open for ever and a human's
+    signature was gone.
+    """
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    frozen = scene.counts(2, SCREW)
+    scene.db.replace_events(
+        DESKTOP,
+        [StateEvent(DESKTOP, 2, SCREW, "placement", "in_chassis", "elsewhere", auto=False)],
+        auto_only=False,
+    )
+    assert scene.svc.refresh(scene.key(2))["conflicts"] == 1
+    assert scene.review_status(2) == "needs_review"
+    cid = scene.db.conflicts(DESKTOP)[0]["id"]
+
+    with pytest.raises(ValueError) as refused:
+        scene.svc.verify_frame(scene.key(2), "lin")
+
+    assert str(cid) in str(refused.value)
+    assert scene.counts(2, SCREW) == frozen  # the frozen row is untouched
+    assert scene.review_status(2) == "needs_review"
+    assert [c["id"] for c in scene.db.conflicts(DESKTOP)] == [cid]
+
+    # settling it is what makes the frame confirmable again
+    scene.svc.resolve_conflict(cid, "accept_new", "lin")
+    scene.svc.verify_frame(scene.key(2), "lin")
+    assert scene.review_status(2) == "verified"
+    assert scene.db.conflicts(DESKTOP, open_only=True) == []
+
+
+def test_verify_frame_queues_a_vanished_frozen_row_instead_of_deleting_it(scene: Scene):
+    """A confirmed instance the inputs no longer contain is a disagreement.
+
+    ``verify_frame`` dropped such a row outright -- ``delete_compiled`` ignored
+    ``status`` -- so the one thing the compiler may never overwrite was removed
+    by the confirmation itself.
+    """
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    frozen = scene.counts(2, SCREW)
+    assert scene.db.conflicts(DESKTOP) == []
+
+    scene.db.replace_events(
+        DESKTOP,
+        [StateEvent(DESKTOP, 2, SCREW, "placement", "in_chassis", "elsewhere", auto=False)],
+        auto_only=False,
+    )
+
+    with pytest.raises(ValueError) as refused:
+        scene.svc.verify_frame(scene.key(2), "lin")
+
+    assert SCREW in str(refused.value)
+    queued = scene.db.conflicts(DESKTOP)
+    assert [c["instance"] for c in queued] == [SCREW]
+    assert queued[0]["new_rle"] is None
+    assert scene.counts(2, SCREW) == frozen
+    assert scene.row(2, SCREW)["status"] == "verified"
+
+
+def test_verify_frame_refuses_a_frozen_row_the_inputs_have_moved_under(scene: Scene):
+    """The re-check has not run yet, and Space must not do its job for it.
+
+    A frozen row that is still *in* the frame but no longer agrees with it was
+    the one disagreement the gate did not look for: ``_put_row`` wrote the new
+    geometry over the human's signature and ``_stamp`` then turned the queued
+    re-check into a no-op, so the conflict was never raised at all.
+    """
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    frozen = scene.counts(2, PSU)
+    replace_parts(scene, scene.psu_kf,
+                  [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
+    # the sweeper has not drained it yet: the truth table still holds the old row
+    scene.svc.queue_rechecks(DESKTOP, VIEW, [2])
+    assert scene.db.conflicts(DESKTOP) == []
+
+    with pytest.raises(ValueError, match=PSU):
+        scene.svc.verify_frame(scene.key(2), "lin")
+
+    assert scene.counts(2, PSU) == frozen
+    assert scene.row(2, PSU)["status"] == "verified"
+    assert [c["instance"] for c in scene.db.conflicts(DESKTOP)] == [PSU]
+    assert scene.db.frame_digest(scene.key(2)) is None
+
+
+def test_verify_frame_refuses_a_frozen_row_whose_label_moved(scene: Scene):
+    """The same gate, for the half of the truth that is not pixels."""
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(1), "lin")
+    scene.db.set_frame_override(
+        FrameOverride(scene.key(1), PSU, None, "occluded_partial")
+    )
+
+    with pytest.raises(ValueError, match="visibility"):
+        scene.svc.verify_frame(scene.key(1), "lin")
+
+    assert scene.row(1, PSU)["visibility"] == "visible"
+    assert [c["instance"] for c in scene.db.conflicts(DESKTOP)] == [PSU]
+
+
+def test_verify_frame_still_drops_an_auto_row_the_inputs_lost(scene: Scene):
+    """Only a frozen row is a signature; an ``auto`` row is a cache."""
+    scene.refresh_all()
+    scene.db.replace_events(
+        DESKTOP,
+        [StateEvent(DESKTOP, 2, SCREW, "placement", "in_chassis", "elsewhere", auto=False)],
+        auto_only=False,
+    )
+    assert SCREW in scene.rows(2)  # the stale auto row is still there
+
+    scene.svc.verify_frame(scene.key(2), "lin")
+
+    assert sorted(scene.rows(2)) == [PSU]
+    assert scene.db.conflicts(DESKTOP) == []
+    assert scene.review_status(2) == "verified"
 
 
 # --------------------------------------------------------------------------- #

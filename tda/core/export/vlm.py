@@ -36,8 +36,9 @@ Steps typed ``ignore`` produce no records at all, and an ``initial``, ``dupli``
 or ``ignore`` step is never the "after" frame of a V3 pair even when the step
 table records an action for it.
 
-``graph_version`` is ``None`` until the constraint graph exists (it is a Plan-B
-module); the field is written now so the JSONL schema does not change later.
+``graph_version`` says which constraint graph the file shipped, read through
+:func:`graph_version_of` so the export keeps working on a build where that
+function does not exist yet; it is ``None`` for a desktop with no edges.
 
 The export **writes**: like the COCO one it calls
 :meth:`~tda.core.truth.TruthService.ensure_fresh` per desktop, so the
@@ -47,6 +48,7 @@ single-user lock of spec 3.5.
 from __future__ import annotations
 
 import json
+import sqlite3
 import zlib
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
@@ -57,6 +59,7 @@ from tda.core.export.coco import (
     NO_CHANGE_STEP_TYPES,
     VERIFIED,
     DesktopCtx,
+    conflicted_steps,
     frame_file_name,
     frame_is_verified,
     load_ctx,
@@ -67,7 +70,7 @@ from tda.core.model import ActionRec, FrameKey, InstanceRec
 from tda.core.taxonomy import Taxonomy
 from tda.core.truth import TruthService
 
-__all__ = ["TASKS", "class_label", "export_vlm", "instance_label"]
+__all__ = ["TASKS", "class_label", "export_vlm", "graph_version_of", "instance_label"]
 
 TASKS = ("V1", "V2", "V3")
 
@@ -207,6 +210,33 @@ def _record(rec_id: str, task: str, key: FrameKey, images: list[str], question: 
         "evidence": evidence, "rationale": rationale, "verified": bool(verified),
         "tier": None, "graph_version": None,
     }
+
+
+def graph_version_of(db: Db, desktop: int) -> Optional[str]:
+    """Which constraint graph this export shipped, when the tool can say.
+
+    The field has been in every record since the format was written down, and
+    filled with ``None``, precisely so that it could be answered later without
+    changing the schema. :func:`tda.core.graph.graph_version` is that answer --
+    a content hash of the desktop's stored edges -- and it arrives with the
+    ``constraints`` command.
+
+    It is read through :func:`getattr` on purpose: this export has to keep
+    working on a build where that function is not there yet, and a stamp nobody
+    can compute is exactly what ``None`` has always meant here.
+    """
+    try:
+        from tda.core import graph as graph_mod
+    except ImportError:  # pragma: no cover - the module is part of the package
+        return None
+    stamp = getattr(graph_mod, "graph_version", None)
+    if stamp is None:
+        return None
+    try:
+        value = stamp(db, int(desktop))
+    except (TypeError, ValueError, sqlite3.Error):
+        return None
+    return None if value is None else str(value)
 
 
 def _frame_id(key: FrameKey) -> str:
@@ -409,6 +439,7 @@ def export_vlm(
     only_verified: bool = False,
     *,
     truth: Optional[TruthService] = None,
+    allow_conflicts: bool = False,
 ) -> dict:
     """Write the V1/V2/V3 question set of ``desktops`` in ``view`` as JSONL.
 
@@ -421,11 +452,18 @@ def export_vlm(
     ``configs/taxonomy.yaml``) -- the same value for the whole file, because a
     tier is a property of the camera, not of one answer.
 
-    Returns ``{"path", "records", "by_task", "desktops", "view"}``.
+    ``allow_conflicts`` is the COCO export's flag and means the same here: a
+    view with an open disagreement is **refused** without it
+    (:func:`tda.core.export.coco.conflicted_steps`), and with it the frames
+    involved answer ``verified: false``, so ``only_verified`` drops them.
+
+    Returns ``{"path", "records", "by_task", "desktops", "view",
+    "open_conflicts"}``.
     """
     wanted = [t for t in TASKS if t in set(tasks)]
     records: list[dict] = []
     tier = view_tier(view, tax)
+    stamp: Optional[str] = None  # the open desktop's graph version
 
     def emit(record: Optional[dict]) -> None:
         """Keep a record, unless ``only_verified`` and nothing verified backs it."""
@@ -434,17 +472,22 @@ def export_vlm(
         if only_verified and not record["verified"]:
             return
         record["tier"] = tier
+        record["graph_version"] = stamp
         records.append(record)
 
     service = truth or TruthService(db, tax)
+    open_conflicts = 0
 
     for desktop in desktops:
+        stamp = graph_version_of(db, desktop)
         ctx = load_ctx(db, tax, desktop, view)
         # the compiled rows of an unverified frame are a cache the
         # annotator's commits leave stale (spec 3.4): fill it before
         # reading the view out, or a frame nobody visited is exported
         # as it was several edits ago -- or silently not at all
         service.ensure_fresh(desktop, view, only_verified)
+        disputed = conflicted_steps(service, desktop, view, allow_conflicts)
+        open_conflicts += len(disputed)
         previous: Optional[tuple[int, dict[str, tuple[dict, list]], str]] = None
         verified: dict[int, bool] = {}
         for frame in db.frames_for(desktop, view):
@@ -453,7 +496,9 @@ def export_vlm(
                 continue  # an `ignore` step is no moment of the teardown
             image = frame_file_name(frame, key)
             rows = db.compiled(key)
-            verified[key.step] = frame_is_verified(db, key, rows)
+            # a frame somebody is still arguing about answers nothing confirmed
+            verified[key.step] = (key.step not in disputed
+                                  and frame_is_verified(db, key, rows))
             pointable = _pointable(ctx, rows, only_verified)
 
             if "V1" in wanted:
@@ -480,4 +525,5 @@ def export_vlm(
     return {
         "path": str(out), "records": len(records), "by_task": by_task,
         "desktops": [int(d) for d in desktops], "view": view,
+        "open_conflicts": open_conflicts,
     }

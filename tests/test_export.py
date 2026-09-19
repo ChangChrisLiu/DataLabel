@@ -15,6 +15,7 @@ from tda.core.masks import encode_rle
 from tda.core.model import (
     ActionRec,
     FrameKey,
+    FrameOverride,
     InstanceRec,
     ShapeKeyframe,
     ShapePart,
@@ -112,6 +113,14 @@ def db(tmp_db_path: str, tax):
         anchor_step=2, placement="in_chassis", geom_type="mask",
         parts=[ShapePart("main", rle=psu_rle)], amodal_complete=False,
     ))
+    # The screw deliberately has no keyframe of its own (several tests are about
+    # what an annotation without one reports). Its frozen row at step 1 still
+    # has to follow from *some* input, or the export's own `ensure_fresh`
+    # queues a conflict about a mask nobody drew -- and an unsettled
+    # disagreement is a view no export may publish. A frame override is exactly
+    # that input: geometry for this one frame, and no keyframe.
+    d.set_frame_override(FrameOverride(FrameKey(DESKTOP, 1, VIEW), SCREW,
+                                       screw_rle, "occluded_partial"))
     d.add_keyframe(ShapeKeyframe(
         id=None, instance=PSU, desktop=DESKTOP, view=VIEW, pose_segment=SEGMENT,
         anchor_step=3, placement="on_bench", geom_type="box",
@@ -418,14 +427,20 @@ def test_amodal_complete_reads_the_frames_pose_segment(db, tax, tmp_path: Path):
 
 
 def test_unknown_instance_keys_are_skipped(db, tax, tmp_path: Path):
-    """A provisional draft key has no taxonomy class: skip it instead of crashing."""
+    """A provisional draft key has no taxonomy class: skip it instead of crashing.
+
+    Such a row is by definition one the compiler will not produce again, so it
+    is also a standing conflict -- ``allow_conflicts`` is what lets the export
+    look at it at all.
+    """
     db.put_compiled(FrameKey(DESKTOP, 1, VIEW), GHOST, encode_rle(SCREW_MASK), 0.0,
                     "visible", "in_chassis", "verified", "h1", verified_by="tester")
-    doc = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"), only_verified=False)
+    doc = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"),
+                      only_verified=False, allow_conflicts=True)
     assert GHOST not in {a["attributes"]["instance_key"] for a in doc["annotations"]}
 
     out = tmp_path / "vlm.jsonl"
-    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out), allow_conflicts=True)
     assert GHOST not in out.read_text(encoding="utf-8")
 
 
@@ -495,3 +510,155 @@ def test_the_measurements_match_a_decoded_mask():
 
     assert mask_bbox_xywh(rle) == bbox_xywh(masks.bbox(masks.decode_rle(rle)))
     assert masks.rle_area(rle) == masks.area(masks.decode_rle(rle))
+
+
+# --------------------------------------------------------------------------- #
+# standing conflicts
+# --------------------------------------------------------------------------- #
+def _queue_conflict(d: Db, step: int = 1) -> int:
+    """One open disagreement about ``step``, the way a re-check would leave it."""
+    return d.add_conflict(FrameKey(DESKTOP, step, VIEW), PSU,
+                          encode_rle(PSU_MASK), encode_rle(SCREW_MASK), 400)
+
+
+# --------------------------------------------------------------------------- #
+# a draft must not reach an export by any road
+# --------------------------------------------------------------------------- #
+DRAFT_SCREW = "ls:Screw#7"
+
+
+def _add_draft_screw(d: Db) -> None:
+    """A draft carrying the *same* class and role as the real screw.
+
+    ``ls:Motherboard#1`` never reaches the counting path; a screw does, because
+    the count is read off the instance table rather than off the frame.
+    """
+    d.upsert_instance(InstanceRec(
+        key=DRAFT_SCREW, desktop=DESKTOP, cls="screw",
+        attrs={"role": "motherboard", "head": "PH2", "captive": False},
+        raw_names=["Motherboard Screw"],
+    ))
+
+
+def test_a_draft_screw_is_counted_by_nothing_and_named_by_nothing(
+    db, tax, tmp_path: Path
+):
+    """The one loop that walked the instance table without the choke point.
+
+    "How many motherboard screws are still fastened?" is answered off the state
+    machine, so a draft the compiler never puts in a frame still entered the
+    count -- 2 where the truth is 1, and 1 after the real screw came out where
+    the truth is 0 -- and ``ls:Screw#7`` appeared in the rationale as a
+    ``propagate_state`` step.
+    """
+    _add_draft_screw(db)
+    out = tmp_path / "v.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    records = _records(out)
+
+    counts = {r["step"]: r["answer"]["count"] for r in records
+              if r["task"] == "V2" and "count" in r["answer"]}
+    # only step 1 can be asked (the question needs a screw this view can point
+    # at), and the answer there is the one real motherboard screw, not two
+    assert counts == {1: 1}
+    assert "ls:" not in out.read_text(encoding="utf-8")
+
+
+def test_no_road_through_either_export_reaches_a_draft(db, tax, tmp_path: Path):
+    """V1, V2 states, V2 counts, V3 and COCO, with a draft of a real class."""
+    _add_draft_screw(db)
+
+    doc = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"),
+                      only_verified=False, include_boxes=True)
+    assert "ls:" not in json.dumps(doc)
+
+    out = tmp_path / "v.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    assert {r["task"] for r in _records(out)} >= {"V1", "V2", "V3"}
+    assert "ls:" not in out.read_text(encoding="utf-8")
+
+
+def test_the_desktop_context_drops_drafts_however_it_is_built(db, tax):
+    """The filtering is the type's, not one call site's."""
+    _add_draft_screw(db)
+    ctx = load_ctx(db, tax, DESKTOP, VIEW)
+
+    assert DRAFT_SCREW not in ctx.instances
+    assert DRAFT_SCREW not in ctx.state_at(1)
+    assert ctx.cls_of(DRAFT_SCREW) is None
+    assert SCREW in ctx.instances
+    assert sorted(ctx.drafts) == [DRAFT_SCREW]
+
+
+def test_the_vlm_export_stamps_the_graph_version_when_the_tool_can_say(
+    db, tax, tmp_path: Path, monkeypatch
+):
+    """The field has always been in the schema so it could be filled in later."""
+    from tda.core import graph as graph_mod
+    from tda.core.export.vlm import graph_version_of
+
+    out = tmp_path / "v.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    assert {r["graph_version"] for r in _records(out)} == {None}
+
+    seen: list[int] = []
+    monkeypatch.setattr(graph_mod, "graph_version",
+                        lambda _db, desktop: (seen.append(desktop), "abc123")[1],
+                        raising=False)
+    assert graph_version_of(db, DESKTOP) == "abc123"
+
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    assert {r["graph_version"] for r in _records(out)} == {"abc123"}
+    assert seen == [DESKTOP, DESKTOP]
+
+
+def test_open_conflicts_is_the_services_own_question(db, tax):
+    from tda.core.truth import TruthService
+
+    service = TruthService(db, tax)
+    assert service.open_conflicts(DESKTOP, VIEW) == []
+
+    cid = _queue_conflict(db)
+
+    assert [c["id"] for c in service.open_conflicts(DESKTOP, VIEW)] == [cid]
+    assert service.open_conflicts(DESKTOP, "oak1") == []
+    assert service.ensure_fresh(DESKTOP, VIEW)["open_conflicts"] == 1
+    db.resolve_conflict(cid, "accept_new")
+    assert service.ensure_fresh(DESKTOP, VIEW)["open_conflicts"] == 0
+
+
+def test_both_exports_refuse_a_view_with_a_standing_conflict(db, tax, tmp_path: Path):
+    """A disagreement nobody settled is not a truth anybody may publish."""
+    _queue_conflict(db)
+
+    with pytest.raises(RuntimeError, match="allow_conflicts"):
+        export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"),
+                    only_verified=False)
+    with pytest.raises(RuntimeError, match="allow_conflicts"):
+        export_vlm(db, tax, [DESKTOP], VIEW, str(tmp_path / "v.jsonl"))
+    assert not (tmp_path / "c.json").exists()
+
+
+def test_allow_conflicts_exports_those_frames_as_unverified(db, tax, tmp_path: Path):
+    _queue_conflict(db, step=1)  # step 1 is the confirmed frame
+
+    doc = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"),
+                      only_verified=False, allow_conflicts=True)
+
+    by_step = {im["extra"]["step"]: im for im in doc["images"]}
+    assert by_step[1]["verified"] is False  # confirmed, but still argued about
+    assert doc["info"]["allow_conflicts"] is True
+    assert doc["info"]["open_conflicts"] == 1
+
+    # ... and so does every annotation of that frame: a row on a disputed frame
+    # is not a confirmed row, whatever its own status column still says
+    disputed = by_step[1]["id"]
+    on_one = [a for a in doc["annotations"] if a["image_id"] == disputed]
+    assert on_one and not [a for a in on_one if a["attributes"]["verified"]]
+    elsewhere = [a for a in doc["annotations"] if a["image_id"] != disputed]
+    assert elsewhere  # the rest of the view is untouched
+
+    out = tmp_path / "v.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out), allow_conflicts=True)
+    at_one = [r for r in _records(out) if r["step"] == 1]
+    assert at_one and not [r for r in at_one if r["verified"]]

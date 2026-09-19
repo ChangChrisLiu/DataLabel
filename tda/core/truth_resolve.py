@@ -16,9 +16,13 @@ from tda.core.db import RESOLUTIONS
 from tda.core.model import FrameKey, FrameOverride, Placement, Visibility
 from tda.core.truth_conflicts import (
     GEOM_BOX,
+    STATE_OWNED_FIELDS,
     disagreement,
     geom_payload,
+    label_changes,
+    labels_still_hold,
     payload_geometry,
+    payload_labels,
     payload_row,
     row_payload,
     row_values,
@@ -135,6 +139,9 @@ class ResolveMixin:
             return None
         if disagreement(queued, compiled_inst) is not None:
             return self._supersede(key, instance, conflict, compiled_inst)
+        if not labels_still_hold(payload_labels(conflict["new_rle"]), compiled_inst):
+            # the pixels agree but the label moved again after this was queued
+            return self._supersede(key, instance, conflict, compiled_inst)
         self._put_row(
             key, instance, row_values(compiled_inst), VERIFIED, compiled.input_hash,
             verified_by=annotator,
@@ -151,21 +158,25 @@ class ResolveMixin:
                 f"conflict {conflict['id']} is stale: {instance} has no truth row on "
                 f"step {key.step} any more"
             )
+        labels: list[dict] = []
         if compiled_inst is None:
             diff = self._payload_area(row_payload(row))
         else:
             diff = disagreement(row, compiled_inst)
-        if diff is None:
+            labels = label_changes(row, compiled_inst,
+                                   self.db.frame_overrides(key).get(instance))
+        if diff is None and not labels:
             return (
                 f"conflict {conflict['id']} is stale: the inputs changed again and now "
                 f"agree with the frozen row of {instance} on step {key.step}"
             )
         values = None if compiled_inst is None else row_values(compiled_inst)
         new_payload = (
-            None if values is None else geom_payload(values.visible_rle, values.box)
+            None if values is None
+            else geom_payload(values.visible_rle, values.box, labels)
         )
         _queue, inserted = self._queue_conflict(
-            key, instance, row_payload(row), new_payload, diff, None
+            key, instance, row_payload(row), new_payload, int(diff or 0), None
         )
         # The deduplication may have found this exact disagreement already open:
         # saying "queued again" then sends the annotator looking for a second
@@ -186,21 +197,35 @@ class ResolveMixin:
                 f"frame override: fix the step's actions or events, or accept_new to drop "
                 f"the frozen row"
             )
+        pinned = {c["field"]: c.get("old") for c in payload_labels(conflict["new_rle"])}
+        owned = sorted(field for field in pinned if field in STATE_OWNED_FIELDS)
+        if owned:
+            raise ValueError(
+                f"{', '.join(owned)} of {instance} on step {key.step} cannot be kept by an "
+                f"override: the state log is the authority on it. Fix the step's actions or "
+                f"events, or accept_new to take what they now say"
+            )
         geom_type, visible_rle, box = payload_geometry(conflict["old_rle"])
         if geom_type == GEOM_BOX and box is not None:
-            visible_rle = masks.encode_rle(self._box_mask(box, frame_hw(self.db, key)))
+            visible_rle = masks.encode_rle(
+                self._box_mask(box, frame_hw(self.db, key, self.cache_dir))
+            )
         existing = self.db.frame_overrides(key).get(instance)
+        held = None if existing is None else existing.visibility
         if visible_rle is None:
             # the frozen row had no geometry at all: pin the label it carried
             row = self.db.compiled(key).get(instance) or {}
             self.db.set_frame_override(FrameOverride(
                 key, instance,
                 visible_rle=None if existing is None else existing.visible_rle,
-                visibility=row.get("visibility") or Visibility.OUT_OF_VIEW.value,
+                visibility=(pinned.get("visibility") or row.get("visibility")
+                            or Visibility.OUT_OF_VIEW.value),
             ))
             return
         self.db.set_frame_override(FrameOverride(
             key, instance,
             visible_rle=visible_rle,
-            visibility=None if existing is None else existing.visibility,
+            # a label the conflict was about is pinned here too, which is what
+            # "keep the old value" means when the pixels never moved
+            visibility=pinned.get("visibility") or held,
         ))

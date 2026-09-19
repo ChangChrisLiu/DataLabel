@@ -67,6 +67,7 @@ from tda.core.ls_export import (
 )
 from tda.core.masks import encode_rle
 from tda.core.model import (
+    VIEWS,
     FrameKey,
     InstanceRec,
     Placement,
@@ -198,23 +199,33 @@ def _purge(db: Db, desktops: Optional[Iterable[int]]) -> tuple[int, int]:
     clears that desktop's other views, because ``relation`` rows are
     desktop-scoped and cannot be narrowed by view.
 
-    Both tables need a real delete, not just an upsert: ``shape_keyframe`` is
-    append-only, and a ``relation`` whose provisional key shifted between runs
-    upserts to a *different* row and would otherwise linger. Returned counts
-    are what was actually deleted. ``shape_part`` rows go with their keyframe
-    (``ON DELETE CASCADE``); instances and step notes are upserted in place.
+    Both deletes go through :class:`~tda.core.db.Db` -- they are writes to the
+    annotation store like any other, and a module reaching past the repository
+    into its tables is how the re-checks below came to be missed for a year.
+
+    Those re-checks are the point of the transaction: a draft keyframe is a
+    compiler input, so purging a desktop's drafts changes what every frozen
+    frame of it compiles to, and nothing else would ever compare them (spec
+    3.4). Returned counts are what was actually deleted; ``shape_part`` rows go
+    with their keyframe (``ON DELETE CASCADE``) and instances and step notes are
+    upserted in place.
     """
-    where, args = "source=?", [SOURCE]
-    if desktops is not None:
-        ids = sorted({int(d) for d in desktops})
-        if not ids:
-            return (0, 0)
-        where += f" AND desktop IN ({','.join('?' * len(ids))})"
-        args += ids
-    with db.conn:
-        kfs = db.conn.execute(f"DELETE FROM shape_keyframe WHERE {where}", args).rowcount
-        rels = db.conn.execute(f"DELETE FROM relation WHERE {where}", args).rowcount
-    return int(kfs or 0), int(rels or 0)
+    ids = None if desktops is None else sorted({int(d) for d in desktops})
+    if ids is not None and not ids:
+        return (0, 0)
+    with db.transaction():
+        kfs = db.delete_keyframes_by_source(SOURCE, ids)
+        rels = db.delete_relations_by_source(SOURCE, ids)
+        for desktop in (ids if ids is not None else _desktops_with_drafts(db)):
+            for view in VIEWS:
+                db.queue_rechecks_for_view(desktop, view)
+    return kfs, rels
+
+
+def _desktops_with_drafts(db: Db) -> list[int]:
+    """Every desktop a full reset may have taken draft shapes from."""
+    rows = db.conn.execute("SELECT id FROM desktop ORDER BY id").fetchall()
+    return [int(r["id"]) for r in rows]
 
 
 def _count_rows(db: Db) -> tuple[int, int]:

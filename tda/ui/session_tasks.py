@@ -48,8 +48,8 @@ from tda.ui.session_ops import (
     placement_of,
 )
 
-__all__ = ["LAYER_RANK", "SPLIT_TRANSITIONS", "STATE_ONLY_TRANSITIONS", "has_bench_roi",
-           "item_text", "task_card_for"]
+__all__ = ["LAYER_RANK", "SPLIT_TRANSITIONS", "STATE_ONLY_TRANSITIONS", "bench_roi_of",
+           "has_bench_roi", "item_text", "task_card_for"]
 
 REMOVED = "removed"
 _VERIFIED = "verified"
@@ -105,6 +105,15 @@ def _has_bench_chain(db: Db, desktop: int, view: str, instance: str) -> bool:
     return any(kf.placement == ON_BENCH for kf in db.keyframes(desktop, view, instance))
 
 
+def bench_roi_of(db: Db, key: FrameKey, cache: Optional[InputCache] = None):
+    """The staging area this view can see at this frame, or ``None``.
+
+    What :func:`tda.core.states.needs_geom` wants handed to it, so the card asks
+    for exactly the geometry the compiler will look for.
+    """
+    return db.bench_roi(key.desktop, key.view, pose_segment_of(db, key, cache))
+
+
 def has_bench_roi(db: Db, key: FrameKey, cache: Optional[InputCache] = None) -> bool:
     """Can this view see a staging area at this frame? (spec 4.2 item 1)
 
@@ -112,8 +121,7 @@ def has_bench_roi(db: Db, key: FrameKey, cache: Optional[InputCache] = None) -> 
     in the picture at all, and asking for thirty rectangles nobody can draw is
     how a task card stops being read.
     """
-    seg = pose_segment_of(db, key, cache)
-    return db.bench_roi(key.desktop, key.view, seg) is not None
+    return bench_roi_of(db, key, cache) is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -253,11 +261,19 @@ def task_card_for(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
         return _start_card(db, tax, desktop, view, step, instances, cache, confirmed)
 
     span = span or [neighbour]
-    bench = has_bench_roi(db, FrameKey(desktop, step, view), cache)
+    bench_roi = bench_roi_of(db, FrameKey(desktop, step, view), cache)
+    bench = bench_roi is not None
     state_here = state_of(db, tax, desktop, step, cache)
     state_there = state_of(db, tax, desktop, neighbour, cache)
-    needs_here = needs_geom(instances, state_here, tax)
-    needs_there = needs_geom(instances, state_there, tax)
+    # the work this view is asked for, and the work there is: one owner, two
+    # questions. The difference is exactly the staging area a view without a
+    # bench ROI cannot see (spec 4.2 item 1), which is not its work.
+    needs_here = needs_geom(instances, state_here, tax, bench_roi=bench_roi)
+    needs_anywhere = needs_geom(instances, state_here, tax)
+    needs_there = needs_geom(
+        instances, state_there, tax,
+        bench_roi=bench_roi_of(db, FrameKey(desktop, neighbour, view), cache),
+    )
 
     changed: dict[str, dict] = {}
     for instance, attr, there, here in diff_states(state_there, state_here):
@@ -267,14 +283,13 @@ def task_card_for(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
     for instance, changes in changed.items():
         if instance not in instances:
             continue  # a virtual cable node: it never carries geometry
+        if instance in needs_anywhere and instance not in needs_here:
+            continue  # on the bench, and this view cannot see one: not its work
         rec_i = instances.get(instance)
         kind = _kind_for(changes, instance in needs_there, instance in needs_here)
         wants_box = needs_here.get(instance) in BENCH_KINDS
-        if wants_box:
-            if not bench:
-                continue  # this view cannot see the staging area: not its work
-            if kind == api.KIND_ADD_SHAPE:
-                kind = api.KIND_ADD_BENCH_BOX
+        if wants_box and kind == api.KIND_ADD_SHAPE:
+            kind = api.KIND_ADD_BENCH_BOX
         done = (True if kind == api.KIND_STATE_ONLY
                 else _has_shape(db, tax, desktop, view, instance, step, cache,
                                 GEOM_BOX if wants_box else None))
@@ -303,12 +318,11 @@ def _start_card(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
     confirmation.
     """
     state = state_of(db, tax, desktop, step, cache)
-    bench = has_bench_roi(db, FrameKey(desktop, step, view), cache)
+    bench_roi = bench_roi_of(db, FrameKey(desktop, step, view), cache)
     items = []
-    for instance, geom_kind in sorted(needs_geom(instances, state, tax).items()):
+    needs = needs_geom(instances, state, tax, bench_roi=bench_roi)
+    for instance, geom_kind in sorted(needs.items()):
         on_bench = geom_kind in BENCH_KINDS
-        if on_bench and not bench:
-            continue  # this view cannot see the staging area
         geom = GEOM_BOX if on_bench else GEOM_MASK
         if _has_shape(db, tax, desktop, view, instance, step, cache, geom):
             continue

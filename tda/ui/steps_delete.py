@@ -15,9 +15,13 @@ Two halves:
   writes one per instance the frame needs, geometry or not, so counting it made
   every instance the app had compiled in the background undeletable. It is a
   cache, and it goes with the delete, as the derived (``auto=True``) events do.
-* :func:`delete_instance` -- do it in one transaction: drop the derived events
-  and the cached rows, drop the identity row, and rewrite every neighbour that
-  pointed at the key. A neighbour's pointer is *cleared*, except
+  A Label Studio **draft** key (:func:`tda.core.model.is_provisional`) has one
+  more exception: the ``source="labelstudio"`` keyframes the importer gave it
+  are part of the draft, not work done on it, so they do not block the delete --
+  they go with it. Anything a human drew onto that key still does.
+* :func:`delete_instance` -- do it in one transaction: drop the draft keyframes
+  if it is a draft, drop the derived events and the cached rows, drop the
+  identity row, and rewrite every neighbour that pointed at the key. A neighbour's pointer is *cleared*, except
   :data:`REVERTIBLE_FIELD`, which goes back to the class name when the deleted
   instance was an implied one -- that is the state the log importer left it in.
   The neighbours are read back from the database rather than taken from memory,
@@ -34,7 +38,8 @@ from typing import TYPE_CHECKING, Optional
 from tda.core.db import Db
 from tda.core.implied import is_implied
 from tda.core.logs import CHASSIS_KEY
-from tda.core.model import VIEWS, InstanceRec
+from tda.core.ls_import import SOURCE as LS_SOURCE
+from tda.core.model import VIEWS, InstanceRec, is_provisional
 from tda.ui.steps_values import RELATION_FIELDS, EditError
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, fine for typing
@@ -52,8 +57,15 @@ def check_deletable(data: "StepTableData", db: Db, key: str) -> None:
     steps = sorted({a.step for a in data.actions if a.target == key})
     if steps:
         raise EditError(f"{key!r} is still the target of step(s) {', '.join(map(str, steps))}")
+    draft = is_provisional(key)
     for view in VIEWS:
-        if db.keyframes(data.desktop, view, key):
+        held = db.keyframes(data.desktop, view, key)
+        if draft:
+            # a draft's own draft keyframes go with it (see `delete_instance`);
+            # anything a human drew onto it does not, and blocks the delete the
+            # way it would on any other instance
+            held = [kf for kf in held if kf.source != LS_SOURCE]
+        if held:
             raise EditError(f"{key!r} still has shape keyframes in view {view!r}")
     for rel in db.relations(data.desktop):
         if key in (rel.get("target"), rel.get("blocker")):
@@ -121,6 +133,10 @@ def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
     neighbours = stored_neighbours(db, data.desktop, key, revert_to=implied_cls)
     try:
         with db.transaction():
+            if is_provisional(key):
+                # the draft and the shapes it was made of are one thing: a key
+                # nobody adopted leaves nothing behind but orphaned pixels
+                db.delete_keyframes_by_source(LS_SOURCE, [data.desktop], key)
             db.delete_auto_events(data.desktop, key)
             db.delete_instance(data.desktop, key)
             for rec in neighbours:
