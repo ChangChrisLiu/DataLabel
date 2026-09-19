@@ -34,6 +34,22 @@ def env(tmp_path: Path) -> dict:
     return {"paths": write_paths_yaml(tmp_path), "cfg": paths, "tmp": tmp_path}
 
 
+def stub_exporter(monkeypatch, command: str) -> None:
+    """Make the exporter write a small file and report a non-zero count.
+
+    What is under test here is the conflict gate in front of the exporter, not
+    the exporter: the seeded scene traces no geometry, so the real one would
+    write nothing and the "nothing exported" refusal would mask the answer.
+    """
+    def fake(db, tax, desktops, view, out, **kw):
+        Path(out).write_text('{"images": []}\n', encoding="utf-8")
+        return {"images": 1, "annotations": 3, "records": 5, "by_task": {"V1": 5}}
+
+    module = "coco" if command == "export-coco" else "vlm"
+    name = "export_coco" if command == "export-coco" else "export_vlm"
+    monkeypatch.setattr(f"tda.core.export.{module}.{name}", fake)
+
+
 def run(env: dict, *argv: str) -> int:
     return main(["--paths", env["paths"], *argv])
 
@@ -114,7 +130,8 @@ def test_an_export_refuses_while_a_conflict_is_open(env, capsys, command, out_na
     ("export-coco", "coco_allowed.json"),
     ("export-vlm", "vlm_allowed.jsonl"),
 ])
-def test_allow_conflicts_lets_the_export_through(env, command, out_name):
+def test_allow_conflicts_lets_the_export_through(env, monkeypatch, command, out_name):
+    stub_exporter(monkeypatch, command)
     open_one_conflict(env)
     out = Path(env["tmp"]) / out_name
     code = run(env, command, "--desktops", str(DESKTOP), "--view", VIEW,
@@ -132,7 +149,7 @@ def test_the_flag_reaches_an_exporter_that_takes_it(env, monkeypatch):
     def fake(db, tax, desktops, view, out, *, allow_conflicts=False, **kw):
         seen["allow_conflicts"] = allow_conflicts
         Path(out).write_text("{}", encoding="utf-8")
-        return {"images": 0, "annotations": 0}
+        return {"images": 1, "annotations": 3}
 
     monkeypatch.setattr(coco_module, "export_coco", fake)
     out = Path(env["tmp"]) / "coco_stub.json"
@@ -148,7 +165,7 @@ def test_an_exporter_without_the_keyword_still_runs(env, monkeypatch):
     def old_style(db, tax, desktops, view, out, only_verified=True, roi_crop=False,
                   truth=None):
         Path(out).write_text("{}", encoding="utf-8")
-        return {"images": 0, "annotations": 0}
+        return {"images": 1, "annotations": 3}
 
     monkeypatch.setattr(coco_module, "export_coco", old_style)
     out = Path(env["tmp"]) / "coco_old.json"

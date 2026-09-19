@@ -157,6 +157,24 @@ def cell(index: int) -> np.ndarray:
     return mask
 
 
+def freeze_mask(db: Db, view: str = VIEW, steps=(1, 2), instance: str = "chassis") -> None:
+    """Confirm one *masked* instance per frame, so an export has something to write.
+
+    :func:`seed_db` traces nothing, so a COCO export of the bare scene contains
+    zero annotations -- which is exactly the state the exports now refuse. A
+    mask and not a box: ``export_coco`` drops box-only rows unless asked for
+    them. The stored ``input_hash`` is a placeholder, so a refreshing reader
+    will re-check these frames and may raise a conflict; a test that only wants
+    a non-empty export passes ``--allow-conflicts``.
+    """
+    mask = np.zeros(HW, dtype=bool)
+    mask[HW[0] // 8:HW[0] // 2, HW[1] // 8:HW[1] // 2] = True
+    rle = masks.encode_rle(mask)
+    for step in steps:
+        db.put_compiled(FrameKey(DESKTOP, step, view), instance, rle, 0.0, "visible",
+                        "in_chassis", "verified", "seeded", verified_by="tester")
+
+
 def chassis_instances(session: AnnotationSession, step: int) -> list[str]:
     """Instances that need a chassis mask at ``step``, in a stable order."""
     insts = instances_of(session.db, DESKTOP)

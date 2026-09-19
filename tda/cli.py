@@ -486,16 +486,53 @@ SUBCOMMANDS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
 )
 
 
+def _global_flags(defaults: bool) -> argparse.ArgumentParser:
+    """``--paths`` / ``--db`` as a parent parser, for the top level or a subcommand.
+
+    ``defaults=False`` is the subcommand copy, whose default is ``SUPPRESS`` so
+    that not passing the flag leaves the attribute the top level already set.
+    Given twice, the later one therefore wins -- which is what an annotator
+    means by typing it twice.
+    """
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--paths",
+                    default=P.DEFAULT_PATHS_PATH if defaults else argparse.SUPPRESS,
+                    help="paths.yaml to use (accepted before or after the command)")
+    ap.add_argument("--db", default=None if defaults else argparse.SUPPRESS,
+                    help="database file (overrides paths.yaml)")
+    return ap
+
+
+class _Subcommands:
+    """``add_subparsers()`` that gives every subcommand the global flags too.
+
+    ``python -m tda.cli status --paths X`` used to answer "unrecognized
+    arguments": the flags existed only in front of the subcommand, which is not
+    where a hand reaches for them. Wrapping the registrar's one call site is
+    what keeps that true for every command, including the ones added next.
+    """
+
+    def __init__(self, sub, parents: list[argparse.ArgumentParser]) -> None:
+        self._sub = sub
+        self._parents = parents
+
+    def add_parser(self, name: str, **kwargs):
+        kwargs["parents"] = [*kwargs.get("parents", []), *self._parents]
+        return self._sub.add_parser(name, **kwargs)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    """The whole command line; ``--paths``/``--db`` are global and come first."""
+    """The whole command line; ``--paths``/``--db`` work on either side of it."""
     ap = argparse.ArgumentParser(
         prog="python -m tda.cli",
         description="Teardown Annotator data pipeline.",
         epilog="pipeline order: build-index -> load-index -> import-logs -> import-ls",
+        parents=[_global_flags(defaults=True)],
     )
-    ap.add_argument("--paths", default=P.DEFAULT_PATHS_PATH, help="paths.yaml to use")
-    ap.add_argument("--db", default=None, help="database file (overrides paths.yaml)")
-    sub = ap.add_subparsers(dest="command", required=True, metavar="command")
+    sub = _Subcommands(
+        ap.add_subparsers(dest="command", required=True, metavar="command"),
+        [_global_flags(defaults=False)],
+    )
     for register in SUBCOMMANDS:
         register(sub)
     return ap
