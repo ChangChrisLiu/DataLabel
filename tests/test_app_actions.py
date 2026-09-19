@@ -176,3 +176,79 @@ def test_annotation_guide_embeds_the_generated_table():
     assert A.shortcut_markdown() in body
     prose = [l for l in body.splitlines() if not l.startswith("| `")]
     assert len(prose) <= 200, "the prose is the part that has to stay readable"
+
+
+# --------------------------------------------------------------------------- #
+# holding a key (final review, item 3)
+# --------------------------------------------------------------------------- #
+def repeat_event(spec: str) -> QKeyEvent:
+    """The auto-repeat Qt sends while a key is held down."""
+    combination = QKeySequence.fromString(spec)[0]
+    return QKeyEvent(QKeyEvent.Type.KeyPress, int(combination.key()),
+                     combination.keyboardModifiers(), 0, 0, 0, "", True)
+
+
+REPEATABLE = {"radius_down": "[", "radius_up": "]", "opacity_down": ",",
+              "opacity_up": ".", "step_back": "PgDown", "step_forward": "PgUp",
+              "zorder_up": "Ctrl+Up", "zorder_down": "Ctrl+Down"}
+
+
+def test_the_repeatable_actions_are_marked_as_such():
+    marked = {a.name for a in A.ACTIONS if a.repeat}
+    assert marked == set(REPEATABLE), f"marked: {sorted(marked)}"
+    assert not any(a.repeat and a.hold for a in A.ACTIONS)
+
+
+@pytest.mark.parametrize("name", sorted(REPEATABLE), ids=sorted(REPEATABLE))
+def test_holding_a_repeatable_key_keeps_firing(window, name):
+    """``if event.isAutoRepeat(): return True`` killed every held key.
+
+    Holding ``]`` to grow the brush, ``.`` to fade the overlay or ``PgDn`` to
+    walk back through the machine did nothing at all after the first press.
+    """
+    action = next(a for a in A.ACTIONS if a.name == name)
+    calls: list[tuple] = []
+    setattr(window, action.slot, lambda *args: calls.append(args))
+    window.set_mode(action.modes[0])
+
+    assert window.handle_key(key_event(REPEATABLE[name])) is True
+    for _ in range(3):
+        assert window.handle_key(repeat_event(REPEATABLE[name])) is True
+
+    assert calls == [tuple(action.args)] * 4
+
+
+@pytest.mark.parametrize("spec,name", [("Return", "commit"), ("Space", "confirm"),
+                                       ("B", "tool_brush"), ("A", "toggle_overlays")])
+def test_holding_a_one_shot_key_fires_once(window, spec, name):
+    """A held Enter must not commit forty times."""
+    action = next(a for a in A.ACTIONS if a.name == name)
+    calls: list[tuple] = []
+    setattr(window, action.slot, lambda *args: calls.append(args))
+    window.set_mode(A.MODE_ANNOTATE)
+
+    assert window.handle_key(key_event(spec)) is True
+    for _ in range(3):
+        assert window.handle_key(repeat_event(spec)) is True
+
+    assert calls == [tuple(action.args)]
+
+
+def test_holding_tab_does_not_walk_the_focus_chain(window):
+    """The repeat is consumed but not fired: Qt would move the focus instead."""
+    seen: list[bool] = []
+    window.act_flash_compare = lambda on: seen.append(on)
+    window.set_mode(A.MODE_ANNOTATE)
+    assert window.handle_key(key_event("Tab")) is True
+    for _ in range(3):
+        assert window.handle_key(repeat_event("Tab")) is True
+    assert seen == [True]
+
+
+def test_the_cheat_sheet_marks_the_repeatable_keys():
+    html = A.cheat_sheet_html()
+    text = A.shortcut_markdown()
+    for name in REPEATABLE:
+        action = next(a for a in A.ACTIONS if a.name == name)
+        assert action.label_zh in html and action.label_zh in text
+    assert "可长按" in html and "可长按" in text

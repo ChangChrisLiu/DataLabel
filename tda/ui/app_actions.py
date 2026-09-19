@@ -92,6 +92,11 @@ class Action:
         modes: modes the binding is live in.
         hold: the action is held rather than pressed -- the slot is called with
             ``True`` on press and ``False`` on release (``Tab``, flash compare).
+        repeat: holding the key fires the action again and again.  It is the
+            difference between "bigger brush" (hold it until the brush is the
+            size you want) and "commit" (once, however long the finger stays
+            down).  Auto-repeat used to be swallowed for *every* binding, which
+            made ``]``, ``.`` and ``PgDn`` do nothing at all when held.
     """
 
     name: str
@@ -103,6 +108,7 @@ class Action:
     args: tuple = field(default_factory=tuple)
     modes: tuple[str, ...] = _ANN
     hold: bool = False
+    repeat: bool = False
 
 
 def _view(view: str, key: str, zh: str) -> Action:
@@ -130,9 +136,9 @@ ACTIONS: tuple[Action, ...] = (
     *[_visibility(i) for i in range(7)],
     # -- frame navigation ---------------------------------------------------
     Action("step_back", ("PgDown",), "act_step", "Previous step (k-1)",
-           "上一步 k-1（倒序标注的“前进”）", "nav", (-1,), _ANN_REV),
+           "上一步 k-1（倒序标注的“前进”）", "nav", (-1,), _ANN_REV, repeat=True),
     Action("step_forward", ("PgUp",), "act_step", "Next step (k+1)",
-           "下一步 k+1", "nav", (+1,), _ANN_REV),
+           "下一步 k+1", "nav", (+1,), _ANN_REV, repeat=True),
     Action("step_first", ("Home",), "act_step_edge", "First step",
            "跳到第一步", "nav", ("first",), _ANN_REV),
     Action("step_last", ("End",), "act_step_edge", "Last step",
@@ -151,9 +157,9 @@ ACTIONS: tuple[Action, ...] = (
     _tool("occluder", "O", "Occluder brush", "遮挡层画笔（手/工具）"),
     _tool("bench_box", "R", "Bench box", "台面框（拖框标注已拆下的零件）"),
     Action("radius_down", ("[",), "act_radius", "Smaller brush",
-           "笔刷变小", "tool", (-1,), _ANN),
+           "笔刷变小", "tool", (-1,), _ANN, repeat=True),
     Action("radius_up", ("]",), "act_radius", "Bigger brush",
-           "笔刷变大", "tool", (+1,), _ANN),
+           "笔刷变大", "tool", (+1,), _ANN, repeat=True),
     Action("cycle_candidate", ("C",), "act_cycle_candidate", "Next SAM candidate",
            "切换 SAM 候选掩码", "tool", (), _ANN),
     Action("fill_holes", ("Shift+F",), "act_fill_holes", "Fill holes",
@@ -189,9 +195,9 @@ ACTIONS: tuple[Action, ...] = (
     Action("cycle_visibility", ("V",), "act_cycle_visibility", "Cycle visibility",
            "循环切换可见性取值", "edit", (), _ANN),
     Action("zorder_up", ("Ctrl+Up",), "act_move_instance", "One layer up",
-           "选中实例上移一层", "edit", (-1,), _ANN),
+           "选中实例上移一层", "edit", (-1,), _ANN, repeat=True),
     Action("zorder_down", ("Ctrl+Down",), "act_move_instance", "One layer down",
-           "选中实例下移一层", "edit", (+1,), _ANN),
+           "选中实例下移一层", "edit", (+1,), _ANN, repeat=True),
     Action("edit_roi", ("Shift+R",), "act_edit_roi", "Re-edit the ROI",
            "重新框定 ROI（机箱范围）", "edit", (), _ANN),
     # -- display ------------------------------------------------------------
@@ -200,9 +206,9 @@ ACTIONS: tuple[Action, ...] = (
     Action("toggle_outline", ("Q",), "act_toggle_outline", "Outline / filled",
            "轮廓线与半透明填充切换", "display", (), _ANN_REV),
     Action("opacity_down", (",",), "act_opacity", "Less opaque",
-           "图层更透明", "display", (-1,), _ANN_REV),
+           "图层更透明", "display", (-1,), _ANN_REV, repeat=True),
     Action("opacity_up", (".",), "act_opacity", "More opaque",
-           "图层更不透明", "display", (+1,), _ANN_REV),
+           "图层更不透明", "display", (+1,), _ANN_REV, repeat=True),
     Action("toggle_heat", ("D",), "act_toggle_heat", "Difference heat map",
            "开关帧间差异热力图", "display", (), _ANN_REV),
     Action("fit_roi", ("F",), "act_fit_roi", "Fit the ROI",
@@ -339,6 +345,18 @@ def _keys_text(action: Action) -> str:
     return " / ".join(action.keys)
 
 
+#: What the generated tables add after a binding that answers auto-repeat.
+REPEAT_NOTE = "（可长按）"
+HOLD_NOTE = "（按住）"
+
+
+def _how_text(action: Action) -> str:
+    """"Hold it down" is part of what a key does, so the tables say so."""
+    if action.repeat:
+        return REPEAT_NOTE
+    return HOLD_NOTE if action.hold else ""
+
+
 def _by_group() -> list[tuple[str, str, list[Action]]]:
     return [
         (key, title, [a for a in ACTIONS if a.group == key])
@@ -351,7 +369,8 @@ def shortcut_markdown() -> str:
     lines = ["| 快捷键 | 作用 | 分组 |", "|---|---|---|"]
     for _key, title, actions in _by_group():
         for action in actions:
-            lines.append(f"| `{_keys_text(action)}` | {action.label_zh} | {title} |")
+            lines.append(f"| `{_keys_text(action)}` | {action.label_zh}"
+                         f"{_how_text(action)} | {title} |")
     return "\n".join(lines)
 
 
@@ -363,7 +382,7 @@ def cheat_sheet_html() -> str:
         for action in actions:
             parts.append(
                 f"<tr><td><b>{_keys_text(action)}</b></td>"
-                f"<td>{action.label_zh}</td>"
+                f"<td>{action.label_zh}{_how_text(action)}</td>"
                 f"<td><i>{action.label}</i></td></tr>"
             )
         parts.append("</table>")

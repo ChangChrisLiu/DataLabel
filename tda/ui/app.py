@@ -218,12 +218,21 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
     def handle_key(self, event) -> bool:
         """Run the action bound to ``event``; ``True`` when it was consumed.
 
-        An auto-repeat of a bound key is **consumed but not fired**: holding
-        ``Tab`` for the flash compare used to let the repeats through to Qt's
-        focus chain, which walked the focus into a combo box -- after which
-        :func:`~tda.ui.app_actions.blocks_shortcuts` switched the whole keyboard
-        off until the annotator clicked somewhere. An auto-repeat of a key that
-        is *not* bound is left alone, so ordinary widgets keep their repeats.
+        Auto-repeat is answered per action, because holding a key means three
+        different things:
+
+        * a **repeat** action fires again on every repeat -- holding ``]`` grows
+          the brush, holding ``PgDn`` walks back through the machine.  Swallowing
+          the repeats for every binding (which is what used to happen) left the
+          annotator pressing ``]`` forty times;
+        * a **hold** action (``Tab``) consumes the repeat without firing: letting
+          it through would walk Qt's focus chain into a combo box, after which
+          :func:`~tda.ui.app_actions.blocks_shortcuts` switched the whole
+          keyboard off until the annotator clicked somewhere;
+        * everything else ignores the repeat: a held ``Enter`` commits once.
+
+        An auto-repeat of a key that is *not* bound is left alone, so ordinary
+        widgets keep their repeats.
         """
         if not self._shortcut_context_ok():
             return False
@@ -239,7 +248,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
             return False
         if not action.hold and event.type() == QEvent.Type.KeyPress:
             self.end_flash()
-        if event.isAutoRepeat():
+        if event.isAutoRepeat() and not action.repeat:
             return True
         pressed = event.type() == QEvent.Type.KeyPress
         if action.hold:

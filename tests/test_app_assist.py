@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from app_scene import (
@@ -453,3 +454,32 @@ def test_an_undo_that_replaces_the_layer_forgets_the_points(window):
     window.act_undo()
 
     assert points_of(window) == []
+
+
+def test_holding_pgdn_does_not_queue_a_comparison_per_frame(window):
+    """Ten repeats, one pending comparison: the mailbox holds the newest only.
+
+    Stepping on auto-repeat is only usable if the work it triggers coalesces --
+    a diff thread per skipped frame was 0.8 GB at scanner resolution.
+    """
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtCore import QEvent as _QEvent
+
+    window.set_mode(A.MODE_ANNOTATE)
+    steps = sorted(window.session.steps())
+    window.session.goto(steps[-1], force=True)
+    QApplication.processEvents()
+
+    def repeat() -> QKeyEvent:
+        return QKeyEvent(_QEvent.Type.KeyPress, int(Qt.Key.Key_PageDown),
+                         Qt.KeyboardModifier.NoModifier, 0, 0, 0, "", True)
+
+    moved = 0
+    for _ in range(10):
+        before = window.session.current().step
+        window.handle_key(repeat())
+        moved += int(window.session.current().step != before)
+
+    assert moved >= 5, "the repeats did not step the frame"
+    assert window.assist.queued() <= 1
+    assert window.sam_queue.pending() == 0
