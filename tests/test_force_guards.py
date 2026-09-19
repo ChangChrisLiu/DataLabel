@@ -302,4 +302,128 @@ def test_the_run_counts_the_instances_it_kept_for_review(env, capsys):
         db.close()
     capsys.readouterr()
     reimport(env)
-    assert "1 vanished instances kept for S1 review" in capsys.readouterr().out
+    assert "1 vanished instances kept (1 carry work" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# the exemption is about having nothing to lose, not about having no steps
+# --------------------------------------------------------------------------- #
+def test_a_desktop_with_no_steps_but_instances_is_still_guarded(env, capsys):
+    """The exact state item 1 was written for: steps gone, instances not.
+
+    Keying "first import" on the step table alone skipped all three checks
+    there, so a header-only sheet plus --force deleted 36 of D13's instances and
+    exited 0.
+    """
+    imported(env)
+    before = sorted(instances(env))
+    db = open_db(env)
+    try:
+        db.replace_steps(DESKTOP, [], [])  # steps gone, instances still there
+    finally:
+        db.close()
+    sheet(env, [])
+    capsys.readouterr()
+    assert reimport(env) == EXIT_ERROR
+    assert "refused" in capsys.readouterr().out
+    assert sorted(instances(env)) == before
+
+
+def test_the_step_ratio_is_only_checked_when_there_were_steps(env, capsys):
+    """With no stored steps there is no ratio to compare; the counts still apply."""
+    imported(env)
+    db = open_db(env)
+    try:
+        db.replace_steps(DESKTOP, [], [])
+    finally:
+        db.close()
+    before = sorted(instances(env))
+    assert reimport(env) == EXIT_OK  # the real sheet: nothing is dropped at all
+    assert sorted(instances(env)) == before
+    assert steps_of(env) == env["n_steps_13"]
+
+
+def test_a_genuine_first_import_is_never_refused(env):
+    """No steps and no instances: there is nothing this run could lose."""
+    sheet(env, ["Initial Conditions"])
+    assert run(env, "load-index") == EXIT_OK
+    assert run(env, "import-logs", "--desktops", str(DESKTOP)) == EXIT_OK
+    assert steps_of(env) == 1
+
+
+# --------------------------------------------------------------------------- #
+# a refusal says which flag answers it
+# --------------------------------------------------------------------------- #
+def test_an_implausible_refusal_offers_force_drop_not_force_verified(env, capsys):
+    imported(env)
+    sheet(env, [])
+    capsys.readouterr()
+    assert reimport(env) == EXIT_ERROR
+    printed = capsys.readouterr().out
+    assert "--force-drop" in printed
+    assert "--force-verified" not in printed
+    assert "carry verified frames" not in printed
+
+
+def test_a_verified_refusal_still_offers_force_verified(env, capsys):
+    imported(env)
+    db = open_db(env)
+    try:
+        db.put_compiled(FrameKey(DESKTOP, 1, "scan"), "chassis", None, 0.0, "visible",
+                        "in_chassis", "verified", "h", verified_by="chang",
+                        geom_type="box", box=(0, 0, 4, 4))
+    finally:
+        db.close()
+    capsys.readouterr()
+    assert reimport(env) == EXIT_ERROR
+    printed = capsys.readouterr().out
+    assert "--force-verified" in printed
+    assert "carry verified frames" in printed
+    assert "--force-drop" not in printed
+
+
+def test_the_report_is_written_even_when_every_desktop_was_refused(env):
+    imported(env)
+    sheet(env, [])
+    (env["cache"] / "import_logs_issues.md").unlink(missing_ok=True)
+    assert reimport(env) == EXIT_ERROR
+    report = (env["cache"] / "import_logs_issues.md")
+    assert report.exists()
+    assert "not believable" in report.read_text(encoding="utf-8")
+
+
+def test_force_drop_without_force_is_refused(env, capsys):
+    assert run(env, "import-logs", "--force-drop") == EXIT_ERROR
+    assert "--force" in capsys.readouterr().out
+
+
+def test_the_kept_count_separates_work_from_the_keys_it_holds(env, capsys):
+    """One frozen ghost mounted on another: one carries work, one is held by it."""
+    imported(env)
+    seed_ghost(env, mounted_on=SECOND_GHOST)
+    db = open_db(env)
+    try:
+        db.upsert_instance(InstanceRec(key=SECOND_GHOST, desktop=DESKTOP, cls="psu"))
+        db.add_conflict(FrameKey(DESKTOP, 1, "scan"), GHOST, None, None, 3)
+    finally:
+        db.close()
+    capsys.readouterr()
+    reimport(env)
+    printed = capsys.readouterr().out
+    assert "2 vanished instances kept (1 carry work, the rest are referenced by them)" \
+        in printed
+
+
+def test_the_refusal_counts_real_instances_and_says_how_many_drafts(env, capsys):
+    imported(env)
+    db = open_db(env)
+    try:
+        db.upsert_instance(InstanceRec(key="ls:Motherboard#1", desktop=DESKTOP,
+                                       cls="motherboard"))
+    finally:
+        db.close()
+    sheet(env, [])
+    capsys.readouterr()
+    reimport(env)
+    printed = capsys.readouterr().out
+    assert "Label Studio draft" in printed

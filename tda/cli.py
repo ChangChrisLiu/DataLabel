@@ -209,12 +209,32 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
     return "\n".join(lines)
 
 
+#: What to do about each kind of refusal, keyed by ``DesktopRun.reason``.
+REFUSAL_ADVICE = {
+    L.REFUSED_VERIFIED: (
+        "carry verified frames, which were compiled from the step table this "
+        "would replace. Re-run with --force-verified to re-import them anyway, "
+        "or select the other desktops with --desktops."
+    ),
+    L.REFUSED_IMPLAUSIBLE: (
+        "would shrink past believing -- far fewer steps than before, or too many "
+        "instances deleted at once. Nothing was written. Check the sheets are "
+        "complete exports; re-run with --force-drop if they really are right."
+    ),
+}
+
+
 def cmd_import_logs(args: argparse.Namespace) -> int:
     """Import the Drive sheets into steps, actions, instances and state events."""
     if args.force_verified and not args.force:
         print("[import-logs] --force-verified only means something with --force: "
               "without --force a desktop that already has steps is skipped before "
               "its verified frames are ever looked at.")
+        return EXIT_ERROR
+    if args.force_drop and not args.force:
+        print("[import-logs] --force-drop only means something with --force: "
+              "without --force nothing is ever dropped, so there is no "
+              "plausibility check for it to overrule.")
         return EXIT_ERROR
     with _session(args, lock=True) as (paths, db):
         directory = args.dir or P.drive_dir(paths)
@@ -240,9 +260,12 @@ def cmd_import_logs(args: argparse.Namespace) -> int:
         kept = sum(r.kept_for_review for r in imported)
         if kept:
             # an issue in a report nobody opens is not a warning: the one thing
-            # a re-import can leave behind that needs a human gets its own line
-            print(f"[import-logs] {kept} vanished instances kept for S1 review "
-                  f"(they carry work; see the report)")
+            # a re-import can leave behind that needs a human gets its own line.
+            # Only some of them carry work; the rest are held because a kept one
+            # names them, and saying otherwise overstates the job.
+            work = sum(r.kept_carrying_work for r in imported)
+            print(f"[import-logs] {kept} vanished instances kept ({work} carry "
+                  f"work, the rest are referenced by them); see the report")
         for r in run.dropped_ls_notes:
             print(f"[import-logs] {L.dropped_notes_line(r.desktop, r.ls_notes_dropped)}")
         carried = run.with_ls_notes
@@ -251,17 +274,20 @@ def cmd_import_logs(args: argparse.Namespace) -> int:
             print(f"[import-logs] {listed} had Label Studio notes; "
                   f"run 'python -m tda.cli import-ls' to rebuild them from the export "
                   f"if anything looks wrong")
-        if run.refused:
-            listed = ", ".join(f"D{r.desktop:02d}" for r in run.refused)
-            print(f"[import-logs] refused: {listed} carry verified frames, which were "
-                  f"compiled from the step table this would replace. Re-run with "
-                  f"--force-verified to re-import them anyway, or select the other "
-                  f"desktops with --desktops.")
-        # A run that imported nothing has nothing to report, and overwriting the
-        # file would throw away the issue list of the run that did the work.
-        if not imported and not run.failed:
+        # The two refusals want different answers, so they are listed apart: the
+        # run-level line used to offer --force-verified whatever the reason,
+        # which is the wrong flag for half of them.
+        for reason, advice in REFUSAL_ADVICE.items():
+            listed = run.refused_of(reason)
+            if listed:
+                names = ", ".join(f"D{r.desktop:02d}" for r in listed)
+                print(f"[import-logs] refused: {names} {advice}")
+        # A run that imported nothing has nothing to add to the report -- but a
+        # refusal *is* the report, and losing it to stdout is how the detail of
+        # why thirteen desktops were left alone disappears on the next scroll.
+        if not imported and not (run.failed or run.refused):
             print("[import-logs] nothing imported, kept the previous report")
-            return EXIT_ERROR if run.refused else EXIT_OK
+            return EXIT_OK
         report = args.report or P.cache_file(paths, P.LOGS_REPORT_NAME)
         with open(report, "w", encoding="utf-8") as fh:
             fh.write(logs_report(run, L.expected_steps(directory)))
