@@ -50,10 +50,12 @@ from tda.core.db import Db
 from tda.core.graph import (
     HARD_TYPES,
     Edge,
+    constraint_edges,
     edge_digest,
     edges_from_db,
     edges_to_db,
     find_cycles,
+    graph_version,
     is_provisional,
     propose_edges,
     unresolved_fan_owners,
@@ -209,7 +211,7 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
     # and feeding them to `find_cycles` or `unmet` invents eight cycles and a
     # stack of violations out of rows nobody claimed were constraints. They are
     # left exactly where they are and counted apart.
-    protected = {_triple(e): e for e in keep if e.type in HARD_TYPES}
+    protected = {_triple(e): e for e in constraint_edges(keep)}
     proposed_triples = {_triple(p) for p in proposed}
     stale = [_triple(e) for e in existing
              if e.source == RULE and _triple(e) not in proposed_triples]
@@ -241,6 +243,10 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
         for rel_type, target, blocker in stale:
             db.delete_relation(desktop, rel_type, target, blocker)
         edges_to_db(db, desktop, to_store)
+        # read the accessor back rather than stamping the digest computed above:
+        # the meta and `graph.graph_version` are then the same answer by
+        # construction, which is what the exports quote
+        out.version = graph_version(db, desktop)
         P.merge_desktop_meta(db, desktop, {
             "graph_version": out.version,
             "graph_edges": out.edges,

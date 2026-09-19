@@ -66,6 +66,7 @@ __all__ = [
     "applicable_preconditions",
     "cable_owner",
     "connector_owner",
+    "constraint_edges",
     "edge_digest",
     "edges_from_db",
     "edges_to_db",
@@ -236,7 +237,7 @@ def validate_sequence(
       ``"step k: <verb> <target> violates <edge>"`` -- one line per unmet edge,
       naming the blocker's actual state;
     * a **failed** attempt must have at least one unmet precondition, else
-      ``"step k: failed <verb> <target> has no unmet constraint — missing edge?"``
+      ``"step k: failed <verb> <target> has no unmet constraint - missing edge?"``
       which is the cue to add the missing ``blocked_by`` edge by hand.
 
     Actions are replayed in ``(step, idx)`` order through
@@ -263,7 +264,7 @@ def validate_sequence(
         elif not bad:
             problems.append(
                 f"step {action.step}: failed {action.verb} {action.target} "
-                "has no unmet constraint — missing edge?"
+                "has no unmet constraint - missing edge?"
             )
     return problems
 
@@ -391,8 +392,33 @@ def edges_from_db(db, desktop: int) -> list[Edge]:
 # --------------------------------------------------------------------------- #
 # 7. graph version
 # --------------------------------------------------------------------------- #
+def constraint_edges(edges: list[Edge]) -> list[Edge]:
+    """The subset of an edge list that is actually the constraint graph.
+
+    The five hard types of spec 7.2, on settled instances. Two things share the
+    ``relation`` table without being constraints and must not reach a digest, a
+    cycle check or a replay:
+
+    * the ``partner_of`` / ``is_pre-request_of`` / ``related_to`` rows the Label
+      Studio import files there -- annotations of another kind, which gate
+      nothing and have no :data:`REQUIRED_STATES` entry;
+    * any edge naming a provisional ``ls:*`` key, which is a shape somebody drew
+      rather than a part anybody has decided exists (spec 3.2).
+    """
+    return [
+        e for e in edges
+        if e.type in HARD_TYPES
+        and not is_provisional(e.target) and not is_provisional(e.blocker)
+    ]
+
+
 def edge_digest(edges: list[Edge]) -> Optional[str]:
     """A 16-hex-character content hash of an edge set, or ``None`` when it is empty.
+
+    Only the constraint edges count (:func:`constraint_edges`), so the caller
+    cannot change the answer by handing in more or less of the table than the
+    next caller did -- which is exactly how the stamped version and the accessor
+    came to disagree on the two desktops that carry Label Studio rows.
 
     What goes in is what changes the *meaning* of the graph -- type, target,
     blocker, necessity, mode and status -- sorted, so two runs that derive the
@@ -402,11 +428,12 @@ def edge_digest(edges: list[Edge]) -> Optional[str]:
     human accepting a rule edge by hand does not invalidate every export that
     quoted the version.
     """
-    if not edges:
+    wanted = constraint_edges(edges)
+    if not wanted:
         return None
     body = "\n".join(sorted(
         f"{e.type}|{e.target}|{e.blocker}|{e.necessity}|{e.mode or ''}|{e.status}"
-        for e in edges
+        for e in wanted
     ))
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
@@ -414,10 +441,11 @@ def edge_digest(edges: list[Edge]) -> Optional[str]:
 def graph_version(db, desktop: int) -> Optional[str]:
     """The content hash of one desktop's stored constraint graph.
 
-    Computed from the ``relation`` rows rather than read back from the meta
-    stamp, so it cannot go stale: a hand-added edge changes the answer
-    immediately, and an export that quotes it is quoting what it shipped.
-    ``None`` for a desktop with no edges at all -- which is what
-    ``python -m tda.cli constraints`` is for.
+    The one definition: ``constraints`` stamps exactly this, read back after its
+    write, and the exports quote exactly this. Computed from the ``relation``
+    rows rather than read back from the meta stamp, so it cannot go stale -- a
+    hand-added edge changes the answer immediately, and an export that quotes it
+    is quoting what it shipped. ``None`` for a desktop with no constraint edges
+    at all, which is what ``python -m tda.cli constraints`` is for.
     """
     return edge_digest(edges_from_db(db, desktop))
