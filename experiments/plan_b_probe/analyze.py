@@ -28,12 +28,21 @@ def valid_steps(st: Store):
     return [i for i in range(len(st.steps)) if st.nkp[i] > 0]
 
 
+def work_wh(st: Store):
+    """Working-image (w, h) for this view, for the grid-displacement measure."""
+    sh = st.shapes[st.shapes[:, 0] > 0]
+    if not len(sh):
+        return None
+    return int(sh[0][1]), int(sh[0][0])
+
+
 # ------------------------------------------------------------------ Q2 events
 
 def within_desktop(view: str, desktop: int, chstore=None):
     """Consecutive-step table motion for one desktop."""
     st = Store(view, desktop)
     up = st.upscale
+    wh = work_wh(st)
     rows = []
     idx = list(range(len(st.steps)))
     prev = None
@@ -44,8 +53,8 @@ def within_desktop(view: str, desktop: int, chstore=None):
             continue
         if prev is not None:
             pk, pd, pi = prev
-            r = E.estimate(pk, pd, kp, des, up)
-            ch = _chassis_delta(chstore, pi, i, up) if chstore is not None else None
+            r = E.estimate(pk, pd, kp, des, up, wh)
+            ch = _chassis_delta(chstore, pi, i, up, wh) if chstore is not None else None
             rows.append({
                 "desktop": desktop, "view": view,
                 "step_from": int(st.steps[pi]), "step_to": int(st.steps[i]),
@@ -54,19 +63,29 @@ def within_desktop(view: str, desktop: int, chstore=None):
                 "table_px": r["px"], "rot_deg": r["rot_deg"], "scale": r["scale"],
                 "chassis_px": None if ch is None else ch[0],
                 "chassis_area_ratio": None if ch is None else ch[1],
+                "step_from_idx": pi, "step_to_idx": i,
             })
         prev = (kp, des, i)
     return rows
 
 
-def _chassis_delta(ch, i, j, up):
-    """(centroid shift in original px, area ratio) of the central non-table blob."""
+def _chassis_delta(ch, i, j, up, wh=None):
+    """(rigid shift in original px, area ratio) of the chassis itself.
+
+    Measured by matching features *inside* the chassis, not by its outline: a
+    teardown removes parts at nearly every step, which moves the blob's centroid
+    and changes its area without the chassis itself having been touched.  A
+    rigid fit over the parts that are still there is not fooled by that.
+    """
     a, b = ch.blob[i], ch.blob[j]
-    if not np.isfinite(a).all() or not np.isfinite(b).all():
-        return None
-    d = float(np.hypot(b[0] - a[0], b[1] - a[1])) * up
-    ar = float(b[2] / a[2]) if a[2] > 0 else float("nan")
-    return d, ar
+    ar = float(b[2] / a[2]) if (np.isfinite(a).all() and np.isfinite(b).all()
+                                and a[2] > 0) else float("nan")
+    ka, da = ch.at(i)
+    kb, db = ch.at(j)
+    if ka is None or kb is None:
+        return None, ar
+    r = E.estimate(ka, da, kb, db, up, wh)
+    return (r["px"] if r["ok"] else None), ar
 
 
 def classify(table_px, table_ok, chassis_px, area_ratio):
@@ -98,6 +117,7 @@ def boundary_estimate(view, d0, d1, k=BOUNDARY_K):
     """
     s0, s1 = Store(view, d0), Store(view, d1)
     up = s0.upscale
+    wh = work_wh(s0)
     a = valid_steps(s0)[-k:]
     b = valid_steps(s1)[:k]
     res = []
@@ -105,7 +125,7 @@ def boundary_estimate(view, d0, d1, k=BOUNDARY_K):
         ka, da = s0.at(i)
         for j in b:
             kb, db = s1.at(j)
-            r = E.estimate(ka, da, kb, db, up)
+            r = E.estimate(ka, da, kb, db, up, wh)
             if r["ok"]:
                 res.append(r)
     if not res:

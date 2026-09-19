@@ -23,7 +23,7 @@ def match(des_a, des_b, ratio: float = 0.78):
     return good
 
 
-def estimate(kp_a, des_a, kp_b, des_b, upscale: float = 1.0):
+def estimate(kp_a, des_a, kp_b, des_b, upscale: float = 1.0, wh=None):
     """Map frame A onto frame B using table-fixed points.
 
     Returns a dict with the median inlier displacement in ORIGINAL-image pixels
@@ -31,8 +31,9 @@ def estimate(kp_a, des_a, kp_b, des_b, upscale: float = 1.0):
     False when there is not enough table evidence -- callers must report those
     as undetermined rather than as a number.
     """
-    out = {"ok": False, "n_match": 0, "n_inlier": 0, "px": None,
-           "rot_deg": None, "scale": None, "spread": None, "reason": ""}
+    out = {"ok": False, "n_match": 0, "n_inlier": 0, "px": None, "px_raw": None,
+           "rot_deg": None, "scale": None, "spread": None, "resid_px": None,
+           "reason": ""}
     good = match(des_a, des_b)
     out["n_match"] = len(good)
     if len(good) < MIN_MATCHES:
@@ -60,10 +61,47 @@ def estimate(kp_a, des_a, kp_b, des_b, upscale: float = 1.0):
     if spread < MIN_SPREAD:
         out["reason"] = "clustered"
         return out
-    # Model-agnostic magnitude: how far the table landmarks actually moved.
-    d = np.linalg.norm(ib - ia, axis=1)
-    out["px"] = float(np.median(d)) * upscale
-    out["rot_deg"] = float(np.degrees(np.arctan2(M[1, 0], M[0, 0])))
-    out["scale"] = float(np.hypot(M[0, 0], M[1, 0]))
+
+    # Refit in closed form on the inliers.  Raw keypoint coordinates are
+    # quantised, so the median raw displacement bottoms out at ~1 working pixel
+    # and cannot resolve a small move; a similarity fitted to a few hundred
+    # inliers is good to well under a pixel.
+    S = umeyama(ia, ib)
+    w, h = wh or (W_WORK, H_WORK)
+    out["px"] = grid_displacement(S, w, h) * upscale
+    out["px_raw"] = float(np.median(np.linalg.norm(ib - ia, axis=1))) * upscale
+    out["rot_deg"] = float(np.degrees(np.arctan2(S[1, 0], S[0, 0])))
+    out["scale"] = float(np.hypot(S[0, 0], S[1, 0]))
+    out["resid_px"] = float(np.median(np.linalg.norm(
+        ia @ S[:, :2].T + S[:, 2] - ib, axis=1))) * upscale
     out["ok"] = True
     return out
+
+
+W_WORK, H_WORK = 640, 640       # grid extent at the working scale
+
+
+def umeyama(a, b):
+    """Least-squares similarity (scale+rotation+translation) mapping a -> b."""
+    ma, mb = a.mean(0), b.mean(0)
+    ca, cb = a - ma, b - mb
+    cov = (cb.T @ ca) / len(a)
+    u, d, vt = np.linalg.svd(cov)
+    s = np.eye(2)
+    if np.linalg.det(u) * np.linalg.det(vt) < 0:
+        s[1, 1] = -1
+    R = u @ s @ vt
+    var = (ca ** 2).sum() / len(a)
+    c = float((d * np.diag(s)).sum() / var) if var > 0 else 1.0
+    S = np.zeros((2, 3))
+    S[:, :2] = c * R
+    S[:, 2] = mb - c * R @ ma
+    return S
+
+
+def grid_displacement(S, w, h):
+    """Median ||S(p) - p|| over a grid: one honest number for 'how much'."""
+    gx, gy = np.meshgrid(np.linspace(0, w - 1, 20), np.linspace(0, h - 1, 20))
+    p = np.stack([gx.ravel(), gy.ravel()], 1)
+    q = p @ S[:, :2].T + S[:, 2]
+    return float(np.median(np.linalg.norm(q - p, axis=1)))
