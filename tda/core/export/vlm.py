@@ -57,6 +57,7 @@ from tda.core.export.coco import (
     NO_CHANGE_STEP_TYPES,
     VERIFIED,
     DesktopCtx,
+    conflicted_steps,
     frame_file_name,
     frame_is_verified,
     load_ctx,
@@ -409,6 +410,7 @@ def export_vlm(
     only_verified: bool = False,
     *,
     truth: Optional[TruthService] = None,
+    allow_conflicts: bool = False,
 ) -> dict:
     """Write the V1/V2/V3 question set of ``desktops`` in ``view`` as JSONL.
 
@@ -421,7 +423,13 @@ def export_vlm(
     ``configs/taxonomy.yaml``) -- the same value for the whole file, because a
     tier is a property of the camera, not of one answer.
 
-    Returns ``{"path", "records", "by_task", "desktops", "view"}``.
+    ``allow_conflicts`` is the COCO export's flag and means the same here: a
+    view with an open disagreement is **refused** without it
+    (:func:`tda.core.export.coco.conflicted_steps`), and with it the frames
+    involved answer ``verified: false``, so ``only_verified`` drops them.
+
+    Returns ``{"path", "records", "by_task", "desktops", "view",
+    "open_conflicts"}``.
     """
     wanted = [t for t in TASKS if t in set(tasks)]
     records: list[dict] = []
@@ -437,6 +445,7 @@ def export_vlm(
         records.append(record)
 
     service = truth or TruthService(db, tax)
+    open_conflicts = 0
 
     for desktop in desktops:
         ctx = load_ctx(db, tax, desktop, view)
@@ -445,6 +454,8 @@ def export_vlm(
         # reading the view out, or a frame nobody visited is exported
         # as it was several edits ago -- or silently not at all
         service.ensure_fresh(desktop, view, only_verified)
+        disputed = conflicted_steps(service, desktop, view, allow_conflicts)
+        open_conflicts += len(disputed)
         previous: Optional[tuple[int, dict[str, tuple[dict, list]], str]] = None
         verified: dict[int, bool] = {}
         for frame in db.frames_for(desktop, view):
@@ -453,7 +464,9 @@ def export_vlm(
                 continue  # an `ignore` step is no moment of the teardown
             image = frame_file_name(frame, key)
             rows = db.compiled(key)
-            verified[key.step] = frame_is_verified(db, key, rows)
+            # a frame somebody is still arguing about answers nothing confirmed
+            verified[key.step] = (key.step not in disputed
+                                  and frame_is_verified(db, key, rows))
             pointable = _pointable(ctx, rows, only_verified)
 
             if "V1" in wanted:
@@ -480,4 +493,5 @@ def export_vlm(
     return {
         "path": str(out), "records": len(records), "by_task": by_task,
         "desktops": [int(d) for d in desktops], "view": view,
+        "open_conflicts": open_conflicts,
     }

@@ -143,14 +143,17 @@ def test_no_export_ever_names_a_provisional_key(drafted: Scene, tmp_path: Path):
                             0.0, "visible", "in_chassis", "verified", "h",
                             verified_by="tester")
 
+    # such a row is one the compiler will never produce again, so the view now
+    # carries a standing conflict as well: that is what `allow_conflicts` is for
     doc = export_coco(drafted.db, drafted.tax, [DESKTOP], VIEW,
                       str(tmp_path / "c.json"), only_verified=False,
-                      include_boxes=True)
+                      include_boxes=True, allow_conflicts=True)
     keys = [a["attributes"]["instance_key"] for a in doc["annotations"]]
     assert keys and not [k for k in keys if is_provisional(k)]
 
     out = tmp_path / "v.jsonl"
-    export_vlm(drafted.db, drafted.tax, [DESKTOP], VIEW, str(out))
+    export_vlm(drafted.db, drafted.tax, [DESKTOP], VIEW, str(out),
+               allow_conflicts=True)
     assert out.read_text(encoding="utf-8")
     assert "ls:" not in out.read_text(encoding="utf-8")
 

@@ -15,6 +15,7 @@ from tda.core.masks import encode_rle
 from tda.core.model import (
     ActionRec,
     FrameKey,
+    FrameOverride,
     InstanceRec,
     ShapeKeyframe,
     ShapePart,
@@ -112,6 +113,14 @@ def db(tmp_db_path: str, tax):
         anchor_step=2, placement="in_chassis", geom_type="mask",
         parts=[ShapePart("main", rle=psu_rle)], amodal_complete=False,
     ))
+    # The screw deliberately has no keyframe of its own (several tests are about
+    # what an annotation without one reports). Its frozen row at step 1 still
+    # has to follow from *some* input, or the export's own `ensure_fresh`
+    # queues a conflict about a mask nobody drew -- and an unsettled
+    # disagreement is a view no export may publish. A frame override is exactly
+    # that input: geometry for this one frame, and no keyframe.
+    d.set_frame_override(FrameOverride(FrameKey(DESKTOP, 1, VIEW), SCREW,
+                                       screw_rle, "occluded_partial"))
     d.add_keyframe(ShapeKeyframe(
         id=None, instance=PSU, desktop=DESKTOP, view=VIEW, pose_segment=SEGMENT,
         anchor_step=3, placement="on_bench", geom_type="box",
@@ -418,14 +427,20 @@ def test_amodal_complete_reads_the_frames_pose_segment(db, tax, tmp_path: Path):
 
 
 def test_unknown_instance_keys_are_skipped(db, tax, tmp_path: Path):
-    """A provisional draft key has no taxonomy class: skip it instead of crashing."""
+    """A provisional draft key has no taxonomy class: skip it instead of crashing.
+
+    Such a row is by definition one the compiler will not produce again, so it
+    is also a standing conflict -- ``allow_conflicts`` is what lets the export
+    look at it at all.
+    """
     db.put_compiled(FrameKey(DESKTOP, 1, VIEW), GHOST, encode_rle(SCREW_MASK), 0.0,
                     "visible", "in_chassis", "verified", "h1", verified_by="tester")
-    doc = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"), only_verified=False)
+    doc = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"),
+                      only_verified=False, allow_conflicts=True)
     assert GHOST not in {a["attributes"]["instance_key"] for a in doc["annotations"]}
 
     out = tmp_path / "vlm.jsonl"
-    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out), allow_conflicts=True)
     assert GHOST not in out.read_text(encoding="utf-8")
 
 
@@ -495,3 +510,56 @@ def test_the_measurements_match_a_decoded_mask():
 
     assert mask_bbox_xywh(rle) == bbox_xywh(masks.bbox(masks.decode_rle(rle)))
     assert masks.rle_area(rle) == masks.area(masks.decode_rle(rle))
+
+
+# --------------------------------------------------------------------------- #
+# standing conflicts
+# --------------------------------------------------------------------------- #
+def _queue_conflict(d: Db, step: int = 1) -> int:
+    """One open disagreement about ``step``, the way a re-check would leave it."""
+    return d.add_conflict(FrameKey(DESKTOP, step, VIEW), PSU,
+                          encode_rle(PSU_MASK), encode_rle(SCREW_MASK), 400)
+
+
+def test_open_conflicts_is_the_services_own_question(db, tax):
+    from tda.core.truth import TruthService
+
+    service = TruthService(db, tax)
+    assert service.open_conflicts(DESKTOP, VIEW) == []
+
+    cid = _queue_conflict(db)
+
+    assert [c["id"] for c in service.open_conflicts(DESKTOP, VIEW)] == [cid]
+    assert service.open_conflicts(DESKTOP, "oak1") == []
+    assert service.ensure_fresh(DESKTOP, VIEW)["open_conflicts"] == 1
+    db.resolve_conflict(cid, "accept_new")
+    assert service.ensure_fresh(DESKTOP, VIEW)["open_conflicts"] == 0
+
+
+def test_both_exports_refuse_a_view_with_a_standing_conflict(db, tax, tmp_path: Path):
+    """A disagreement nobody settled is not a truth anybody may publish."""
+    _queue_conflict(db)
+
+    with pytest.raises(RuntimeError, match="allow_conflicts"):
+        export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"),
+                    only_verified=False)
+    with pytest.raises(RuntimeError, match="allow_conflicts"):
+        export_vlm(db, tax, [DESKTOP], VIEW, str(tmp_path / "v.jsonl"))
+    assert not (tmp_path / "c.json").exists()
+
+
+def test_allow_conflicts_exports_those_frames_as_unverified(db, tax, tmp_path: Path):
+    _queue_conflict(db, step=1)  # step 1 is the confirmed frame
+
+    doc = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"),
+                      only_verified=False, allow_conflicts=True)
+
+    by_step = {im["extra"]["step"]: im for im in doc["images"]}
+    assert by_step[1]["verified"] is False  # confirmed, but still argued about
+    assert doc["info"]["allow_conflicts"] is True
+    assert doc["info"]["open_conflicts"] == 1
+
+    out = tmp_path / "v.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out), allow_conflicts=True)
+    at_one = [r for r in _records(out) if r["step"] == 1]
+    assert at_one and not [r for r in at_one if r["verified"]]

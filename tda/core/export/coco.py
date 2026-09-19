@@ -76,6 +76,7 @@ __all__ = [
     "cache_rel_path",
     "categories",
     "category_ids",
+    "conflicted_steps",
     "export_coco",
     "frame_file_name",
     "frame_hw",
@@ -364,6 +365,31 @@ def frame_is_verified(db: Db, key: FrameKey, rows: dict[str, dict]) -> bool:
     return bool(rows) and all(row.get("status") == VERIFIED for row in rows.values())
 
 
+def conflicted_steps(service: TruthService, desktop: int, view: str,
+                     allow_conflicts: bool) -> set[int]:
+    """Steps of one view with an open disagreement; refuses unless allowed.
+
+    A *standing* conflict is a frozen row a human was told is disputed and has
+    not settled: the compiler may not overwrite it, so every export of that view
+    republishes the disputed value, marked as confirmed, for as long as the
+    queue entry sits there. Both exports therefore stop and say so.
+
+    ``allow_conflicts=True`` is the deliberate "publish it anyway" -- a
+    rehearsal export, a mid-annotation snapshot -- and then the frames involved
+    go out with ``verified: false``, because that is what they are.
+    """
+    rows = service.open_conflicts(desktop, view)
+    if rows and not allow_conflicts:
+        steps = sorted({int(r["step"]) for r in rows})
+        raise RuntimeError(
+            f"desktop {desktop} view {view}: {len(rows)} open conflict(s) on step(s) "
+            f"{steps[:5]}{'...' if len(steps) > 5 else ''} are still unsettled; "
+            f"resolve them in the review panel, or pass allow_conflicts=True to "
+            f"export those frames as unverified"
+        )
+    return {int(r["step"]) for r in rows}
+
+
 def view_tier(view: str, tax: Taxonomy) -> str:
     """The annotation tier of one view (spec 8.1); raises for an unknown one.
 
@@ -475,6 +501,7 @@ def export_coco(
     *,
     include_boxes: bool = False,
     truth: Optional[TruthService] = None,
+    allow_conflicts: bool = False,
 ) -> dict:
     """Write the compiled truth of ``desktops`` in ``view`` as one COCO file.
 
@@ -493,6 +520,11 @@ def export_coco(
         Also emit the compiled ``box`` rows -- a part lying on the bench, whose
         truth is a rectangle rather than a mask -- as bbox-only annotations with
         ``segmentation: []``.
+    allow_conflicts:
+        Export a view that still has open conflicts. Without it the export
+        **refuses** (:func:`conflicted_steps`); with it the frames involved are
+        written with ``verified: false``, and ``info`` records how many there
+        were.
 
     Steps typed ``ignore`` are skipped: they describe no moment of the teardown.
 
@@ -509,6 +541,8 @@ def export_coco(
             "only_verified": bool(only_verified),
             "roi_crop": bool(roi_crop),
             "include_boxes": bool(include_boxes),
+            "allow_conflicts": bool(allow_conflicts),
+            "open_conflicts": 0,
         },
         "licenses": [],
         "images": [],
@@ -527,6 +561,8 @@ def export_coco(
         # reading the view out, or a frame nobody visited is exported
         # as it was several edits ago -- or silently not at all
         service.ensure_fresh(desktop, view, only_verified)
+        disputed = conflicted_steps(service, desktop, view, allow_conflicts)
+        doc["info"]["open_conflicts"] += len(disputed)
         for frame in db.frames_for(desktop, view):
             key = FrameKey(desktop, frame["step"], view)
             if not ctx.exportable(key.step):
@@ -549,7 +585,10 @@ def export_coco(
                 # have to read all of them; `review_status` is the raw column
                 # underneath and stays for whoever already reads it
                 "tier": tier,
-                "verified": frame_is_verified(db, key, db.compiled(key)),
+                # a frame somebody is still arguing about is not a confirmed
+                # one, whatever its rows say (spec 3.4)
+                "verified": (key.step not in disputed
+                             and frame_is_verified(db, key, db.compiled(key))),
                 "extra": {"desktop": desktop, "step": key.step, "view": view,
                           "review_status": frame.get("review_status")},
             }

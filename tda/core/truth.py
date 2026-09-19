@@ -322,6 +322,18 @@ class TruthService(FreshMixin, ResolveMixin):
             self.db.add_rechecks(desktop, view, wanted)
         return sorted(set(wanted))
 
+    def open_conflicts(self, desktop: int, view: Optional[str] = None) -> list[dict]:
+        """Disagreements of one desktop (or one view) nobody has settled, oldest first.
+
+        A *standing* conflict is the one thing a batch pass cannot work around:
+        :meth:`refresh` will not overwrite the frozen row, so the view keeps
+        publishing a value a human has already been told is disputed. Exports
+        refuse on it unless they are told to go ahead
+        (:func:`tda.core.export.coco.export_coco`'s ``allow_conflicts``), and a
+        quality check reports it.
+        """
+        return self.db.conflicts(desktop, view, open_only=True)
+
     def pending_rechecks(self, desktop: int, view: str) -> list[int]:
         """Frozen frames of one view still waiting to be compared, ascending.
 

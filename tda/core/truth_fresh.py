@@ -151,6 +151,13 @@ class FreshMixin:
         reported on its own under ``rechecked`` and ``refreshed``, so a caller
         can say which of them found something.
 
+        ``open_conflicts`` counts the disagreements of this view that nobody has
+        settled. They are **not** an error here -- the truth table is as fresh
+        as it can be made while they stand, and the frozen rows deliberately
+        keep their values -- but a caller publishing the view has to know: that
+        is what :func:`tda.core.export.coco.export_coco`'s ``allow_conflicts``
+        decides, and what a quality check reports.
+
         Raises ``RuntimeError`` when a re-check is still outstanding afterwards
         -- an export must not run on a frozen frame nobody has compared -- and
         when the stored digests were written by another ``compiler_version``,
@@ -179,6 +186,7 @@ class FreshMixin:
                 f"desktop {desktop} view {view}: {len(left)} frozen frame(s) still "
                 f"await a truth re-check ({left[:5]}...); run them before exporting"
             )
+        total["open_conflicts"] = len(self.open_conflicts(desktop, view))
         return total
 
     def _refuse_foreign_digests(self, desktop: int, view: str) -> None:
