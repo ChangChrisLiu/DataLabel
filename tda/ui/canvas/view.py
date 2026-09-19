@@ -183,6 +183,10 @@ class ImageCanvas(QGraphicsView):
     sigMousePress = Signal(float, float, object)
     sigMouseMove = Signal(float, float, object)
     sigMouseRelease = Signal(float, float, object)
+    #: The zoom factor changed, by whatever route -- the wheel, a fit, a
+    #: programmatic set.  The status bar's percentage was rewritten only by the
+    #: *actions* that zoom, so after a wheel notch it said the old number.
+    sigZoomChanged = Signal(float)
 
     #: Zoom factor per wheel notch (spec 4.5).
     ZOOM_STEP = 1.25
@@ -205,6 +209,7 @@ class ImageCanvas(QGraphicsView):
         self._pan_origin = QPointF()
         self._space_down = False
         self._rubber_band: Optional[tuple[float, float, float, float]] = None
+        self._last_zoom: Optional[float] = None
         # Parented to the view, not the viewport: QGraphicsView scrolls the
         # viewport's child widgets together with the scene, which would drag the
         # minimap off screen on the first pan.
@@ -399,6 +404,19 @@ class ImageCanvas(QGraphicsView):
 
     def _sync_minimap(self) -> None:
         self._minimap.set_view_rect(self.viewport_image_rect())
+        self._announce_zoom()
+
+    def _announce_zoom(self) -> None:
+        """Tell whoever is showing the percentage, once per real change.
+
+        Every path that zooms already syncs the minimap, which makes this the
+        one place that sees all of them -- the wheel included, which is the one
+        the status bar used to miss.
+        """
+        zoom = self.zoom_factor()
+        if self._last_zoom is None or abs(zoom - self._last_zoom) > 1e-9:
+            self._last_zoom = zoom
+            self.sigZoomChanged.emit(zoom)
 
     def _place_minimap(self, margin: int = 8) -> None:
         self._minimap.move(

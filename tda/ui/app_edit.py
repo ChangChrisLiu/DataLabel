@@ -83,6 +83,9 @@ class EditMixin:
         # Connected before any tool is attached, so the window sees a press
         # first and can adopt an instance for it (or mark it as doomed).
         self.canvas.sigMousePress.connect(self._on_canvas_press)
+        # The wheel zooms without going through any action, so the percentage
+        # in the status bar has to follow the canvas rather than the keyboard.
+        self.canvas.sigZoomChanged.connect(lambda _z: self.update_status())
         self._paint_blocked = False
         self._blocked_layer: Optional[np.ndarray] = None
 

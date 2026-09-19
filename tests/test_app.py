@@ -696,3 +696,26 @@ def test_the_chooser_count_follows_the_sweeper(window, monkeypatch):
     monkeypatch.setattr(window, "refresh_desktop_counts", lambda: seen.append(1))
     window._on_sweep_progress(4, 4, 0)
     assert seen == [1]
+
+
+def test_the_zoom_percentage_follows_the_wheel(window):
+    """The status bar's zoom was only rewritten by actions that called it."""
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    window.resize(900, 700)
+    window.show()
+    QApplication.processEvents()
+    before = window.zoom_label.text()
+
+    viewport = window.canvas.viewport()
+    centre = QPointF(viewport.rect().center())
+    QApplication.sendEvent(viewport, QWheelEvent(
+        centre, viewport.mapToGlobal(QPoint(*map(int, (centre.x(), centre.y())))),
+        QPoint(0, 0), QPoint(0, 120), Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False,
+    ))
+    QApplication.processEvents()
+
+    assert window.canvas.zoom_factor() != pytest.approx(float(before.rstrip("%")) / 100)
+    assert window.zoom_label.text() != before
