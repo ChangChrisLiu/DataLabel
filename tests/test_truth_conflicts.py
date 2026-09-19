@@ -612,6 +612,43 @@ def test_confirming_with_a_handed_over_frame_writes_what_a_fresh_one_would(
         other.close()
 
 
+def test_an_edit_landing_while_the_frame_is_confirmed_writes_nothing(
+    scene: Scene, monkeypatch
+):
+    """The window between reading the inputs and writing the rows.
+
+    The compilation is made outside any transaction -- it is pixels, and
+    holding the database for a third of a second at scanner resolution would
+    serialise the tool on it -- so an edit can land in between and the rows
+    written would describe inputs nobody has any more. ``refresh`` guards its
+    own write the same way.
+    """
+    scene.refresh_all()
+    edited: list[int] = []
+    real = scene.db.compiled
+
+    def move_the_shape(key):
+        if not edited:  # once, from inside the window
+            edited.append(1)
+            replace_parts(scene, scene.psu_kf,
+                          [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
+        return real(key)
+
+    monkeypatch.setattr(scene.db, "compiled", move_the_shape)
+
+    with pytest.raises(ValueError, match="press Space again"):
+        scene.svc.verify_frame(scene.key(2), "lin")
+
+    monkeypatch.undo()
+    assert scene.review_status(2) != "verified"
+    assert all(row["status"] == "auto" for row in scene.rows(2).values())
+    assert scene.db.conflicts(DESKTOP) == []
+    # nothing was stamped for the inputs that arrived mid-flight: the frame
+    # still carries the digest of the ones it was last actually compiled from
+    assert scene.db.frame_digest(scene.key(2))["digest"] != \
+        scene.svc.inputs_digest(scene.key(2))
+
+
 def test_verify_frame_still_drops_an_auto_row_the_inputs_lost(scene: Scene):
     """Only a frozen row is a signature; an ``auto`` row is a cache."""
     scene.refresh_all()

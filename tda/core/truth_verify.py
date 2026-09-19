@@ -114,8 +114,11 @@ class VerifyMixin:
         that **agrees** is left exactly as it is, signature included, so
         confirming an already-confirmed frame writes nothing but the digest.
 
-        Every write goes into one transaction: a frame is either confirmed
-        whole -- rows, flag and op log -- or not at all.
+        Every write goes into one transaction, which begins by taking the
+        frame's input digest again: a frame is either confirmed whole -- rows,
+        flag and op log -- against the inputs it was compiled from, or not at
+        all. An edit that landed while it was being compiled raises the same
+        ordinary ``ValueError`` and writes nothing.
         """
         refused = f"frame {key.desktop}/{key.view}/step {key.step} cannot be verified: "
         open_ids = self._open_conflict_ids(key)
@@ -138,7 +141,17 @@ class VerifyMixin:
             raise ValueError(refused + "; ".join(disputed)
                              + "; the disagreement is now in the review queue")
         previous = self._review_status(key)
+        digest = digest_of(inputs, self.compiler_version)
         with self.db.transaction():
+            # The compilation happened outside this block -- it is pixels, and
+            # holding the database for a third of a second at scanner
+            # resolution would serialise the whole tool on it -- so an edit can
+            # have landed in between, and the rows about to be written would
+            # describe inputs nobody has any more. `refresh` guards its own
+            # write the same way.
+            if self.inputs_digest(key) != digest:
+                raise ValueError(refused + "the inputs changed while confirming; "
+                                 "press Space again")
             for instance in sorted(compiled.instances):
                 row = stored.get(instance)
                 if row is not None and row["status"] == VERIFIED:
@@ -157,7 +170,7 @@ class VerifyMixin:
                 # `auto` only: the guard above turned every frozen one away
                 self.db.delete_compiled(key, instance)
             self._mark_bench(key, compiled)
-            self._stamp(key, digest_of(inputs, self.compiler_version))
+            self._stamp(key, digest)
             self.db.set_frame_flags(key, review_status=VERIFIED)
             self.db.log_op(
                 key.desktop, key.view, "verify_frame",
