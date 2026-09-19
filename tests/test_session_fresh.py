@@ -225,3 +225,55 @@ def test_ensure_fresh_reports_both_halves(session, tmp_path):
                                    + totals["refreshed"]["conflicts"])
     assert totals["updated"] == (totals["rechecked"]["updated"]
                                  + totals["refreshed"]["updated"])
+
+
+# --------------------------------------------------------------------------- #
+# the hash a reader computes is the hash the compiler wrote
+# --------------------------------------------------------------------------- #
+def _hash_matches(session, step: int) -> tuple[bool, str]:
+    """``(does it match, why not)`` for one frame of the open view."""
+    from tda.core.truth_fresh import hash_of_inputs
+    from tda.core.truth_inputs import gather
+
+    key = FrameKey(DESKTOP, step, VIEW)
+    inputs = gather(session.db, session.tax, key, cache_dir=session.truth.cache_dir)
+    compiled = session.truth.compile(key)
+    mine = hash_of_inputs(inputs, compiled.layers, session.truth.compiler_version)
+    return mine == compiled.input_hash, (
+        f"step {step}: needs={len(inputs.needs)} placements={len(inputs.placements)}"
+    )
+
+
+def test_every_frame_of_the_scene_hashes_the_way_the_compiler_hashed_it(session):
+    """The property the whole handover rests on, on every frame of a real sheet.
+
+    ``gather`` hands out the placement of every instance the desktop has; the
+    compiler hashes the ones this frame needs geometry for. Reading the
+    superset made the hashes differ on every frame with an instance that needs
+    nothing here -- 7 of the 14 steps of D13, and the *later* ones, which is
+    where the annotation actually happens.
+    """
+    from session_scene import seed_shapes
+
+    session.goto(12)
+    seed_shapes(session, 12)  # real shapes, so the frames have layers to order
+    results = {step: _hash_matches(session, step) for step in session.steps()}
+    bad = {step: why for step, (ok, why) in results.items() if not ok}
+
+    assert not bad, f"{len(bad)}/{len(results)} frames hash differently: {bad}"
+
+
+def test_the_handover_is_accepted_where_the_frame_needs_less_than_the_desktop(session):
+    """The regression: a frame whose placements are a superset of its needs."""
+    from session_scene import seed_shapes
+    from tda.core.truth_inputs import gather
+    from tda.core.truth_verify import usable
+
+    session.goto(12)
+    seed_shapes(session, 12)
+    key = FrameKey(DESKTOP, 12, VIEW)
+    inputs = gather(session.db, session.tax, key, cache_dir=session.truth.cache_dir)
+    assert set(inputs.placements) != set(inputs.needs), "the scene lost its point"
+
+    assert usable(session.truth.compile(key), key, inputs,
+                  session.truth.compiler_version)

@@ -27,14 +27,12 @@ import hashlib
 from typing import Optional
 
 from tda.core import masks
-from tda.core.compiler import select_keyframe
+from tda.core.compiler import placements_for, select_keyframe
 from tda.core.compiler_visibility import input_hash
-from tda.core.model import FrameKey, Placement, ShapeKeyframe
+from tda.core.model import FrameKey, ShapeKeyframe
 from tda.core.truth_inputs import FrameInputs, annotatable_steps
 
 __all__ = ["FreshMixin", "digest_of", "hash_of_inputs", "selected_keyframes"]
-
-IN_CHASSIS = Placement.IN_CHASSIS.value
 
 
 def digest_of(inputs: FrameInputs, compiler_version: str) -> str:
@@ -93,10 +91,9 @@ def selected_keyframes(inputs: FrameInputs) -> dict[str, Optional[ShapeKeyframe]
     """
     key = inputs.key
     assert inputs.pose_segment is not None, "gather always resolves a pose segment"
+    placement_of = placements_for(inputs.needs, inputs.placements)
     out: dict[str, Optional[ShapeKeyframe]] = {}
-    for instance in sorted(inputs.needs):
-        assert instance in inputs.placements, "gather fills placements for every need"
-        placement = inputs.placements.get(instance, IN_CHASSIS)
+    for instance, placement in placement_of.items():
         chain = [
             kf for kf in inputs.keyframes.get(instance, ())
             if kf.view == key.view and kf.desktop == key.desktop
@@ -108,11 +105,11 @@ def selected_keyframes(inputs: FrameInputs) -> dict[str, Optional[ShapeKeyframe]
 
 def _selected(inputs: FrameInputs) -> list[tuple]:
     """``(instance, placement, keyframe identity)`` for the digest."""
-    chosen = selected_keyframes(inputs)
+    placement_of = placements_for(inputs.needs, inputs.placements)
     return [
-        (instance, inputs.placements.get(instance, IN_CHASSIS),
+        (instance, placement_of[instance],
          None if kf is None else (kf.id, kf.version, kf.geom_type))
-        for instance, kf in sorted(chosen.items())
+        for instance, kf in sorted(selected_keyframes(inputs).items())
     ]
 
 
@@ -140,7 +137,9 @@ def hash_of_inputs(inputs: FrameInputs, layer_order: dict,
         key=inputs.key,
         hw=inputs.hw,
         needs=inputs.needs,
-        placements=inputs.placements,
+        # narrowed to `needs`, which is the dict the compiler hashes: `gather`
+        # hands over the whole desktop's placements on purpose
+        placements=placements_for(inputs.needs, inputs.placements),
         selected=selected_keyframes(inputs),
         zorder=inputs.zorder,
         layer_order=layer_order,

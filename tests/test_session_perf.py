@@ -383,8 +383,9 @@ def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path):
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize("step", [2, 12])
 def test_confirming_a_frame_is_under_budget_at_full_scanner_resolution(
-    qapp, tmp_path, monkeypatch
+    qapp, tmp_path, monkeypatch, step: int
 ):
     """Space, in the configuration the annotator actually runs.
 
@@ -396,15 +397,23 @@ def test_confirming_a_frame_is_under_budget_at_full_scanner_resolution(
     arriving at a frame compiles it, or the sweeper prefetched it, and Space
     hands that frame to the truth service rather than paying for it twice.
 
-    **The sweeper stays on**, and the frame confirmed is the prefetched ``k-1``:
-    in reverse-order annotation every frame arrives that way, and a budget met
-    only with the background worker switched off is a budget for a tool nobody
-    runs. The compile count is asserted alongside the clock, because a wall time
-    is also met by a fast machine.
+    **The sweeper stays on**, and the frame confirmed is the prefetched
+    ``k-1``: in reverse-order annotation every frame arrives that way, and a
+    budget met only with the background worker switched off is a budget for a
+    tool nobody runs. The compile count is asserted alongside the clock,
+    because a wall time is also met by a fast machine.
+
+    Both an early frame and a late one: by **step 12** several instances have
+    left the machine and need no geometry, so the frame's placements are a
+    strict subset of the desktop's. Reading the wrong one of those two dicts
+    made the handover fail on exactly the later frames -- which is where the
+    annotation happens -- and this test, standing only on step 2, said nothing.
     """
     session = make_session(tmp_path, last_step=40, hw=(1600, 1600))
-    session.goto(3)
-    drawn = seed_shapes(session, 3, grid=8, anchor=40)
+    session.goto(step)
+    # seeded for the frame being confirmed: its needs are a superset of the
+    # later ones', so k+1 is drawn too and neither frame has a missing shape
+    drawn = seed_shapes(session, step, grid=8, anchor=40)
     assert len(drawn) >= 30
     assert session.sweeper_enabled is True
 
@@ -414,23 +423,24 @@ def test_confirming_a_frame_is_under_budget_at_full_scanner_resolution(
         assert session.confirm_frame() is True
 
     def before_confirm(attempt: int) -> None:
-        session.goto(3)                       # k, so the sweeper prefetches k-1
+        session.goto(step + 1)                # k, so the sweeper prefetches k-1
         session.drain_prefetch(timeout=20.0)
-        session.goto(2)                       # ... and arrive on the prefetched one
-        session.drain_prefetch(timeout=20.0)  # which warms step 1 in its turn
-        session.db.set_frame_flags(FrameKey(DESKTOP, 2, VIEW), review_status=None)
+        session.goto(step)                    # ... and arrive on the prefetched one
+        session.drain_prefetch(timeout=20.0)  # which warms k-2 in its turn
+        session.db.set_frame_flags(FrameKey(DESKTOP, step, VIEW), review_status=None)
         compiles.clear()
 
     _, confirm_runs = best_of(confirm, before_confirm)
     # The frame Space confirmed was compiled by nobody on this thread: it came
     # from the prefetch and the truth service proved it still current. Stepping
-    # back to step 1 afterwards does compile that frame -- arriving anywhere
-    # does, and the goto budgets above are what covers it.
-    assert [k.step for k in compiles] == [1], f"confirm_frame compiled {compiles}"
-    assert len(session.db.compiled(FrameKey(DESKTOP, 2, VIEW))) >= 30
+    # back to k-2 afterwards does compile that frame -- arriving anywhere does,
+    # and the goto budgets above are what covers it.
+    assert [k.step for k in compiles] == [step - 1], \
+        f"confirm_frame compiled {compiles}"
+    assert len(session.db.compiled(FrameKey(DESKTOP, step, VIEW))) >= 30
 
     session.close()
-    _under(0.6, "confirm_frame", confirm_runs)
+    _under(0.6, f"confirm_frame at step {step}", confirm_runs)
 
 
 def _count_compiles_in(monkeypatch) -> list:
