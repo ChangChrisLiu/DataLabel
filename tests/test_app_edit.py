@@ -840,3 +840,41 @@ def test_an_overridden_warning_is_logged(window):
         handler.flush()
     text = Path(S.log_path(window.paths)).read_text(encoding="utf-8")
     assert "area_warning_overridden" in text and instance in text
+
+
+# --------------------------------------------------------------------------- #
+# the debounce must not outlive what it was protecting (F3 round 2, item 2)
+# --------------------------------------------------------------------------- #
+def test_an_undo_inside_the_debounce_window_cancels_the_write(window):
+    """Brush, Ctrl+Z within 300 ms: the stale 197-px mask was written anyway.
+
+    The next open then offered to "restore" pixels the annotator had already
+    taken back.
+    """
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    assert window._sidecar_pending is not None
+    before = window.sidecar_writes
+
+    window.act_undo()             # inside the debounce window
+
+    assert window._sidecar_pending is None
+    assert not window._sidecar_timer.isActive()
+    window.flush_sidecar()
+    assert window.sidecar_writes == before
+    assert window.sidecar.pending_for(window.session.current(), instance) is None
+
+
+def test_an_undo_after_the_write_deletes_the_sidecar(window):
+    """... and after the 300 ms, where the file is already on disk."""
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    paint(window)
+    window.flush_sidecar()        # the debounce elapsed
+    assert window.sidecar.pending_for(window.session.current(), instance) is not None
+
+    window.act_undo()
+
+    assert window.sidecar.pending_for(window.session.current(), instance) is None
+    assert window.pending_restore() is None

@@ -337,6 +337,13 @@ class CommitMixin:
             return
         self.refresh_overlay()
         self._sync_editing_layer()
+        # An undo can take the layer back to what begin_edit loaded, and then
+        # the sidecar it wrote (or is about to) describes work that no longer
+        # exists: re-queue it, which drops both when there is nothing left.
+        instance = getattr(self.session, "editing_instance", None)
+        mask = self.session.editing_mask()
+        if instance is not None and mask is not None:
+            self.queue_sidecar(self.session.current(), instance, mask)
         self.timeline.refresh_statuses()   # it takes back other frames too
         self.update_status()
         self.report(what)

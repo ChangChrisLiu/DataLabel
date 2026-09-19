@@ -444,10 +444,13 @@ class EditMixin:
         and written once the annotator pauses.
         """
         if not self.has_uncommitted_edit():
-            # A stroke that changed nothing -- inside a shape that is already
-            # committed, or a net-zero brush-then-erase -- is not work to
-            # protect, and writing it meant later offering to "restore" a layer
-            # identical to what is already in the database.
+            # A layer back at what ``begin_edit`` loaded -- an undo inside the
+            # debounce window, a net-zero brush-then-erase, a stroke inside a
+            # shape that is already committed -- is not work to protect.  It is
+            # not enough to skip the write: the *pending* one has to be dropped
+            # and an already written file deleted, or the annotator is offered
+            # a "restore" of pixels they took back (measured: 197 px).
+            self.drop_sidecar(key, instance)
             return
         self._sidecar_pending = (key, str(instance), np.array(mask, dtype=bool, copy=True))
         self._sidecar_timer.start()
