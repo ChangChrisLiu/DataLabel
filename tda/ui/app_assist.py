@@ -90,9 +90,26 @@ class AssistMixin:
         The tools have a ``"editing"`` fallback for when nothing says; relying
         on it would stamp two different edits with the same identity, so the
         window always answers explicitly.
+
+        Changing it also throws the half-built prompt away: the points clicked
+        so far were about the *previous* part, and sending them with the next
+        click made every mask after the first commit a union of the two.
         """
         for tool in (self.sam_point, self.sam_box):
+            if tool.instance != instance:
+                tool.reset_prompt()
             tool.instance = instance
+
+    def reset_sam_prompt(self) -> None:
+        """Forget the points, the box drag and the candidates of both SAM tools.
+
+        Called wherever the **editing layer is replaced from outside the tool**
+        -- a commit, ``Esc``, an undo/redo, a restored sidecar.  That is the one
+        rule worth remembering: a prompt refines the layer it produced, so the
+        moment somebody else writes that layer the prompt describes nothing.
+        """
+        for tool in (self.sam_point, self.sam_box):
+            tool.reset_prompt()
 
     def clear_prompt_box(self) -> None:
         """Forget the box prompt; the next frame's diff map proposes its own."""

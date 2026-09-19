@@ -126,6 +126,8 @@ class SamToolBase(Tool):
         self._candidate_rect: Optional[Rect] = None
         self._candidate_base: Optional[np.ndarray] = None
         self._candidate_identity: Any = None
+        #: ``(frame token, instance)`` the prompt being built belongs to.
+        self._prompt_identity: Any = None
         self._renders: Optional[list[Optional[np.ndarray]]] = None
         self._bridge = SamResultBridge(self)
         self._bridge.sigResult.connect(
@@ -149,11 +151,27 @@ class SamToolBase(Tool):
     def _cancel(self) -> None:
         """Invalidate the in-flight prompt and forget the per-prompt state."""
         self._token += 1  # nothing already submitted can match again
-        self._reset_candidates()
-        self.prompt_box = None
+        self.reset_prompt()
         rubber_band = getattr(self.canvas, "set_rubber_band", None)
         if rubber_band is not None:
             rubber_band(None)
+
+    def reset_prompt(self) -> None:
+        """Forget everything about the prompt being built, keeping the tool armed.
+
+        A prompt describes **one instance on one frame**: the points clicked so
+        far, the box they are being sent with, and the candidates that came
+        back.  The moment any of that stops being true -- the frame changes, the
+        target instance changes, the layer is replaced from outside the tool
+        (a commit, ``Esc``, an undo) -- none of it is a prompt any more.
+
+        Subclasses extend it with their own half of the prompt (the points, the
+        drag).  ``clear_points()`` used to be the only way to drop the points
+        and **nothing called it**, so every mask after the first commit was a
+        union over everything the annotator had clicked that session.
+        """
+        self._reset_candidates()
+        self.prompt_box = None
 
     # -- frame identity -----------------------------------------------------
     @property
@@ -185,8 +203,8 @@ class SamToolBase(Tool):
         if token == self._frame_token:
             return
         self._frame_token = token
-        self._reset_candidates()
-        self.prompt_box = None
+        # Everything collected so far is in the *previous* frame's coordinates.
+        self.reset_prompt()
 
     def _target_instance(self) -> Optional[str]:
         """The instance key an applied mask will be written to.
@@ -214,16 +232,19 @@ class SamToolBase(Tool):
         """Drop state belonging to another frame or instance, once we notice.
 
         :meth:`set_frame_token` covers the frame; the *instance* changes on the
-        overlay, which the tool cannot observe, so the drift is detected the
-        next time the tool is used instead. Both the candidates and the prompt
-        box describe a region of the previous target and must not survive.
+        overlay or through :attr:`instance`, which the tool cannot observe, so
+        the drift is detected the next time the tool is used instead.  Points,
+        box and candidates all describe the previous target and none of them
+        may survive it: a point on part A is not a prompt for part B.
+
+        The identity is remembered even when no result has come back yet --
+        otherwise the very sequence this exists for (click A, commit, activate
+        B, click B) saw no candidates to compare against and kept A's point.
         """
-        if (
-            self._candidate_identity is not None
-            and self._candidate_identity != self._identity()
-        ):
-            self._reset_candidates()
-            self.prompt_box = None
+        identity = self._identity()
+        if self._prompt_identity is not None and self._prompt_identity != identity:
+            self.reset_prompt()
+        self._prompt_identity = identity
 
     def _fits(self, rect: Optional[Rect]) -> bool:
         """True when ``rect`` is a non-empty window inside the overlay."""
@@ -477,8 +498,11 @@ class SamToolBase(Tool):
 class SamPointTool(SamToolBase):
     """Point prompts: left click = positive, right click = negative.
 
-    Points accumulate so every click refines the same proposal; the session
-    calls :meth:`clear_points` when the target instance changes.
+    Points accumulate so every click refines the same proposal, and they are
+    dropped the moment they stop describing one -- see
+    :meth:`~SamToolBase.reset_prompt`, which the tool calls itself on a frame
+    or instance change and which the window calls whenever it replaces the
+    editing layer.
 
     A lone first click is sent with ``multimask=True`` and the three proposals
     are then reachable with :meth:`~SamToolBase.cycle_candidate`. When
@@ -518,11 +542,16 @@ class SamPointTool(SamToolBase):
             return False
 
     def clear_points(self) -> None:
-        """Forget the collected prompts (e.g. after accepting the mask)."""
+        """Forget the collected points, keeping the box and the candidates.
+
+        The narrow half of :meth:`reset_prompt`, for a caller that wants to
+        start the points again against the same box.
+        """
         self.points = []
 
-    def _cancel(self) -> None:
-        super()._cancel()
+    def reset_prompt(self) -> None:
+        """Also forget the points: they belong to the prompt, not to the session."""
+        super().reset_prompt()
         self.clear_points()
 
 
@@ -538,8 +567,9 @@ class SamBoxTool(SamToolBase):
         self._start: Optional[tuple[float, float]] = None
         self._dragging = False
 
-    def _cancel(self) -> None:
-        super()._cancel()  # also takes the rubber band off the canvas
+    def reset_prompt(self) -> None:
+        """Also forget the drag: a half-dragged box is in the old coordinates."""
+        super().reset_prompt()
         self.box = None
         self._start = None
         self._dragging = False

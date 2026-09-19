@@ -370,3 +370,86 @@ def test_the_diff_heat_toggle_paints_and_clears_an_overlay_item(window):
     assert window.heat_item.pixmap().isNull() is False
     window.act_toggle_heat()
     assert window.heat_visible is False
+
+
+# --------------------------------------------------------------------------- #
+# the points belong to one prompt (final review, item 1)
+# --------------------------------------------------------------------------- #
+def points_of(win: MainWindow) -> list:
+    return list(win.sam_point.points)
+
+
+def last_request(win: MainWindow):
+    return win.sam_queue.requests[-1]
+
+
+def test_the_points_do_not_follow_the_annotator_to_the_next_instance(window):
+    """S, click A, Enter, activate B, click B sent both points as one prompt.
+
+    Every mask after the first commit was a union over everything clicked in
+    the session, and ``multimask=False`` meant ``C`` offered nothing to fix it.
+    """
+    card = [str(r["instance"]) for r in window.session.task_card() if r.get("instance")]
+    window.task_card.sigRequestEdit.emit(card[0])
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush()
+    QApplication.processEvents()
+    assert len(last_request(window).points) == 1
+    window.act_commit()                      # Enter: part A is written
+
+    window.task_card.sigRequestEdit.emit(card[1])
+    window.sam_point.on_press(20.0, 20.0, None)
+
+    assert len(last_request(window).points) == 1, points_of(window)
+    assert last_request(window).multimask is True
+
+
+def test_the_points_do_not_follow_the_annotator_to_the_next_frame(window):
+    """Two of the three points were in the previous frame's coordinates."""
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush()
+    QApplication.processEvents()
+
+    window.session.goto(LAST_STEP - 1, force=True)   # S is still armed
+    QApplication.processEvents()
+    window.sam_point.on_press(20.0, 20.0, None)
+
+    assert len(last_request(window).points) == 1, points_of(window)
+
+
+def test_a_commit_forgets_the_points(window):
+    """The mask is written; the clicks that made it are not a prompt any more."""
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush()
+    QApplication.processEvents()
+    window.act_commit()
+    assert points_of(window) == []
+
+
+def test_esc_forgets_the_points(window):
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush()
+    QApplication.processEvents()
+    window.act_clear_edit()
+    assert points_of(window) == []
+
+
+def test_an_undo_that_replaces_the_layer_forgets_the_points(window):
+    """The layer the points were refining is gone, so they refine nothing."""
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush()
+    QApplication.processEvents()
+    assert points_of(window)
+
+    window.act_undo()
+
+    assert points_of(window) == []

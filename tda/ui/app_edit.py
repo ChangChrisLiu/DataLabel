@@ -178,7 +178,15 @@ class EditMixin:
         self._offer_restore(key)
 
     def _sync_editing_layer(self, repaint: bool = True) -> None:
-        """Keep the overlay's edit layer in step with the session's."""
+        """Keep the overlay's edit layer in step with the session's.
+
+        This is the **one** place the layer is replaced from outside the SAM
+        tool -- a commit, ``Esc``, an undo, a restored sidecar all end here --
+        so it is where the half-built prompt is dropped.  Keeping the points
+        made the next click refine a layer their result no longer had anything
+        to do with.
+        """
+        self.reset_sam_prompt()
         if self.overlay is None:
             return
         instance = getattr(self.session, "editing_instance", None)

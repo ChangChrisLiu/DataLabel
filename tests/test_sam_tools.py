@@ -926,3 +926,65 @@ def test_candidate_switches_are_undoable_through_a_real_undo_stack(zoomed):
     stack.redo()
     stack.redo()
     assert np.array_equal(ov.editing, candidate_2)
+
+
+# ---------------------------------------------------------------------------
+# the points belong to one prompt, not to the session (final review, item 1)
+# ---------------------------------------------------------------------------
+def test_changing_the_frame_token_forgets_the_points(zoomed):
+    """Clicks on the previous frame are in the previous frame's coordinates.
+
+    ``set_frame_token`` dropped the candidates and the box but kept ``points``,
+    so the first click on the next frame went out as a two-point prompt -- one
+    of them pointing at whatever now occupies that spot.
+    """
+    canvas, ov = zoomed
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue)
+    tool.on_press(20.0, 30.0, None)
+    assert len(queue.last.points) == 1
+
+    tool.set_frame_token(FrameKey(13, 11, "scan"))
+    tool.on_press(40.0, 20.0, None)
+
+    assert len(queue.last.points) == 1, f"points leaked: {queue.last.points}"
+    assert queue.last.multimask is True, "a lone first point must offer candidates"
+
+
+def test_switching_instance_forgets_the_points(zoomed):
+    """A point that belongs to part A is not a prompt for part B.
+
+    The reviewer's sequence: S, click A, Enter, activate B, click B -- the
+    request carried both points and ``multimask=False``, so ``C`` offered
+    nothing and the mask was a union of two parts.
+    """
+    canvas, ov = zoomed
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue, instance="part.a")
+    tool.on_press(20.0, 30.0, None)
+    assert len(queue.last.points) == 1
+
+    tool.instance = "part.b"
+    tool.on_press(40.0, 20.0, None)
+
+    assert len(queue.last.points) == 1, f"points leaked: {queue.last.points}"
+    assert queue.last.multimask is True
+
+
+def test_reset_prompt_forgets_the_points_and_the_drag(zoomed):
+    """One call the window can make whenever the layer stops being the tool's."""
+    canvas, ov = zoomed
+    queue = StubQueue(_blob_result)
+    point = _point_tool(canvas, ov, queue)
+    point.on_press(20.0, 30.0, None)
+    box = _box_tool(canvas, ov, queue)
+    box.on_press(10.0, 10.0, None)
+    box.on_move(30.0, 30.0, None)
+
+    point.reset_prompt()
+    box.reset_prompt()
+
+    assert point.points == []
+    assert box.box is None and box._dragging is False
+    point.on_press(40.0, 20.0, None)
+    assert len(queue.last.points) == 1
