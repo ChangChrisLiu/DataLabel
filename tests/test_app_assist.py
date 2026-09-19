@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from app_scene import (
@@ -50,6 +51,11 @@ def window(qapp, tmp_path):
     QApplication.processEvents()
     win.set_mode(A.MODE_ANNOTATE)
     win.sam_queue = queue
+    # The diff map only proposes prompt boxes once the segment has an ROI, so
+    # accept the one the window offers -- which is what an annotator does on
+    # the first frame of a machine.
+    if win.roi_editing:
+        win.act_commit()
     yield win
     close_window(win)
 
@@ -370,3 +376,182 @@ def test_the_diff_heat_toggle_paints_and_clears_an_overlay_item(window):
     assert window.heat_item.pixmap().isNull() is False
     window.act_toggle_heat()
     assert window.heat_visible is False
+
+
+# --------------------------------------------------------------------------- #
+# the points belong to one prompt (final review, item 1)
+# --------------------------------------------------------------------------- #
+def points_of(win: MainWindow) -> list:
+    return list(win.sam_point.points)
+
+
+def last_request(win: MainWindow):
+    return win.sam_queue.requests[-1]
+
+
+def test_the_points_do_not_follow_the_annotator_to_the_next_instance(window):
+    """S, click A, Enter, activate B, click B sent both points as one prompt.
+
+    Every mask after the first commit was a union over everything clicked in
+    the session, and ``multimask=False`` meant ``C`` offered nothing to fix it.
+    """
+    card = [str(r["instance"]) for r in window.session.task_card() if r.get("instance")]
+    window.task_card.sigRequestEdit.emit(card[0])
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush()
+    QApplication.processEvents()
+    assert len(last_request(window).points) == 1
+    window.act_commit()                      # Enter: part A is written
+
+    window.task_card.sigRequestEdit.emit(card[1])
+    window.sam_point.on_press(20.0, 20.0, None)
+
+    assert len(last_request(window).points) == 1, points_of(window)
+    assert last_request(window).multimask is True
+
+
+def test_the_points_do_not_follow_the_annotator_to_the_next_frame(window):
+    """Two of the three points were in the previous frame's coordinates."""
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush()
+    QApplication.processEvents()
+
+    window.session.goto(LAST_STEP - 1, force=True)   # S is still armed
+    QApplication.processEvents()
+    window.sam_point.on_press(20.0, 20.0, None)
+
+    assert len(last_request(window).points) == 1, points_of(window)
+
+
+def test_a_commit_forgets_the_points(window):
+    """The mask is written; the clicks that made it are not a prompt any more."""
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush()
+    QApplication.processEvents()
+    window.act_commit()
+    assert points_of(window) == []
+
+
+def test_esc_forgets_the_points(window):
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush()
+    QApplication.processEvents()
+    window.act_clear_edit()
+    assert points_of(window) == []
+
+
+def test_an_undo_that_replaces_the_layer_forgets_the_points(window):
+    """The layer the points were refining is gone, so they refine nothing."""
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush()
+    QApplication.processEvents()
+    assert points_of(window)
+
+    window.act_undo()
+
+    assert points_of(window) == []
+
+
+def test_holding_pgdn_does_not_queue_a_comparison_per_frame(window):
+    """Ten repeats, one pending comparison: the mailbox holds the newest only.
+
+    Stepping on auto-repeat is only usable if the work it triggers coalesces --
+    a diff thread per skipped frame was 0.8 GB at scanner resolution.
+    """
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtCore import QEvent as _QEvent
+
+    window.set_mode(A.MODE_ANNOTATE)
+    steps = sorted(window.session.steps())
+    window.session.goto(steps[-1], force=True)
+    QApplication.processEvents()
+
+    def repeat() -> QKeyEvent:
+        return QKeyEvent(_QEvent.Type.KeyPress, int(Qt.Key.Key_PageDown),
+                         Qt.KeyboardModifier.NoModifier, 0, 0, 0, "", True)
+
+    moved = 0
+    for _ in range(10):
+        before = window.session.current().step
+        window.handle_key(repeat())
+        moved += int(window.session.current().step != before)
+
+    assert moved >= 5, "the repeats did not step the frame"
+    assert window.assist.queued() <= 1
+    assert window.sam_queue.pending() == 0
+
+
+def test_a_blob_covering_most_of_the_roi_is_not_a_prompt_box(window):
+    """"Everything changed" is not a prompt; it is the absence of one.
+
+    A box over 60 % of the ROI tells SAM nothing it did not already know, and
+    on the rehearsal that is exactly when the single candidate came back as the
+    whole chassis.
+    """
+    from tda.core.diffmap import DiffBlob
+
+    roi = window.roi()
+    assert roi is not None
+    x0, y0, x1, y1 = roi
+    window.act_tool("sam_point")
+
+    big = DiffBlob(box=(float(x0), float(y0), float(x1), float(y1)),
+                   area=(x1 - x0) * (y1 - y0), score=9.0)
+    window.begin_add_shape(big)
+    assert window.sam_point.prompt_box is None
+    assert "整块" in window.status_message() or "whole" in window.status_message()
+
+    w, h = (x1 - x0) // 4, (y1 - y0) // 4
+    small = DiffBlob(box=(float(x0), float(y0), float(x0 + w), float(y0 + h)),
+                     area=w * h, score=9.0)
+    window.begin_add_shape(small)
+    assert window.sam_point.prompt_box is not None
+
+
+# --------------------------------------------------------------------------- #
+# the checkpoint comes from the paths the app was started with (item 19)
+# --------------------------------------------------------------------------- #
+def test_the_window_passes_its_own_weights_dir_to_sam(window, monkeypatch, tmp_path):
+    """``default_checkpoint()`` read ``<repo>/configs/paths.yaml`` and ignored --paths.
+
+    Started with another paths file -- a second data disk, a colleague's copy --
+    the app looked for the repo's checkpoint instead of the configured one.
+    """
+    import tda.models.sam_service as sam_service
+
+    seen: list[dict] = []
+
+    class FakeService:
+        def __init__(self, checkpoint=None, **kwargs):
+            seen.append({"checkpoint": checkpoint, **kwargs})
+
+    monkeypatch.setattr(sam_service, "SamService", FakeService)
+    monkeypatch.setattr(sam_service, "SamQueue", lambda service: service)
+    window.sam_queue = None
+    window._sam_loading = False
+    window.paths = dict(window.paths, weights_dir=str(tmp_path / "w"))
+
+    window.start_sam()
+    window._sam_loader_thread.join(10.0)
+    QApplication.processEvents()
+
+    assert seen, "SAM was never constructed"
+    assert str(tmp_path / "w") in str(seen[0]["checkpoint"])
+
+
+def test_default_checkpoint_still_works_for_library_use():
+    from tda.models.sam_service import CHECKPOINT_NAME, checkpoint_in, default_checkpoint
+
+    fallback = default_checkpoint()
+    assert fallback is None or str(fallback).endswith(CHECKPOINT_NAME)
+    picked = checkpoint_in({"weights_dir": "D:/somewhere"})
+    assert str(picked).endswith(CHECKPOINT_NAME) and "somewhere" in str(picked)

@@ -7,6 +7,7 @@
     python -m tda.cli import-logs [--desktops ...]    # Drive sheets -> steps/actions/...
     python -m tda.cli import-ls   [--export PATH]     # Label Studio export -> drafts
     python -m tda.cli infer-relations [--dry-run]     # fill empty relational fields
+    python -m tda.cli constraints [--validate]        # spec-7 edges -> relation rows
     python -m tda.cli backup                          # SQLite backup API -> backup_dir
     python -m tda.cli status      [--desktop N]       # what the database holds
 
@@ -28,20 +29,37 @@ up into ``backup_dir`` before they touch anything.
 Adding a command (the GUI ``app``, ``check``, ``build-cache``, ``export-*``):
 write a ``_add_<name>`` registrar that calls ``sub.add_parser(...)`` and sets
 ``func=<handler>``, then list it in :data:`SUBCOMMANDS`. A handler takes the
-parsed arguments and returns the process exit code; ``_session(args,
-lock=True)`` hands it ``(paths, db)`` with the lock held.
+parsed arguments and returns the process exit code; ``session(args, lock=True)``
+of :mod:`tda.cli_common` hands it ``(paths, db)`` with the lock held. Everything
+shared lives there and **nothing imports this module**: run as ``python -m
+tda.cli`` this file is ``__main__``, so an import of ``tda.cli`` would load it a
+second time and give the importer a different ``Locked`` class than the one
+:func:`main` catches.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sqlite3
-from contextlib import contextmanager
-from typing import Callable, Iterator, Optional
+import sys
+from typing import Callable, Optional
 
 from tda import pipeline as P
 from tda import pipeline_logs as L
 from tda.cli_app import SUBCOMMANDS as _APP_SUBCOMMANDS
+from tda.cli_common import (
+    EXIT_ERROR,
+    EXIT_LOCKED,
+    EXIT_OK,
+    EXIT_ORDER,
+    ConfigError,
+    Locked,
+    desktops as _desktops,
+    load_paths,
+    safety_backup as _safety_backup,
+    session as _session,
+)
+from tda.cli_graph import _add_constraints
 from tda.cli_relations import _add_infer_relations
 from tda.core.db import Db
 from tda.core.index import build_index, load_index, save_index
@@ -49,71 +67,7 @@ from tda.core.index_report import write_report
 from tda.core.model import VIEWS
 from tda.core.taxonomy import load_taxonomy
 
-EXIT_OK = 0
-EXIT_ERROR = 1
-EXIT_ORDER = 2  # the pipeline order was not respected
-EXIT_LOCKED = 3  # another annotator holds the single-user lock
-
 __all__ = ["main"]
-
-
-class Locked(RuntimeError):
-    """Another annotator holds the single-user lock (spec 3.5)."""
-
-
-# --------------------------------------------------------------------------- #
-# helpers
-# --------------------------------------------------------------------------- #
-def _desktops(args: argparse.Namespace) -> Optional[set[int]]:
-    """Parse ``--desktops``; ``None`` means every desktop the source offers."""
-    return P.parse_desktops(getattr(args, "desktops", None))
-
-
-@contextmanager
-def _session(
-    args: argparse.Namespace, lock: bool = False
-) -> Iterator[tuple[dict, Db]]:
-    """Open ``paths.yaml`` + the database, optionally holding the single-user lock.
-
-    The lock is released only when this call took it, so a refused command never
-    unlocks the annotator who is actually working.
-    """
-    paths = P.load_paths(args.paths)
-    db = P.open_db(paths, args.db)
-    held = False
-    try:
-        if lock:
-            try:
-                db.acquire_lock(f"cli:{args.command}")
-            except RuntimeError as exc:
-                raise Locked(str(exc)) from None
-            held = True
-        yield paths, db
-    finally:
-        if held:
-            db.release_lock()
-        db.close()
-
-
-def _safety_backup(paths: dict, db: Db, command: str, why: str) -> bool:
-    """Back the database up before a destructive run; ``False`` when it failed.
-
-    A destructive command that could not make its safety copy must stop before
-    it writes anything, so this swallows the three ways the copy can fail --
-    ``OSError`` (a full, missing or read-only ``backup_dir``), ``sqlite3.Error``
-    (the copy itself) and ``ValueError`` (``paths.yaml`` defines no
-    ``backup_dir``) -- and turns each into the same single line. The caller
-    returns :data:`EXIT_ERROR` immediately; the lock is released by
-    :func:`_session` on the way out either way. No traceback ever reaches the
-    annotator: there is nothing in it they could act on.
-    """
-    try:
-        out = db.backup(P.backup_dest(paths), P.backup_keep(paths))
-    except (OSError, sqlite3.Error, ValueError) as exc:
-        print(f"[{command}] backup failed: {exc}; nothing was written")
-        return False
-    print(f"[{command}] {why}: backed the database up first -> {out}")
-    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -121,7 +75,7 @@ def _safety_backup(paths: dict, db: Db, command: str, why: str) -> bool:
 # --------------------------------------------------------------------------- #
 def cmd_build_index(args: argparse.Namespace) -> int:
     """Scan the source trees on F: and write ``cache/index.json`` + its report."""
-    paths = P.load_paths(args.paths)
+    paths = load_paths(args.paths)
     wanted = _desktops(args) or set(P.ALL_DESKTOPS)
     roots = {k: P.require(paths, k) for k in ("oak_root", "scanner_root", "rs_root")}
     out = args.out or P.index_path(paths)
@@ -216,6 +170,8 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
         f"- state events: {sum(r.events for r in imported)}",
         f"- step durations from the index: {sum(r.durations for r in imported)}",
         f"- {L.INFERRED_HEADING}: {sum(len(r.fills) for r in imported)}",
+        f"- instances dropped (the sheet no longer names them): "
+        f"{sum(len(r.dropped) for r in imported)}",
         f"- issues: {sum(len(r.issues) for r in imported)}",
         "",
         "| desktop | brand | steps | n_logged_steps | match | actions | instances "
@@ -242,13 +198,30 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
     for r in imported:
         lines.append(f"## D{r.desktop:02d} - {r.brand}")
         lines.append("")
+        # the drops first: they are the only thing here that removed a row
+        lines.extend(f"- {text}" for text in r.dropped)
         if r.issues:
             lines.extend(f"- {text}" for text in r.issues)
-        else:
+        elif not r.dropped:
             lines.append("- no issues")
         lines.append("")
         lines.extend(L.inferred_section(r))
     return "\n".join(lines)
+
+
+#: What to do about each kind of refusal, keyed by ``DesktopRun.reason``.
+REFUSAL_ADVICE = {
+    L.REFUSED_VERIFIED: (
+        "carry verified frames, which were compiled from the step table this "
+        "would replace. Re-run with --force-verified to re-import them anyway, "
+        "or select the other desktops with --desktops."
+    ),
+    L.REFUSED_IMPLAUSIBLE: (
+        "would shrink past believing -- far fewer steps than before, or too many "
+        "instances deleted at once. Nothing was written. Check the sheets are "
+        "complete exports; re-run with --force-drop if they really are right."
+    ),
+}
 
 
 def cmd_import_logs(args: argparse.Namespace) -> int:
@@ -257,6 +230,11 @@ def cmd_import_logs(args: argparse.Namespace) -> int:
         print("[import-logs] --force-verified only means something with --force: "
               "without --force a desktop that already has steps is skipped before "
               "its verified frames are ever looked at.")
+        return EXIT_ERROR
+    if args.force_drop and not args.force:
+        print("[import-logs] --force-drop only means something with --force: "
+              "without --force nothing is ever dropped, so there is no "
+              "plausibility check for it to overrule.")
         return EXIT_ERROR
     with _session(args, lock=True) as (paths, db):
         directory = args.dir or P.drive_dir(paths)
@@ -269,6 +247,7 @@ def cmd_import_logs(args: argparse.Namespace) -> int:
         run = L.import_logs_into_db(
             db, directory, load_taxonomy(), index, _desktops(args), args.force,
             log=print, force_verified=args.force_verified,
+            force_drop=args.force_drop,
         )
         imported = run.imported
         print(f"[import-logs] {len(imported)} desktops imported, {len(run.skipped)} skipped, "
@@ -278,6 +257,15 @@ def cmd_import_logs(args: argparse.Namespace) -> int:
               f"{sum(r.instances for r in imported)} instances, "
               f"{sum(r.events for r in imported)} events, "
               f"{sum(len(r.issues) for r in imported)} issues")
+        kept = sum(r.kept_for_review for r in imported)
+        if kept:
+            # an issue in a report nobody opens is not a warning: the one thing
+            # a re-import can leave behind that needs a human gets its own line.
+            # Only some of them carry work; the rest are held because a kept one
+            # names them, and saying otherwise overstates the job.
+            work = sum(r.kept_carrying_work for r in imported)
+            print(f"[import-logs] {kept} vanished instances kept ({work} carry "
+                  f"work, the rest are referenced by them); see the report")
         for r in run.dropped_ls_notes:
             print(f"[import-logs] {L.dropped_notes_line(r.desktop, r.ls_notes_dropped)}")
         carried = run.with_ls_notes
@@ -286,17 +274,20 @@ def cmd_import_logs(args: argparse.Namespace) -> int:
             print(f"[import-logs] {listed} had Label Studio notes; "
                   f"run 'python -m tda.cli import-ls' to rebuild them from the export "
                   f"if anything looks wrong")
-        if run.refused:
-            listed = ", ".join(f"D{r.desktop:02d}" for r in run.refused)
-            print(f"[import-logs] refused: {listed} carry verified frames, which were "
-                  f"compiled from the step table this would replace. Re-run with "
-                  f"--force-verified to re-import them anyway, or select the other "
-                  f"desktops with --desktops.")
-        # A run that imported nothing has nothing to report, and overwriting the
-        # file would throw away the issue list of the run that did the work.
-        if not imported and not run.failed:
+        # The two refusals want different answers, so they are listed apart: the
+        # run-level line used to offer --force-verified whatever the reason,
+        # which is the wrong flag for half of them.
+        for reason, advice in REFUSAL_ADVICE.items():
+            listed = run.refused_of(reason)
+            if listed:
+                names = ", ".join(f"D{r.desktop:02d}" for r in listed)
+                print(f"[import-logs] refused: {names} {advice}")
+        # A run that imported nothing has nothing to add to the report -- but a
+        # refusal *is* the report, and losing it to stdout is how the detail of
+        # why thirteen desktops were left alone disappears on the next scroll.
+        if not imported and not (run.failed or run.refused):
             print("[import-logs] nothing imported, kept the previous report")
-            return EXIT_ERROR if run.refused else EXIT_OK
+            return EXIT_OK
         report = args.report or P.cache_file(paths, P.LOGS_REPORT_NAME)
         with open(report, "w", encoding="utf-8") as fh:
             fh.write(logs_report(run, L.expected_steps(directory)))
@@ -320,6 +311,12 @@ def _add_import_logs(sub) -> None:
                    help="with --force, also re-import desktops that carry verified "
                         "frames. Those frames were compiled from the step table this "
                         "replaces, so they are refused without it")
+    p.add_argument("--force-drop", action="store_true",
+                   help="with --force, import a sheet even though it looks wrong: "
+                        "far fewer steps than before, or more than a fifth of the "
+                        "desktop's instances about to be deleted. Without it such a "
+                        "desktop is refused untouched, because an export truncated "
+                        "to its header parses perfectly and means nothing")
     p.set_defaults(func=cmd_import_logs)
 
 
@@ -526,25 +523,80 @@ SUBCOMMANDS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
     _add_import_logs,
     _add_import_ls,
     _add_infer_relations,
+    _add_constraints,
     _add_backup,
     _add_status,
     *_APP_SUBCOMMANDS,
 )
 
 
+def _global_flags(defaults: bool) -> argparse.ArgumentParser:
+    """``--paths`` / ``--db`` as a parent parser, for the top level or a subcommand.
+
+    ``defaults=False`` is the subcommand copy, whose default is ``SUPPRESS`` so
+    that not passing the flag leaves the attribute the top level already set.
+    Given twice, the later one therefore wins -- which is what an annotator
+    means by typing it twice.
+    """
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--paths",
+                    default=P.DEFAULT_PATHS_PATH if defaults else argparse.SUPPRESS,
+                    help="paths.yaml to use (accepted before or after the command)")
+    ap.add_argument("--db", default=None if defaults else argparse.SUPPRESS,
+                    help="database file (overrides paths.yaml)")
+    return ap
+
+
+class _Subcommands:
+    """``add_subparsers()`` that gives every subcommand the global flags too.
+
+    ``python -m tda.cli status --paths X`` used to answer "unrecognized
+    arguments": the flags existed only in front of the subcommand, which is not
+    where a hand reaches for them. Wrapping the registrar's one call site is
+    what keeps that true for every command, including the ones added next.
+    """
+
+    def __init__(self, sub, parents: list[argparse.ArgumentParser]) -> None:
+        self._sub = sub
+        self._parents = parents
+
+    def add_parser(self, name: str, **kwargs):
+        kwargs["parents"] = [*kwargs.get("parents", []), *self._parents]
+        return self._sub.add_parser(name, **kwargs)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    """The whole command line; ``--paths``/``--db`` are global and come first."""
+    """The whole command line; ``--paths``/``--db`` work on either side of it."""
     ap = argparse.ArgumentParser(
         prog="python -m tda.cli",
         description="Teardown Annotator data pipeline.",
         epilog="pipeline order: build-index -> load-index -> import-logs -> import-ls",
+        parents=[_global_flags(defaults=True)],
     )
-    ap.add_argument("--paths", default=P.DEFAULT_PATHS_PATH, help="paths.yaml to use")
-    ap.add_argument("--db", default=None, help="database file (overrides paths.yaml)")
-    sub = ap.add_subparsers(dest="command", required=True, metavar="command")
+    sub = _Subcommands(
+        ap.add_subparsers(dest="command", required=True, metavar="command"),
+        [_global_flags(defaults=False)],
+    )
     for register in SUBCOMMANDS:
         register(sub)
     return ap
+
+
+def _survive_a_narrow_console() -> None:
+    """Never let an un-encodable character be the thing that kills a command.
+
+    Every line this tool prints is ASCII on purpose, but a raw step name from a
+    sheet, a path or an exception message is not under our control, and a
+    Windows console still defaults to cp1252. A ``UnicodeEncodeError`` out of
+    ``print`` would abort an import *after* it had written -- so the stream is
+    told to substitute instead. Older or already-replaced streams simply have no
+    ``reconfigure``, which is not a reason to fail either.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, OSError, ValueError):  # not a real tty, or already set
+            pass
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -552,7 +604,14 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     ``0`` ok, ``1`` a configuration or input error, ``2`` the pipeline order was
     not respected, ``3`` somebody else holds the single-user lock.
+
+    The three exceptions caught here are the ones an annotator causes by typing:
+    a database somebody else has open, an unusable ``paths.yaml``, a ``--desktops``
+    range that reads backwards. Each is one line and no traceback -- there is
+    nothing in a traceback they could act on. Everything else is a bug and keeps
+    its traceback, which is the only place it can be read.
     """
+    _survive_a_narrow_console()
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args))
@@ -560,6 +619,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"[{args.command}] refused: {exc}. Close the annotator (or wait for the "
               f"lock to expire) and try again.")
         return EXIT_LOCKED
+    except ConfigError as exc:  # missing, unreadable or invalid paths.yaml
+        print(f"[{args.command}] {exc}")
+        return EXIT_ERROR
     except ValueError as exc:  # bad --desktops spec, bad paths.yaml, bad --dest
         print(f"[{args.command}] {exc}")
         return EXIT_ERROR

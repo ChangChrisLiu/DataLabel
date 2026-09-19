@@ -30,8 +30,13 @@ from tda.core.model import FrameKey, Visibility
 from tda.ui import session_api as api
 from tda.ui.canvas.overlay import palette_color
 from tda.ui.panels.instances import InstanceListPanel
-from tda.ui.panels.review import STEP_ROLE, ReviewPanel
-from tda.ui.panels.taskcard import KIND_ICONS, TaskCardPanel
+from tda.ui.panels.review import STEP_ROLE, ReviewPanel, _entry_text
+from tda.ui.panels.taskcard import (
+    KIND_ICONS,
+    TaskCardPanel,
+    instance_of,
+    pair_problems,
+)
 from tda.ui.panels.timeline import TimelinePanel, status_brush
 
 
@@ -273,12 +278,35 @@ def texts(list_widget) -> list[str]:
     return [list_widget.item(i).text() for i in range(list_widget.count())]
 
 
+_SHOWN: list = []
+
+
 def show(panel, width: int = 260, height: int = 520):
-    """Show a panel offscreen so that item rectangles are laid out."""
+    """Show a panel offscreen so that item rectangles are laid out.
+
+    Remembered so that :func:`_hide_what_was_shown` can take it down again: a
+    panel shown on its own is its own top-level window, and Qt keeps the
+    application focus inside it after the test ends.  The main window then
+    treats that focus as "another visible window of ours" and switches its
+    whole keyboard off, which made every later shortcut test in the process
+    fail depending on file order.
+    """
     panel.resize(width, height)
     panel.show()
     QApplication.processEvents()
+    _SHOWN.append(panel)
     return panel
+
+
+@pytest.fixture(autouse=True)
+def _hide_what_was_shown():
+    yield
+    while _SHOWN:
+        panel = _SHOWN.pop()
+        panel.hide()
+        panel.setParent(None)
+        panel.deleteLater()
+    QApplication.processEvents()
 
 
 def click_item(view, item, double: bool = False) -> None:
@@ -509,7 +537,10 @@ def test_taskcard_shows_problems_when_confirm_fails(session: StubSession) -> Non
     session.confirm_result = False
     panel.confirm()          # what the window's act_confirm calls
     assert panel.problems_visible() is True
-    assert panel.problems() == ["missing_shape:screw.cpu_cooler.03"]
+    # the row is the human sentence; the compiler's code is in the tooltip
+    assert panel.problems() == ["screw.cpu_cooler.03：这一帧还缺形状，把它画出来"]
+    assert [r["code"] for r in panel.problem_rows()] == [
+        "missing_shape:screw.cpu_cooler.03"]
     session.confirm_result = True
     panel.confirm()
     assert panel.problems_visible() is False
@@ -812,3 +843,133 @@ def test_review_snap_back_only_touches_the_list_that_was_clicked(session) -> Non
     assert conflicts.currentRow() == 1, "another tab's selection was cleared"
     assert unexplained.currentRow() != 0 or int(
         unexplained.item(0).data(STEP_ROLE)) == session.current().step
+
+
+# ---------------------------------------------------------------------------
+# problem codes and their sentences (F3 round 2, item 3)
+# ---------------------------------------------------------------------------
+MIXED_PROBLEMS = [
+    "bench_missing:b.01",
+    "missing_shape:c.01",
+    "zorder_cycle:a.01,b.01",
+    "empty_visible:d.01",
+    "shape_size_mismatch:e.01/main",
+    "pose_segment_ambiguous:f.01",
+    "gremlins:g.01",
+    "Draw c.01 on this frame",          # the session's only sentence
+]
+
+
+def test_a_sentence_only_pairs_with_the_code_it_was_written_for():
+    """It popped one sentence per code, in order, and the session writes them
+    only for ``missing_shape:`` -- so on a mixed frame the sentence landed on
+    ``bench_missing:b.01`` and the real missing shape showed its raw code."""
+    rows = {row["code"]: row for row in pair_problems(MIXED_PROBLEMS)}
+
+    assert rows["missing_shape:c.01"]["text"] == "Draw c.01 on this frame"
+    assert rows["bench_missing:b.01"]["text"] != "Draw c.01 on this frame"
+    assert "b.01" in rows["bench_missing:b.01"]["text"]
+    assert len(rows) == len(MIXED_PROBLEMS) - 1     # the sentence is not a row
+
+
+def test_every_known_code_has_a_human_sentence():
+    rows = {row["code"]: row for row in pair_problems(MIXED_PROBLEMS)}
+    for code in ("bench_missing:b.01", "zorder_cycle:a.01,b.01", "empty_visible:d.01",
+                 "shape_size_mismatch:e.01/main", "pose_segment_ambiguous:f.01"):
+        text = rows[code]["text"]
+        assert text != code, code
+        assert instance_of(code) in text, f"{code} -> {text!r}"
+        assert len(text) > len(instance_of(code)) + 4, f"{code} -> {text!r}"
+
+
+def test_an_unknown_code_is_shown_as_it_is():
+    rows = {row["code"]: row for row in pair_problems(MIXED_PROBLEMS)}
+    assert rows["gremlins:g.01"]["text"] == "gremlins:g.01"
+
+
+def test_the_instance_of_a_problem_is_the_key_not_the_tail():
+    rows = {row["code"]: row for row in pair_problems(MIXED_PROBLEMS)}
+    assert rows["shape_size_mismatch:e.01/main"]["instance"] == "e.01"
+    assert rows["zorder_cycle:a.01,b.01"]["instance"] == "a.01"
+
+
+# ---------------------------------------------------------------------------
+# the refusal's own words are a row, not a sentence to pair (F3 round 4)
+# ---------------------------------------------------------------------------
+#: What ``confirm_frame`` emits now: its refusal, then the compiler's codes,
+#: then one "how to fix it" sentence per ``missing_shape:``.
+REFUSED_PROBLEMS = [
+    "frame 13/scan/step 14 cannot be verified: missing_shape:c.01, missing_shape:d.01",
+    "missing_shape:c.01",
+    "missing_shape:d.01",
+    "Draw c.01 on this frame",
+    "Draw d.01 on this frame",
+]
+
+CONFLICT_PROBLEMS = [
+    "frame 13/scan/step 14 cannot be verified: conflict(s) 3, 5 are still open;"
+    " settle them in the review queue first",
+]
+
+
+def test_the_refusal_line_does_not_steal_a_missing_shapes_sentence():
+    """It came first, so ``sentences.pop(0)`` handed it to ``missing_shape:c.01``
+    and pushed every sentence one code along -- the last one had none left and
+    was listed a second time on its own, under nobody's instance."""
+    rows = pair_problems(REFUSED_PROBLEMS)
+
+    assert rows[0]["text"] == REFUSED_PROBLEMS[0]
+    assert rows[0]["code"] == "", "the refusal is not a code"
+    by_code = {row["code"]: row for row in rows[1:]}
+    assert by_code["missing_shape:c.01"]["text"] == "Draw c.01 on this frame"
+    assert by_code["missing_shape:d.01"]["text"] == "Draw d.01 on this frame"
+    assert len(rows) == 3, rows
+
+
+def test_a_refusal_with_no_codes_is_still_one_row():
+    """An open conflict blocks the frame with nothing the compiler can name."""
+    rows = pair_problems(CONFLICT_PROBLEMS)
+    assert len(rows) == 1
+    assert rows[0]["text"] == CONFLICT_PROBLEMS[0]
+    assert rows[0]["code"] == ""
+
+
+def test_the_status_line_counts_the_things_to_fix_not_the_lines(qapp):
+    """The refusal line *restates* the codes under it, so counting it too
+    said "3 problem(s)" for two missing shapes.  When it is all there is, it
+    is the problem and it counts."""
+    panel = TaskCardPanel()
+    panel._show_problems(REFUSED_PROBLEMS)
+    assert panel.problem_count() == 2
+    panel._show_problems(CONFLICT_PROBLEMS)
+    assert panel.problem_count() == 1
+
+
+# ---------------------------------------------------------------------------
+# a conflict row says what disagrees, not how many pixels (F3 round 4)
+# ---------------------------------------------------------------------------
+def test_a_label_only_conflict_does_not_read_as_zero_pixels():
+    """``visibility: visible -> occluded_partial`` moves no pixels at all, so
+    the row said "(Δ 0 px)" -- the one queue entry that has to be acted on,
+    described as nothing having changed."""
+    entry = {"id": 9, "step": 12, "instance": "cpu_cooler.01", "sym_diff_px": 0,
+             "labels": {"visibility": ["visible", "occluded_partial"]},
+             "summary": "visibility: visible → occluded_partial"}
+
+    text = _entry_text(api.QUEUE_CONFLICTS, entry)
+
+    assert "visibility: visible → occluded_partial" in text
+    assert "0 px" not in text
+    assert "Step 12" in text and "cpu_cooler.01" in text
+
+
+def test_a_pixel_conflict_still_says_how_many_differ():
+    entry = {"id": 7, "step": 12, "instance": "cpu_cooler.01",
+             "sym_diff_px": 1234, "labels": {}, "summary": "1234 px differ"}
+    assert "1234 px differ" in _entry_text(api.QUEUE_CONFLICTS, entry)
+
+
+def test_a_conflict_row_from_before_the_summary_still_reads():
+    """An entry a running session queued earlier carries no ``summary``."""
+    entry = {"id": 7, "step": 12, "instance": "cpu_cooler.01", "sym_diff_px": 20}
+    assert "20 px" in _entry_text(api.QUEUE_CONFLICTS, entry)

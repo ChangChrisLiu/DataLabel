@@ -28,6 +28,9 @@ on the GUI thread.
 """
 from __future__ import annotations
 
+import logging
+import time
+
 from typing import Any, Optional, Sequence
 
 import cv2
@@ -42,7 +45,14 @@ from tda.ui.canvas.sam_crop import (
     norm_box,
     viewport_crop,
 )
+from tda.ui.canvas.sam_prompt import (  # re-exported: this was their home
+    FALLBACK_INSTANCE,
+    HINT_EDITED,
+    CandidatesMixin,
+)
 from tda.ui.canvas.tools import Box, Point, Rect, Tool
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "MAX_SAM_SIDE",
@@ -59,22 +69,19 @@ __all__ = [
 ]
 
 
-#: Emitted on :attr:`SamToolBase.sigHint` when cycling is abandoned because the
-#: annotator painted on the proposal (their edit is never discarded).
-HINT_EDITED = "candidates discarded: the mask was edited"
 #: Emitted on :attr:`SamToolBase.sigError` for a result that arrived too late.
 ERR_FRAME_CHANGED = "SAM result dropped: the frame or instance changed"
 ERR_OUT_OF_BOUNDS = "SAM result dropped: the crop no longer fits the frame"
 #: Emitted on :attr:`SamToolBase.sigError` when the tool has not been told which
 #: frame it is on, which makes every later staleness check meaningless.
 ERR_NO_FRAME_TOKEN = "frame token not set: call set_frame_token(...) on frame change"
-#: Instance key used when neither the tool nor the overlay names one yet.
-FALLBACK_INSTANCE = "editing"
+#: Emitted when a prompt is attempted while the canvas is showing another frame.
+ERR_FLASHING = "松开 Tab 再操作 / release Tab first: another frame is on screen"
 
 
 
 
-class SamToolBase(Tool):
+class SamToolBase(CandidatesMixin, Tool):
     """Shared plumbing for the SAM prompt tools.
 
     Attributes:
@@ -101,7 +108,6 @@ class SamToolBase(Tool):
     """
 
     sigHint = Signal(str)
-    sigError = Signal(str)
 
     def __init__(
         self,
@@ -117,6 +123,13 @@ class SamToolBase(Tool):
         self.refine = bool(refine)
         self.instance = instance
         self.last_result: Optional[SamResult] = None
+        #: The frame to crop prompts from.  ``None`` means "whatever the canvas
+        #: is displaying", which is only the same thing while nothing is being
+        #: flashed over it; the window sets this on every frame change.
+        self.image: Optional[np.ndarray] = None
+        #: While true the tool accepts no prompt: the canvas is showing another
+        #: frame (``Tab``), so a click on it is not about this one.
+        self.paused = False
         self.prompt_box: Optional[Box] = None
         self.stroke_before: Optional[np.ndarray] = None
         self._frame_token: Any = None
@@ -126,6 +139,10 @@ class SamToolBase(Tool):
         self._candidate_rect: Optional[Rect] = None
         self._candidate_base: Optional[np.ndarray] = None
         self._candidate_identity: Any = None
+        #: ``(frame token, instance)`` the prompt being built belongs to.
+        self._prompt_identity: Any = None
+        #: When the in-flight prompt was submitted, for the log line.
+        self._submitted_at: float = 0.0
         self._renders: Optional[list[Optional[np.ndarray]]] = None
         self._bridge = SamResultBridge(self)
         self._bridge.sigResult.connect(
@@ -147,13 +164,35 @@ class SamToolBase(Tool):
         self._cancel()
 
     def _cancel(self) -> None:
-        """Invalidate the in-flight prompt and forget the per-prompt state."""
-        self._token += 1  # nothing already submitted can match again
-        self._reset_candidates()
-        self.prompt_box = None
+        """Invalidate the in-flight prompt, forget the state, clear the band."""
+        self.reset_prompt()
         rubber_band = getattr(self.canvas, "set_rubber_band", None)
         if rubber_band is not None:
             rubber_band(None)
+
+    def reset_prompt(self) -> None:
+        """Forget everything about the prompt being built, keeping the tool armed.
+
+        Including the request that is still **in flight**.  Forgetting the
+        points but leaving the token alone meant that click, ``Esc``,
+        re-activate the same instance painted 2,464 px into the layer the
+        annotator had just emptied: the answer to a prompt they had discarded
+        still matched the identity check and was applied.
+
+        A prompt describes **one instance on one frame**: the points clicked so
+        far, the box they are being sent with, and the candidates that came
+        back.  The moment any of that stops being true -- the frame changes, the
+        target instance changes, the layer is replaced from outside the tool
+        (a commit, ``Esc``, an undo) -- none of it is a prompt any more.
+
+        Subclasses extend it with their own half of the prompt (the points, the
+        drag).  ``clear_points()`` used to be the only way to drop the points
+        and **nothing called it**, so every mask after the first commit was a
+        union over everything the annotator had clicked that session.
+        """
+        self._token += 1  # nothing already submitted can match again
+        self._reset_candidates()
+        self.prompt_box = None
 
     # -- frame identity -----------------------------------------------------
     @property
@@ -185,8 +224,8 @@ class SamToolBase(Tool):
         if token == self._frame_token:
             return
         self._frame_token = token
-        self._reset_candidates()
-        self.prompt_box = None
+        # Everything collected so far is in the *previous* frame's coordinates.
+        self.reset_prompt()
 
     def _target_instance(self) -> Optional[str]:
         """The instance key an applied mask will be written to.
@@ -214,16 +253,19 @@ class SamToolBase(Tool):
         """Drop state belonging to another frame or instance, once we notice.
 
         :meth:`set_frame_token` covers the frame; the *instance* changes on the
-        overlay, which the tool cannot observe, so the drift is detected the
-        next time the tool is used instead. Both the candidates and the prompt
-        box describe a region of the previous target and must not survive.
+        overlay or through :attr:`instance`, which the tool cannot observe, so
+        the drift is detected the next time the tool is used instead.  Points,
+        box and candidates all describe the previous target and none of them
+        may survive it: a point on part A is not a prompt for part B.
+
+        The identity is remembered even when no result has come back yet --
+        otherwise the very sequence this exists for (click A, commit, activate
+        B, click B) saw no candidates to compare against and kept A's point.
         """
-        if (
-            self._candidate_identity is not None
-            and self._candidate_identity != self._identity()
-        ):
-            self._reset_candidates()
-            self.prompt_box = None
+        identity = self._identity()
+        if self._prompt_identity is not None and self._prompt_identity != identity:
+            self.reset_prompt()
+        self._prompt_identity = identity
 
     def _fits(self, rect: Optional[Rect]) -> bool:
         """True when ``rect`` is a non-empty window inside the overlay."""
@@ -248,75 +290,21 @@ class SamToolBase(Tool):
             else (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
         )
 
-    # -- candidates ---------------------------------------------------------
-    @property
-    def candidate_count(self) -> int:
-        """Number of masks the last result offered (0 before the first one)."""
-        return len(self._candidates)
-
-    @property
-    def candidate_index(self) -> int:
-        """Index of the candidate currently in the editing layer."""
-        return self._candidate_index
-
-    def cycle_candidate(self, step: int = 1) -> int:
-        """Replace the editing layer with the next candidate; return its index.
-
-        Meant to be bound to ``C``. A single positive point is ambiguous on a
-        large part, so SAM's three proposals are kept and the annotator flips
-        through them instead of re-clicking.
-
-        The index is *derived from the layer*, not trusted: the current editing
-        mask is compared against what each candidate would produce and the walk
-        continues from whichever one matches. That keeps cycling correct after
-        an undo or redo has moved the layer behind the tool's back. When the
-        layer matches no candidate the annotator has painted on the proposal, so
-        the candidates are dropped, :attr:`sigHint` explains why, and nothing is
-        overwritten -- a manual edit is never discarded. With fewer than two
-        candidates this is a no-op, which also keeps a pointless entry out of
-        the undo stack.
-        """
-        self._sync_identity()
-        if self.overlay is None or not self._candidates:
-            return self._candidate_index
-        if len(self._candidates) < 2:
-            return self._candidate_index
-        renders = self._ensure_renders()
-        if not renders:
-            self._reset_candidates()
-            return 0
-        current = self.overlay.editing
-        match = next(
-            (i for i, layer in enumerate(renders) if np.array_equal(current, layer)),
-            None,
-        )
-        if match is None:
-            self._reset_candidates()
-            self.sigHint.emit(HINT_EDITED)
-            return 0
-        self._candidate_index = (match + int(step)) % len(renders)
-        self._apply_candidate()
-        return self._candidate_index
-
-    def _reset_candidates(self) -> None:
-        """Forget the offered masks and their renderings (frees the cache)."""
-        self._candidates = []
-        self._candidate_index = 0
-        self._candidate_rect = None
-        self._candidate_base = None
-        self._candidate_identity = None
-        self._renders = None
-
     # -- submission ---------------------------------------------------------
     def _submit(self, points: Sequence[Point], box: Optional[Box] = None) -> None:
         if self.queue is None or self.canvas is None or self.overlay is None:
+            return
+        if self.paused:
+            # The canvas is showing another frame; the crop would be of that one
+            # and the mask would be written to this one.
+            self.sigError.emit(ERR_FLASHING)
             return
         if self._frame_token is None:
             # Without an identity a late result could not be told apart from a
             # fresh one, so refuse to create one rather than accept it blindly.
             self.sigError.emit(ERR_NO_FRAME_TOKEN)
             return
-        prepared = viewport_crop(self.canvas)
+        prepared = viewport_crop(self.canvas, image=self.image)
         if prepared is None:
             return
         crop, rect, scale = prepared
@@ -346,15 +334,22 @@ class SamToolBase(Tool):
             points=crop_points,
             box=crop_box,
             mask_input=mask_input,
-            # One point on its own is ambiguous (part vs. whole assembly), so
-            # let SAM propose three candidates for :meth:`cycle_candidate`. A
-            # box, a second point or a prior mask has already disambiguated it.
-            multimask=(
-                len(crop_points) == 1 and crop_box is None and mask_input is None
-            ),
+            # Every prompt without a prior mask is ambiguous -- "part or whole
+            # assembly?" is the question SAM cannot answer from geometry -- so
+            # ask for the three candidates and let ``C`` walk them.  Asking for
+            # one whenever a box was given measured badly on real frames: a
+            # correct but large box around the motherboard came back as the
+            # whole chassis (627k px) with no second answer to fall back on.
+            # A refinement is different: it already has the shape to improve,
+            # and only the blended result is a valid edit.
+            multimask=mask_input is None,
         )
         self._reset_candidates()
         self._token += 1
+        self._submitted_at = time.perf_counter()
+        log.info("sam prompt instance=%s points=%d box=%s refine=%s multimask=%s",
+                 self._target_instance(), len(crop_points), crop_box is not None,
+                 bool(self.refine), bool(req.multimask))
         stamp = (self._token, self._identity())
         bridge, refine = self._bridge, self.refine
         # on_error matters as much as the callback: without it a failed
@@ -401,7 +396,13 @@ class SamToolBase(Tool):
         result, rect, refine, stamp = payload  # type: ignore[misc]
         token, identity = stamp
         if token != self._token:
-            return  # superseded by a newer prompt; nothing to report
+            # Superseded.  By a newer prompt -- nothing to report, the annotator
+            # is already looking at what they asked for -- or by the prompt
+            # being cancelled, which for a frame or instance change is worth a
+            # line: they clicked and the answer went nowhere.
+            if identity != self._identity():
+                self.sigError.emit(ERR_FRAME_CHANGED)
+            return
         if self.overlay is None or identity != self._identity():
             self.sigError.emit(ERR_FRAME_CHANGED)
             return
@@ -409,6 +410,11 @@ class SamToolBase(Tool):
             self.sigError.emit(ERR_OUT_OF_BOUNDS)
             return
 
+        elapsed = ((time.perf_counter() - self._submitted_at) * 1000.0
+                   if self._submitted_at else -1.0)
+        log.info("sam result instance=%s candidates=%d ms=%.0f picked=1",
+                 self._target_instance(),
+                 len(result.candidates or [result.mask]), elapsed)
         self.last_result = result
         self._candidates = [
             np.asarray(mask).astype(bool)
@@ -425,60 +431,15 @@ class SamToolBase(Tool):
         self._candidate_base = self.overlay.editing.copy() if refine else None
         self._apply_candidate()
 
-    def _render(self, index: int) -> Optional[np.ndarray]:
-        """The full-frame editing layer candidate ``index`` would produce."""
-        if self.overlay is None or not self._fits(self._candidate_rect):
-            return None
-        if not 0 <= index < len(self._candidates):
-            return None
-        base = self._candidate_base
-        if base is not None and base.shape != self.overlay.hw:
-            return None
-        assert self._candidate_rect is not None
-        x0, y0, x1, y1 = self._candidate_rect
-        mask = self._candidates[index]
-        if mask.shape != (y1 - y0, x1 - x0):
-            mask = cv2.resize(
-                mask.astype(np.uint8),
-                (x1 - x0, y1 - y0),
-                interpolation=cv2.INTER_NEAREST,
-            ).astype(bool)
-        full = base.copy() if base is not None else np.zeros(self.overlay.hw, dtype=bool)
-        full[y0:y1, x0:x1] = mask
-        return full
-
-    def _ensure_renders(self) -> list[np.ndarray]:
-        """Render every candidate once; ``[]`` when they cannot be applied.
-
-        At most three full-frame boolean layers, held only for the latest
-        result and freed by :meth:`_reset_candidates`.
-        """
-        if self._renders is None:
-            rendered = [self._render(i) for i in range(len(self._candidates))]
-            self._renders = [] if any(r is None for r in rendered) else rendered
-        return [r for r in self._renders if r is not None]
-
-    def _apply_candidate(self) -> None:
-        """Write the selected candidate into the editing layer (GUI thread)."""
-        renders = self._ensure_renders()
-        if not renders or self.overlay is None or self._candidate_rect is None:
-            return
-        layer = renders[self._candidate_index]
-        # Same contract as PaintTool: the pre-edit layer is available when
-        # sigStroke fires, so one applied mask is one undoable op.
-        self.stroke_before = self.overlay.editing.copy()
-        instance = self._target_instance() or FALLBACK_INSTANCE
-        self.overlay.set_editing(instance, layer)
-        if self.canvas is not None:
-            self.canvas.refresh(self._candidate_rect)
-        self.sigStroke.emit(self._candidate_rect)
-
 
 class SamPointTool(SamToolBase):
     """Point prompts: left click = positive, right click = negative.
 
-    Points accumulate so every click refines the same proposal; the session
-    calls :meth:`clear_points` when the target instance changes.
+    Points accumulate so every click refines the same proposal, and they are
+    dropped the moment they stop describing one -- see
+    :meth:`~SamToolBase.reset_prompt`, which the tool calls itself on a frame
+    or instance change and which the window calls whenever it replaces the
+    editing layer.
 
     A lone first click is sent with ``multimask=True`` and the three proposals
     are then reachable with :meth:`~SamToolBase.cycle_candidate`. When
@@ -518,11 +479,16 @@ class SamPointTool(SamToolBase):
             return False
 
     def clear_points(self) -> None:
-        """Forget the collected prompts (e.g. after accepting the mask)."""
+        """Forget the collected points, keeping the box and the candidates.
+
+        The narrow half of :meth:`reset_prompt`, for a caller that wants to
+        start the points again against the same box.
+        """
         self.points = []
 
-    def _cancel(self) -> None:
-        super()._cancel()
+    def reset_prompt(self) -> None:
+        """Also forget the points: they belong to the prompt, not to the session."""
+        super().reset_prompt()
         self.clear_points()
 
 
@@ -538,8 +504,9 @@ class SamBoxTool(SamToolBase):
         self._start: Optional[tuple[float, float]] = None
         self._dragging = False
 
-    def _cancel(self) -> None:
-        super()._cancel()  # also takes the rubber band off the canvas
+    def reset_prompt(self) -> None:
+        """Also forget the drag: a half-dragged box is in the old coordinates."""
+        super().reset_prompt()
         self.box = None
         self._start = None
         self._dragging = False

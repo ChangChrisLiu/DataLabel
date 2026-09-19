@@ -29,8 +29,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
 from tda.core.model import FrameKey
 from tda.ui import app_actions as A
@@ -39,25 +39,33 @@ from tda.ui import app_support as S
 from tda.ui.app_assist import AssistMixin
 from tda.ui.app_commit import CommitMixin
 from tda.ui.app_edit import EditMixin
+from tda.ui.app_keys import FLASH_UNNAMED, KeysMixin
 from tda.ui.app_roi import RoiMixin
 from tda.ui.app_shell import (
     MODE_TITLES,
     ShellMixin,
+    StatusMixin,
     confirm_discard_dialog,
     main,
     take_lock,
+)
+from tda.ui.app_view import (
+    CANDIDATES_DROPPED,
+    GRID_OFF,
+    OPACITY_STEP,
+    ToolsMixin,
 )
 from tda.ui.canvas.overlay import LabelOverlay
 
 __all__ = ["MainWindow", "main", "take_lock"]
 
-#: How much one ``,``/``.`` press moves the overlay alpha.
-OPACITY_STEP = 20
-#: Zoom the pixel grid is disabled at (the canvas draws it above ``GRID_ZOOM``).
-GRID_OFF = 1e9
+# Re-exported so that ``from tda.ui.app import ...`` keeps working wherever it
+# already did; the definitions live with the code that uses them.
+__all__ += ["CANDIDATES_DROPPED", "FLASH_UNNAMED", "GRID_OFF", "OPACITY_STEP"]
 
 
-class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
+class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, KeysMixin,
+                 ToolsMixin, StatusMixin, ShellMixin, QMainWindow):
     """One annotator, one desktop/view, three modes."""
 
     def __init__(self, session, paths: dict, annotator: str, *,
@@ -77,6 +85,9 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         self._cheat_sheet: Optional[QWidget] = None
         self.tools_enabled = True
         self._tool_name = "brush"
+        #: The neighbour step the canvas is showing while ``Tab`` is held, or
+        #: ``None``.  One place: every guard reads this and nothing else.
+        self._flashing: Optional[int] = None
         self.review_refreshes = 0
         #: Steps whose background re-check gave up; ``F5`` retries them.
         self.sweep_failures: set[int] = set()
@@ -95,6 +106,8 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         self._connect_session()
 
         self.setWindowTitle(f"Teardown Annotator — {self.annotator}")
+        self.logger.info("window open: annotator=%s db=%s", self.annotator,
+                         self.paths.get("db_path", ""))
         self.restore_window_state()
         QApplication.instance().installEventFilter(self)
         for name, why in compat.ADAPTED.items():
@@ -124,7 +137,17 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
 
     def render_frame(self) -> None:
         """Repaint everything that belongs to the frame the session is on."""
+        # A hint is about the frame it was said on.  "step 14 is not complete:
+        # 61 problems" stayed on screen two frames later, where it was simply
+        # untrue.
+        self.report("")
+        # Whatever was being compared, this is not it; the tools are re-armed
+        # below (or detached, when the frame has no image).
+        self._flashing = None
+        for tool in (self.sam_point, self.sam_box):
+            tool.paused = False
         if not compat.is_open(self.session):
+            self._render_nothing()
             return
         key = self.session.current()
         image = self.session.image()
@@ -140,6 +163,9 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
             if self.mode != A.MODE_STEPS:
                 self.stack.setCurrentWidget(self.placeholder_label)
             self._detach_tool()
+            # The placeholder is in the middle of the window and easy to miss
+            # while reading the task card; the status bar says which step.
+            self.report(f"step {key.step}: 本视图没有图像 / no image in this view")
         else:
             self.stack.setCurrentWidget(
                 self.steps_panel if self.mode == A.MODE_STEPS else self.canvas
@@ -153,8 +179,30 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
             self._attach_tool()
         self._segment = segment
 
+        # One line per frame the annotator actually arrives on: with the
+        # commits below it reconstructs a whole session, and it is the only
+        # thing a 0-byte log file was not doing.
+        self.logger.info("frame D%s/%s step %s (%s)", key.desktop, key.view,
+                         key.step, self.session.frame_status(key.step))
+
         self.on_frame_changed_edit(key)
         self.on_frame_changed_assist(key)
+        self.update_status()
+
+    def _render_nothing(self) -> None:
+        """Show that there is nothing open, rather than the last thing there was.
+
+        A desktop/view with no frame rows leaves the session closed.  Returning
+        early here left the *previous* view's image, masks, instance list and
+        timeline on screen with a tool armed over them: everything the annotator
+        could see was about a frame they were no longer on.
+        """
+        self.tools_enabled = False
+        self._segment = None
+        self._detach_tool()
+        self.stack.setCurrentWidget(self.placeholder_label)
+        for panel in (self.timeline, self.task_card, self.instances, self.review):
+            panel.refresh()
         self.update_status()
 
     def _pose_segment(self, key: FrameKey) -> Optional[int]:
@@ -193,86 +241,6 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         self.overlay.set_instances(masks, order)
         self.canvas.refresh()
 
-    # -------------------------------------------------------------- keyboard
-    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: D102
-        kind = event.type()
-        if self.closed:
-            return False  # a window on its way out must not eat anybody's keys
-        if kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
-            focus = QApplication.focusWidget()
-            if focus is None or focus is self or self.isAncestorOf(focus):
-                if self.handle_key(event):
-                    return True
-        return super().eventFilter(obj, event)
-
-    def handle_key(self, event) -> bool:
-        """Run the action bound to ``event``; ``True`` when it was consumed.
-
-        An auto-repeat of a bound key is **consumed but not fired**: holding
-        ``Tab`` for the flash compare used to let the repeats through to Qt's
-        focus chain, which walked the focus into a combo box -- after which
-        :func:`~tda.ui.app_actions.blocks_shortcuts` switched the whole keyboard
-        off until the annotator clicked somewhere. An auto-repeat of a key that
-        is *not* bound is left alone, so ordinary widgets keep their repeats.
-        """
-        if not self._shortcut_context_ok():
-            return False
-        focus = self._focus_widget()
-        if A.blocks_shortcuts(focus) or A.navigates_a_list(focus, event.key()):
-            return False
-        action = A.action_for(event.key(), event.modifiers(), self.mode)
-        if action is None:
-            return False
-        if event.isAutoRepeat():
-            return True
-        pressed = event.type() == QEvent.Type.KeyPress
-        if action.hold:
-            self.dispatch(action, pressed)
-        elif pressed:
-            self.dispatch(action)
-        return True
-
-    def _shortcut_context_ok(self) -> bool:
-        """Are the window's shortcuts live at all right now?
-
-        Not while a modal dialog is up, and not while the focus sits in another
-        **visible** window of ours -- the cheat sheet is a child dialog, so
-        without this its ``Esc`` would also discard the edit underneath it.
-
-        The visibility check matters: Qt keeps the application focus on a widget
-        of a window that has been closed but not yet deleted, so a torn-down
-        window would otherwise switch off the keyboard of the one that replaced
-        it -- which is exactly what made a whole suite fail when another suite
-        had run first.
-        """
-        if QApplication.activeModalWidget() is not None:
-            return False
-        focus = QApplication.focusWidget()
-        if focus is None:
-            return True
-        other = focus.window()
-        return other is self or not other.isVisible()
-
-    def _focus_widget(self) -> Optional[QWidget]:
-        """The focused widget *of this window*, or ``None``.
-
-        ``QApplication.focusWidget()`` is authoritative while the window is
-        active; when it is not (or nothing has been shown yet) the window's own
-        ``focusWidget()`` still knows which child last took the focus, which is
-        what makes the text-field guard work before the first activation.
-        """
-        focus = QApplication.focusWidget()
-        if focus is not None and not (focus is self or self.isAncestorOf(focus)):
-            focus = None
-        return focus if focus is not None else self.focusWidget()
-
-    def dispatch(self, action: A.Action, *extra) -> None:
-        """Call the window slot an action names."""
-        slot = getattr(self, action.slot, None)
-        if slot is None:
-            self.report_error(f"no slot {action.slot!r} for {action.name}")
-            return
-        slot(*(tuple(extra) if action.hold else tuple(action.args)))
 
     # ----------------------------------------------------------------- modes
     @S.guard
@@ -302,6 +270,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
             self.review.refresh()
         self._attach_tool()          # Review arms nothing; the others re-arm
         self._sync_mode_tab()
+        self.focus_canvas()
         self.update_status()
 
     def _sync_mode_tab(self) -> None:
@@ -342,6 +311,10 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         """Show another camera of the same machine."""
         if view == self.session.view:
             return
+        if not self._has_frames(self.session.desktop, view):
+            self.report(f"{view}: 这台机器没有这个视图的帧 / no frames in this view")
+            self._sync_view_buttons()
+            return
         step = self.session.current().step if compat.is_open(self.session) else None
 
         def switch() -> None:
@@ -350,10 +323,41 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
                 self.session.goto(step, force=True)
             self._segment = None
             self.render_frame()
+            self.refresh_desktop_counts()   # the count is per view
 
         self.leave_frame(switch)
+        self._sync_view_buttons()
+        self.focus_canvas()
+
+    def _sync_view_buttons(self) -> None:
+        """Check the button of the view that is actually open."""
         for name, button in self.view_buttons.items():
             button.setChecked(name == self.session.view)
+
+    def focus_canvas(self) -> None:
+        """Put the keyboard back where the annotator works.
+
+        The toolbar widgets take no focus at all now, but a mode switch or a
+        dock click can still leave it in a panel; after choosing something from
+        the top bar the next key belongs to the canvas.
+        """
+        if self.stack.currentWidget() is self.canvas:
+            self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _has_frames(self, desktop: Optional[int], view: str) -> bool:
+        """Does this desktop/view have any frame rows at all?
+
+        Opening one that has none left the *previous* view's image, masks and
+        timeline on screen with a brush armed over them, and then saved that
+        view as "last view" -- after which the next launch died in ``__init__``.
+        Both moves are refused instead, with a line that says why.
+        """
+        if desktop is None:
+            return False
+        try:
+            return bool(self.db.frames_for(int(desktop), str(view)))
+        except Exception:  # noqa: BLE001 - a read that fails is not a reason to move
+            return False
 
     @S.guard
     def _on_desktop_chosen(self, index: int) -> None:
@@ -364,6 +368,11 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
     @S.guard
     def act_set_desktop(self, desktop: int) -> None:
         """Open another machine in the current view."""
+        if not self._has_frames(int(desktop), self.session.view):
+            self.report(f"D{desktop}: 这个视图没有帧 / no frames in this view")
+            self._sync_desktop_combo()
+            return
+
         def switch() -> None:
             self.session.open(int(desktop), self.session.view, force=True)
             if self._steps_panel is not None:
@@ -372,11 +381,15 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
             self.render_frame()
 
         if not self.leave_frame(switch):
-            index = self.desktop_combo.findData(int(self.session.desktop))
-            if index >= 0:
-                blocked = self.desktop_combo.blockSignals(True)
-                self.desktop_combo.setCurrentIndex(index)
-                self.desktop_combo.blockSignals(blocked)
+            self._sync_desktop_combo()
+
+    def _sync_desktop_combo(self) -> None:
+        """Point the chooser back at the machine that is open."""
+        index = self.desktop_combo.findData(int(self.session.desktop))
+        if index >= 0 and index != self.desktop_combo.currentIndex():
+            blocked = self.desktop_combo.blockSignals(True)
+            self.desktop_combo.setCurrentIndex(index)
+            self.desktop_combo.blockSignals(blocked)
 
     # ------------------------------------------------------ navigation slots
     @S.guard
@@ -406,154 +419,21 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         if not self.leave_frame(lambda: self.session.goto(int(step), force=True)):
             self.timeline.select_current_step()
             self.review.select_current_step()
-
-    @S.guard
-    def act_flash_compare(self, pressed: bool, other: bool = False) -> None:
-        """Hold ``Tab`` to see the neighbour frame without moving the view.
-
-        The neighbour is the frame the task card is written against -- the one
-        the annotator came from, ``j + 1`` in reverse order.  ``Shift+Tab``
-        shows the other side instead.
-        """
-        image = (compat.flash_image(self.session, other=other) if pressed
-                 else self.session.image())
-        if image is None:
-            return
-        zoom, centre = self.canvas.zoom_factor(), self._canvas_centre()
-        self.canvas.set_image(image)
-        self.canvas.set_zoom(zoom)
-        self.canvas.center_on(centre)
-        self.canvas.refresh()
-
-    @S.guard
-    def act_flash_other(self, pressed: bool) -> None:
-        """``Shift+Tab``: flash the frame on the *other* side of this one."""
-        self.act_flash_compare(pressed, other=True)
-
-    # ----------------------------------------------------------- tool slots
-    def _all_tools(self) -> tuple:
-        return (self.brush, self.eraser, self.occluder, self.sam_point,
-                self.sam_box, self.roi_tool, self.bench_tool)
-
-    @S.guard
-    def act_tool(self, name: str) -> None:
-        """Arm one tool; the SAM tools refuse when no model is loaded."""
-        if name in ("sam_point", "sam_box") and not self.sam_available:
-            self.report(f"SAM is unavailable: {self.sam_reason}")
-            return
-        if name != "bench_box":
-            self.disarm_bench()   # the arm belongs to the box tool, not to the brush
-        self.cancel_roi_edit()
-        self._tool_name = name
-        self._attach_tool()
-        self.update_status()
-
-    @property
-    def active_tool(self):
-        """The tool receiving the canvas mouse signals, or ``None`` in Review.
-
-        Review mode is **read-only on the canvas**: an edit begun there could
-        not be settled (``Enter`` and ``Esc`` belong to Annotate mode and the
-        mode switch is blocked by the very layer it would create), so no tool is
-        armed and ``R`` takes the frame into Annotate mode instead.
-        """
-        if self.mode == A.MODE_REVIEW:
-            return None
-        return self._tool_for(self._tool_name)
-
-    def _tool_for(self, name: str):
-        return {
-            "brush": self.brush, "eraser": self.eraser, "occluder": self.occluder,
-            "sam_point": self.sam_point, "sam_box": self.sam_box,
-            "bench_box": self.bench_tool, "roi": self.roi_tool,
-        }.get(name, self.brush)
-
-    def _attach_tool(self) -> None:
-        """Exactly one tool listens to the canvas; a SAM tool is re-armed after.
-
-        In Review mode none is: the canvas is there to look at the frame a queue
-        entry points to, not to edit it.
-        """
-        wanted = (None if self.mode == A.MODE_REVIEW
-                  else self._tool_for("roi" if self.roi_editing else self._tool_name))
-        for tool in self._all_tools():
-            if tool is not wanted:
-                tool.detach()
-        if self.tools_enabled and wanted is not None:
-            wanted.attach()
-            if wanted in (self.sam_point, self.sam_box):
-                self.rearm_sam()
-
-    def _detach_tool(self) -> None:
-        for tool in self._all_tools():
-            tool.detach()
-
-    @S.guard
-    def act_radius(self, delta: int) -> None:
-        """``[`` / ``]``: every pixel tool shares one radius."""
-        radius = max(0, self.brush.radius + int(delta))
-        for tool in (self.brush, self.eraser, self.occluder):
-            tool.set_radius(radius)
-        self.update_status()
-
-    # --------------------------------------------------------- display slots
-    @S.guard
-    def act_toggle_overlays(self) -> None:
-        if self.overlay is not None:
-            self.overlay.visible = not self.overlay.visible
-            self.canvas.refresh()
-
-    @S.guard
-    def act_toggle_outline(self) -> None:
-        self.canvas.overlay_outline = not self.canvas.overlay_outline
-        self.canvas.refresh()
-
-    @S.guard
-    def act_opacity(self, delta: int) -> None:
-        alpha = self.canvas.overlay_alpha + int(delta) * OPACITY_STEP
-        self.canvas.overlay_alpha = int(min(255, max(0, alpha)))
-        self.canvas.refresh()
-        self.report(f"overlay opacity {self.canvas.overlay_alpha}/255")
-
-    @S.guard
-    def act_toggle_grid(self) -> None:
-        """The canvas draws the grid above ``GRID_ZOOM``; this parks the threshold."""
-        default = type(self.canvas).GRID_ZOOM
-        self.canvas.GRID_ZOOM = GRID_OFF if self.canvas.GRID_ZOOM == default else default
-        self.canvas.viewport().update()
-        self.report("pixel grid " + ("off" if self.canvas.GRID_ZOOM > 100 else "on"))
-
-    @S.guard
-    def act_fit_image(self) -> None:
-        self.canvas.fit_image()
-        self.update_status()
-
-    @S.guard
-    def act_fit_roi(self) -> None:
-        roi = self.roi()
-        self.canvas.zoom_to(roi) if roi is not None else self.canvas.fit_image()
-        self.update_status()
-
-    @S.guard
-    def act_cheat_sheet(self) -> None:
-        """The ``?`` / ``F12`` sheet, generated from the same table as the guide."""
-        from PySide6.QtWidgets import QDialog, QTextBrowser
-
-        if self._cheat_sheet is None:
-            dialog = QDialog(self)
-            dialog.setWindowTitle("快捷键 / Shortcuts")
-            browser = QTextBrowser(dialog)
-            browser.setHtml(A.cheat_sheet_html())
-            layout = QVBoxLayout(dialog)
-            layout.addWidget(browser)
-            dialog.resize(520, 640)
-            self._cheat_sheet = dialog
-        self._cheat_sheet.show()
-        self._cheat_sheet.raise_()
-
     # -------------------------------------------------------- session slots
     @S.guard
     def act_save(self) -> None:
+        """``Ctrl+S``: save what is on screen.
+
+        In Steps mode that is the step table, not the session: it used to save
+        the session and say "saved" while the annotator's row edits were still
+        sitting in the panel's model -- and "saved" is exactly the word that
+        stops somebody pressing Apply.  Same path as the button, same message.
+        """
+        if self.mode == A.MODE_STEPS:
+            self.steps_panel.apply()
+            self.save_window_state()
+            self.report(self.steps_panel.status.text() or "step table saved")
+            return
         self.session.save()
         self.save_window_state()
         self.report("saved")
@@ -599,6 +479,10 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         """The session's background re-check of frozen frames is making headway."""
         suffix = f", {failed} failed — F5 retries" if failed else ""
         self.report(f"re-checking verified frames: {done}/{total}{suffix}")
+        # Each verdict may repaint a row the annotator is not standing on, and
+        # move the machine chooser's [done/total].
+        self.timeline.refresh_statuses()
+        self.refresh_desktop_counts()
 
     @S.guard
     def _on_sweep_error(self, step: int, text: str) -> None:
@@ -614,12 +498,25 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
 
     @S.guard
     def _on_queues_changed(self) -> None:
+        """A queue moved: the review panel and the timeline colours both follow.
+
+        The timeline only ever repainted on a frame change, so a frame that
+        became a conflict while the annotator worked two steps away kept its
+        old colour until they happened to visit it.
+        """
         self.review.refresh()
+        self.timeline.refresh_statuses()
 
     @S.guard
     def _on_problems(self, problems: list) -> None:
+        """The compiler has something to say about the open frame.
+
+        The count and where to read them; the list itself is the task card's
+        problems pane.  Joining them into the status bar put 2,550 characters
+        into a one-line label.
+        """
         if problems:
-            self.report(f"{len(problems)} problem(s): {'; '.join(str(p) for p in problems)}")
+            self.report(f"{len(problems)} problem(s) — 见任务卡 / see the task card")
 
     @S.guard
     def _on_dirty(self, dirty: bool) -> None:

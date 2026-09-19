@@ -47,9 +47,12 @@ __all__ = [
     "SCREW_ROLE_CLASSES",
     "UNRESOLVED",
     "Edge",
+    "GATED_VERBS",
+    "GATES",
     "HARD_TYPES",
     "REQUIRED_STATES",
     "VerbTarget",
+    "gated_verbs",
     "active_edges",
     "blocker_state",
     "cable_nodes",
@@ -58,6 +61,7 @@ __all__ = [
     "infer_relational_fields",
     "is_provisional",
     "propose_edges",
+    "unresolved_fan_owners",
     "unresolved_kind",
     "unresolved_relations",
     "verb_applies",
@@ -79,6 +83,45 @@ REQUIRED_STATES: dict[str, frozenset[str]] = {
 
 #: ``blocked_by`` is the only type that carries a mode (spec 7.1).
 BLOCKED_MODES = ("physical_path", "tool_access", "cable_tension")
+
+#: Verbs a hard constraint can block at all (spec 7.2). ``reorient`` is a
+#: capture action on the chassis, not a disassembly step, so nothing gates it.
+GATED_VERBS = frozenset({"remove", "displace", "open", "unscrew", "disconnect", "release"})
+
+#: Which of those verbs each edge type actually gates. One table, read by
+#: :func:`tda.core.graph.applicable_preconditions` (and so by ``legal_actions``
+#: and ``validate_sequence``) *and* by :mod:`tda.core.graph_plan`, so the
+#: checker and the planner cannot drift apart.
+#:
+#: Every type used to gate every verb, which said a slim-case PSU could not be
+#: swung out of the way until its whole harness was unplugged -- backwards, as
+#: swinging it out is how you reach the plugs. Across the 66 sheets that alone
+#: produced 34 ``displace psu.01 violates connected_to(...)`` lines, every one
+#: of them describing correct work. The distinction is *moving the part* versus
+#: *reaching it*:
+#:
+#: * ``fastened_by`` / ``locked_by`` -- a screwed-down or latched part does not
+#:   move, but you can still work on what is plugged into it;
+#: * ``covered_by`` / ``blocked_by`` -- no access at all, so every verb waits
+#:   (``blocked_by`` by its ``mode``, as before);
+#: * ``connected_to`` -- you may displace, open or unscrew a part whose cables
+#:   are still plugged; you may not take it away.
+GATES: dict[str, frozenset[str]] = {
+    "fastened_by": frozenset({"remove", "displace", "open"}),
+    "locked_by": frozenset({"remove", "displace", "open"}),
+    "covered_by": GATED_VERBS,
+    "blocked_by": GATED_VERBS,
+    "connected_to": frozenset({"remove"}),
+}
+
+
+def gated_verbs(edge_type: str) -> frozenset[str]:
+    """Which verbs an edge of this type gates; an unknown type gates them all.
+
+    Gating too much is noisy and visible; gating too little silently drops a
+    constraint out of the ground truth, so an unrecognised type errs the loud way.
+    """
+    return GATES.get(edge_type, GATED_VERBS)
 
 CABLE_PREFIX = "cable:"
 REMOVED = "removed"
@@ -209,6 +252,14 @@ POWER_LEAD_KINDS = frozenset({"atx_24pin", "cpu_power", "sata_power", "molex"})
 #: Connector kinds with a detachable plug at *both* ends, owned by nobody.
 TWO_ENDED_KINDS = frozenset({"sata_data"})
 
+#: The class a fan lead can be captive to.
+COOLER_CLASS = "cpu_cooler"
+
+#: ``cpu_cooler.kind`` values that actually carry a fan. ``taxonomy.yaml`` lists
+#: ``fan`` / ``heatsink`` / ``heatsink_fan``, and a bare ``heatsink`` is a block
+#: of metal: nothing is moulded into it, so no fan lead can belong to it.
+FAN_CAPABLE_COOLER_KINDS = frozenset({"fan", "heatsink_fan"})
+
 
 def cable_owner(
     cable_id: str,
@@ -255,14 +306,69 @@ def connector_owner(
       nobody, so each end gates only its own socket host (spec 7.2);
     * anything else falls back to the tagged cable owner, which still drops the
       drive classes of :data:`DETACHABLE_CABLE_OWNERS` -- an untyped connector
-      filed under a drive is one of its SATA leads.
+      filed under a drive is one of its SATA leads -- and, for a fan lead, a
+      cooler that cannot carry a fan (see :func:`owns_fan_lead`).
     """
     kind = str(rec.attrs.get("kind") or "")
     if kind in POWER_LEAD_KINDS:
         return _unique_of_class(instances, "psu")
     if kind in TWO_ENDED_KINDS:
         return None
-    return cable_owner(rec.cable or "", instances)
+    owner = cable_owner(rec.cable or "", instances)
+    if owner and not owns_fan_lead(instances.get(owner)):
+        return None
+    return owner
+
+
+def owns_fan_lead(owner: Optional[InstanceRec]) -> bool:
+    """Can this instance be the far end of a cooler fan lead?
+
+    Anything that is not a cooler at all is none of this rule's business and
+    answers ``True``; a cooler answers whether its ``kind`` has a fan
+    (:data:`FAN_CAPABLE_COOLER_KINDS`).
+
+    ``cable:cpu_fan`` used to resolve onto "the one ``cpu_cooler`` of this
+    desktop" and stop there. On twelve machines that one instance is a bare
+    ``kind=heatsink`` -- the sheet operated the heatsink and never the fan, so
+    the fan was never instantiated -- and the rule bound the fan lead to a part
+    with no fan, producing fifteen ``connected_to`` edges that said the heatsink
+    could not come out until a connector that is not on it was unplugged, and
+    eleven of the thirty sequence violations across the dataset. A missing
+    instance is a question for stage S1 (:func:`unresolved_fan_owners`), not
+    something to answer with the nearest part of roughly the right class.
+    """
+    if owner is None or owner.cls != COOLER_CLASS:
+        return True
+    return str(owner.attrs.get("kind") or "") in FAN_CAPABLE_COOLER_KINDS
+
+
+def unresolved_fan_owners(instances: dict[str, InstanceRec]) -> list[str]:
+    """One line per fan lead whose cooler cannot carry a fan, for stage S1.
+
+    The connector keeps its ``socket_host`` edge -- the plug really is in that
+    board -- so this is not a lost constraint but a missing *instance*: the
+    desktop has a fan, the log never named it, and only a human can say whether
+    to create one. Sorted, so a re-run of the same desktop reports the same
+    thing in the same order.
+    """
+    out: list[str] = []
+    for key, rec in sorted(instances.items()):
+        if rec.cls != "connector" or is_provisional(key):
+            continue
+        kind = str(rec.attrs.get("kind") or "")
+        if kind in POWER_LEAD_KINDS or kind in TWO_ENDED_KINDS:
+            continue
+        owner_key = cable_owner(rec.cable or "", instances)
+        owner = instances.get(owner_key or "")
+        if owner_key and not owns_fan_lead(owner):
+            out.append(
+                f"unresolved fan owner: {key} is a cooler fan lead, but the only "
+                f"cpu_cooler on this desktop is {owner_key} "
+                f"(kind={str(owner.attrs.get('kind') or '')!r}), which has no fan. "
+                f"No owner edge was proposed; create the fan instance if the "
+                f"machine has one."
+            )
+    return out
 
 
 # --------------------------------------------------------------------------- #

@@ -7,7 +7,7 @@ the tool signals report plain image pixels and the SAM crops be taken straight
 from :meth:`ImageCanvas.viewport_image_rect`.
 
 Interaction: wheel zooms about the cursor by a factor of 1.25 per notch,
-middle-drag or ``Space``-drag pans, a pixel grid appears past 400% and a small
+middle-drag pans, a pixel grid appears past 400% and a small
 non-interactive minimap in the corner shows where the viewport sits.
 
 Run ``python -m tda.ui.canvas.view --image <path>`` for a standalone smoke test.
@@ -183,6 +183,10 @@ class ImageCanvas(QGraphicsView):
     sigMousePress = Signal(float, float, object)
     sigMouseMove = Signal(float, float, object)
     sigMouseRelease = Signal(float, float, object)
+    #: The zoom factor changed, by whatever route -- the wheel, a fit, a
+    #: programmatic set.  The status bar's percentage was rewritten only by the
+    #: *actions* that zoom, so after a wheel notch it said the old number.
+    sigZoomChanged = Signal(float)
 
     #: Zoom factor per wheel notch (spec 4.5).
     ZOOM_STEP = 1.25
@@ -203,8 +207,8 @@ class ImageCanvas(QGraphicsView):
         self.overlay_outline = True
         self._panning = False
         self._pan_origin = QPointF()
-        self._space_down = False
         self._rubber_band: Optional[tuple[float, float, float, float]] = None
+        self._last_zoom: Optional[float] = None
         # Parented to the view, not the viewport: QGraphicsView scrolls the
         # viewport's child widgets together with the scene, which would drag the
         # minimap off screen on the first pan.
@@ -399,6 +403,19 @@ class ImageCanvas(QGraphicsView):
 
     def _sync_minimap(self) -> None:
         self._minimap.set_view_rect(self.viewport_image_rect())
+        self._announce_zoom()
+
+    def _announce_zoom(self) -> None:
+        """Tell whoever is showing the percentage, once per real change.
+
+        Every path that zooms already syncs the minimap, which makes this the
+        one place that sees all of them -- the wheel included, which is the one
+        the status bar used to miss.
+        """
+        zoom = self.zoom_factor()
+        if self._last_zoom is None or abs(zoom - self._last_zoom) > 1e-9:
+            self._last_zoom = zoom
+            self.sigZoomChanged.emit(zoom)
 
     def _place_minimap(self, margin: int = 8) -> None:
         self._minimap.move(
@@ -420,27 +437,11 @@ class ImageCanvas(QGraphicsView):
         self.zoom_at(event.position(), self.ZOOM_STEP ** (delta / 120.0))
         event.accept()
 
-    def keyPressEvent(self, event) -> None:  # noqa: D102 - Qt override
-        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
-            self._space_down = True
-            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-    def keyReleaseEvent(self, event) -> None:  # noqa: D102 - Qt override
-        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
-            self._space_down = False
-            self.viewport().unsetCursor()
-            event.accept()
-            return
-        super().keyReleaseEvent(event)
-
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: D102
-        pan = event.button() == Qt.MouseButton.MiddleButton or (
-            self._space_down and event.button() == Qt.MouseButton.LeftButton
-        )
-        if pan:
+        # Middle-drag only.  Space-drag used to be the other way to pan and
+        # was unreachable: Space is "confirm the frame" in the window, which
+        # swallows it long before the canvas sees it.
+        if event.button() == Qt.MouseButton.MiddleButton:
             self._panning = True
             self._pan_origin = event.position()
             self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -466,10 +467,7 @@ class ImageCanvas(QGraphicsView):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: D102
         if self._panning:
             self._panning = False
-            if self._space_down:
-                self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
-            else:
-                self.viewport().unsetCursor()
+            self.viewport().unsetCursor()
             self._sync_minimap()
             event.accept()
             return

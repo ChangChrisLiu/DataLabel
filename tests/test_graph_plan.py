@@ -74,7 +74,7 @@ def test_validate_sequence_flags_a_failure_without_a_constraint(bench, tax):
     actions = [_act(1, "screw.cpu_cooler.01", "unscrew", result="failed")]
     problems = validate_sequence(bench, edges, actions, tax)
     assert problems == [
-        "step 1: failed unscrew screw.cpu_cooler.01 has no unmet constraint — missing edge?"
+        "step 1: failed unscrew screw.cpu_cooler.01 has no unmet constraint - missing edge?"
     ]
 
 

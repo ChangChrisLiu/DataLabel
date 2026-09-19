@@ -276,7 +276,8 @@ def test_sam_point_tool_right_click_is_a_negative_point(zoomed):
     tool.on_press(20.0, 30.0, _press(0, 0, Qt.MouseButton.LeftButton))
     tool.on_press(40.0, 30.0, _press(0, 0, Qt.MouseButton.RightButton))
     assert queue.last.points == [(20.0, 30.0, 1), (40.0, 30.0, 0)]
-    assert queue.last.multimask is False
+    # candidates are offered for every prompt without a prior mask (item 15)
+    assert queue.last.multimask is True
 
 
 def test_sam_point_tool_downscales_a_large_crop_and_scales_points(qapp):
@@ -340,7 +341,7 @@ def test_sam_point_tool_sends_point_plus_box_when_a_prompt_box_is_set(zoomed):
     req = queue.last
     assert req.points == [(20.0, 30.0, 1)]
     assert req.box == (10.0, 12.0, 50.0, 52.0)
-    assert req.multimask is False, "point+box is unambiguous, so no candidates"
+    assert req.multimask is True, "a box narrows the question but does not answer it"
 
     tool.set_prompt_box(None)
     tool.clear_points()
@@ -926,3 +927,149 @@ def test_candidate_switches_are_undoable_through_a_real_undo_stack(zoomed):
     stack.redo()
     stack.redo()
     assert np.array_equal(ov.editing, candidate_2)
+
+
+# ---------------------------------------------------------------------------
+# the points belong to one prompt, not to the session (final review, item 1)
+# ---------------------------------------------------------------------------
+def test_changing_the_frame_token_forgets_the_points(zoomed):
+    """Clicks on the previous frame are in the previous frame's coordinates.
+
+    ``set_frame_token`` dropped the candidates and the box but kept ``points``,
+    so the first click on the next frame went out as a two-point prompt -- one
+    of them pointing at whatever now occupies that spot.
+    """
+    canvas, ov = zoomed
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue)
+    tool.on_press(20.0, 30.0, None)
+    assert len(queue.last.points) == 1
+
+    tool.set_frame_token(FrameKey(13, 11, "scan"))
+    tool.on_press(40.0, 20.0, None)
+
+    assert len(queue.last.points) == 1, f"points leaked: {queue.last.points}"
+    assert queue.last.multimask is True, "a lone first point must offer candidates"
+
+
+def test_switching_instance_forgets_the_points(zoomed):
+    """A point that belongs to part A is not a prompt for part B.
+
+    The reviewer's sequence: S, click A, Enter, activate B, click B -- the
+    request carried both points and ``multimask=False``, so ``C`` offered
+    nothing and the mask was a union of two parts.
+    """
+    canvas, ov = zoomed
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue, instance="part.a")
+    tool.on_press(20.0, 30.0, None)
+    assert len(queue.last.points) == 1
+
+    tool.instance = "part.b"
+    tool.on_press(40.0, 20.0, None)
+
+    assert len(queue.last.points) == 1, f"points leaked: {queue.last.points}"
+    assert queue.last.multimask is True
+
+
+def test_reset_prompt_forgets_the_points_and_the_drag(zoomed):
+    """One call the window can make whenever the layer stops being the tool's."""
+    canvas, ov = zoomed
+    queue = StubQueue(_blob_result)
+    point = _point_tool(canvas, ov, queue)
+    point.on_press(20.0, 30.0, None)
+    box = _box_tool(canvas, ov, queue)
+    box.on_press(10.0, 10.0, None)
+    box.on_move(30.0, 30.0, None)
+
+    point.reset_prompt()
+    box.reset_prompt()
+
+    assert point.points == []
+    assert box.box is None and box._dragging is False
+    point.on_press(40.0, 20.0, None)
+    assert len(queue.last.points) == 1
+
+
+# ---------------------------------------------------------------------------
+# candidates are offered whenever there is no prior mask (addendum, item 15)
+# ---------------------------------------------------------------------------
+def test_a_box_prompt_asks_for_candidates(zoomed):
+    """A single candidate for a box prompt was the whole chassis, twice.
+
+    Measured on the rehearsal: the motherboard (s41) and the PSU (s33) had a
+    correct but large diff box and SAM's one answer was 627k / 620k px of
+    machine, with no way out but the eraser.
+    """
+    canvas, ov = zoomed
+    queue = StubQueue(_multi_result)
+    tool = _box_tool(canvas, ov, queue)
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(40.0, 40.0, None)
+    tool.on_release(40.0, 40.0, None)
+
+    assert queue.last.multimask is True
+    assert _spin(lambda: tool.candidate_count >= 2), tool.candidate_count
+
+
+def test_a_point_and_box_prompt_asks_for_candidates(zoomed):
+    canvas, ov = zoomed
+    queue = StubQueue(_multi_result)
+    tool = _point_tool(canvas, ov, queue)
+    tool.set_prompt_box((8.0, 8.0, 44.0, 44.0))
+    tool.on_press(20.0, 30.0, None)
+
+    assert queue.last.multimask is True
+    assert _spin(lambda: tool.candidate_count >= 2)
+
+
+def test_a_refinement_still_asks_for_one(zoomed):
+    """With a prior mask the answer is not ambiguous, and blending needs one."""
+    canvas, ov = zoomed
+    ov.set_editing("inst-x", np.zeros((60, 80), dtype=bool))
+    ov.editing[20:30, 20:30] = True
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue, refine=True)
+    tool.on_press(25.0, 25.0, None)
+
+    assert queue.last.mask_input is not None
+    assert queue.last.multimask is False
+
+
+# ---------------------------------------------------------------------------
+# a prompt that was reset is a prompt that was cancelled (F3 round 2, item 1)
+# ---------------------------------------------------------------------------
+def test_a_reset_prompt_drops_a_result_that_is_still_in_flight(zoomed):
+    """Click, Esc, re-activate the SAME instance: the late mask landed anyway.
+
+    ``reset_prompt`` forgot the points and the candidates but left the token
+    alone, so the answer to a prompt the annotator had already discarded
+    painted 2,464 px into the layer they had just emptied.
+    """
+    canvas, ov = zoomed
+    queue = HoldingQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue, instance="part.a")
+    tool.on_press(20.0, 30.0, None)
+    assert queue.pending, "nothing was submitted"
+
+    tool.reset_prompt()          # what Esc does, through the window
+    ov.set_editing("part.a", np.zeros((60, 80), dtype=bool))
+    queue.flush()                # the answer arrives now
+    _drain()
+
+    assert not ov.editing.any(), "a discarded prompt painted the layer"
+
+
+def test_a_reset_prompt_does_not_stop_the_next_one(zoomed):
+    """The tool stays armed: the point after the reset must still work."""
+    canvas, ov = zoomed
+    queue = HoldingQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue)
+    tool.on_press(20.0, 30.0, None)
+    tool.reset_prompt()
+
+    tool.on_press(40.0, 20.0, None)
+    queue.flush()
+    _drain()
+
+    assert ov.editing.any(), "the prompt after the reset was dropped too"

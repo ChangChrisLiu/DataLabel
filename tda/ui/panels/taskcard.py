@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from tda.ui import session_api as api
+from tda.ui.panels import session_is_open
 
 __all__ = ["TaskCardPanel", "KIND_ICONS"]
 
@@ -53,6 +54,85 @@ DONE_COLOR = QColor(128, 128, 132)
 #: :attr:`TaskCardPanel.sigCommit` payload meaning "ask the session".
 SUGGESTED = ""
 
+#: A compiler problem code looks like ``missing_shape:cpu_cooler.01`` -- one
+#: token, a colon, an instance key.  A "how to fix it" sentence has spaces.
+_CODE_CHARS = set("abcdefghijklmnopqrstuvwxyz_")
+
+
+def _is_code(problem: str) -> bool:
+    """Is this the compiler's own name for a problem rather than a sentence?"""
+    head, sep, rest = str(problem).partition(":")
+    return bool(sep) and bool(head) and set(head) <= _CODE_CHARS and " " not in head
+
+
+#: The session writes a "how to fix it" sentence for exactly these codes
+#: (``session_review._how_to_fix``), in the order they appear, so they are the
+#: only ones a sentence may be paired with.  Pairing them with *every* code put
+#: "Draw c.01 on this frame" next to ``bench_missing:b.01`` on any frame that
+#: had both, and left the real missing shape showing its raw code.
+EXPLAINED_CODES = ("missing_shape:",)
+
+#: What every other code means, in one place.  ``{what}`` is the part of the
+#: code after the colon -- an instance key, sometimes with a part or a second
+#: key after it -- which is what the annotator has to go and look at.
+PROBLEM_SENTENCES: tuple[tuple[str, str], ...] = (
+    ("bench_missing:", "{what}：已拆到台面上但还没有台面框（按 R 拖一个框）"),
+    ("shape_size_mismatch:", "{what}：形状和这一帧的画面尺寸对不上，重画一次"),
+    ("zorder_cycle:", "{what}：层级关系互相矛盾，改掉其中一条"),
+    ("zorder_missing:", "{what}：不在层级顺序里，会被画在最上面"),
+    ("empty_visible:", "{what}：可见部分是空的，可能被完全遮挡或画到了框外"),
+    ("pose_segment_ambiguous:", "{what}：跨了不止一个位姿段，先确认位姿分段"),
+    ("missing_shape:", "{what}：这一帧还缺形状，把它画出来"),
+)
+
+
+def explain_code(code: str) -> str:
+    """The human sentence for a problem code, or the code itself when unknown."""
+    for prefix, template in PROBLEM_SENTENCES:
+        if code.startswith(prefix):
+            return template.format(what=code[len(prefix):])
+    return code
+
+
+def instance_of(code: str) -> str:
+    """The instance key a code is about: before any ``/`` part or ``,`` partner."""
+    tail = code.split(":", 1)[1] if ":" in code else ""
+    return tail.split("/", 1)[0].split(",", 1)[0].strip()
+
+
+def pair_problems(problems: list[str]) -> list[dict]:
+    """``{"text", "code", "instance"}`` per problem, each one listed once.
+
+    ``confirm_frame`` emits the compiler's codes **and** one sentence per code
+    it knows how to explain (:data:`EXPLAINED_CODES`), in the same order.  Only
+    those codes consume a sentence; every other one is explained from
+    :data:`PROBLEM_SENTENCES` here, and a code nobody has written a sentence for
+    is shown as it is rather than wearing somebody else's.
+
+    A refusal **opens** with the session's own sentence ("frame 13/scan/step 14
+    cannot be verified: ...", "conflict(s) 3, 5 are still open"), which explains
+    no code -- it restates them.  Popping sentences off one flat list handed it
+    to the first ``missing_shape:`` and pushed every real sentence one code
+    along, leaving the last one orphaned under nobody's instance.  So only what
+    comes *after* the first code can be paired; anything before it is its own
+    row.
+    """
+    first_code = next((i for i, p in enumerate(problems) if _is_code(p)),
+                      len(problems))
+    lead, rest = problems[:first_code], problems[first_code:]
+    codes = [p for p in rest if _is_code(p)]
+    sentences = [p for p in rest if not _is_code(p)]
+    rows: list[dict] = [{"text": text, "code": "", "instance": ""}
+                        for text in lead]
+    for code in codes:
+        if code.startswith(EXPLAINED_CODES) and sentences:
+            text = sentences.pop(0)
+        else:
+            text = explain_code(code)
+        rows.append({"text": text, "code": code, "instance": instance_of(code)})
+    rows.extend({"text": text, "code": "", "instance": ""} for text in sentences)
+    return rows
+
 
 class TaskCardPanel(QWidget):
     """The per-frame instruction list with the commit and confirm actions."""
@@ -70,6 +150,7 @@ class TaskCardPanel(QWidget):
         super().__init__(parent)
         self._session: Optional[api.SessionLike] = None
         self._problems: list[str] = []
+        self._rows: list[dict] = []
 
         self._list = QListWidget()
         self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
@@ -105,7 +186,12 @@ class TaskCardPanel(QWidget):
 
         self._problems_label = QLabel("Problems")
         self._problems_list = QListWidget()
-        self._problems_list.setMaximumHeight(90)
+        self._problems_list.setMaximumHeight(90)     # it scrolls; 60 of them fit
+        self._problems_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self._problems_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._problems_list.itemClicked.connect(self._on_problem_clicked)
+        self._problems_list.itemActivated.connect(self._on_problem_activated)
         self._problems_label.setVisible(False)
         self._problems_list.setVisible(False)
 
@@ -160,7 +246,7 @@ class TaskCardPanel(QWidget):
     def refresh(self) -> None:
         """Rebuild the card from ``session.task_card()``."""
         self._list.clear()
-        rows = self._session.task_card() if self._session is not None else []
+        rows = self._session.task_card() if session_is_open(self._session) else []
         first_open = -1
         for i, row in enumerate(rows):
             kind = str(row.get("kind", api.KIND_CONFIRM))
@@ -230,6 +316,18 @@ class TaskCardPanel(QWidget):
             self._show_problems(self._problems)
         return ok
 
+    def problem_count(self) -> int:
+        """How many things there are to fix -- not how many lines are shown.
+
+        The refusal's opening line restates the codes listed under it, so
+        counting it as well told the annotator "3 problem(s)" for two missing
+        shapes.  When it is all there is -- an open conflict, which the
+        compiler cannot name -- it *is* the problem, and counts.
+        """
+        if not self._problems_list.isVisibleTo(self):
+            return 0
+        return len([row for row in self._rows if row["code"]]) or len(self._rows)
+
     def problems(self) -> list[str]:
         """The problems currently on display (empty when none are shown)."""
         if not self._problems_list.isVisibleTo(self):
@@ -272,14 +370,56 @@ class TaskCardPanel(QWidget):
         self._problems = [str(p) for p in problems]
 
     def _show_problems(self, problems: list[str]) -> None:
+        """One row per problem: the sentence, with the code in the tooltip.
+
+        The session emits the compiler's codes *and* the "how to fix it"
+        sentences in one list, so a start frame with 60 missing shapes listed
+        every part twice -- once as ``missing_shape:cover.01`` and once as
+        "Draw cover.01 on this frame".  They are paired back up here: the
+        sentence is what the annotator reads, the code is what they quote in a
+        bug report, and the instance is what a click jumps to.
+        """
         self._problems_list.clear()
-        for problem in problems:
-            self._problems_list.addItem(problem)
+        self._rows = pair_problems(problems)
+        for row in self._rows:
+            item = QListWidgetItem(row["text"])
+            item.setToolTip(row["code"] or row["text"])
+            item.setData(INSTANCE_ROLE, row["instance"])
+            self._problems_list.addItem(item)
         visible = bool(problems)
         self._problems_label.setVisible(visible)
         self._problems_list.setVisible(visible)
 
+    def problem_rows(self) -> list[dict]:
+        """``{"text", "code", "instance"}`` per row currently shown."""
+        out = []
+        for i in range(self._problems_list.count()):
+            item = self._problems_list.item(i)
+            out.append({"text": item.text(), "code": item.toolTip(),
+                        "instance": str(item.data(INSTANCE_ROLE) or "")})
+        return out
+
+    def activate_problem(self, instance: str) -> None:
+        """Jump to the card item a problem is about (a click in the pane)."""
+        if instance:
+            self.select_instance(instance)
+
+    def _on_problem_clicked(self, item: QListWidgetItem) -> None:
+        self.activate_problem(str(item.data(INSTANCE_ROLE) or ""))
+
+    def _on_problem_activated(self, item: QListWidgetItem) -> None:
+        """Double click / Enter on a problem: start editing that instance.
+
+        The window decides whether the edit may begin, as for every other way
+        of asking.
+        """
+        instance = str(item.data(INSTANCE_ROLE) or "")
+        if instance:
+            self.select_instance(instance)
+            self.sigRequestEdit.emit(instance)
+
     def _hide_problems(self) -> None:
         self._problems_list.clear()
+        self._rows = []
         self._problems_label.setVisible(False)
         self._problems_list.setVisible(False)

@@ -33,6 +33,22 @@ def _scoped(sql: str, args: list, desktops) -> tuple[str, list]:
 class DeleteMixin:
     """Row removals for a repository holding ``self.conn``."""
 
+    def delete_relation(self, desktop: int, rel_type: str, target: str,
+                        blocker: str) -> None:
+        """Drop one constraint edge; an edge that is not there is not an error.
+
+        ``python -m tda.cli constraints`` re-derives a desktop's rule edges from
+        scratch, so an edge the rules no longer propose has to go -- otherwise a
+        corrected ``screw.fastens`` would leave the old ``fastened_by`` behind
+        forever, and the graph would only ever grow.
+        """
+        with self._tx():
+            self.conn.execute(
+                'DELETE FROM relation WHERE desktop=? AND "type"=? AND target=? '
+                "AND blocker=?",
+                (int(desktop), str(rel_type), str(target), str(blocker)),
+            )
+
     def delete_keyframe(self, keyframe_id: int) -> None:
         """Drop one shape keyframe; its parts go with it (``ON DELETE CASCADE``)."""
         with self._tx():

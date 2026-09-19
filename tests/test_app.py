@@ -614,3 +614,316 @@ def test_no_panel_reaches_the_session_behind_the_window(window):
     assert not hasattr(window.review, "confirm")
     assert not hasattr(window.review, "open_selected")
     assert not hasattr(window.review, "_goto")
+
+
+# --------------------------------------------------------------------------- #
+# the timeline shows the status of every frame, not only the open one (item 4)
+# --------------------------------------------------------------------------- #
+def test_the_timeline_repaints_other_rows_when_the_queues_change(window, monkeypatch):
+    """`_refresh_statuses` only ran on a frame change.
+
+    After a commit that touched a verified frame its row stayed amber
+    ``recheck`` although ``frame_status`` already said ``conflict`` -- the
+    annotator had no way of knowing where the work was.
+    """
+    from tda.ui import session_api as api
+
+    other = min(window.session.steps())
+    before = window.timeline.step_brush(other).color().name()
+    monkeypatch.setattr(window.session, "frame_status",
+                        lambda step: (api.STATUS_CONFLICT if step == other
+                                      else api.STATUS_AUTO))
+
+    window._on_queues_changed()
+
+    assert window.timeline.step_brush(other).color().name() != before
+
+
+def test_the_sweeper_reporting_progress_repaints_the_timeline(window, monkeypatch):
+    seen: list[int] = []
+    monkeypatch.setattr(window.timeline, "refresh_statuses", lambda: seen.append(1))
+    window._on_sweep_progress(1, 4, 0)
+    assert seen == [1]
+
+
+def test_a_commit_repaints_the_timeline(window, monkeypatch):
+    """A commit is exactly when another frame's status changes."""
+    seen: list[int] = []
+    card = [r for r in window.session.task_card() if r.get("instance")]
+    window.task_card.sigRequestEdit.emit(str(card[0]["instance"]))
+    window.set_editing_mask(np.ones((64, 64), dtype=bool))
+    monkeypatch.setattr(window.timeline, "refresh_statuses", lambda: seen.append(1))
+
+    window.act_commit()
+
+    assert seen, "the timeline was not asked to repaint"
+
+
+# --------------------------------------------------------------------------- #
+# the machine chooser's [done/total] (item 5)
+# --------------------------------------------------------------------------- #
+def chooser_text(win: MainWindow) -> str:
+    return win.desktop_combo.itemText(win.desktop_combo.currentIndex())
+
+
+def test_the_chooser_count_follows_a_confirmation(window):
+    """Computed once at launch and never again -- and the guide points at it."""
+    before = chooser_text(window)
+    assert "[0/" in before, before
+    seed_shapes(window.session, window.session.current().step)
+    window.task_card.refresh()
+
+    assert window.act_confirm() is True
+
+    assert chooser_text(window) != before
+    assert "[1/" in chooser_text(window), chooser_text(window)
+
+
+def test_the_chooser_count_follows_a_view_switch(window):
+    """The count is per view, so switching view has to re-read it."""
+    seed_shapes(window.session, window.session.current().step)
+    window.task_card.refresh()
+    window.act_confirm()
+    assert "[1/" in chooser_text(window)
+
+    window.act_set_view("oak1")
+
+    assert window.session.view == "oak1"
+    assert "[0/2]" in chooser_text(window), chooser_text(window)
+
+
+def test_the_chooser_count_follows_the_sweeper(window, monkeypatch):
+    seen: list[int] = []
+    monkeypatch.setattr(window, "refresh_desktop_counts", lambda: seen.append(1))
+    window._on_sweep_progress(4, 4, 0)
+    assert seen == [1]
+
+
+def test_the_zoom_percentage_follows_the_wheel(window):
+    """The status bar's zoom was only rewritten by actions that called it."""
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    window.resize(900, 700)
+    window.show()
+    QApplication.processEvents()
+    before = window.zoom_label.text()
+
+    viewport = window.canvas.viewport()
+    centre = QPointF(viewport.rect().center())
+    QApplication.sendEvent(viewport, QWheelEvent(
+        centre, viewport.mapToGlobal(QPoint(*map(int, (centre.x(), centre.y())))),
+        QPoint(0, 0), QPoint(0, 120), Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False,
+    ))
+    QApplication.processEvents()
+
+    assert window.canvas.zoom_factor() != pytest.approx(float(before.rstrip("%")) / 100)
+    assert window.zoom_label.text() != before
+
+
+# --------------------------------------------------------------------------- #
+# a view with no frames at all (item 7)
+# --------------------------------------------------------------------------- #
+EMPTY_VIEW = "rs"
+
+
+def test_switching_to_a_view_with_no_frames_is_refused(window):
+    """It left the PREVIOUS view's image, masks and timeline on screen.
+
+    `render_frame` returned early on a closed session, so everything the
+    annotator could see still belonged to the view they had left -- and the
+    brush was still armed over it.
+    """
+    before = window.session.view
+    step = window.session.current().step
+
+    window.act_set_view(EMPTY_VIEW)
+
+    assert window.session.view == before
+    assert window.session.current().step == step
+    assert window.session.is_open is True
+    assert "没有" in window.status_message() or "no frames" in window.status_message()
+    assert window.view_buttons[before].isChecked() is True
+
+
+def test_switching_to_a_desktop_with_no_frames_is_refused(window):
+    before = int(window.session.desktop)
+    missing = max(window.db.desktop_ids()) + 7
+
+    window.act_set_desktop(missing)
+
+    assert int(window.session.desktop) == before
+    assert window.session.is_open is True
+
+
+def test_a_closed_session_leaves_nothing_of_the_last_frame_on_screen(window):
+    """Whatever put the session in this state, the window must not lie."""
+    window.session.open(int(window.session.desktop), EMPTY_VIEW, force=True)
+    window.render_frame()
+    QApplication.processEvents()
+
+    assert window.session.is_open is False
+    assert window.stack.currentWidget() is window.placeholder_label
+    assert window.active_tool is None or window.tools_enabled is False
+    assert window.timeline.list_widget().count() == 0
+    assert window.instances.table().rowCount() == 0
+    assert window.task_card.list_widget().count() == 0
+
+
+def test_a_poisoned_last_frame_in_the_ini_cannot_stop_the_launch(qapp, tmp_path):
+    """The next launch raised out of __init__ and the app would not start.
+
+    A view with no frames was saved as "last view"; on the next launch the
+    timeline asked the session for a frame that does not exist.
+    """
+    from tda.ui.app_shell import resume_target
+
+    paths = make_paths(tmp_path)
+    make_session(tmp_path).close(force=True)          # build the scene's database
+    settings = S.make_settings(paths)
+    settings.setValue("last/tester/desktop", 999)
+    settings.setValue("last/tester/view", "nonsense")
+    settings.setValue("last/tester/step", 4242)
+    settings.sync()
+
+    target = resume_target(paths, "tester", None, None, None, paths["db_path"])
+
+    assert int(target["desktop"]) == DESKTOP
+    assert target["view"] == VIEW            # the only view the scene has frames for
+    assert target["step"] in (None, LAST_STEP)
+
+
+def test_ctrl_s_in_steps_mode_applies_the_step_table(window, monkeypatch):
+    """It said "saved" while the step table's edits were still unsaved.
+
+    ``Ctrl+S`` saved the *session*, which in Steps mode is not what is on
+    screen: the annotator's row edits sat in the panel's model, and the word
+    "saved" is exactly the thing that stops somebody pressing Apply.
+    """
+    window.set_mode(A.MODE_STEPS)
+    applied: list[int] = []
+    monkeypatch.setattr(window.steps_panel, "apply", lambda: applied.append(1))
+    window.steps_panel.status.setText("Saved D13: 0 open question(s).")
+
+    window.act_save()
+
+    assert applied == [1]
+    assert "Saved D13" in window.status_message()
+
+
+def test_ctrl_s_outside_steps_mode_still_saves_the_session(window, monkeypatch):
+    saved: list[int] = []
+    monkeypatch.setattr(window.session, "save", lambda: saved.append(1))
+    window.set_mode(A.MODE_ANNOTATE)
+    window.act_save()
+    assert saved == [1]
+
+
+# --------------------------------------------------------------------------- #
+# the toolbar must not eat the keyboard (item 10)
+# --------------------------------------------------------------------------- #
+def test_the_toolbar_widgets_never_take_the_focus(window):
+    """A click on the chooser or a view button killed every shortcut, silently.
+
+    ``blocks_shortcuts`` is right about a combo box that has the focus -- the
+    annotator may be typing in it -- so the answer is that these never take it.
+    """
+    assert window.desktop_combo.focusPolicy() == Qt.FocusPolicy.NoFocus
+    assert window.mode_tabs.focusPolicy() == Qt.FocusPolicy.NoFocus
+    for button in window.view_buttons.values():
+        assert button.focusPolicy() == Qt.FocusPolicy.NoFocus
+
+
+def test_choosing_a_view_puts_the_focus_back_on_the_canvas(window):
+    """After a top-bar choice the next key belongs to the canvas again."""
+    window.resize(900, 700)
+    window.show()
+    QApplication.processEvents()
+    window.task_card.list_widget().setFocus()
+    QApplication.processEvents()
+
+    window.act_set_view("oak1")          # frame rows, no images: the placeholder
+    QApplication.processEvents()
+    assert window.stack.currentWidget() is window.placeholder_label
+
+    window.act_set_view(VIEW)            # back to the view that has pictures
+    QApplication.processEvents()
+    assert window.canvas.hasFocus() or QApplication.focusWidget() is window.canvas
+
+
+def test_the_cheat_sheet_does_not_switch_the_keyboard_off(window):
+    """It is read-only, and it is exactly what somebody has open while learning."""
+    window.resize(900, 700)
+    window.show()
+    QApplication.processEvents()
+    window.act_cheat_sheet()
+    QApplication.processEvents()
+    try:
+        assert window._cheat_sheet.isVisible()
+        assert window._shortcut_context_ok() is True
+    finally:
+        window._cheat_sheet.close()
+
+
+# --------------------------------------------------------------------------- #
+# the log file is worth reading (addendum, item 17)
+# --------------------------------------------------------------------------- #
+def log_text(win: MainWindow) -> str:
+    for handler in win.logger.handlers:
+        handler.flush()
+    return Path(S.log_path(win.paths)).read_text(encoding="utf-8")
+
+
+def test_the_log_records_the_session_the_frames_and_the_commits(qapp, tmp_path):
+    """30 minutes of driving left a 0-byte tda_app.log."""
+    win = open_window(tmp_path)
+    try:
+        win.resize(900, 700)
+        win.show()
+        QApplication.processEvents()
+        assert "window open" in log_text(win)
+        assert f"D{DESKTOP}" in log_text(win) and VIEW in log_text(win)
+
+        card = [r for r in win.session.task_card() if r.get("instance")]
+        instance = str(card[0]["instance"])
+        win.task_card.sigRequestEdit.emit(instance)
+        win.set_editing_mask(np.ones((64, 64), dtype=bool))
+        win.act_commit()
+        text = log_text(win)
+        assert "commit" in text and instance in text
+        assert "px" in text and "ms" in text
+
+        win.act_step(-1)
+        assert "frame" in log_text(win)
+
+        win.act_confirm()
+        assert "confirm" in log_text(win)
+    finally:
+        close_window(win)
+    assert "window closed" in log_text(win)
+
+
+def test_the_log_records_every_sam_prompt(window):
+    """SAM timings existed only in the smoke report; the log said nothing.
+
+    And ``tda.models.sam_service``'s own lines never reached the file at all,
+    because the handler was on ``tda.app`` rather than on ``tda``.
+    """
+    import logging
+
+    card = [r for r in window.session.task_card() if r.get("instance")]
+    window.task_card.sigRequestEdit.emit(str(card[0]["instance"]))
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush(multimask=True)
+    QApplication.processEvents()
+
+    logging.getLogger("tda.models.sam_service").info("hello from the service")
+    text = log_text(window)
+    assert "sam prompt" in text
+    assert "points=1" in text and "candidates=3" in text and "ms=" in text
+    assert "hello from the service" in text, "the service's logger is not attached"
+
+    window.act_cycle_candidate()
+    assert "sam candidate" in log_text(window)

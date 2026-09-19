@@ -186,7 +186,7 @@ class BackupLockMixin:
         Anything else removes the file and raises ``OSError``; ``sqlite3.Error``
         from the copy itself propagates unchanged. Every caller of the safety
         copy turns both into one printed line and exit 1
-        (:func:`tda.cli._safety_backup`).
+        (:func:`tda.cli_common.safety_backup`).
 
         Only once all of that has passed is :func:`prune_backups` asked to drop
         the surplus older copies (``keep``, ``None`` for no pruning). The order

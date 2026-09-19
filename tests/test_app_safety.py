@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -38,6 +38,7 @@ from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
 from tda.ui import session_api as api
 from tda.ui.app import MainWindow
+from tda.ui.app_edit import FLASH_HINT as A_FLASH_HINT
 
 
 @pytest.fixture(scope="session")
@@ -780,6 +781,8 @@ def test_sequence_b_sam_then_brush_then_commit_then_confirm(window):
     window.act_tool("brush")
     paint(window)
     window.act_commit()
+    if window.warn_bar.isVisibleTo(window):
+        window.act_commit()      # a synthetic 64x64 part trips the area prior
     assert session.db.keyframes(DESKTOP, VIEW, instance)
     assert window.act_confirm() in (True, False)   # whatever the compiler says
     assert window.session.editing_instance is None
@@ -901,3 +904,257 @@ def test_sequence_d_blocked_navigation_then_commit_then_navigation(window):
     window.act_commit()
     window.act_step(-1)
     assert window.session.current().step < step
+
+
+# --------------------------------------------------------------------------- #
+# while Tab is held the canvas is showing another frame (final review, item 2)
+# --------------------------------------------------------------------------- #
+def flashable(win: MainWindow) -> MainWindow:
+    """Stand on a frame that *has* a neighbour to flash (the last one has none)."""
+    win.session.goto(LAST_STEP - 1, force=True)
+    QApplication.processEvents()
+    return win
+
+
+def test_a_press_while_flashing_is_swallowed_with_a_hint(window):
+    """The canvas is showing the neighbour; a stroke there would be a lie.
+
+    In reverse order the part the card asks for is ABSENT in j+1, so a SAM
+    click on the flashed image cropped pixels that do not contain it and the
+    mask landed in the *current* frame's layer, confidently wrong.
+    """
+    flashable(window)
+    instance = start_edit(window)
+    window.act_flash_compare(True)
+    assert window.is_flashing() is True
+    before = window.overlay.editing.copy()
+
+    paint(window)
+
+    assert np.array_equal(window.overlay.editing, before), "a stroke landed while flashed"
+    assert "Tab" in window.status_message()
+
+
+def test_sam_is_refused_while_flashing(window):
+    flashable(window)
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.act_flash_compare(True)
+    pending = window.sam_queue.pending()
+
+    window.sam_point.on_press(32.0, 32.0, None)
+
+    assert window.sam_queue.pending() == pending, "a prompt went out on the wrong image"
+
+
+def test_the_status_bar_says_which_frame_is_being_compared(window):
+    """What is on the canvas is not what the rest of the window is about."""
+    flashable(window)
+    window.act_flash_compare(True)
+    assert "对照" in window.frame_label.text()
+    window.act_flash_compare(False)
+    assert "对照" not in window.frame_label.text()
+    assert str(window.session.current().step) in window.frame_label.text()
+
+
+def test_a_lost_key_release_does_not_leave_the_canvas_on_the_neighbour(window):
+    """Alt+Tab while holding Tab: the release never arrives.
+
+    The canvas stayed on the neighbour's image with the current frame's overlay
+    and status -- and every tool stayed live over it.
+    """
+    flashable(window)
+    window.act_flash_compare(True)
+    assert window.is_flashing() is True
+
+    QApplication.sendEvent(window, QEvent(QEvent.Type.WindowDeactivate))
+    QApplication.processEvents()
+
+    assert window.is_flashing() is False
+    assert np.array_equal(window.canvas.image_rgb(), window.session.image())
+
+
+def test_any_other_key_ends_the_flash(window):
+    flashable(window)
+    window.act_flash_compare(True)
+    window.handle_key(_key_event(Qt.Key.Key_B))
+    assert window.is_flashing() is False
+
+
+def test_a_frame_change_ends_the_flash(window):
+    flashable(window)
+    window.act_flash_compare(True)
+    window.session.goto(min(window.session.steps()), force=True)
+    QApplication.processEvents()
+    assert window.is_flashing() is False
+
+
+def _key_event(key, press: bool = True):
+    from PySide6.QtGui import QKeyEvent
+
+    return QKeyEvent(
+        QEvent.Type.KeyPress if press else QEvent.Type.KeyRelease,
+        key, Qt.KeyboardModifier.NoModifier,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# every failure has to reach the annotator (item 12)
+# --------------------------------------------------------------------------- #
+def test_a_tool_that_raises_does_not_escape_into_qt(window, monkeypatch):
+    """``queue.submit`` raising left the label saying "SAM ready" for ever.
+
+    The three tool slots were unguarded, so the exception went into the Qt
+    event loop, the status bar said nothing, and every further click repeated
+    it.
+    """
+    start_edit(window)
+    window.act_tool("sam_point")
+
+    def explode(*_a, **_k):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr(window.sam_queue, "submit", explode)
+    viewport = window.canvas.viewport()
+    QTest.mousePress(viewport, Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, viewport.rect().center())
+    QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton,
+                       Qt.KeyboardModifier.NoModifier, viewport.rect().center())
+    QApplication.processEvents()
+
+    assert "CUDA out of memory" in window.last_error_message()
+    assert "error" in window.sam_label.text().lower()
+    assert "S" in window.sam_label.text()
+
+
+def test_an_exception_in_a_slot_is_reported_as_an_error(window):
+    """``report_exception`` wrote to the hint line only, so nothing recorded it."""
+    window.report_exception(RuntimeError("boom"), "act_commit")
+    assert "boom" in window.last_error_message()
+
+
+def test_a_locked_database_is_explained_in_words(window):
+    import sqlite3
+
+    window.report_exception(sqlite3.OperationalError("database is locked"),
+                            "act_commit")
+    assert "数据库正忙" in window.last_error_message()
+
+
+def test_a_failed_sidecar_write_is_said_once_and_survives_the_block(window, monkeypatch):
+    """The crash protection failing is worse news than the edit being blocked."""
+    instance = start_edit(window)
+
+    def explode(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(window.sidecar, "save", explode)
+    paint(window)
+    window.flush_sidecar()
+    assert "崩溃保护已失效" in window.status_message()
+
+    window.act_step(-1)          # blocked: BLOCK_HINT used to overwrite it
+    assert "崩溃保护已失效" in window.status_message()
+
+    said = window.status_message()
+    window.flush_sidecar()
+    assert window.status_message() == said     # not repeated every stroke
+
+
+def test_a_step_with_no_image_says_so_on_arrival(qapp, tmp_path):
+    """The placeholder is silent; the status bar has to say which step."""
+    win = open_window(tmp_path, missing=(3,))
+    try:
+        win.session.goto(3, force=True)
+        QApplication.processEvents()
+        assert win.session.image() is None
+        assert "没有图像" in win.status_message() or "no image" in win.status_message()
+    finally:
+        close_window(win)
+
+
+def test_editing_keys_on_a_removed_row_say_why_nothing_happened(window):
+    """A removed part is listed read-only; H / V / 1-7 must not be silent."""
+    window.instances.show_removed.setChecked(True)
+    QApplication.processEvents()
+    table = window.instances.table()
+    if table.rowCount() <= len(window.instances.rows()):
+        pytest.skip("this frame has no removed parts")
+    table.setCurrentCell(table.rowCount() - 1, 1)
+
+    window.act_toggle_hidden()
+
+    assert "已移除" in window.status_message()
+
+
+# --------------------------------------------------------------------------- #
+# the small ones (F3 round 2, item 6)
+# --------------------------------------------------------------------------- #
+def test_the_flash_hint_is_not_overwritten_by_a_late_assist_line(window):
+    """The diff map answers a few ms later and took the hint off the screen."""
+    flashable(window)
+    start_edit(window)
+    window.act_flash_compare(True)
+    paint(window)                      # the hint appears
+    assert "Tab" in window.status_message()
+
+    window.report("prompt box from the difference map: (1, 2, 3, 4)")
+
+    assert "Tab" in window.status_message(), "the hint was overwritten"
+
+
+def test_a_held_hint_still_gives_way_to_a_frame_change(window):
+    flashable(window)
+    window.act_flash_compare(True)
+    window.report(A_FLASH_HINT, hold_ms=5000)
+    window.session.goto(min(window.session.steps()), force=True)
+    QApplication.processEvents()
+    assert "Tab" not in window.status_message()
+
+
+def test_switching_to_the_brush_says_the_candidates_go(window):
+    """``detach()`` drops them, which the SAM label's docstring did not admit."""
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush(multimask=True)
+    QApplication.processEvents()
+    assert window.sam_point.candidate_count == 3
+
+    window.act_tool("brush")
+
+    assert "候选" in window.status_message()
+    assert window.sam_point.candidate_count == 0
+
+
+def test_the_zoom_slot_cannot_escape_into_qt(window, monkeypatch):
+    """Every slot the window connects goes through the guard, this one too."""
+    def explode() -> None:
+        raise RuntimeError("status went wrong")
+
+    monkeypatch.setattr(window, "update_status", explode)
+    window.canvas.set_zoom(2.0)        # emits sigZoomChanged
+    QApplication.processEvents()
+    assert "status went wrong" in window.last_error_message()
+
+
+def test_an_error_is_never_held_back_by_a_hint(window):
+    """The hold protects a hint from a background line, not from bad news."""
+    window.report(A_FLASH_HINT, hold_ms=5000)
+    window.report_error("SAM failed: out of memory")
+    assert "out of memory" in window.status_message()
+    assert "out of memory" in window.last_error_message()
+
+
+def test_one_candidate_is_not_worth_a_goodbye(window):
+    """``C`` offers nothing with a single proposal, so losing it says nothing."""
+    start_edit(window)
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush(multimask=False)       # one candidate
+    QApplication.processEvents()
+    assert window.sam_point.candidate_count <= 1
+
+    window.act_tool("brush")
+
+    assert "候选" not in window.status_message()

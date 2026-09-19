@@ -8,7 +8,13 @@ every one of them lands in.
 """
 from __future__ import annotations
 
+import time
+
+import numpy as np
+
+from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
+from tda.ui import app_priors
 from tda.ui import app_support as S
 from tda.ui import session_api as api
 
@@ -42,6 +48,13 @@ class CommitMixin:
             return
         if getattr(self.session, "editing_instance", None) is not None \
                 and self.session.editing_mask() is not None:
+            if not self.has_uncommitted_edit():
+                # Enter on a layer nobody has touched used to report
+                # "committed (keyframe): False", write nothing, and clear the
+                # layer -- so the annotator lost the instance they had just
+                # loaded and had to double-click it again.
+                self.report("没有可提交的修改 / nothing to commit on this layer")
+                return
             scope = self.session.suggest_scope()
             if scope == api.SCOPE_KEYFRAME:
                 self._commit(scope)
@@ -132,21 +145,40 @@ class CommitMixin:
         if instance is None:
             self.report("nothing is being edited")
             return
+        if not self._area_is_plausible(instance, scope):
+            return
         key = self.session.current()
+        mask = self.session.editing_mask()
+        pixels = int(mask.sum()) if mask is not None else 0
+        started = time.perf_counter()
+        # An override belongs to the one commit it was given for, whether that
+        # commit is taken or refused: it must not ride along on the next one.
+        extra, self._override_facts = self._override_facts, None
         try:
-            result = self.session.commit_edit(scope) or {}
+            result = self.session.commit_edit(scope, extra=extra) or {}
         except ValueError as refused:
             self._pending_scope = None
             self.scope_bar.hide()
+            self.logger.info("refused commit %s %s step %s: %s",
+                             instance, scope, key.step, refused)
             self.report_error(f"refused: {refused}")
             return
+        self.logger.info("commit %s scope=%s step=%s px=%d ms=%.0f affected=%d",
+                         instance, scope, key.step, pixels,
+                         (time.perf_counter() - started) * 1000.0,
+                         len(result.get("affected") or []))
         self._pending_scope = None
         self.scope_bar.hide()
         self.session.clear_edit()
-        self.drop_sidecar(key, instance)
+        # One of the three: what any copy of this instance held is in the
+        # database now, so even one from an earlier run is stale.
+        self.drop_sidecar(key, instance, foreign_ok=True)
         self.set_sam_instance(None)
         self._sync_editing_layer()
         self.refresh_overlay()
+        # An edit reaches other frames: those rows change colour now, not when
+        # the annotator next happens to stand on one of them.
+        self.timeline.refresh_statuses()
         # No re_explain() here: committing re-renders the frame, which clears
         # assist_result, so a re-split would run against nothing.  The real one
         # happens at confirm time, where the answer is actually used.
@@ -160,6 +192,13 @@ class CommitMixin:
         while the ROI bar is up that is the rectangle, not the instance that
         happens to be loaded behind it.
         """
+        if self._pending_warning is not None:
+            # The warning is the thing on screen: Esc answers it by taking the
+            # annotator back to the layer, not by throwing the layer away.
+            self._pending_warning = None
+            self.warn_bar.hide()
+            self.report("回到编辑 / back to the mask")
+            return
         if self.roi_editing:
             self.cancel_roi_edit()
             self.report("ROI unchanged")
@@ -172,9 +211,11 @@ class CommitMixin:
         if instance is not None:
             key = self.session.current()
             self.session.clear_edit()
+            # Esc discards *the layer on screen*.  A crash copy from an earlier
+            # run is a question nobody has answered, so it -- and its offer --
+            # stay; only this window's own copy goes.
             self.drop_sidecar(key, instance)
-            self._restore_offer = None
-            self.restore_bar.hide()
+            self._offer_restore(key, instance)
             self._pending_scope = None
             self.scope_bar.hide()
             self.set_sam_instance(None)
@@ -194,16 +235,118 @@ class CommitMixin:
         """
         if not self.can_leave_edit():
             return False      # confirming steps the frame back: same gate
+        if not self._open_the_selected_entry():
+            return False
         step = self.session.current().step
         blobs = self.unexplained_at_confirm()
         ok = self.task_card.confirm()
+        self.logger.info("confirm step %s: %s", step, "ok" if ok else "refused")
         if ok:
             self.hand_over_unexplained(step, blobs)
+            # One more frame is done: both places that count say so.
+            self.timeline.refresh_statuses()
+            self.refresh_desktop_counts()
             self.report(f"step {step} confirmed")
         else:
-            problems = self.task_card.problems()
-            self.report(f"step {step} is not complete: {'; '.join(problems) or 'see the task card'}")
+            # One line, whatever the frame is missing.  A real start frame has
+            # 60+ missing shapes, which put 2,550 characters into the one-line
+            # status bar and asked the window to be 30,612 px wide.
+            count = self.task_card.problem_count()
+            self.report(f"step {step} is not complete: {count} problem(s) — "
+                        f"见任务卡 / see the task card")
         return bool(ok)
+
+    # ------------------------------------------------------- the size warning
+    def warn_bar_text(self) -> str:
+        """What the area warning bar is currently saying."""
+        return self.warn_bar.label.text()
+
+    def _area_is_plausible(self, instance: str, scope: str) -> bool:
+        """``False`` when a warning was raised and is waiting for a second Enter.
+
+        Never blocks: the second press writes the mask exactly as it is and the
+        override is logged, because the annotator is the authority on what a
+        part looks like.  The rehearsal committed 1,502,386 px as a ``screw``
+        and 40 masks under 50 px with nothing said either way, which is the
+        only outcome this rules out.
+        """
+        pending = self._pending_warning
+        if pending is not None and pending[0] == scope:
+            self._pending_warning = None
+            self.warn_bar.hide()
+            # Both places: the log line is what somebody greps, the payload is
+            # what the commit itself carries.  Nothing joins a log line back to
+            # one row of the op log, and that row is the mask's audit trail.
+            self._override_facts = dict(pending[2])
+            self.logger.info("area_warning_overridden instance=%s scope=%s: %s",
+                             instance, scope, pending[1])
+            return True
+        mask = self.session.editing_mask()
+        if mask is None:
+            return True
+        cls = self._class_of(instance)
+        warning = app_priors.area_warning(mask, cls, self._roi_area(), self.priors)
+        if warning is None:
+            self._pending_warning = None
+            self.warn_bar.hide()
+            return True
+        self._pending_warning = (scope, warning,
+                                 self._warning_facts(mask, cls, warning))
+        self.warn_bar.show_text(f"{warning}  —— Enter 仍然提交 / Esc 回去改")
+        self.report(warning)
+        self.logger.info("area_warning instance=%s scope=%s: %s",
+                         instance, scope, warning)
+        return False
+
+    def _warning_facts(self, mask, cls: str, warning: str) -> dict:
+        """What an override of this warning should say in the op log.
+
+        Plain JSON, because the op log is JSON: the size that was questioned,
+        the band it was judged against when the class has one -- the "too
+        small" rule applies to every class, including one the priors have never
+        seen -- and the sentence the annotator read before going ahead.
+        """
+        band = self.priors.band(cls) if cls else None
+        facts: dict = {"area_warning_overridden": True,
+                       "area_px": int(np.count_nonzero(mask)),
+                       "area_warning": str(warning)}
+        if band is not None:
+            facts["area_bounds"] = [float(band[0]), float(band[1])]
+        return facts
+
+    def _class_of(self, instance: str) -> str:
+        """The taxonomy class of an instance, for the per-class prior."""
+        for row in self.session.instance_rows():
+            if str(row.get("key")) == str(instance):
+                return str(row.get("cls") or "")
+        return str(instance).split(".", 1)[0] if instance else ""
+
+    def _roi_area(self) -> float:
+        """Area of the stored ROI, or of the whole frame when there is none."""
+        roi = self.roi()
+        if roi is not None:
+            return max(1.0, float(roi[2] - roi[0]) * float(roi[3] - roi[1]))
+        hw = None if self.overlay is None else self.overlay.hw
+        return max(1.0, float(hw[0]) * float(hw[1])) if hw else 1.0
+
+    def _open_the_selected_entry(self) -> bool:
+        """In Review mode, make ``Enter`` mean what its label says.
+
+        The binding reads "accept the frame the queue points at" and it
+        confirmed whatever was on the canvas: the annotator clicked an entry,
+        pressed ``Enter``, and a different frame was marked verified.  The
+        selected entry's frame is opened first -- through the same gate as any
+        other move -- and only then confirmed.  ``False`` means the move was
+        refused, so nothing is confirmed either.
+        """
+        if self.mode != A.MODE_REVIEW:
+            return True
+        step = self.review.selected_step()
+        if step is None or int(step) == int(self.session.current().step):
+            return True
+        return self.leave_frame(
+            lambda: self.session.goto(int(step), force=True)
+        )
 
     # ------------------------------------------------------------------ undo
     @S.guard
@@ -220,6 +363,14 @@ class CommitMixin:
             return
         self.refresh_overlay()
         self._sync_editing_layer()
+        # An undo can take the layer back to what begin_edit loaded, and then
+        # the sidecar it wrote (or is about to) describes work that no longer
+        # exists: re-queue it, which drops both when there is nothing left.
+        instance = getattr(self.session, "editing_instance", None)
+        mask = self.session.editing_mask()
+        if instance is not None and mask is not None:
+            self.queue_sidecar(self.session.current(), instance, mask)
+        self.timeline.refresh_statuses()   # it takes back other frames too
         self.update_status()
         self.report(what)
 
@@ -231,16 +382,34 @@ class CommitMixin:
     # ------------------------------------------------------------ visibility
     @S.guard
     def act_set_visibility(self, value: str) -> None:
+        if not self._editable_row():
+            return
         self.instances.set_visibility(value)
         self.refresh_overlay()
 
     @S.guard
     def act_cycle_visibility(self) -> None:
+        if not self._editable_row():
+            return
         self.instances.cycle_visibility()
         self.refresh_overlay()
 
     @S.guard
     def act_toggle_hidden(self) -> None:
+        if not self._editable_row():
+            return
         self.instances.toggle_hidden()
         self.refresh_overlay()
+
+    def _editable_row(self) -> bool:
+        """Is the instance table pointing at something these keys can change?
+
+        The ``Removed`` toggle lists parts the frame no longer has; they are
+        read-only, and ``H`` / ``V`` / ``1``-``7`` on one of them did nothing at
+        all -- which reads exactly like the key not working.
+        """
+        if self.instances.selected_is_removed():
+            self.report("已移除的零件不可编辑 / this part has been removed")
+            return False
+        return True
 

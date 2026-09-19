@@ -176,3 +176,146 @@ def test_annotation_guide_embeds_the_generated_table():
     assert A.shortcut_markdown() in body
     prose = [l for l in body.splitlines() if not l.startswith("| `")]
     assert len(prose) <= 200, "the prose is the part that has to stay readable"
+
+
+# --------------------------------------------------------------------------- #
+# holding a key (final review, item 3)
+# --------------------------------------------------------------------------- #
+def repeat_event(spec: str) -> QKeyEvent:
+    """The auto-repeat Qt sends while a key is held down."""
+    combination = QKeySequence.fromString(spec)[0]
+    return QKeyEvent(QKeyEvent.Type.KeyPress, int(combination.key()),
+                     combination.keyboardModifiers(), 0, 0, 0, "", True)
+
+
+REPEATABLE = {"radius_down": "[", "radius_up": "]", "opacity_down": ",",
+              "opacity_up": ".", "step_back": "PgDown", "step_forward": "PgUp",
+              "zorder_up": "Ctrl+Up", "zorder_down": "Ctrl+Down"}
+
+
+def test_the_repeatable_actions_are_marked_as_such():
+    marked = {a.name for a in A.ACTIONS if a.repeat}
+    assert marked == set(REPEATABLE), f"marked: {sorted(marked)}"
+    assert not any(a.repeat and a.hold for a in A.ACTIONS)
+
+
+@pytest.mark.parametrize("name", sorted(REPEATABLE), ids=sorted(REPEATABLE))
+def test_holding_a_repeatable_key_keeps_firing(window, name):
+    """``if event.isAutoRepeat(): return True`` killed every held key.
+
+    Holding ``]`` to grow the brush, ``.`` to fade the overlay or ``PgDn`` to
+    walk back through the machine did nothing at all after the first press.
+    """
+    action = next(a for a in A.ACTIONS if a.name == name)
+    calls: list[tuple] = []
+    setattr(window, action.slot, lambda *args: calls.append(args))
+    window.set_mode(action.modes[0])
+
+    assert window.handle_key(key_event(REPEATABLE[name])) is True
+    for _ in range(3):
+        assert window.handle_key(repeat_event(REPEATABLE[name])) is True
+
+    assert calls == [tuple(action.args)] * 4
+
+
+@pytest.mark.parametrize("spec,name", [("Return", "commit"), ("Space", "confirm"),
+                                       ("B", "tool_brush"), ("A", "toggle_overlays")])
+def test_holding_a_one_shot_key_fires_once(window, spec, name):
+    """A held Enter must not commit forty times."""
+    action = next(a for a in A.ACTIONS if a.name == name)
+    calls: list[tuple] = []
+    setattr(window, action.slot, lambda *args: calls.append(args))
+    window.set_mode(A.MODE_ANNOTATE)
+
+    assert window.handle_key(key_event(spec)) is True
+    for _ in range(3):
+        assert window.handle_key(repeat_event(spec)) is True
+
+    assert calls == [tuple(action.args)]
+
+
+def test_holding_tab_does_not_walk_the_focus_chain(window):
+    """The repeat is consumed but not fired: Qt would move the focus instead."""
+    seen: list[bool] = []
+    window.act_flash_compare = lambda on: seen.append(on)
+    window.set_mode(A.MODE_ANNOTATE)
+    assert window.handle_key(key_event("Tab")) is True
+    for _ in range(3):
+        assert window.handle_key(repeat_event("Tab")) is True
+    assert seen == [True]
+
+
+def test_the_cheat_sheet_marks_the_repeatable_keys():
+    html = A.cheat_sheet_html()
+    text = A.shortcut_markdown()
+    for name in REPEATABLE:
+        action = next(a for a in A.ACTIONS if a.name == name)
+        assert action.label_zh in html and action.label_zh in text
+    assert "可长按" in html and "可长按" in text
+
+
+# ---------------------------------------------------------------------------
+# the session's newer refusals reach the annotator, not a traceback (F3 round 4)
+# ---------------------------------------------------------------------------
+def test_a_bench_box_on_a_view_with_no_staging_area_is_explained(window):
+    """``commit_box`` refuses on a view with no staging-area ROI (spec 4.2 item
+    1), and the scanner view of the fixture is one.  The window arms the tool
+    from the task card, so the refusal has to come back as a sentence."""
+    window.begin_bench_box("chassis")
+
+    window.on_bench_box((1.0, 1.0, 9.0, 9.0))
+
+    said = window.status_message()
+    assert "堆放区" in said and "scan" in said, said
+    assert "Traceback" not in said
+
+
+def test_editing_a_label_studio_draft_is_refused_in_words(window):
+    """``ls:`` keys are the team's old tracings; a commit would rewrite one in
+    place and the draft nobody adopted would become somebody's annotation.
+    The window asks for the edit the same way the task card does."""
+    window.task_card.sigRequestEdit.emit("ls:Motherboard#1")
+
+    said = window.status_message()
+    assert "Label Studio" in said and "草稿" in said, said
+    assert getattr(window.session, "editing_instance", None) is None
+
+
+def test_an_ignore_step_is_shown_neutral_and_stepped_over(qapp, tmp_path):
+    """A calibration shot is no moment of the teardown: it is not compiled,
+    not confirmable and not exported, so ``PgDn`` must not stop on it -- but
+    the timeline still shows the frame, in the colour of a step nobody has
+    annotated (spec 4.2, 缺帧处理)."""
+    import dataclasses
+
+    from app_scene import DESKTOP, VIEW, make_db
+    from tda.core.model import StepType
+    from tda.core.truth import TruthService
+    from tda.ui.session import AnnotationSession
+    from tda.ui import session_api as api
+    from tda.ui.panels.timeline import status_brush
+
+    db, paths, tax = make_db(tmp_path)
+    ignored = 13
+    db.replace_steps(
+        DESKTOP,
+        [dataclasses.replace(rec, step_type=StepType.IGNORE.value)
+         if rec.step == ignored else rec for rec in db.steps(DESKTOP)],
+        db.actions(DESKTOP),
+    )
+    session = AnnotationSession(db, tax, TruthService(db, tax),
+                                paths["cache_dir"], "tester")
+    session.open(DESKTOP, VIEW)
+    win = MainWindow(session, paths, "tester", sam_queue=StubSamQueue())
+    try:
+        assert ignored in win.timeline.item_steps(), "the frame is not on the timeline"
+        assert session.frame_status(ignored) == api.STATUS_UNLABELED
+        assert (win.timeline.step_brush(ignored).color()
+                == status_brush(api.STATUS_UNLABELED).color())
+
+        assert session.current().step == 14
+        win.act_step(-1)          # PgDn: one step towards the start
+
+        assert session.current().step == 12, "PgDn stopped on the ignore step"
+    finally:
+        close_window(win)
