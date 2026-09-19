@@ -227,6 +227,7 @@ def cmd_import_logs(args: argparse.Namespace) -> int:
         run = L.import_logs_into_db(
             db, directory, load_taxonomy(), index, _desktops(args), args.force,
             log=print, force_verified=args.force_verified,
+            force_drop=args.force_drop,
         )
         imported = run.imported
         print(f"[import-logs] {len(imported)} desktops imported, {len(run.skipped)} skipped, "
@@ -236,6 +237,12 @@ def cmd_import_logs(args: argparse.Namespace) -> int:
               f"{sum(r.instances for r in imported)} instances, "
               f"{sum(r.events for r in imported)} events, "
               f"{sum(len(r.issues) for r in imported)} issues")
+        kept = sum(r.kept_for_review for r in imported)
+        if kept:
+            # an issue in a report nobody opens is not a warning: the one thing
+            # a re-import can leave behind that needs a human gets its own line
+            print(f"[import-logs] {kept} vanished instances kept for S1 review "
+                  f"(they carry work; see the report)")
         for r in run.dropped_ls_notes:
             print(f"[import-logs] {L.dropped_notes_line(r.desktop, r.ls_notes_dropped)}")
         carried = run.with_ls_notes
@@ -278,6 +285,12 @@ def _add_import_logs(sub) -> None:
                    help="with --force, also re-import desktops that carry verified "
                         "frames. Those frames were compiled from the step table this "
                         "replaces, so they are refused without it")
+    p.add_argument("--force-drop", action="store_true",
+                   help="with --force, import a sheet even though it looks wrong: "
+                        "far fewer steps than before, or more than a fifth of the "
+                        "desktop's instances about to be deleted. Without it such a "
+                        "desktop is refused untouched, because an export truncated "
+                        "to its header parses perfectly and means nothing")
     p.set_defaults(func=cmd_import_logs)
 
 
