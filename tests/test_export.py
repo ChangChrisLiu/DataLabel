@@ -650,6 +650,14 @@ def test_allow_conflicts_exports_those_frames_as_unverified(db, tax, tmp_path: P
     assert doc["info"]["allow_conflicts"] is True
     assert doc["info"]["open_conflicts"] == 1
 
+    # ... and so does every annotation of that frame: a row on a disputed frame
+    # is not a confirmed row, whatever its own status column still says
+    disputed = by_step[1]["id"]
+    on_one = [a for a in doc["annotations"] if a["image_id"] == disputed]
+    assert on_one and not [a for a in on_one if a["attributes"]["verified"]]
+    elsewhere = [a for a in doc["annotations"] if a["image_id"] != disputed]
+    assert elsewhere  # the rest of the view is untouched
+
     out = tmp_path / "v.jsonl"
     export_vlm(db, tax, [DESKTOP], VIEW, str(out), allow_conflicts=True)
     at_one = [r for r in _records(out) if r["step"] == 1]

@@ -423,7 +423,8 @@ def view_tier(view: str, tax: Taxonomy) -> str:
 
 
 def _attributes(ctx: DesktopCtx, instance: str, row: dict, step: int,
-                keyframe: Optional[ShapeKeyframe], tier: Optional[str]) -> dict:
+                keyframe: Optional[ShapeKeyframe], tier: Optional[str],
+                disputed: bool = False) -> dict:
     """The truth-table semantics carried alongside every annotation.
 
     ``tier`` and ``verified`` are deliberately two fields. The tier is the
@@ -432,6 +433,12 @@ def _attributes(ctx: DesktopCtx, instance: str, row: dict, step: int,
     whether a human confirmed this particular row. The single ``quality`` field
     that used to hold ``gold``/``auto`` answered the second question with the
     first question's vocabulary.
+
+    ``disputed`` says the frame carries an open conflict and is being exported
+    anyway (``allow_conflicts``). No row of such a frame is confirmed, whatever
+    its own ``status`` column still says: the image entry already said so, and
+    a consumer filtering on the annotations rather than on the images would
+    otherwise have taken the disputed rows as signed off.
 
     ``implied`` is provenance: the instance was created by
     :mod:`tda.core.implied` because the desktop plainly has one and its log
@@ -448,7 +455,7 @@ def _attributes(ctx: DesktopCtx, instance: str, row: dict, step: int,
         "amodal_complete": None if keyframe is None else bool(keyframe.amodal_complete),
         "implied": bool(rec is not None and is_implied(rec)),
         "tier": tier,
-        "verified": row.get("status") == VERIFIED,
+        "verified": not disputed and row.get("status") == VERIFIED,
     }
 
 
@@ -616,7 +623,8 @@ def export_coco(
                                            segment)
                 ann = _annotation(
                     ann_id, img_id, cat_of[cls], row,
-                    _attributes(ctx, instance, row, key.step, keyframe, tier),
+                    _attributes(ctx, instance, row, key.step, keyframe, tier,
+                                key.step in disputed),
                     roi, include_boxes,
                 )
                 if ann is not None:
