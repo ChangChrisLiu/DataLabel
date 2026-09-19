@@ -17,13 +17,17 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+import cv2
 import numpy as np
 
 from tda.ui.canvas.tools import Rect
 
+#: Instance key used when neither the tool nor the overlay names one yet.
+FALLBACK_INSTANCE = "editing"
+
 log = logging.getLogger(__name__)
 
-__all__ = ["HINT_EDITED", "CandidatesMixin"]
+__all__ = ["FALLBACK_INSTANCE", "HINT_EDITED", "CandidatesMixin"]
 
 #: Emitted on ``sigHint`` when cycling is abandoned because the annotator
 #: painted on the proposal (their edit is never discarded).

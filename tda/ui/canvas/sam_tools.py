@@ -46,6 +46,7 @@ from tda.ui.canvas.sam_crop import (
     viewport_crop,
 )
 from tda.ui.canvas.sam_prompt import (  # re-exported: this was their home
+    FALLBACK_INSTANCE,
     HINT_EDITED,
     CandidatesMixin,
 )
@@ -76,8 +77,6 @@ ERR_OUT_OF_BOUNDS = "SAM result dropped: the crop no longer fits the frame"
 ERR_NO_FRAME_TOKEN = "frame token not set: call set_frame_token(...) on frame change"
 #: Emitted when a prompt is attempted while the canvas is showing another frame.
 ERR_FLASHING = "松开 Tab 再操作 / release Tab first: another frame is on screen"
-#: Instance key used when neither the tool nor the overlay names one yet.
-FALLBACK_INSTANCE = "editing"
 
 
 

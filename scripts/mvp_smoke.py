@@ -235,7 +235,14 @@ class Smoke:
 
         started = time.perf_counter()
         window.act_commit()
-        if window.scope_bar.isVisible():
+        # The two non-modal bars an annotator answers with a second Enter: the
+        # scope suggestion and the area warning.  Both are recorded, because
+        # "how often does the size warning fire on real masks?" is exactly what
+        # a smoke run should be able to answer.
+        frame["area_warned"] = bool(window.warn_bar.isVisible())
+        if window.scope_bar.isVisible() or window.warn_bar.isVisible():
+            window.act_commit()
+        if window.scope_bar.isVisible() or window.warn_bar.isVisible():
             window.act_commit()
         frame["commit_ms"] = (time.perf_counter() - started) * 1000
         frame["committed"] = window.session.editing_instance is None
@@ -277,6 +284,10 @@ class Smoke:
         window.act_commit()
         if window.scope_bar.isVisible():
             out["scope_bar"] = window.scope_bar_text()
+            window.act_commit()
+        out["area_warned"] = bool(window.warn_bar.isVisible())
+        if window.warn_bar.isVisible():
+            out["area_warning"] = window.warn_bar_text()
             window.act_commit()
         out["commit_ms"] = (time.perf_counter() - started) * 1000
         out["committed"] = window.session.editing_instance is None
