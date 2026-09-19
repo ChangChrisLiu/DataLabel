@@ -16,6 +16,7 @@ from tda.core.graph_rules import (
     VerbTarget,
     active_edges,
     cable_nodes,
+    gated_verbs,
     verb_applies,
     verb_effect,
 )
@@ -159,6 +160,11 @@ def remaining_plan(
         visiting.add(key)
         try:
             for edge in by_target.get(key, ()):
+                # the same table the checker reads: a `connected_to` edge is in
+                # the way of taking the part out, not of swinging it aside, so a
+                # `displace` step does not schedule its disconnects
+                if verb not in gated_verbs(edge.type):
+                    continue
                 wanted = REQUIRED_STATES.get(edge.type, frozenset())
                 if not ensure(edge.blocker, wanted):
                     return False

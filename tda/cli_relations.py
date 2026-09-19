@@ -37,6 +37,13 @@ import argparse
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from tda.cli_common import (
+    EXIT_ERROR,
+    EXIT_OK,
+    desktops as _desktops,
+    safety_backup as _safety_backup,
+    session as _session,
+)
 from tda.core.db import Db
 from tda.core.graph_infer import (
     AMBIGUOUS,
@@ -406,9 +413,6 @@ def _log_desktop(log, prefix: str, one: DesktopRelations) -> None:
 # --------------------------------------------------------------------------- #
 def cmd_infer_relations(args: argparse.Namespace) -> int:
     """Fill the relational fields of a database that was imported without them."""
-    # late import: tda.cli imports this module to register the subcommand
-    from tda.cli import EXIT_ERROR, EXIT_OK, _desktops, _safety_backup, _session
-
     if args.reset_declined and not args.add_implied:
         print("[infer-relations] --reset-declined only means something with "
               "--add-implied: it forgets the implied instances S1 deleted so "

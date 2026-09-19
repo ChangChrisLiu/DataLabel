@@ -199,6 +199,14 @@ _BRACKET = re.compile(r"\[([^\[\]]*)\]")
 _OPEN_BRACKET_TAIL = re.compile(r"[(\[](.*)$", re.DOTALL)
 _CLOSERS = re.compile(r"[)\]]")
 _ATTEMPT = re.compile(r"\btry to\b|\bfailed\b|\bfailure\b", re.IGNORECASE)
+#: A bracketed part that says only how the action *went* -- "(failed)". That is
+#: a property of the attempt, not of the part, so it must not reach
+#: ``attrs["qualifier"]``, which is part of the instance identity: with it,
+#: "Try to remove power module (failed)" and the later "Power module" were two
+#: different power supplies. The row still counts as an attempt -- ``_ATTEMPT``
+#: reads the whole name, qualifiers included, and is untouched by this.
+_RESULT_ONLY = re.compile(r"^[\s,.;:-]*(?:try to|failed|failure)[\s,.;:-]*$",
+                          re.IGNORECASE)
 # "1&2&3", "1/2/3", "1, 2 and 3"
 _NUM_RUN_SEP = re.compile(r"(\d+(?:\s*(?:[&/,]|and)\s*\d+)+)\s*$")
 # "connector 1 2 3 4 5"
@@ -310,9 +318,13 @@ def parse_raw_name(
 
     parsed = ParsedTarget(instance_no=instance_no, multi=multi)
     if quals:
-        # Keep the annotator's original casing in the qualifier.
-        raw_quals = _split_qualifier(raw.strip())[1] or quals
-        parsed.attrs["qualifier"] = " | ".join(raw_quals)
+        # Keep the annotator's original casing in the qualifier, and drop the
+        # parts that only record the result (see :data:`_RESULT_ONLY`). A row
+        # whose every qualifier is a result marker carries none at all.
+        raw_quals = [q for q in (_split_qualifier(raw.strip())[1] or quals)
+                     if not _RESULT_ONLY.match(q)]
+        if raw_quals:
+            parsed.attrs["qualifier"] = " | ".join(raw_quals)
     if len(instance_nos) > 1:
         parsed.attrs["instance_nos"] = instance_nos
     parsed.attempt = bool(_ATTEMPT.search(match_text))

@@ -17,19 +17,23 @@ One desktop is one transaction, and a sheet that cannot be read is recorded as
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from tda.core.db import Db
-from tda.core.graph_rules import infer_relational_fields, unresolved_relations
+from tda.core.graph_rules import (
+    infer_relational_fields,
+    is_provisional,
+    unresolved_relations,
+)
 from tda.core.implied import OP_KIND as IMPLIED_OP_KIND
-from tda.core.implied import implied_instances
+from tda.core.implied import implied_instances, is_implied
 from tda.core.index import DesktopIndex
 from tda.core.log_report import _expected_steps
 from tda.core.logs import LogImport, import_log, iter_desktop_csvs, read_desktop_csv
-from tda.core.model import StepRec, StepType
+from tda.core.model import VIEWS, StepRec, StepType
 from tda.core.states import events_from_actions
 from tda.core.taxonomy import Taxonomy
 from tda.pipeline import Log, merge_desktop_meta, split_pose_segments, wanted
@@ -50,6 +54,12 @@ INFERRED_HEADING = "inferred relational fields (heuristic - confirm in S1)"
 OP_VIEW = "-"
 #: ``op_log.annotator`` of an implied instance -- this is machinery, not a person.
 IMPLIED_ANNOTATOR = "cli:import-logs"
+
+#: Why a desktop was refused. The two have different answers -- one wants
+#: ``--force-verified`` and the other ``--force-drop`` -- so the run-level line
+#: has to tell them apart rather than assume the older of the two.
+REFUSED_VERIFIED = "verified_frames"
+REFUSED_IMPLAUSIBLE = "implausible_shrink"
 
 __all__ = [
     "DesktopRun", "INFERRED_HEADING", "LogsRun", "add_implied_instances", "brand_model",
@@ -146,6 +156,9 @@ class DesktopRun:
     #: Notes the re-imported sheet had no matching row for (it was renumbered).
     ls_notes_dropped: int = 0
     brand: str = ""
+    #: For a ``refused`` run, which refusal it was: :data:`REFUSED_VERIFIED` or
+    #: :data:`REFUSED_IMPLAUSIBLE`. Empty for every other status.
+    reason: str = ""
     issues: list[str] = field(default_factory=list)
     #: ``"<key>.<field> = <value>"`` per relational field the heuristic filled.
     fills: list[str] = field(default_factory=list)
@@ -153,6 +166,14 @@ class DesktopRun:
     unresolved: list[str] = field(default_factory=list)
     #: One line per instance :mod:`tda.core.implied` created for this desktop.
     implied: list[str] = field(default_factory=list)
+    #: One line per instance a ``--force`` re-import removed because this sheet
+    #: no longer produces it (see :func:`_plan_drops`).
+    dropped: list[str] = field(default_factory=list)
+    #: Vanished instances kept rather than dropped, for any reason.
+    kept_for_review: int = 0
+    #: Of those, the ones held by work of their own; the rest are held only
+    #: because a kept one names them, and need no decision of their own.
+    kept_carrying_work: int = 0
 
 
 def inferred_section(run: DesktopRun) -> list[str]:
@@ -197,8 +218,19 @@ class LogsRun:
 
     @property
     def refused(self) -> list[DesktopRun]:
-        """Desktops skipped because they carry verified frames (see ``--force-verified``)."""
+        """Desktops the run would not touch, for either of two reasons.
+
+        Each carries a ``reason``: :data:`REFUSED_VERIFIED` (frozen frames were
+        compiled from the step table this would replace -- ``--force-verified``)
+        or :data:`REFUSED_IMPLAUSIBLE` (the re-imported sheet would shrink the
+        desktop past believing -- ``--force-drop``). They want different answers,
+        so a caller listing them must group by ``reason``.
+        """
         return self._with("refused")
+
+    def refused_of(self, reason: str) -> list[DesktopRun]:
+        """The refused desktops of one :data:`REFUSED_VERIFIED`-style reason."""
+        return [r for r in self.refused if r.reason == reason]
 
     @property
     def with_ls_notes(self) -> list[int]:
@@ -349,13 +381,264 @@ def add_implied_instances(db: Db, li: LogImport, tax: Taxonomy) -> list[str]:
     return lines
 
 
+#: ``relation.source`` this pipeline owns. A derived edge naming a key that is
+#: about to go is machinery and goes with it; anything else is somebody's work.
+RULE_SOURCE = "rule"
+
+
+def _references(db: Db, desktop: int, key: str) -> dict[str, int]:
+    """Every reason not to delete one instance, per table; empty when there is none.
+
+    :meth:`~tda.core.db.Db.instance_reference_counts` leaves out the two tables
+    that have richer per-instance queries of their own, so they are asked here:
+    ``shape_keyframe`` across every view, and the ``relation`` rows a human or
+    the Label Studio import owns. A ``source="rule"`` edge is deliberately *not*
+    a reason -- it was derived from the instance and is re-derived without it.
+    """
+    counts = dict(db.instance_reference_counts(desktop, key))
+    shapes = sum(len(db.keyframes(desktop, view, key)) for view in VIEWS)
+    if shapes:
+        counts["shape_keyframe"] = shapes
+    held = [r for r in db.relations(desktop)
+            if key in (r["target"], r["blocker"]) and r["source"] != RULE_SOURCE]
+    if held:
+        counts["relation"] = len(held)
+    return counts
+
+
+#: ``op_log.kind`` written for every instance a forced re-import removes.
+DROP_OP_KIND = "dropped_instance"
+
+#: The relational columns one instance can name another with. A key that is kept
+#: has to keep whatever it points at, or S1 inherits a dangling reference.
+REFERRING_FIELDS = ("parent", "mounted_on", "fastens", "socket_host")
+
+#: How small a re-imported step table may get before the sheet is not believed:
+#: an export truncated to its header parses perfectly and means nothing.
+MIN_STEP_RATIO = 0.6
+#: ... and how much of a desktop's instance table one run may remove.
+MAX_DROP_RATIO = 0.2
+MAX_DROP_COUNT = 5
+#: How many of the keys at risk a refusal lists before saying "and N more".
+REFUSAL_KEYS_SHOWN = 10
+
+
+@dataclass
+class DropPlan:
+    """What a re-import would remove from one desktop, decided before it writes.
+
+    ``dropping`` is what will go, ``holding`` maps every vanished key that stays
+    to the reason it stays, and ``refusal`` -- when set -- means the desktop is
+    not imported at all.
+    """
+
+    dropping: list[str] = field(default_factory=list)
+    holding: dict[str, str] = field(default_factory=dict)
+    #: Of ``holding``, the keys held by work of their own rather than by another
+    #: kept key. Counted apart because they are the ones S1 has to look at.
+    carrying_work: int = 0
+    refusal: str = ""
+    #: Set when drops were found on a path that may not take them (no --force).
+    deferred: int = 0
+
+
+def _would_exist(db: Db, li: LogImport, tax: Taxonomy) -> set[str]:
+    """Every key this import will end up having produced, implied ones included.
+
+    :func:`implied_instances` is pure, so asking it here -- before anything is
+    written -- costs nothing and lets the whole plan be decided outside the
+    transaction. ``add_implied_instances`` asks it again for real.
+    """
+    implied = implied_instances(li.instances, li.actions, tax,
+                               db.declined_implied(li.desktop))
+    return set(li.instances) | {rec.key for rec in implied}
+
+
+def _hold_reasons(db: Db, desktop: int, vanished: set[str]) -> tuple[dict[str, str], int]:
+    """Which vanished keys stay, and why -- including the ones they point at.
+
+    A key carrying a human's work stays. So does any *other* vanished key that a
+    staying one names in one of :data:`REFERRING_FIELDS`, transitively: keeping
+    a frozen ``psu.02`` while deleting the ``psu.03`` it is mounted on would
+    leave S1 a dangling reference, which is exactly the kind of tidy-up this
+    function exists to avoid. A surviving *imported* instance can never point at
+    a vanished key -- the importer has just rewritten every one of its
+    relational fields from the sheet -- so only the vanished set is walked.
+
+    Returns ``(key -> why, how many are held by work of their own)``. The second
+    number is the one a human has to act on; the rest are along for the ride.
+    """
+    stored = db.instances(desktop)
+    holding = {
+        key: ", ".join(f"{n} {table}" for table, n in sorted(counts.items()))
+        for key in sorted(vanished)
+        for counts in [_references(db, desktop, key)]
+        if counts
+    }
+    carrying_work = len(holding)
+    growing = True
+    while growing:
+        growing = False
+        for key in sorted(holding):
+            rec = stored.get(key)
+            for field_name in REFERRING_FIELDS:
+                ref = getattr(rec, field_name, None) if rec else None
+                if ref in vanished and ref not in holding:
+                    holding[ref] = f"named by {key}.{field_name}, which is kept"
+                    growing = True
+    return holding, carrying_work
+
+
+def _plan_drops(db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec],
+                force: bool, force_drop: bool) -> DropPlan:
+    """Decide what a re-import may remove, before it has written anything.
+
+    The writer only ever upserted, so a key the sheet stopped naming simply
+    stayed -- harmless while the identity rule holds still, and fatal the moment
+    it changes. The thirteen PSU desktops of the real database were imported
+    under the old rule; re-importing them merges ``psu.01`` and ``psu.02``, and
+    without a drop the old ``psu.02`` would survive with no actions at all,
+    ``installed`` in the chassis for ever.
+
+    Deleting is the only thing this tool does that destroys annotator-visible
+    data, so three gates stand in front of it:
+
+    * **only under ``--force``**, which is the only import path that takes a
+      safety backup first. A plain ``import-logs`` of a desktop whose steps are
+      gone but whose instances are not reports the count and changes nothing.
+    * **only if the sheet is believable.** An export truncated to its header
+      parses perfectly and yields nothing; a parse *failure* was always safe
+      (the desktop rolls back) and a parse *success* that means nothing was not.
+      A re-import keeping less than :data:`MIN_STEP_RATIO` of the previous steps,
+      or removing more than :data:`MAX_DROP_RATIO` of the real instances or more
+      than :data:`MAX_DROP_COUNT` of them, refuses the desktop unless
+      ``--force-drop`` says otherwise.
+    * **only what nothing holds** -- see :func:`_hold_reasons`.
+
+    Provisional ``ls:*`` keys are never in scope: they belong to ``import-ls``.
+    """
+    stored = db.instances(li.desktop)
+    vanished = {key for key in stored
+                if key not in _would_exist(db, li, tax) and not is_provisional(key)}
+    if not vanished:
+        return DropPlan()
+    holding, carrying = _hold_reasons(db, li.desktop, vanished)
+    dropping = sorted(vanished - set(holding))
+    if not dropping:
+        return DropPlan(holding=holding, carrying_work=carrying)
+    if not force:
+        return DropPlan(holding=holding, carrying_work=carrying,
+                        deferred=len(dropping))
+    if not force_drop:
+        refusal = _implausible(li, previous, stored, dropping)
+        if refusal:
+            return DropPlan(refusal=refusal)
+    return DropPlan(dropping=dropping, holding=holding, carrying_work=carrying)
+
+
+def _implausible(li: LogImport, previous: list[StepRec], stored: dict,
+                 dropping: list[str]) -> str:
+    """Why this re-import is not believable, or ``""`` when it is.
+
+    The exemption is "there is nothing to lose", and that is a fact about the
+    *instances*, not about the step table. Keying it on ``previous`` alone
+    skipped all three checks on exactly the state the ``--force`` gate above was
+    written for -- steps gone, instances still there -- so a header-only sheet
+    could delete 36 of a desktop's 37 instances and exit 0. A desktop is exempt
+    only when it holds neither steps nor real instances.
+
+    The step-ratio check needs a previous step count to be a ratio of; the two
+    instance-count checks need only stored real instances, and run whenever
+    there are any.
+    """
+    real = [key for key, rec in stored.items()
+            if not is_provisional(key) and not is_implied(rec)]
+    if not previous and not real:  # a genuine first import: nothing to lose
+        return ""
+    drafts = sum(1 for key in stored if is_provisional(key))
+    reasons = []
+    if previous and len(li.steps) < MIN_STEP_RATIO * len(previous):
+        reasons.append(f"{len(li.steps)} steps against {len(previous)} before")
+    if real and len(dropping) > MAX_DROP_COUNT:
+        reasons.append(f"{len(dropping)} instances would be dropped, more than "
+                       f"{MAX_DROP_COUNT}")
+    if real and len(dropping) > MAX_DROP_RATIO * len(real):
+        reasons.append(f"{len(dropping)} of {len(real)} real instances would be "
+                       f"dropped, more than {int(MAX_DROP_RATIO * 100)}%")
+    if not reasons:
+        return ""
+    shown = ", ".join(dropping[:REFUSAL_KEYS_SHOWN])
+    more = (f" and {len(dropping) - REFUSAL_KEYS_SHOWN} more"
+            if len(dropping) > REFUSAL_KEYS_SHOWN else "")
+    drafted = f" (+{drafts} Label Studio drafts)" if drafts else ""
+    return (
+        f"D{li.desktop:02d}: the re-imported sheet is not believable "
+        f"({'; '.join(reasons)}); {len(real)} real instances stored{drafted}, "
+        f"{len(li.instances)} in the sheet. Nothing was written. At risk: "
+        f"{shown}{more}. Re-run with --force-drop if the sheet really is right."
+    )
+
+
+def _apply_drops(db: Db, li: LogImport, plan: DropPlan) -> tuple[list[str], list[str]]:
+    """Carry the plan out inside the caller's transaction; ``(dropped, issues)``.
+
+    Every removal is logged to ``op_log`` with the whole stored record and the
+    derived edges that went with it, so a drop can be audited and undone one row
+    at a time -- the same promise :func:`add_implied_instances` makes for the
+    rows it creates.
+    """
+    dropped: list[str] = []
+    issues = [
+        f"D{li.desktop:02d}: instance {key} vanished from the sheet but is kept "
+        f"({why}) - merge or delete it in S1"
+        for key, why in sorted(plan.holding.items())
+    ]
+    if plan.deferred:
+        issues.append(
+            f"D{li.desktop:02d}: {plan.deferred} instances are no longer in the "
+            f"sheet; re-run with --force to drop them"
+        )
+    if not plan.dropping:
+        return dropped, issues
+    # one read of each table for the whole desktop: the loop below only ever
+    # removes rows, so re-reading per key would cost a query per drop to learn
+    # nothing the first read did not already say
+    stored = db.instances(li.desktop)
+    relations = [dict(row) for row in db.relations(li.desktop)]
+    for key in plan.dropping:
+        rec = stored.get(key)
+        edges = [row for row in relations
+                 if key in (row["target"], row["blocker"])
+                 and row["source"] == RULE_SOURCE]
+        for row in edges:
+            db.delete_relation(li.desktop, row["type"], row["target"], row["blocker"])
+        db.delete_instance(li.desktop, key)
+        record = asdict(rec) if rec is not None else {"key": key}
+        db.log_op(
+            li.desktop, OP_VIEW, DROP_OP_KIND,
+            {"instance": key, "record": record, "relations": edges,
+             "reason": _drop_reason(rec)},
+            {"instance": key, "record": record, "relations": edges},
+            IMPLIED_ANNOTATOR,
+        )
+        dropped.append(f"dropped instance {key} ({_drop_reason(rec)})")
+    return dropped, issues
+
+
+def _drop_reason(rec) -> str:
+    """Why this key went, in the words the annotator needs to hear."""
+    if rec is not None and is_implied(rec):
+        return "implied instance no longer warranted"
+    return "no longer in the sheet"
+
+
 def _write_import(
-    db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec]
-) -> tuple[int, int, int, list[str], list[str], list[str]]:
+    db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec], plan: DropPlan
+) -> tuple[int, int, int, list[str], list[str], list[str], list[str], list[str]]:
     """Write one desktop's import atomically.
 
     Returns ``(events, steps with LS notes, notes dropped, fills, unresolved,
-    implied)``.
+    implied, dropped instances, drop issues)``.
 
     The relational heuristic of spec 7.3 runs here, *before* the instances are
     written and inside the same transaction: ``logs.py`` leaves ``fastens``,
@@ -377,11 +660,16 @@ def _write_import(
         fills = infer_relational_fields(li.instances, tax, li.actions)
         for inst in li.instances.values():
             db.upsert_instance(inst)
+        # the plan was decided before this transaction opened; carrying it out
+        # in here is what makes a desktop that raises keep both its old
+        # instances and its old steps
+        gone, drop_issues = _apply_drops(db, li, plan)
         events = events_from_actions(li.instances, li.actions, tax)
         db.replace_events(li.desktop, events, auto_only=True)
         split_pose_segments(db, li.desktop)
     return (len(events), kept, dropped, fills,
-            unresolved_relations(li.instances, tax, li.actions), implied)
+            unresolved_relations(li.instances, tax, li.actions), implied,
+            gone, drop_issues)
 
 
 def dropped_notes_line(desktop: int, dropped: int) -> str:
@@ -431,7 +719,7 @@ def _verified_refusal(db: Db, desktop: int, frozen: int, log: Optional[Log]) -> 
             f"re-import would rewrite the step table underneath them. Refused, "
             f"nothing written - pass --force-verified to do it anyway")
     return DesktopRun(
-        desktop, "", "refused",
+        desktop, "", "refused", reason=REFUSED_VERIFIED,
         issues=[f"D{desktop:02d}: {frozen} verified frames; re-run with "
                 f"--force-verified to re-import anyway"],
     )
@@ -449,6 +737,7 @@ def import_logs_into_db(
     force: bool = False,
     log: Optional[Log] = None,
     force_verified: bool = False,
+    force_drop: bool = False,
 ) -> LogsRun:
     """Import the exported Drive sheets into steps, actions, instances and events.
 
@@ -483,7 +772,8 @@ def import_logs_into_db(
         if previous and log:
             log(_force_warning(db, desktop, previous))
         try:
-            run.runs.append(_import_one(db, desktop, path, tax, index, previous, log))
+            run.runs.append(_import_one(db, desktop, path, tax, index, previous, log,
+                                        force=force, force_drop=force_drop))
         except Exception as exc:  # one unreadable sheet must not end the run
             run.runs.append(DesktopRun(
                 desktop, str(path), "failed",
@@ -497,10 +787,17 @@ def import_logs_into_db(
 def _import_one(
     db: Db, desktop: int, path, tax: Taxonomy,
     index: dict[int, DesktopIndex], previous: list[StepRec], log: Optional[Log],
+    force: bool = False, force_drop: bool = False,
 ) -> DesktopRun:
     """Read and write one desktop; raises if the sheet cannot be parsed."""
     rows, meta = read_desktop_csv(path)
     li = import_log(desktop, rows, meta, tax)
+    plan = _plan_drops(db, li, tax, previous, force, force_drop)
+    if plan.refusal:
+        if log:
+            log(f"[import-logs] refused: {plan.refusal}")
+        return DesktopRun(desktop, str(path), "refused",
+                          reason=REFUSED_IMPLAUSIBLE, issues=[plan.refusal])
     filled, issues = _apply_index(li.steps, index.get(desktop))
     sheet_id = meta.get("desktop_id")
     if sheet_id is not None and int(sheet_id) != desktop:
@@ -508,9 +805,11 @@ def _import_one(
             f"D{desktop:02d}: the sheet's own Desktop ID is {sheet_id}; "
             f"kept the file's number"
         )
-    events, kept, dropped, fills, unresolved, implied = _write_import(db, li, tax, previous)
+    (events, kept, dropped, fills, unresolved, implied,
+     gone, drop_issues) = _write_import(db, li, tax, previous, plan)
     if dropped:
         issues.append(dropped_notes_line(desktop, dropped))
+    issues.extend(drop_issues)
     if log:
         extra = f", {len(implied)} implied instance(s)" if implied else ""
         log(f"[import-logs] D{desktop:02d}: {len(li.steps)} steps, {len(li.actions)} "
@@ -518,6 +817,10 @@ def _import_one(
             f"{filled} durations, {len(fills)} inferred relational fields, "
             f"{len(li.issues) + len(issues)} issues{extra}")
         for text in implied:
+            log(f"[import-logs]   {text}")
+        for text in gone:
+            log(f"[import-logs]   {text}")
+        for text in drop_issues:
             log(f"[import-logs]   {text}")
         if dropped:
             log(f"[import-logs]   {dropped_notes_line(desktop, dropped)}")
@@ -527,7 +830,8 @@ def _import_one(
         durations=filled, ls_notes=kept, ls_notes_dropped=dropped,
         brand=str(li.meta.get("brand_model_raw") or ""),
         issues=list(li.issues) + issues, fills=fills, unresolved=unresolved,
-        implied=implied,
+        implied=implied, dropped=gone, kept_for_review=len(plan.holding),
+        kept_carrying_work=plan.carrying_work,
     )
 
 

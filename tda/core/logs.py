@@ -15,9 +15,9 @@ pre-fills:
   compound rows draft a flagged placeholder);
 * one :class:`~tda.core.model.InstanceRec` per operated target plus the
   implicit ``chassis``, with ordinals in order of first operation. Every row
-  that names a target is a new instance unless the strict reuse test in
-  ``_Importer._reuse`` says otherwise, so the annotators' restarted numbering
-  never merges two physical parts.
+  that names a target is a new instance unless one of the two reuse tests in
+  :mod:`tda.core.log_identity` says otherwise, so the annotators' restarted
+  numbering never merges two physical parts.
 
 Nothing here guesses what a human must decide: unresolved targets keep a ``?``
 in the key, and every one of them is reported in ``issues`` for stage S1.
@@ -35,6 +35,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Optional
 
+from .log_identity import (
+    CHASSIS_KEY,
+    UNRESOLVED,
+    InstanceLedger,
+    attr_conflicts as _attr_conflicts,
+    identity as _identity,
+    instance_key,
+    is_captive as _is_captive,
+    merge_attrs as _merge_attrs,
+    placeholder_key as _placeholder_key,
+    reuse_candidates,
+)
 from .model import ActionRec, InstanceRec, StepRec
 from .taxonomy import (
     FALLBACK_RULE,
@@ -58,9 +70,7 @@ META_KEYS = {
     "Collection Date": "collection_date",
 }
 
-UNRESOLVED = "?"
 UNKNOWN_TOOL = "unknown"
-CHASSIS_KEY = "chassis"
 
 #: Step types that draft no action at all (spec 2.3).
 NO_ACTION_TYPES = frozenset({"initial", "dupli", "ignore"})
@@ -92,14 +102,6 @@ _DEVICE_SOCKET_HOSTS = {
     "optical_drive": "optical_drive",
 }
 DEFAULT_SOCKET_HOST = "motherboard"
-
-#: Attributes the importer derives itself; they never take part in the
-#: instance-identity comparison.
-_DERIVED_ATTRS = frozenset({"instance_nos", "sheet_no", "captive", "captive_source"})
-
-#: Brands whose CPU-cooler screws are captive (they stay in the bracket).
-_CAPTIVE_BRANDS = ("dell", "optiplex")
-_CAPTIVE_ROLE = "cpu_cooler"
 
 _DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 _AND = re.compile(r"\band\b", re.IGNORECASE)
@@ -197,31 +199,6 @@ def read_desktop_csv(path: str | Path) -> tuple[list[dict], dict]:
 # --------------------------------------------------------------------------- #
 # Import
 # --------------------------------------------------------------------------- #
-def instance_key(cls: str, attrs: dict, ordinal: int) -> str:
-    """Build an instance key: class, discriminator, 2-digit ordinal.
-
-    The discriminator is ``attrs["role"]`` (screws) or ``attrs["kind"]``
-    (connectors, drives, coolers, cards); ``chassis`` is unique per desktop and
-    therefore carries no ordinal.
-    """
-    if cls == CHASSIS_KEY:
-        return CHASSIS_KEY
-    parts = [cls]
-    disc = attrs.get("role") or attrs.get("kind") or ""
-    if disc:
-        parts.append(str(disc))
-    parts.append(f"{ordinal:02d}")
-    return ".".join(parts)
-
-
-def _placeholder_key(cls: str, attrs: dict) -> str:
-    """The key of a target a human still has to resolve."""
-    if not cls:
-        return UNRESOLVED
-    disc = attrs.get("role") or attrs.get("kind") or ""
-    return ".".join([cls] + ([str(disc)] if disc else []) + [UNRESOLVED])
-
-
 def _default_verb(cls: str) -> str:
     if cls in _DEFAULT_VERBS:
         return _DEFAULT_VERBS[cls]
@@ -232,49 +209,6 @@ def _is_chassis(parsed: ParsedTarget, step_type: str) -> bool:
     return step_type == "reorient" or parsed.cls == CHASSIS_KEY
 
 
-def _identity(cls: str, disc: str, number: int, attrs: dict) -> tuple:
-    """What a later row must match exactly before it may reuse an instance.
-
-    Spec 3.2's class + role + number, plus every attribute that names *which*
-    part the row means: the cable owner, the annotator's bracketed qualifier
-    and ``of`` (what a cover, cage or latch belongs to).  Two "Connector 1"
-    rows whose cables run to different devices are different connectors, and a
-    RAM cover is never the heatsink cover.
-    """
-    return (
-        cls,
-        disc,
-        number,
-        str(attrs.get("cable_owner") or ""),
-        str(attrs.get("qualifier") or ""),
-        str(attrs.get("of") or ""),
-    )
-
-
-def _attr_conflicts(stored: dict, new: dict) -> list[tuple[str, object, object]]:
-    """Attributes the new row states differently from the stored instance."""
-    return [
-        (name, stored[name], value)
-        for name, value in new.items()
-        if name not in _DERIVED_ATTRS and name in stored and stored[name] != value
-    ]
-
-
-def _merge_attrs(stored: dict, new: dict) -> None:
-    """Add the new row's extra attributes; conflicts are handled by the caller."""
-    for name, value in new.items():
-        if name not in _DERIVED_ATTRS:
-            stored.setdefault(name, value)
-
-
-def _is_captive(cls: str, attrs: dict, meta: dict) -> Optional[bool]:
-    if cls != "screw":
-        return None
-    brand = str(meta.get("brand_model_raw") or "").lower()
-    dell = any(token in brand for token in _CAPTIVE_BRANDS)
-    return bool(dell and attrs.get("role") == _CAPTIVE_ROLE)
-
-
 class _Importer:
     """One desktop's import; kept private so the module API stays functional."""
 
@@ -282,12 +216,9 @@ class _Importer:
         self.out = LogImport(desktop=desktop, meta=dict(meta))
         self.tax = taxonomy
         self.desktop = desktop
-        self._ordinals: dict[tuple[str, str], int] = {}
-        # (cls, discriminator, the number the annotator wrote) -> keys, in
-        # creation order; the only place a later row may find an earlier one.
-        self._numbered: dict[tuple[str, str, int], list[str]] = {}
-        # instance key -> the (step, verb) pairs already applied to it.
-        self._ops: dict[str, list[tuple[int, str]]] = {}
+        #: Which instances exist, how a row could find them, and what has been
+        #: done to each: the only place a later row may reuse an earlier one.
+        self.ledger = InstanceLedger()
         self._seen_seq: dict[int, int] = {}
         self._prev_seq: Optional[int] = None
 
@@ -352,8 +283,9 @@ class _Importer:
     ) -> ActionRec:
         cls = CHASSIS_KEY if _is_chassis(parsed, step_type) else parsed.cls
         verb = parsed.verb or _default_verb(cls)
+        result = "failed" if step_type == "failed" else "success"
         self._check_verb(step, cls, verb)
-        target = self._target(step, raw_name, parsed, step_type, verb)
+        target = self._target(step, raw_name, parsed, step_type, verb, result)
         return ActionRec(
             desktop=self.desktop,
             step=step,
@@ -362,12 +294,13 @@ class _Importer:
             verb=verb,
             tool=self._tool(step, raw_name, cls, row),
             direction="none",
-            result="failed" if step_type == "failed" else "success",
+            result=result,
             failure_reason=None,  # filled in during S1 review
         )
 
     def _target(
-        self, step: int, raw_name: str, parsed: ParsedTarget, step_type: str, verb: str
+        self, step: int, raw_name: str, parsed: ParsedTarget, step_type: str, verb: str,
+        result: str,
     ) -> str:
         """Resolve the target key; every ``?`` that survives is reported."""
         if _is_chassis(parsed, step_type):
@@ -388,7 +321,7 @@ class _Importer:
             if not fallback:
                 self.issue(step, f"{raw_name!r} names no target class - needs manual target")
             return UNRESOLVED
-        return self._instance(step, raw_name, parsed, verb)
+        return self._instance(step, raw_name, parsed, verb, result)
 
     def _check_verb(self, step: int, cls: str, verb: str) -> None:
         spec = self.tax.verbs.get(verb)
@@ -407,36 +340,40 @@ class _Importer:
         return tool
 
     # -- instances -------------------------------------------------------- #
-    def _instance(self, step: int, raw_name: str, parsed: ParsedTarget, verb: str) -> str:
+    def _instance(self, step: int, raw_name: str, parsed: ParsedTarget, verb: str,
+                  result: str) -> str:
         """The target key for one row.
 
-        Spec 3.2: every row that names a target is a **new** instance unless
-        all three reuse conditions hold (see :meth:`_reuse`) -- the sheet's
-        numbering restarts ("CPU fan screw 1..5" then "Heatsink screw 1..4")
-        and its unnumbered repeats ("Case - motherboard connector" seven times)
-        are genuinely different parts.
+        Spec 3.2: every row that names a target is a **new** instance unless one
+        of the two reuse tests says otherwise -- the sheet's numbering restarts
+        ("CPU fan screw 1..5" then "Heatsink screw 1..4") and its unnumbered
+        repeats ("Case - motherboard connector" seven times) are genuinely
+        different parts. See :meth:`_reuse_numbered` and :meth:`_reuse_physical`.
         """
         cls, attrs = parsed.cls, parsed.attrs
         disc = str(attrs.get("role") or attrs.get("kind") or "")
         number = parsed.instance_no
-        key = self._reuse(step, raw_name, cls, disc, number, attrs, verb)
+        if number is None:
+            key = self._reuse_physical(step, cls, disc, attrs, verb, result)
+        else:
+            key = self._reuse_numbered(step, raw_name, cls, disc, number, attrs, verb)
         if key is None:
             key = self._create(cls, disc, number, parsed)
         self.out.instances[key].raw_names.append(raw_name)
-        self._ops.setdefault(key, []).append((step, verb))
+        self.ledger.record(key, step, verb, result)
         return key
 
-    def _reuse(
+    def _reuse_numbered(
         self,
         step: int,
         raw_name: str,
         cls: str,
         disc: str,
-        number: Optional[int],
+        number: int,
         attrs: dict,
         verb: str,
     ) -> Optional[str]:
-        """An existing instance this row operates again, or ``None``.
+        """An existing instance a **numbered** row operates again, or ``None``.
 
         All of these must hold: the name carries an explicit instance number,
         an earlier instance of the same ``(cls, discriminator, number)`` has
@@ -444,10 +381,8 @@ class _Importer:
         (e.g. loosen then remove).  Reuse and attribute conflicts are both
         reported, so nothing is merged or dropped silently.
         """
-        if number is None:
-            return None
-        for key in self._numbered.get(_identity(cls, disc, number, attrs), []):
-            prior = [v for _, v in self._ops.get(key, [])]
+        for key in self.ledger.numbered_matches(cls, disc, number, attrs):
+            prior = self.ledger.verbs(key)
             if verb in prior:
                 continue  # the same operation again means another part
             self.issue(
@@ -455,26 +390,74 @@ class _Importer:
                 f"reused instance {key} at step {step} for {raw_name!r} "
                 f"(prior verbs {', '.join(prior) or 'none'}; new verb {verb})",
             )
-            stored = self.out.instances[key].attrs
-            for name, old, new in _attr_conflicts(stored, attrs):
-                self.issue(
-                    step,
-                    f"instance {key} attribute {name!r} conflicts with the stored value "
-                    f"({old!r} vs {new!r}) - kept {old!r}",
-                )
-            _merge_attrs(stored, attrs)
+            self._absorb(step, key, attrs)
             return key
         return None
 
+    def _reuse_physical(self, step: int, cls: str, disc: str, attrs: dict, verb: str,
+                        result: str) -> Optional[str]:
+        """The unnumbered ``displace``-then-``remove`` pair of one physical part.
+
+        Only a **successful** ``remove`` may take this door: an attempt that did
+        not happen says the part is untouched, not that it is being finished
+        off, and merging it would put two verbs of the same name on one
+        instance. :func:`tda.core.log_identity.reuse_candidates` owns the rest
+        of the conditions; exactly one candidate is a reuse, and several are
+        reported rather than guessed between. Either way stage S1 sees it.
+        """
+        if verb != "remove" or result != "success":
+            return None
+        found = reuse_candidates(self.ledger, cls, disc, attrs, self._state_of)
+        if len(found) != 1:
+            if len(found) > 1:
+                # saying nothing here is how a sheet could quietly grow a part:
+                # the annotator sees one row and the draft holds several keys
+                self.issue(
+                    step,
+                    f"{len(found)} candidates for an unnumbered remove of {cls} "
+                    f"({', '.join(key for key, _last in found)}) - left unmerged",
+                )
+            return None
+        key, last = found[0]
+        self.issue(step, f"reuses {key}: {last} -> {verb} (one physical part, not two)")
+        self._absorb(step, key, attrs)
+        return key
+
+    def _absorb(self, step: int, key: str, attrs: dict) -> None:
+        """Fold a reusing row's attributes into the instance it found."""
+        stored = self.out.instances[key].attrs
+        for name, old, new in _attr_conflicts(stored, attrs):
+            self.issue(
+                step,
+                f"instance {key} attribute {name!r} conflicts with the stored value "
+                f"({old!r} vs {new!r}) - kept {old!r}",
+            )
+        _merge_attrs(stored, attrs)
+
+    def _state_of(self, key: str) -> Optional[str]:
+        """The state this instance is in, folding the verbs that succeeded.
+
+        The taxonomy owns what each verb does, including the conditional one
+        (an ``unscrew`` leaves a captive screw ``loosened`` and a plain one
+        ``removed``), so the fold asks it rather than repeating the table.
+        """
+        rec = self.out.instances.get(key)
+        if rec is None:
+            return None
+        state = self.tax.default_state(rec.cls)
+        for _step, verb, result in self.ledger.ops().get(key, []):
+            if result != "success":
+                continue
+            effect = self.tax.apply_verb(rec.cls, rec.attrs, verb)
+            if effect and effect[0] == "state":
+                state = effect[1]
+        return state
+
     def _create(self, cls: str, disc: str, number: Optional[int], parsed: ParsedTarget) -> str:
-        group = (cls, disc)
-        ordinal = self._ordinals.get(group, 0) + 1
-        self._ordinals[group] = ordinal
+        ordinal = self.ledger.next_ordinal(cls, disc)
         key = instance_key(cls, parsed.attrs, ordinal)
         self.out.instances[key] = self._new_instance(key, cls, parsed.attrs, parsed)
-        if number is not None:
-            identity = _identity(cls, disc, number, parsed.attrs)
-            self._numbered.setdefault(identity, []).append(key)
+        self.ledger.remember(key, cls, disc, number, parsed.attrs)
         return key
 
     def _check_operations(self) -> None:
@@ -482,13 +465,20 @@ class _Importer:
 
         Multi-step instances are the reused ones and are already reported at
         the point of reuse; the same verb twice can only mean the importer
-        merged two different parts, so it is reported loudly.  ``_ops`` only
+        merged two different parts, so it is reported loudly.  The ledger only
         holds the instances ``_instance`` created, so the implicit chassis --
         whose ``reorient`` legitimately repeats -- never reaches this check.
+
+        Only operations that **happened** count. An attempt that failed changed
+        nothing, so "failed remove at step 21, remove at step 42" is one part
+        acted on once -- and counting it made this cry wolf on D35, D36 and D45,
+        which are exactly the three merges the narrow reuse rule exists for.
         """
-        for key, ops in self._ops.items():
+        for key, ops in self.ledger.ops().items():
             seen: dict[str, int] = {}
-            for step, verb in ops:
+            for step, verb, result in ops:
+                if result != "success":
+                    continue
                 if verb in seen:
                     self.issue(
                         None,

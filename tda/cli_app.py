@@ -6,16 +6,22 @@ problems of one view, build the local image cache, and write the two rehearsal
 exports.  They are registered by appending :data:`SUBCOMMANDS` to the parser
 there, so ``python -m tda.cli --help`` lists all of them together.
 
-Everything that writes takes the single-user lock through ``tda.cli._session``
-(exit code 3 while somebody else holds it), including ``check``: recompiling a
-view writes the ``compiled_mask`` rows it finds stale.
+Everything that writes takes the single-user lock through
+:func:`tda.cli_common.session` (exit code 3 while somebody else holds it),
+including ``check``: recompiling a view writes the ``compiled_mask`` rows it
+finds stale.  That import is at module level and points at
+:mod:`tda.cli_common`, never at :mod:`tda.cli`: importing the latter from here
+loads it a second time under ``python -m tda.cli`` and hands this module a
+``Locked`` class that ``main()`` does not catch.
 """
 from __future__ import annotations
 
 import argparse
-from typing import Callable, Sequence
+from pathlib import Path
+from typing import Callable, Optional, Sequence
 
 from tda import pipeline as P
+from tda.cli_common import EXIT_ERROR, EXIT_OK, load_paths, session
 from tda.core.model import VIEWS
 from tda.core.taxonomy import load_taxonomy
 
@@ -27,6 +33,42 @@ def _desktop_list(spec: str | None) -> list[int]:
     """``--desktops 1-3,13`` -> ``[1, 2, 3, 13]``; nothing given -> ``[]``."""
     wanted = P.parse_desktops(spec) if spec else None
     return sorted(wanted) if wanted else []
+
+
+def _view_list(spec: str) -> list[str]:
+    """``"scan,oak1"`` -> ``["scan", "oak1"]``, in order and without repeats.
+
+    ``ValueError`` for a view that does not exist, which :func:`tda.cli.main`
+    turns into one line and exit 1. That replaces argparse's ``choices``, which
+    cannot describe a comma-separated list and answered "invalid choice:
+    'scan,oak1'" for a spelling this now accepts.
+    """
+    known = ", ".join(VIEWS)
+    wanted = [v.strip() for v in str(spec).split(",") if v.strip()]
+    if not wanted:
+        raise ValueError(f"no view given; the views are {known}")
+    unknown = [v for v in wanted if v not in VIEWS]
+    if unknown:
+        raise ValueError(f"not a view: {', '.join(unknown)}; the views are {known}")
+    out: list[str] = []
+    for view in wanted:
+        if view not in out:
+            out.append(view)
+    return out
+
+
+def _add_view_flags(p, default: str = "scan", plural_first: bool = False) -> None:
+    """``--view`` and ``--views``: one option, both spellings, one or many views.
+
+    The exports spelled it ``--view`` and ``build-cache`` spelled it ``--views``,
+    and each rejected the other -- a coin toss the annotator loses half the time
+    in the middle of a release. They are the same option now, and it takes a
+    comma-separated list wherever more than one view makes sense.
+    """
+    names = ("--views", "--view") if plural_first else ("--view", "--views")
+    p.add_argument(*names, dest="views", default=default, metavar="VIEW[,VIEW...]",
+                   help=f"one view or a comma-separated list ({', '.join(VIEWS)}); "
+                        f"--view and --views are the same option")
 
 
 def _count(stats: dict, key: str) -> int:
@@ -65,6 +107,104 @@ def _pending_rechecks(truth, desktop: int, view: str) -> list[int]:
         return [int(s) for s in found(desktop, view)]
     except Exception:  # noqa: BLE001 - a missing table is "nothing pending"
         return []
+
+
+def _open_conflicts(truth, db, desktops: Sequence[int], view: str) -> int:
+    """How many conflicts of these ``(desktop, view)`` are still open.
+
+    An open conflict is a frozen row the recompile disagrees with: a human has
+    to choose between the two, and until they do the view's truth table is not
+    one to ship (spec 3.4).  ``check`` reported only the conflicts *this run*
+    raised, so a queue somebody left behind yesterday read as a clean desktop.
+
+    Worker F1 owns ``TruthService.open_conflicts``; it is preferred as soon as
+    it exists, and until then the same question is answered straight from the
+    table it will read anyway.
+    """
+    found = getattr(truth, "open_conflicts", None)
+    if not callable(found):
+        def found(desktop: int, view: str) -> list:
+            return db.conflicts(desktop, view)
+    return sum(_how_many(found(int(desktop), str(view))) for desktop in desktops)
+
+
+def _how_many(answer) -> int:
+    """A count, whether the service answered with the rows or with their number.
+
+    ``TruthService.open_conflicts`` returns a list; a future one may well return
+    an ``int``, and this adapter is the wrong place to care which.
+    """
+    if isinstance(answer, int):
+        return answer
+    try:
+        return len(answer)
+    except TypeError:
+        return 0
+
+
+def _frame_counts(db, desktops: Sequence[int], view: str) -> tuple[int, int]:
+    """``(verified, not verified)`` frames of one view over the selection.
+
+    An export that filters on ``verified`` and finds none writes an empty
+    artefact, so it has to say what it looked at: "0 verified, 214 not verified"
+    is a diagnosis, "0 images" is a mystery.
+    """
+    verified = total = 0
+    for desktop in desktops:
+        frames = [row for row in db.frames_for(int(desktop), str(view))
+                  if not row.get("missing")]
+        total += len(frames)
+        verified += sum(1 for v, _step in db.verified_frames(int(desktop)) if v == view)
+    return verified, max(total - verified, 0)
+
+
+def _nothing_exported(command: str, view: str, out: str, only_verified: bool) -> int:
+    """Warn, remove the empty artefact, and fail.
+
+    An export that found nothing used to write the file anyway and exit 0, so a
+    day of annotation came back as a COCO with zero images or a zero-byte JSONL
+    and nothing at all to say why. The file goes too: an empty artefact left on
+    disk is the one that gets shipped, or diffed against, or trained on.
+    """
+    subject = ("0 verified frames" if only_verified else "no exportable frames")
+    hint = (" (use --no-only-verified to include unverified frames)"
+            if only_verified else "")
+    print(f"[{command}] WARNING: {subject} for the requested desktops/{view} "
+          f"- nothing exported{hint}")
+    try:
+        Path(out).unlink(missing_ok=True)
+    except OSError as exc:  # a locked or read-only file: say so, do not crash
+        print(f"[{command}] could not remove the empty {out}: {exc}")
+    return EXIT_ERROR
+
+
+def _out_paths(out: str | None, views: Sequence[str], paths: dict, pattern: str,
+               command: str) -> Optional[dict[str, str]]:
+    """Where each view's file goes, or ``None`` when ``--out`` cannot cover them."""
+    if out and len(views) > 1:
+        print(f"[{command}] refused: --out names one file but {len(views)} views "
+              f"were asked for ({', '.join(views)}). Drop --out to write one file "
+              f"per view into cache_dir, or export one view at a time.")
+        return None
+    if out:
+        return {views[0]: str(out)}
+    return {view: P.cache_file(paths, pattern.format(view=view)) for view in views}
+
+
+def _call_export(export, *args, allow_conflicts: bool, **kw):
+    """Call an exporter, passing ``allow_conflicts`` only when it takes it.
+
+    The keyword is F1's; an exporter that predates it must still run rather
+    than die of an unexpected argument.  A ``TypeError`` raised *inside* the
+    exporter says nothing about ``allow_conflicts`` and is left alone -- it is
+    a bug, and swallowing it would hide it behind a second, argument-less call.
+    """
+    try:
+        return export(*args, allow_conflicts=allow_conflicts, **kw)
+    except TypeError as exc:
+        if "allow_conflicts" not in str(exc):
+            raise
+        return export(*args, **kw)
 
 
 def _prepare_truth(db, tax, desktops: Sequence[int], view: str,
@@ -120,7 +260,7 @@ def _prepare_truth(db, tax, desktops: Sequence[int], view: str,
 def cmd_app(args: argparse.Namespace) -> int:
     """Open the annotator window; the exit code is the window's.
 
-    The lock is taken by the window rather than by ``_session`` here: it has to
+    The lock is taken by the window rather than by ``session`` here: it has to
     stay held for the whole session and be released on close, next to the exit
     backup, and a refusal has to reach the annotator as a message box.
     """
@@ -140,8 +280,12 @@ def _add_app(sub) -> None:
     p = sub.add_parser("app", help="open the annotator (resumes the last frame)")
     p.add_argument("--desktop", type=int, default=None,
                    help="machine to open (default: where this annotator left off)")
-    p.add_argument("--view", default=None, choices=list(VIEWS),
-                   help="view to open (default: the last one, else scan)")
+    # one view, not a list: the window opens on a single view. The plural
+    # spelling is accepted so that a hand that has just typed `--views` at an
+    # export does not get "unrecognized arguments" here.
+    p.add_argument("--view", "--views", dest="view", default=None, choices=list(VIEWS),
+                   help="the ONE view to open (default: the last one, else scan); "
+                        "unlike check and the exports this takes no list")
     p.add_argument("--annotator", required=True, help="who is annotating (the lock holder)")
     p.add_argument("--step", type=int, default=None, help="open this logical step")
     p.set_defaults(func=cmd_app)
@@ -154,31 +298,44 @@ def cmd_check(args: argparse.Namespace) -> int:
     """Recompile one view and print what the compiler is unhappy about.
 
     Exit code 1 when anything is reported, so a shell loop over the desktops
-    can stop on the first machine that needs attention.
+    can stop on the first machine that needs attention. "Anything" is three
+    things, not one: the compiler's problems, the conflicts still standing
+    open, and the re-checks still queued. A desktop with none of the first and
+    six of the second is not a desktop to export, and answering 0 there was how
+    an open conflict survived all the way into a release artefact.
     """
-    from tda.cli import EXIT_ERROR, EXIT_OK, _session
+    with session(args, lock=True) as (_paths, db):
+        desktop = int(args.desktop)
+        tax = load_taxonomy()
+        worst = EXIT_OK
+        for view in _view_list(args.views):
+            worst = max(worst, _check_one(db, tax, args, desktop, view))
+        return worst
 
-    with _session(args, lock=True) as (_paths, db):
-        stats = _prepare_truth(db, load_taxonomy(), [int(args.desktop)],
-                               str(args.view), refresh=True)
-        problems = list(stats["problems"])
-        print(f"[check] D{args.desktop:02d} {args.view}: {stats['steps']} steps, "
-              f"{stats['updated']} rows written, {stats['conflicts']} conflicts")
-        if stats["pending"]:
-            print(f"[check] {len(stats['pending'])} frames are still queued for "
-                  f"a re-check: {sorted(stats['pending'])[:10]}")
-        for text in problems[: int(args.limit)]:
-            print(f"  - {text}")
-        if len(problems) > int(args.limit):
-            print(f"  ... {len(problems) - int(args.limit)} more")
-        print(f"problems: {len(problems)}")
-        return EXIT_ERROR if problems else EXIT_OK
+
+def _check_one(db, tax, args: argparse.Namespace, desktop: int, view: str) -> int:
+    """Recompile one ``(desktop, view)`` and report it; the exit code is its own."""
+    stats = _prepare_truth(db, tax, [desktop], view, refresh=True)
+    problems = list(stats["problems"])
+    standing = _open_conflicts(stats["truth"], db, [desktop], view)
+    print(f"[check] D{desktop:02d} {view}: {stats['steps']} steps, "
+          f"{stats['updated']} rows written, {stats['conflicts']} conflicts")
+    if stats["pending"]:
+        print(f"[check] {len(stats['pending'])} frames are still queued for "
+              f"a re-check: {sorted(stats['pending'])[:10]}")
+    for text in problems[: int(args.limit)]:
+        print(f"  - {text}")
+    if len(problems) > int(args.limit):
+        print(f"  ... {len(problems) - int(args.limit)} more")
+    print(f"problems: {len(problems)}")
+    print(f"open conflicts: {standing}")
+    return EXIT_ERROR if (problems or standing or stats["pending"]) else EXIT_OK
 
 
 def _add_check(sub) -> None:
-    p = sub.add_parser("check", help="recompile one view and count its problems")
+    p = sub.add_parser("check", help="recompile one or more views and count the problems")
     p.add_argument("--desktop", type=int, required=True)
-    p.add_argument("--view", default="scan", choices=list(VIEWS))
+    _add_view_flags(p)
     p.add_argument("--limit", type=int, default=20, help="how many problems to list")
     p.set_defaults(func=cmd_check)
 
@@ -195,7 +352,7 @@ def cmd_build_cache(args: argparse.Namespace) -> int:
     """
     from tda.core import cache
 
-    paths = P.load_paths(args.paths)
+    paths = load_paths(args.paths)
     wanted = _desktop_list(args.desktops)
     runs = _runs(wanted) if wanted else [(int(args.first), int(args.last))]
     extra: list[str] = []
@@ -209,8 +366,9 @@ def cmd_build_cache(args: argparse.Namespace) -> int:
         extra.append("--force")
 
     worst = 0
+    views = ",".join(_view_list(args.views))
     for first, last in runs:
-        argv = ["--cache", P.require(paths, "cache_dir"), "--views", str(args.views),
+        argv = ["--cache", P.require(paths, "cache_dir"), "--views", views,
                 "--first", str(first), "--last", str(last), *extra]
         worst = max(worst, int(cache.main(argv)))
     return worst
@@ -218,7 +376,7 @@ def cmd_build_cache(args: argparse.Namespace) -> int:
 
 def _add_build_cache(sub) -> None:
     p = sub.add_parser("build-cache", help="copy the chosen frames into the local cache")
-    p.add_argument("--views", default="scan", help="comma separated views")
+    _add_view_flags(p, plural_first=True)
     p.add_argument("--desktops", default=None, help="e.g. 13 or 1-66 or 1-3,13")
     # Kept because tda.core.cache.main speaks this and scripts already use it;
     # --desktops wins when both are given.
@@ -234,55 +392,85 @@ def _add_build_cache(sub) -> None:
 # --------------------------------------------------------------------------- #
 # exports
 # --------------------------------------------------------------------------- #
-def _export_prologue(args, db, desktops: Sequence[int], command: str):
-    """``(exit code, truth)``: refuse while re-checks are still queued, else go.
+def _export_prologue(args, db, desktops: Sequence[int], view: str, command: str):
+    """``(exit code, truth)``: refuse while anything is unresolved, else go.
 
     An export is a release artefact: shipping a frame whose stored geometry the
-    session had already marked stale is worse than not shipping at all, so the
-    command stops and says which frames to run ``check`` on.  The service it
-    built is handed back so the exporter refreshes through the same one.
-    """
-    from tda.cli import EXIT_ERROR
+    session had already marked stale -- or one a human is still being asked to
+    adjudicate -- is worse than not shipping at all, so the command stops and
+    says what to run ``check`` on.  The service it built is handed back so the
+    exporter refreshes through the same one.
 
-    stats = _prepare_truth(db, load_taxonomy(), desktops, str(args.view),
+    Two reasons to stop, and the annotator can only overrule the second:
+    a queued re-check is a job this command could not finish, while an open
+    conflict is a question only they can answer.  ``--allow-conflicts`` says
+    they have decided to ship over it.
+    """
+    stats = _prepare_truth(db, load_taxonomy(), desktops, view,
                            refresh=bool(getattr(args, "refresh", True)))
+    verified, unverified = _frame_counts(db, desktops, view)
+    print(f"[{command}] {view}: {verified} verified frames, {unverified} not "
+          f"verified, {verified + unverified} considered")
     if stats["pending"]:
         print(f"[{command}] refused: {len(stats['pending'])} frames are still "
               f"pending a re-check ({sorted(stats['pending'])[:10]}). Run "
-              f"'python -m tda.cli check --desktop N --view {args.view}' first.")
+              f"'python -m tda.cli check --desktop N --view {view}' first.")
         return EXIT_ERROR, stats["truth"]
+    if not bool(getattr(args, "allow_conflicts", False)):
+        standing = _open_conflicts(stats["truth"], db, desktops, view)
+        if standing:
+            print(f"[{command}] refused: {standing} open conflict"
+                  f"{'' if standing == 1 else 's'} on the requested desktops. "
+                  f"Resolve them in the annotator, or pass --allow-conflicts to "
+                  f"export the frozen rows as they stand.")
+            return EXIT_ERROR, stats["truth"]
     return None, stats["truth"]
 
 
 def cmd_export_coco(args: argparse.Namespace) -> int:
     """Write the compiled truth of one view as a COCO file."""
-    from tda.cli import EXIT_ERROR, EXIT_OK, _session
     from tda.core.export.coco import export_coco
 
-    with _session(args, lock=True) as (paths, db):
-        out = args.out or P.cache_file(paths, f"coco_{args.view}.json")
+    with session(args, lock=True) as (paths, db):
         desktops = _desktop_list(args.desktops)
         if not desktops:
             print("[export-coco] nothing to export: pass --desktops")
             return EXIT_ERROR
-        refused, truth = _export_prologue(args, db, desktops, "export-coco")
-        if refused is not None:
-            return refused
-        stats = export_coco(db, load_taxonomy(), desktops, str(args.view), str(out),
-                            only_verified=bool(args.only_verified),
-                            roi_crop=bool(args.roi_crop), truth=truth)
-        # ``images``/``annotations`` are the *lists*: printing them put the
-        # whole COCO document on the terminal.
-        print(f"[export-coco] {_count(stats, 'images')} images, "
-              f"{_count(stats, 'annotations')} annotations -> {out}")
-        return EXIT_OK
+        views = _view_list(args.views)
+        targets = _out_paths(args.out, views, paths, "coco_{view}.json", "export-coco")
+        if targets is None:
+            return EXIT_ERROR
+        worst = EXIT_OK
+        for view in views:
+            out = targets[view]
+            refused, truth = _export_prologue(args, db, desktops, view, "export-coco")
+            if refused is not None:
+                worst = max(worst, refused)
+                continue
+            stats = _call_export(
+                export_coco, db, load_taxonomy(), desktops, view, str(out),
+                allow_conflicts=bool(args.allow_conflicts),
+                only_verified=bool(args.only_verified),
+                roi_crop=bool(args.roi_crop), truth=truth,
+            )
+            if not _count(stats, "annotations"):
+                worst = max(worst, _nothing_exported("export-coco", view, out,
+                                                     bool(args.only_verified)))
+                continue
+            # ``images``/``annotations`` are the *lists*: printing them put the
+            # whole COCO document on the terminal.
+            print(f"[export-coco] {_count(stats, 'images')} images, "
+                  f"{_count(stats, 'annotations')} annotations -> {out}")
+        return worst
 
 
 def _add_export_coco(sub) -> None:
-    p = sub.add_parser("export-coco", help="compiled truth -> one COCO json")
+    p = sub.add_parser("export-coco", help="compiled truth -> one COCO json per view")
     p.add_argument("--desktops", default=None, help="e.g. 13 or 1-20")
-    p.add_argument("--view", default="scan", choices=list(VIEWS))
-    p.add_argument("--out", default=None)
+    _add_view_flags(p)
+    p.add_argument("--out", default=None,
+                   help="one output file; only with a single view (without it each "
+                        "view is written to <cache_dir>/coco_<view>.json)")
     p.add_argument("--roi-crop", action="store_true", help="crop to the pose-segment ROI")
     p.add_argument("--only-verified", dest="only_verified", action="store_true",
                    default=True, help="export confirmed rows only (the default)")
@@ -293,41 +481,60 @@ def _add_export_coco(sub) -> None:
 
 
 def _add_refresh_flags(p) -> None:
-    """Whether the export recompiles first (it does; ``--no-refresh`` skips it)."""
+    """What an export does before it reads the truth table, and what stops it."""
     p.add_argument("--refresh", dest="refresh", action="store_true", default=True,
                    help="recompile the requested frames first (the default)")
     p.add_argument("--no-refresh", dest="refresh", action="store_false",
                    help="export what is stored, only draining the re-check queue")
+    p.add_argument("--allow-conflicts", dest="allow_conflicts", action="store_true",
+                   help="export even though frames of these desktops still carry "
+                        "an open conflict. Without it the export refuses: a "
+                        "conflict is a frozen row the recompile disagrees with, "
+                        "and only a human can say which of the two ships")
 
 
 def cmd_export_vlm(args: argparse.Namespace) -> int:
     """Write the V1/V2/V3 question set of one view as JSONL."""
-    from tda.cli import EXIT_ERROR, EXIT_OK, _session
     from tda.core.export.vlm import TASKS, export_vlm
 
-    with _session(args, lock=True) as (paths, db):
-        out = args.out or P.cache_file(paths, f"vlm_{args.view}.jsonl")
+    with session(args, lock=True) as (paths, db):
         desktops = _desktop_list(args.desktops)
         if not desktops:
             print("[export-vlm] nothing to export: pass --desktops")
             return EXIT_ERROR
-        refused, truth = _export_prologue(args, db, desktops, "export-vlm")
-        if refused is not None:
-            return refused
+        views = _view_list(args.views)
+        targets = _out_paths(args.out, views, paths, "vlm_{view}.jsonl", "export-vlm")
+        if targets is None:
+            return EXIT_ERROR
         tasks = [t.strip() for t in str(args.tasks).split(",") if t.strip()] or list(TASKS)
-        stats = export_vlm(db, load_taxonomy(), desktops, str(args.view), str(out),
-                           tasks=tasks, only_verified=bool(args.only_verified),
-                           truth=truth)
-        print(f"[export-vlm] {stats.get('records', 0)} records "
-              f"({stats.get('by_task', {})}) -> {out}")
-        return EXIT_OK
+        worst = EXIT_OK
+        for view in views:
+            out = targets[view]
+            refused, truth = _export_prologue(args, db, desktops, view, "export-vlm")
+            if refused is not None:
+                worst = max(worst, refused)
+                continue
+            stats = _call_export(
+                export_vlm, db, load_taxonomy(), desktops, view, str(out),
+                allow_conflicts=bool(args.allow_conflicts), tasks=tasks,
+                only_verified=bool(args.only_verified), truth=truth,
+            )
+            if not _count(stats, "records"):
+                worst = max(worst, _nothing_exported("export-vlm", view, out,
+                                                     bool(args.only_verified)))
+                continue
+            print(f"[export-vlm] {_count(stats, 'records')} records "
+                  f"({stats.get('by_task', {})}) -> {out}")
+        return worst
 
 
 def _add_export_vlm(sub) -> None:
-    p = sub.add_parser("export-vlm", help="compiled truth -> one VLM JSONL")
+    p = sub.add_parser("export-vlm", help="compiled truth -> one VLM JSONL per view")
     p.add_argument("--desktops", default=None, help="e.g. 13 or 1-20")
-    p.add_argument("--view", default="scan", choices=list(VIEWS))
-    p.add_argument("--out", default=None)
+    _add_view_flags(p)
+    p.add_argument("--out", default=None,
+                   help="one output file; only with a single view (without it each "
+                        "view is written to <cache_dir>/vlm_<view>.jsonl)")
     p.add_argument("--tasks", default="V1,V2,V3")
     p.add_argument("--only-verified", dest="only_verified", action="store_true",
                    default=False, help="ask only about confirmed rows")

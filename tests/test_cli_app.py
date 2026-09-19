@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from app_scene import DESKTOP, LAST_STEP, VIEW, make_db, write_paths_yaml
+from app_scene import DESKTOP, LAST_STEP, VIEW, freeze_mask, make_db, write_paths_yaml
 from tda.cli import EXIT_ERROR, EXIT_LOCKED, EXIT_OK, main
 from tda.core.db import Db
 from tda.core.model import FrameKey
@@ -27,6 +27,23 @@ from tda.core.model import FrameKey
 def env(tmp_path: Path) -> dict:
     db, paths, _tax = make_db(tmp_path)
     db.close()
+    return {"paths": write_paths_yaml(tmp_path), "cfg": paths, "tmp": tmp_path}
+
+
+@pytest.fixture
+def exportable(tmp_path: Path) -> dict:
+    """The scene plus two confirmed masks: something for an export to write.
+
+    ``seed_db`` traces nothing, so a COCO export of the plain scene contains
+    zero annotations -- and an export that finds nothing now warns, removes the
+    file and exits 1. The frozen rows disagree with the recompile by design, so
+    the tests that use this pass ``--allow-conflicts``.
+    """
+    db, paths, _tax = make_db(tmp_path)
+    try:
+        freeze_mask(db)
+    finally:
+        db.close()
     return {"paths": write_paths_yaml(tmp_path), "cfg": paths, "tmp": tmp_path}
 
 
@@ -95,11 +112,11 @@ def test_check_refuses_while_another_annotator_holds_the_lock(env, capsys):
 # --------------------------------------------------------------------------- #
 # exports
 # --------------------------------------------------------------------------- #
-def test_export_coco_prints_a_summary_not_the_document(env, capsys):
+def test_export_coco_prints_a_summary_not_the_document(exportable, capsys):
     """``stats['images']`` is the image *list*: printing it dumped the whole COCO."""
-    out = Path(env["tmp"]) / "coco_summary.json"
-    assert run(env, "export-coco", "--desktops", str(DESKTOP), "--view", VIEW,
-               "--out", str(out)) == EXIT_OK
+    out = Path(exportable["tmp"]) / "coco_summary.json"
+    assert run(exportable, "export-coco", "--desktops", str(DESKTOP), "--view", VIEW,
+               "--out", str(out), "--allow-conflicts") == EXIT_OK
     line = [l for l in capsys.readouterr().out.splitlines()
             if l.startswith("[export-coco]")][-1]
     assert len(line) < 200
@@ -131,10 +148,10 @@ def test_build_cache_caches_exactly_the_desktops_asked_for(env, monkeypatch):
     assert covered == {1, 2, 3, 13}
 
 
-def test_export_coco_writes_a_file(env, capsys):
-    out = Path(env["tmp"]) / "coco.json"
-    code = run(env, "export-coco", "--desktops", str(DESKTOP), "--view", VIEW,
-               "--out", str(out))
+def test_export_coco_writes_a_file(exportable, capsys):
+    out = Path(exportable["tmp"]) / "coco.json"
+    code = run(exportable, "export-coco", "--desktops", str(DESKTOP), "--view", VIEW,
+               "--out", str(out), "--allow-conflicts")
     assert code == EXIT_OK
     assert out.exists()
     payload = json.loads(out.read_text(encoding="utf-8"))
@@ -142,10 +159,10 @@ def test_export_coco_writes_a_file(env, capsys):
     assert str(out) in capsys.readouterr().out
 
 
-def test_export_coco_honours_only_verified(env):
-    out = Path(env["tmp"]) / "coco_all.json"
-    assert run(env, "export-coco", "--desktops", str(DESKTOP), "--view", VIEW,
-               "--out", str(out), "--no-only-verified") == EXIT_OK
+def test_export_coco_honours_only_verified(exportable):
+    out = Path(exportable["tmp"]) / "coco_all.json"
+    assert run(exportable, "export-coco", "--desktops", str(DESKTOP), "--view", VIEW,
+               "--out", str(out), "--no-only-verified", "--allow-conflicts") == EXIT_OK
     assert out.exists()
 
 
