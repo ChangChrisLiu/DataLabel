@@ -447,12 +447,18 @@ class AssistMixin:
         self.sam_reason = "loading"
         self.update_status()
         loader = self._sam_loader
+        paths = dict(self.paths)
 
         def load() -> None:
             try:
-                from tda.models.sam_service import SamQueue, SamService
+                from tda.models import sam_service
 
-                loader.sigLoaded.emit(SamQueue(SamService()))
+                # The paths the app was *started* with, not the repo's own
+                # configs/paths.yaml: --paths was being ignored for the weights.
+                checkpoint = sam_service.checkpoint_in(paths)
+                service = (sam_service.SamService(checkpoint=str(checkpoint))
+                           if checkpoint is not None else sam_service.SamService())
+                loader.sigLoaded.emit(sam_service.SamQueue(service))
             except Exception as exc:  # noqa: BLE001 - the app works without SAM
                 loader.sigLoaded.emit(f"{type(exc).__name__}: {exc}")
 

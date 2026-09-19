@@ -515,3 +515,43 @@ def test_a_blob_covering_most_of_the_roi_is_not_a_prompt_box(window):
                      area=w * h, score=9.0)
     window.begin_add_shape(small)
     assert window.sam_point.prompt_box is not None
+
+
+# --------------------------------------------------------------------------- #
+# the checkpoint comes from the paths the app was started with (item 19)
+# --------------------------------------------------------------------------- #
+def test_the_window_passes_its_own_weights_dir_to_sam(window, monkeypatch, tmp_path):
+    """``default_checkpoint()`` read ``<repo>/configs/paths.yaml`` and ignored --paths.
+
+    Started with another paths file -- a second data disk, a colleague's copy --
+    the app looked for the repo's checkpoint instead of the configured one.
+    """
+    import tda.models.sam_service as sam_service
+
+    seen: list[dict] = []
+
+    class FakeService:
+        def __init__(self, checkpoint=None, **kwargs):
+            seen.append({"checkpoint": checkpoint, **kwargs})
+
+    monkeypatch.setattr(sam_service, "SamService", FakeService)
+    monkeypatch.setattr(sam_service, "SamQueue", lambda service: service)
+    window.sam_queue = None
+    window._sam_loading = False
+    window.paths = dict(window.paths, weights_dir=str(tmp_path / "w"))
+
+    window.start_sam()
+    window._sam_loader_thread.join(10.0)
+    QApplication.processEvents()
+
+    assert seen, "SAM was never constructed"
+    assert str(tmp_path / "w") in str(seen[0]["checkpoint"])
+
+
+def test_default_checkpoint_still_works_for_library_use():
+    from tda.models.sam_service import CHECKPOINT_NAME, checkpoint_in, default_checkpoint
+
+    fallback = default_checkpoint()
+    assert fallback is None or str(fallback).endswith(CHECKPOINT_NAME)
+    picked = checkpoint_in({"weights_dir": "D:/somewhere"})
+    assert str(picked).endswith(CHECKPOINT_NAME) and "somewhere" in str(picked)
