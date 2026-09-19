@@ -124,6 +124,52 @@ def test_nothing_is_implied_when_nothing_references_the_class(tax):
     assert implied_instances(instances, [], tax) == []
 
 
+# --------------------------------------------------------------------------- #
+# a host_class declaration is a reference too
+# --------------------------------------------------------------------------- #
+def _latches_only(desktop: int = 64) -> dict[str, InstanceRec]:
+    """A desktop whose only claim on a motherboard is that it has board latches."""
+    return {
+        "chassis.01": InstanceRec("chassis.01", desktop, "chassis"),
+        "ram_latch.01": InstanceRec("ram_latch.01", desktop, "ram_latch"),
+        "cpu_socket_lever.01": InstanceRec(
+            "cpu_socket_lever.01", desktop, "cpu_socket_lever"),
+    }
+
+
+def test_a_board_mounted_latch_references_the_board_it_rides_on(tax):
+    made = implied_instances(_latches_only(), [], tax)
+    assert [rec.key for rec in made] == ["motherboard.01"]
+    assert "referenced by 2 instances" in made[0].attrs["note"]
+
+
+def test_the_implied_board_then_becomes_the_latches_parent(tax):
+    instances = _latches_only()
+    for rec in implied_instances(instances, [], tax):
+        instances[rec.key] = rec
+    infer_relational_fields(instances, tax, [])
+    for key in ("ram_latch.01", "cpu_socket_lever.01"):
+        assert (instances[key].parent, instances[key].attached) \
+            == ("motherboard.01", True), key
+    assert unresolved_relations(instances, tax, []) == []
+
+
+def test_a_latch_that_already_has_a_parent_is_not_a_reference(tax):
+    """Only an *unresolved* row is evidence the desktop is missing the part."""
+    instances = _latches_only()
+    instances["ram_latch.01"].parent = "chassis.01"
+    instances["cpu_socket_lever.01"].parent = "chassis.01"
+    assert implied_instances(instances, [], tax) == []
+
+
+def test_a_latch_draft_is_not_a_reference_either(tax):
+    instances = {
+        "ls:RAM Module Retention Clip#1": InstanceRec(
+            "ls:RAM Module Retention Clip#1", 66, "ram_latch"),
+    }
+    assert implied_instances(instances, [], tax) == []
+
+
 def test_creating_the_implied_instance_is_idempotent(tax):
     instances = _d64_like()
     actions = _d64_actions()
