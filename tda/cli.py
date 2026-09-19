@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from typing import Callable, Optional
 
 from tda import pipeline as P
@@ -542,6 +543,23 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _survive_a_narrow_console() -> None:
+    """Never let an un-encodable character be the thing that kills a command.
+
+    Every line this tool prints is ASCII on purpose, but a raw step name from a
+    sheet, a path or an exception message is not under our control, and a
+    Windows console still defaults to cp1252. A ``UnicodeEncodeError`` out of
+    ``print`` would abort an import *after* it had written -- so the stream is
+    told to substitute instead. Older or already-replaced streams simply have no
+    ``reconfigure``, which is not a reason to fail either.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, OSError, ValueError):  # not a real tty, or already set
+            pass
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """Run one subcommand; returns the process exit code.
 
@@ -554,6 +572,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     nothing in a traceback they could act on. Everything else is a bug and keeps
     its traceback, which is the only place it can be read.
     """
+    _survive_a_narrow_console()
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args))

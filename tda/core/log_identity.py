@@ -193,6 +193,31 @@ class InstanceLedger:
         return list(self._unnumbered.get(identity(cls, disc, None, attrs), []))
 
 
+def reuse_candidates(
+    ledger: InstanceLedger,
+    cls: str,
+    disc: str,
+    attrs: dict,
+    state_of: Callable[[str], Optional[str]],
+) -> list[tuple[str, str]]:
+    """Every instance an unnumbered successful ``remove`` *could* be operating.
+
+    ``(key, how it was last acted on)`` each. One is a reuse; none is a new
+    part; two or more is a question for a human, which the caller reports rather
+    than silently answering.
+    """
+    found: list[tuple[str, str]] = []
+    for key in ledger.unnumbered_matches(cls, disc, attrs):
+        if state_of(key) == REMOVED:
+            continue
+        done, attempted = ledger.last_successful(key), ledger.last_failed(key)
+        if done in NON_TERMINAL_VERBS:
+            found.append((key, done))
+        elif attempted is not None:
+            found.append((key, f"failed {attempted}"))
+    return found
+
+
 def physical_reuse(
     ledger: InstanceLedger,
     cls: str,
@@ -227,13 +252,5 @@ def physical_reuse(
     Without this, each of those sheets drafted two keys for one physical power
     supply, both needing an in-chassis mask on the same frames.
     """
-    found: list[tuple[str, str]] = []
-    for key in ledger.unnumbered_matches(cls, disc, attrs):
-        if state_of(key) == REMOVED:
-            continue
-        done, attempted = ledger.last_successful(key), ledger.last_failed(key)
-        if done in NON_TERMINAL_VERBS:
-            found.append((key, done))
-        elif attempted is not None:
-            found.append((key, f"failed {attempted}"))
+    found = reuse_candidates(ledger, cls, disc, attrs, state_of)
     return found[0] if len(found) == 1 else None

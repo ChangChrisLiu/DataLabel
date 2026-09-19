@@ -141,12 +141,30 @@ def test_a_removal_plan_still_pulls_the_plugs_first(bench, edges, tax):
         plan.index(("remove", "psu.01"))
 
 
-def test_a_displace_inside_a_plan_does_not_drag_the_cables_along(bench, edges, tax):
-    """The planner must honour the table too, not its own copy of the rule."""
+def test_a_displace_inside_a_plan_does_not_drag_the_cables_along(bench, tax):
+    """The planner must honour the table, not keep its own copy of the rule.
+
+    The drive is held only by its two SATA plugs, so nothing at all gates
+    sliding it out of the cage. A plan that reaches it through a ``displace``
+    must therefore emit no ``disconnect`` before that step -- which is precisely
+    what the planner did before, having cleared every edge of a node whatever
+    verb it was about to emit.
+    """
     from tda.core.graph_plan import remaining_plan as planner
 
     assert planner is remaining_plan
-    plan = remaining_plan(bench, edges, initial_state(bench, tax), "motherboard.01", tax)
+    drive = bench["storage_drive.hdd.01"]
+    state = initial_state(bench, tax)
+    gating = applicable_preconditions(propose_edges(bench, tax),
+                                      ("displace", drive.key))
+    assert [e.type for e in gating] == []  # nothing gates the displace at all
+
+    # and through the planner: the board's own plug is still pulled first,
+    # because *that* goal ends in a remove
+    plan = remaining_plan(bench, propose_edges(bench, tax), state,
+                          "motherboard.01", tax)
     assert plan is not None
-    # the board's own plug must still be pulled before the board comes out
-    assert ("disconnect", "connector.atx_24pin.01") in plan
+    atx = ("disconnect", "connector.atx_24pin.01")
+    assert atx in plan
+    assert plan.index(atx) < plan.index(("remove", "motherboard.01"))
+    assert ("displace", "motherboard.01") not in plan

@@ -125,7 +125,21 @@ def _open_conflicts(truth, db, desktops: Sequence[int], view: str) -> int:
     if not callable(found):
         def found(desktop: int, view: str) -> list:
             return db.conflicts(desktop, view)
-    return sum(len(found(int(desktop), str(view))) for desktop in desktops)
+    return sum(_how_many(found(int(desktop), str(view))) for desktop in desktops)
+
+
+def _how_many(answer) -> int:
+    """A count, whether the service answered with the rows or with their number.
+
+    ``TruthService.open_conflicts`` returns a list; a future one may well return
+    an ``int``, and this adapter is the wrong place to care which.
+    """
+    if isinstance(answer, int):
+        return answer
+    try:
+        return len(answer)
+    except TypeError:
+        return 0
 
 
 def _frame_counts(db, desktops: Sequence[int], view: str) -> tuple[int, int]:
@@ -156,7 +170,7 @@ def _nothing_exported(command: str, view: str, out: str, only_verified: bool) ->
     hint = (" (use --no-only-verified to include unverified frames)"
             if only_verified else "")
     print(f"[{command}] WARNING: {subject} for the requested desktops/{view} "
-          f"— nothing exported{hint}")
+          f"- nothing exported{hint}")
     try:
         Path(out).unlink(missing_ok=True)
     except OSError as exc:  # a locked or read-only file: say so, do not crash
@@ -266,8 +280,12 @@ def _add_app(sub) -> None:
     p = sub.add_parser("app", help="open the annotator (resumes the last frame)")
     p.add_argument("--desktop", type=int, default=None,
                    help="machine to open (default: where this annotator left off)")
-    p.add_argument("--view", default=None, choices=list(VIEWS),
-                   help="view to open (default: the last one, else scan)")
+    # one view, not a list: the window opens on a single view. The plural
+    # spelling is accepted so that a hand that has just typed `--views` at an
+    # export does not get "unrecognized arguments" here.
+    p.add_argument("--view", "--views", dest="view", default=None, choices=list(VIEWS),
+                   help="the ONE view to open (default: the last one, else scan); "
+                        "unlike check and the exports this takes no list")
     p.add_argument("--annotator", required=True, help="who is annotating (the lock holder)")
     p.add_argument("--step", type=int, default=None, help="open this logical step")
     p.set_defaults(func=cmd_app)
