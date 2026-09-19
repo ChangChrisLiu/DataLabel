@@ -39,6 +39,7 @@ import time
 from collections import deque
 from typing import Iterable, Optional
 
+import shiboken6
 from PySide6.QtCore import QObject, Signal
 
 from tda.core.db import Db
@@ -73,10 +74,6 @@ STALE_QUIET_PERIOD = 1.0
 
 #: The step a worker-level failure (its database, not one frame) is reported as.
 NO_STEP = -1
-
-#: What PySide raises when the object a signal belongs to has been destroyed.
-#: The only ``RuntimeError`` an emit may swallow (:meth:`TruthSweeper._emit`).
-DELETED_SOURCE = "Signal source has been deleted"
 
 
 class TruthSweeper(QObject):
@@ -260,12 +257,21 @@ class TruthSweeper(QObject):
         note it: the work itself is in the database either way. Every *other*
         ``RuntimeError`` is a bug in a slot and is re-raised -- swallowing
         those would make this guard the next place a failure goes missing.
+
+        Which of the two it was is asked of shiboken rather than read off the
+        exception: what PySide raises for a destroyed object is PySide's
+        business, it has been worded differently across versions, and the
+        version is not pinned. ``isValid`` is checked *after* the emit as well
+        as before, because the window can be torn down between the two.
         """
+        if not shiboken6.isValid(self):
+            log.debug("truth sweeper has no receiver left for %s", signal)
+            return
         try:
             signal.emit(*args)
-        except RuntimeError as gone:
-            if DELETED_SOURCE not in str(gone):
-                raise
+        except RuntimeError:
+            if shiboken6.isValid(self):
+                raise  # the object is alive, so this is a slot's own failure
             log.debug("truth sweeper could not deliver %s", signal)
 
     def _run(self) -> None:

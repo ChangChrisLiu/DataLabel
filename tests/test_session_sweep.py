@@ -188,22 +188,41 @@ def test_a_worker_that_cannot_start_is_not_running_the_moment_it_says_so(
         session.close()
 
 
-def test_the_emit_guard_only_swallows_a_receiver_that_is_gone(qapp, tmp_path):
-    """Everything else is a bug in the slot, and a bug has to be reportable."""
-    sweeper = TruthSweeper(str(tmp_path / "x.sqlite"), None, str(tmp_path))
+def test_the_emit_guard_only_swallows_a_receiver_that_is_really_gone(qapp, tmp_path):
+    """Provoked with real Qt destruction, not with a hand-written message.
 
-    class Gone:
-        def emit(self, *a):
-            raise RuntimeError("Signal source has been deleted")
+    What PySide raises when the object behind a signal has been destroyed is
+    PySide's business and has been worded differently across versions, so the
+    guard asks shiboken whether the object is still there instead of reading
+    the exception. Everything else is a bug in a slot, and a bug has to be
+    reportable.
+    """
+    import shiboken6
+
+    sweeper = TruthSweeper(str(tmp_path / "x.sqlite"), None, str(tmp_path))
+    emit = sweeper._emit  # noqa: SLF001 - the guard is what is under test
 
     class Broken:
         def emit(self, *a):
             raise RuntimeError("the slot raised")
 
-    sweeper._emit(Gone())  # noqa: SLF001 - the guard is what is under test
-
     with pytest.raises(RuntimeError, match="the slot raised"):
-        sweeper._emit(Broken())
+        emit(Broken())
+
+    signal = sweeper.sigQueuesChanged
+    shiboken6.delete(sweeper)
+    assert not shiboken6.isValid(sweeper)
+
+    emit(signal)  # the C++ object is gone: noted, not raised
+
+    class Reworded:
+        """The same situation, in the wording PySide uses for other wrappers."""
+
+        def emit(self, *a):
+            raise RuntimeError(
+                "wrapped C/C++ object of type TruthSweeper has been deleted")
+
+    emit(Reworded())  # still the object being gone, whatever it is called
 
 
 def test_stop_keeps_is_running_truthful_when_the_join_times_out(session):
