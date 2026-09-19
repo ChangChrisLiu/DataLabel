@@ -183,21 +183,37 @@ class PoseSegmentMixin:
         which of them a bench box was measured against is as answerable a
         question as it is for the chassis crop.
 
+        Drawing (or clearing) a staging area changes what **every frame of the
+        view** compiles to: a part on the bench becomes an instance of the frame
+        that was not in it before, so ``needs``, ``placements`` and the digest
+        all move (spec 3.3 step 2). The view's frozen frames are therefore
+        queued for a re-check, in the same transaction as the write and the op
+        log -- without it they kept rows describing a machine with nothing on
+        the bench, and an export published them.
+
         Returns the rectangle as stored, or ``None`` when it was cleared.
+
+        Raises:
+            ValueError: ``roi`` is malformed, or the segment does not exist.
         """
         payload = None if roi is None else _clean_roi(roi, hw)
         before = self.bench_roi(desktop, view, seg)
-        with self._tx():
-            self.conn.execute(
+        with self.transaction():
+            cur = self.conn.execute(
                 "UPDATE pose_segment SET bench_roi_json=? WHERE desktop=? AND view=? "
                 "AND seg=?",
                 (R.dumps(payload), desktop, view, seg),
             )
-        self.log_op(
-            desktop, view, "set_bench_roi",
-            {"seg": int(seg), "roi": payload}, {"seg": int(seg), "roi": before},
-            annotator,
-        )
+            if not cur.rowcount:
+                raise ValueError(
+                    f"no pose segment {seg} for desktop {desktop} view {view!r}"
+                )
+            self.queue_rechecks_for_view(desktop, view)
+            self.log_op(
+                desktop, view, "set_bench_roi",
+                {"seg": int(seg), "roi": payload}, {"seg": int(seg), "roi": before},
+                annotator,
+            )
         return payload
 
     def bench_roi(self, desktop: int, view: str, seg: int) -> Optional[list]:
