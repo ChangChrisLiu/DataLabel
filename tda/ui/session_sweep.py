@@ -167,7 +167,14 @@ class TruthSweeper(QObject):
         still holding a connection to the same database. Whenever the worker is
         stopping, this joins it briefly before answering, so "not running" is
         true by the time anybody can read it.
+
+        Called **on** the worker -- by a slot running there -- it answers at
+        once instead of waiting: the caller is the thing that would drain the
+        queue, so anything still in it is work this very thread is holding, and
+        the wait could only ever end at the timeout.
         """
+        if self._thread is threading.current_thread():
+            return self._idle.is_set()
         deadline = time.monotonic() + timeout
         while True:
             idle = self._idle.wait(min(0.05, max(0.0, deadline - time.monotonic())))
@@ -184,17 +191,12 @@ class TruthSweeper(QObject):
 
         Only while ``_stopping`` is set -- the worker itself sets it when it
         cannot start, and :meth:`stop` sets it on the way down -- so this never
-        waits on a sweeper that is simply busy.
-
-        A thread cannot wait for itself to finish, so a :meth:`wait_idle`
-        called *on* the worker (by a slot running there) answers from what it
-        can see rather than raising ``cannot join current thread`` out of the
-        middle of a sweep.
+        waits on a sweeper that is simply busy. :meth:`wait_idle` is the only
+        caller and has already turned the worker's own thread away, so the
+        join here can never be a thread waiting for itself.
         """
         thread = self._thread
-        if thread is None or thread is threading.current_thread():
-            return
-        if not thread.is_alive():
+        if thread is None or not thread.is_alive():
             return
         with self._lock:
             stopping = self._stopping

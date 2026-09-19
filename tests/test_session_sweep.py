@@ -21,6 +21,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -251,6 +252,30 @@ def test_wait_idle_on_the_worker_thread_answers_instead_of_joining_itself(
 
     assert "error" not in seen, seen.get("error")
     assert "value" in seen
+
+
+def test_wait_idle_on_the_worker_does_not_wait_for_work_it_is_holding(
+    session, monkeypatch
+):
+    """The caller is the drainer, so waiting for the queue is waiting for itself."""
+    seen: dict = {}
+
+    def inside(self, *a, **k):
+        with self._lock:
+            self._rechecks.append(99)   # still queued, and this thread has it
+        started = time.monotonic()
+        seen["value"] = self.wait_idle(timeout=10.0)
+        seen["waited"] = time.monotonic() - started
+        with self._lock:
+            self._rechecks.clear()
+
+    monkeypatch.setattr(TruthSweeper, "_recheck", inside)
+    session.sweeper.open(DESKTOP, VIEW)
+    session.sweeper.enqueue([3])
+    session.drain_sweeper(timeout=20.0)
+
+    assert seen.get("value") is False      # it will not drain while we stand here
+    assert seen["waited"] < 1.0, f"waited {seen['waited']:.1f}s for itself"
 
 
 def test_stop_keeps_is_running_truthful_when_the_join_times_out(session):
