@@ -275,6 +275,77 @@ def test_coco_file_matches_the_returned_document(db, tax, tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
+# a board-mounted latch leaves the chassis inside the motherboard
+# --------------------------------------------------------------------------- #
+BOARD, LATCH = "motherboard.01", "ram_latch.01"
+BOARD_MASK = _rect(0, 40, 0, 40)
+LATCH_MASK = _rect(4, 12, 4, 12)
+
+
+@pytest.fixture
+def board_db(tmp_db_path: str, tax):
+    """A board with one RAM latch on it: the clip opens at 2, the board goes at 3.
+
+    The taxonomy's ``host_class`` is what the S1 heuristic turns into this
+    ``parent``/``attached`` pair, and the spec-3.3 cascade then takes the latch
+    out with the board. This view has no staging-area ROI, so once a part is on
+    the bench it is in nobody's picture.
+    """
+    d = Db(tmp_db_path)
+    d.upsert_desktop(DESKTOP, {"brand": "dell", "split": "train"})
+    d.upsert_instance(InstanceRec(key=BOARD, desktop=DESKTOP, cls="motherboard"))
+    d.upsert_instance(InstanceRec(key=LATCH, desktop=DESKTOP, cls="ram_latch",
+                                  parent=BOARD, attached=True))
+    d.replace_steps(
+        DESKTOP,
+        [StepRec(DESKTOP, 1, "initial", "initial"),
+         StepRec(DESKTOP, 2, "normal", "ram clip 1"),
+         StepRec(DESKTOP, 3, "normal", "motherboard")],
+        [ActionRec(DESKTOP, 2, 0, LATCH, "open", tool="hand"),
+         ActionRec(DESKTOP, 3, 0, BOARD, "remove", tool="hand", direction="+Z")],
+    )
+    for step in (1, 2, 3):
+        d.upsert_frame(FrameKey(DESKTOP, step, VIEW), f"F:/scan/019/{step:03d}/P_0.png",
+                       {"hw": [64, 64]}, "2025-05-31T10:00:00",
+                       flags={"review_status": "unlabeled"})
+    for instance, mask in ((BOARD, BOARD_MASK), (LATCH, LATCH_MASK)):
+        d.add_keyframe(ShapeKeyframe(
+            id=None, instance=instance, desktop=DESKTOP, view=VIEW,
+            pose_segment=SEGMENT, anchor_step=3, placement="in_chassis",
+            geom_type="mask", parts=[ShapePart("main", rle=encode_rle(mask))],
+        ))
+    yield d
+    d.close()
+
+
+def _ann_keys(doc: dict, step: int) -> set[str]:
+    by_id = {im["id"]: im for im in doc["images"]}
+    return {ann["attributes"]["instance_key"] for ann in doc["annotations"]
+            if by_id[ann["image_id"]]["extra"]["step"] == step}
+
+
+def test_coco_stops_exporting_a_latch_once_its_board_is_out(board_db, tax, tmp_path: Path):
+    doc = export_coco(board_db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"),
+                      only_verified=False, include_boxes=True)
+    assert _ann_keys(doc, 1) == {BOARD, LATCH}
+    assert _ann_of(doc, 2, LATCH)["attributes"]["state"] == "open"
+    # step 3: the board is on the bench and this view has no staging area, and
+    # the latch went out inside it -- neither is anybody's work here
+    assert _ann_keys(doc, 3) == set()
+
+
+def test_the_vlm_export_asks_about_the_latch_only_while_it_is_there(
+    board_db, tax, tmp_path: Path
+):
+    """Both classes still have more than one state, so V2 keeps asking (spec 8)."""
+    out = tmp_path / "vlm.jsonl"
+    export_vlm(board_db, tax, [DESKTOP], VIEW, str(out), only_verified=False)
+    states = {(r["step"], r["answer"]["state"]) for r in _records(out)
+              if r["task"] == "V2" and r["id"].endswith(f"state-{LATCH}")}
+    assert states == {(1, "closed"), (2, "open")}
+
+
+# --------------------------------------------------------------------------- #
 # VLM
 # --------------------------------------------------------------------------- #
 def _records(path: Path) -> list[dict]:

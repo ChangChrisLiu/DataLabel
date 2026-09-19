@@ -600,3 +600,154 @@ def test_generated_events_validate_clean(instances, cooler_actions, tax):
     ]
     events = events_from_actions(instances, actions, tax)
     assert validate_events(instances, events, tax) == []
+
+
+# --------------------------------------------------------------------------- #
+# the board-mounted latches ride out inside the motherboard
+#
+# D13 in miniature: the RAM clips are opened at steps 14-17, the socket lever at
+# 20, and the board is lifted at the last step of the sheet. Nothing ever
+# removes a latch by a verb of its own -- `remove.applies_to` does not list the
+# class -- so before the `host_class` pair was filled they stood `in_chassis`
+# with state `open` for ever, and the start frame of reverse-order annotation
+# was a task card demanding five masks on a picture of an empty chassis.
+# --------------------------------------------------------------------------- #
+BOARD = "motherboard.01"
+RAM_LATCHES = tuple(f"ram_latch.{i:02d}" for i in range(1, 5))
+LEVER = "cpu_socket_lever.01"
+BOARD_MOUNTED = (*RAM_LATCHES, LEVER)
+BOARD_STEP = 42
+
+
+def _d13_instances(board_parent: bool = True) -> dict[str, InstanceRec]:
+    """A chassis, a board carrying four RAM clips and a lever, and a PSU latch.
+
+    ``psu_latch.01`` is the control: ``taxonomy.yaml`` deliberately declares no
+    ``host_class`` for it, so it must keep asking for a mask whatever the board
+    does.
+    """
+    parent = {"parent": BOARD, "attached": True} if board_parent else {}
+    recs = [
+        _inst("chassis.01", "chassis"),
+        _inst(BOARD, "motherboard"),
+        _inst("ram_module.01", "ram_module"),
+        *[_inst(key, "ram_latch", attrs={"of": "ram_module.01"}, **parent)
+          for key in RAM_LATCHES],
+        _inst(LEVER, "cpu_socket_lever", **parent),
+        _inst("psu_latch.01", "psu_latch"),
+    ]
+    return {r.key: r for r in recs}
+
+
+def _d13_actions(board_step: int | None = BOARD_STEP) -> list[ActionRec]:
+    """Clips open at 14-17, lever at 20, board lifted at ``board_step``."""
+    actions = [_act(14 + i, 0, key, "open") for i, key in enumerate(RAM_LATCHES)]
+    actions.append(_act(20, 0, LEVER, "open"))
+    actions.append(_act(21, 0, "psu_latch.01", "open"))
+    if board_step is not None:
+        actions.append(_act(board_step, 0, BOARD, "remove", direction="+Z"))
+    return actions
+
+
+@pytest.fixture
+def d13() -> dict[str, InstanceRec]:
+    return _d13_instances()
+
+
+@pytest.fixture
+def d13_events(d13, tax) -> list[StateEvent]:
+    return events_from_actions(d13, _d13_actions(), tax)
+
+
+def test_the_last_frame_asks_for_no_board_mounted_latch(d13, d13_events, tax):
+    fs = state_at(d13, d13_events, BOARD_STEP, tax)
+    geom = needs_geom(d13, fs, tax)
+    for key in BOARD_MOUNTED:
+        assert key not in geom, key
+    assert geom["psu_latch.01"] == "mask"  # no host_class: still the human's work
+    assert geom["chassis.01"] == "mask"
+
+
+def test_the_frame_before_asks_for_every_one_of_them(d13, d13_events, tax):
+    fs = state_at(d13, d13_events, BOARD_STEP - 1, tax)
+    geom = needs_geom(d13, fs, tax)
+    for key in BOARD_MOUNTED:
+        assert geom[key] == "mask", key
+    assert geom[BOARD] == "mask"
+
+
+def test_they_are_gone_with_the_board_rather_than_lying_beside_it(d13, d13_events, tax):
+    fs = state_at(d13, d13_events, BOARD_STEP, tax)
+    for key in BOARD_MOUNTED:
+        assert fs[key] == InstState(state="removed", placement="on_bench"), key
+        assert fs[key].left_with == BOARD
+        assert gone_with_parent(fs, key)
+    assert not gone_with_parent(fs, "psu_latch.01")
+
+
+def test_a_view_with_a_bench_never_asks_for_a_box_of_one_either(d13, d13_events, tax):
+    """They are *inside* the board on the bench, not beside it (decision C7)."""
+    fs = state_at(d13, d13_events, BOARD_STEP, tax)
+    seeing = needs_geom(d13, fs, tax, bench_roi=[0, 0, 32, 32])
+    assert seeing[BOARD] == "box"
+    for key in BOARD_MOUNTED:
+        assert key not in seeing, key
+
+
+def test_a_desktop_whose_board_never_leaves_keeps_asking_for_them(d13, tax):
+    """The implied-board case (D49/D62/D63/D64): nothing removes it, so they stay."""
+    events = events_from_actions(d13, _d13_actions(board_step=None), tax)
+    for step in (1, 17, 20, BOARD_STEP):
+        geom = needs_geom(d13, state_at(d13, events, step, tax), tax)
+        for key in BOARD_MOUNTED:
+            assert geom[key] == "mask", (step, key)
+
+
+def test_a_latch_with_no_parent_is_exactly_the_old_defect(tax):
+    """The unfilled table: after the board leaves they still stand in the chassis."""
+    orphaned = _d13_instances(board_parent=False)
+    events = events_from_actions(orphaned, _d13_actions(), tax)
+    geom = needs_geom(orphaned, state_at(orphaned, events, BOARD_STEP, tax), tax)
+    for key in BOARD_MOUNTED:
+        assert geom[key] == "mask", key
+
+
+def test_the_cascade_writes_removed_and_validate_events_accepts_it(d13, d13_events, tax):
+    """`removed` is a state of both classes precisely so this log is legal."""
+    written = [(e.target, e.old, e.new) for e in d13_events
+               if e.target in BOARD_MOUNTED and e.attr == "state"]
+    assert ("ram_latch.01", "open", "removed") in written
+    assert (LEVER, "open", "removed") in written
+    assert validate_events(d13, d13_events, tax) == []
+    for cls in ("ram_latch", "cpu_socket_lever"):
+        assert "removed" in tax.states_of(cls)
+        assert tax.needs_mask(cls, "removed", "in_chassis") is False
+
+
+def test_no_verb_can_put_a_latch_in_removed(tax):
+    """The state is the cascade's word, never an annotator's choice (spec 6.3)."""
+    for cls in ("ram_latch", "cpu_socket_lever"):
+        assert cls not in tax.verbs["remove"]["applies_to"]
+        assert tax.apply_verb(cls, {}, "remove") is None
+        assert tax.apply_verb(cls, {}, "displace") is None
+
+
+def test_the_task_card_transition_of_the_frame_the_board_is_still_on(d13, d13_events, tax):
+    """What the annotator meets walking backwards onto the last-but-one frame.
+
+    ``diff_states(state(j + 1), state(j))`` is what the card is built from, so
+    every latch reads ``removed -> open``: it comes back into the chassis with
+    the board and has to be drawn there. That is an ``add_shape`` item, not a
+    verb-less state change nobody could commit.
+    """
+    here = state_at(d13, d13_events, BOARD_STEP - 1, tax)
+    there = state_at(d13, d13_events, BOARD_STEP, tax)
+    changes = {key: (attr, old, new) for key, attr, old, new in diff_states(there, here)
+               if attr == "state"}
+    assert changes[BOARD] == ("state", "removed", "installed")
+    for key in RAM_LATCHES:
+        assert changes[key] == ("state", "removed", "open"), key
+    assert changes[LEVER] == ("state", "removed", "open")
+    # and the geometry policy agrees: needed here, not needed there
+    assert all(key in needs_geom(d13, here, tax) for key in BOARD_MOUNTED)
+    assert not any(key in needs_geom(d13, there, tax) for key in BOARD_MOUNTED)

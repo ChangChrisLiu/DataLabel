@@ -289,6 +289,23 @@ def test_verb_combo_only_offers_the_verbs_of_the_row_class(panel):
     assert connector == ["disconnect", "remove"]
 
 
+def test_the_verb_combo_offers_no_way_to_remove_a_board_mounted_latch(panel):
+    """`removed` is what the spec-3.3 cascade writes when the board leaves.
+
+    It is a state of ``ram_latch`` and ``cpu_socket_lever`` for that reason
+    alone, and ``remove.applies_to`` deliberately does not list either class --
+    so the one place a human picks a verb must not offer it.
+    """
+    model = panel.steps_model
+    column = _column(model, "Verb")
+    delegate = panel.steps_view.itemDelegateForColumn(column)
+
+    clip = model.first_row_of(14)      # 'RAM clip 1' -> ram_latch.01
+    lever = model.first_row_of(20)     # 'CPU locker' -> cpu_socket_lever.01
+    assert delegate.values_for(model.index(clip, column)) == ["open"]
+    assert delegate.values_for(model.index(lever, column)) == ["open"]
+
+
 def test_verb_combo_falls_back_to_every_verb_for_an_unresolved_target(qapp, db, tmp_path, tax):
     widget = StepTablePanel(db, 63, taxonomy=tax, cache_dir=tmp_path / "cache")
     model = widget.steps_model
