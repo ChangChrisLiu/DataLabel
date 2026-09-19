@@ -6,9 +6,13 @@ problems of one view, build the local image cache, and write the two rehearsal
 exports.  They are registered by appending :data:`SUBCOMMANDS` to the parser
 there, so ``python -m tda.cli --help`` lists all of them together.
 
-Everything that writes takes the single-user lock through ``tda.cli._session``
-(exit code 3 while somebody else holds it), including ``check``: recompiling a
-view writes the ``compiled_mask`` rows it finds stale.
+Everything that writes takes the single-user lock through
+:func:`tda.cli_common.session` (exit code 3 while somebody else holds it),
+including ``check``: recompiling a view writes the ``compiled_mask`` rows it
+finds stale.  That import is at module level and points at
+:mod:`tda.cli_common`, never at :mod:`tda.cli`: importing the latter from here
+loads it a second time under ``python -m tda.cli`` and hands this module a
+``Locked`` class that ``main()`` does not catch.
 """
 from __future__ import annotations
 
@@ -16,6 +20,7 @@ import argparse
 from typing import Callable, Sequence
 
 from tda import pipeline as P
+from tda.cli_common import EXIT_ERROR, EXIT_OK, load_paths, session
 from tda.core.model import VIEWS
 from tda.core.taxonomy import load_taxonomy
 
@@ -120,7 +125,7 @@ def _prepare_truth(db, tax, desktops: Sequence[int], view: str,
 def cmd_app(args: argparse.Namespace) -> int:
     """Open the annotator window; the exit code is the window's.
 
-    The lock is taken by the window rather than by ``_session`` here: it has to
+    The lock is taken by the window rather than by ``session`` here: it has to
     stay held for the whole session and be released on close, next to the exit
     backup, and a refusal has to reach the annotator as a message box.
     """
@@ -156,9 +161,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     Exit code 1 when anything is reported, so a shell loop over the desktops
     can stop on the first machine that needs attention.
     """
-    from tda.cli import EXIT_ERROR, EXIT_OK, _session
-
-    with _session(args, lock=True) as (_paths, db):
+    with session(args, lock=True) as (_paths, db):
         stats = _prepare_truth(db, load_taxonomy(), [int(args.desktop)],
                                str(args.view), refresh=True)
         problems = list(stats["problems"])
@@ -195,7 +198,7 @@ def cmd_build_cache(args: argparse.Namespace) -> int:
     """
     from tda.core import cache
 
-    paths = P.load_paths(args.paths)
+    paths = load_paths(args.paths)
     wanted = _desktop_list(args.desktops)
     runs = _runs(wanted) if wanted else [(int(args.first), int(args.last))]
     extra: list[str] = []
@@ -242,8 +245,6 @@ def _export_prologue(args, db, desktops: Sequence[int], command: str):
     command stops and says which frames to run ``check`` on.  The service it
     built is handed back so the exporter refreshes through the same one.
     """
-    from tda.cli import EXIT_ERROR
-
     stats = _prepare_truth(db, load_taxonomy(), desktops, str(args.view),
                            refresh=bool(getattr(args, "refresh", True)))
     if stats["pending"]:
@@ -256,10 +257,9 @@ def _export_prologue(args, db, desktops: Sequence[int], command: str):
 
 def cmd_export_coco(args: argparse.Namespace) -> int:
     """Write the compiled truth of one view as a COCO file."""
-    from tda.cli import EXIT_ERROR, EXIT_OK, _session
     from tda.core.export.coco import export_coco
 
-    with _session(args, lock=True) as (paths, db):
+    with session(args, lock=True) as (paths, db):
         out = args.out or P.cache_file(paths, f"coco_{args.view}.json")
         desktops = _desktop_list(args.desktops)
         if not desktops:
@@ -302,10 +302,9 @@ def _add_refresh_flags(p) -> None:
 
 def cmd_export_vlm(args: argparse.Namespace) -> int:
     """Write the V1/V2/V3 question set of one view as JSONL."""
-    from tda.cli import EXIT_ERROR, EXIT_OK, _session
     from tda.core.export.vlm import TASKS, export_vlm
 
-    with _session(args, lock=True) as (paths, db):
+    with session(args, lock=True) as (paths, db):
         out = args.out or P.cache_file(paths, f"vlm_{args.view}.jsonl")
         desktops = _desktop_list(args.desktops)
         if not desktops:

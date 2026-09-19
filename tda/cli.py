@@ -28,20 +28,35 @@ up into ``backup_dir`` before they touch anything.
 Adding a command (the GUI ``app``, ``check``, ``build-cache``, ``export-*``):
 write a ``_add_<name>`` registrar that calls ``sub.add_parser(...)`` and sets
 ``func=<handler>``, then list it in :data:`SUBCOMMANDS`. A handler takes the
-parsed arguments and returns the process exit code; ``_session(args,
-lock=True)`` hands it ``(paths, db)`` with the lock held.
+parsed arguments and returns the process exit code; ``session(args, lock=True)``
+of :mod:`tda.cli_common` hands it ``(paths, db)`` with the lock held. Everything
+shared lives there and **nothing imports this module**: run as ``python -m
+tda.cli`` this file is ``__main__``, so an import of ``tda.cli`` would load it a
+second time and give the importer a different ``Locked`` class than the one
+:func:`main` catches.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sqlite3
-from contextlib import contextmanager
-from typing import Callable, Iterator, Optional
+from typing import Callable, Optional
 
 from tda import pipeline as P
 from tda import pipeline_logs as L
 from tda.cli_app import SUBCOMMANDS as _APP_SUBCOMMANDS
+from tda.cli_common import (
+    EXIT_ERROR,
+    EXIT_LOCKED,
+    EXIT_OK,
+    EXIT_ORDER,
+    ConfigError,
+    Locked,
+    desktops as _desktops,
+    load_paths,
+    safety_backup as _safety_backup,
+    session as _session,
+)
 from tda.cli_relations import _add_infer_relations
 from tda.core.db import Db
 from tda.core.index import build_index, load_index, save_index
@@ -49,71 +64,7 @@ from tda.core.index_report import write_report
 from tda.core.model import VIEWS
 from tda.core.taxonomy import load_taxonomy
 
-EXIT_OK = 0
-EXIT_ERROR = 1
-EXIT_ORDER = 2  # the pipeline order was not respected
-EXIT_LOCKED = 3  # another annotator holds the single-user lock
-
 __all__ = ["main"]
-
-
-class Locked(RuntimeError):
-    """Another annotator holds the single-user lock (spec 3.5)."""
-
-
-# --------------------------------------------------------------------------- #
-# helpers
-# --------------------------------------------------------------------------- #
-def _desktops(args: argparse.Namespace) -> Optional[set[int]]:
-    """Parse ``--desktops``; ``None`` means every desktop the source offers."""
-    return P.parse_desktops(getattr(args, "desktops", None))
-
-
-@contextmanager
-def _session(
-    args: argparse.Namespace, lock: bool = False
-) -> Iterator[tuple[dict, Db]]:
-    """Open ``paths.yaml`` + the database, optionally holding the single-user lock.
-
-    The lock is released only when this call took it, so a refused command never
-    unlocks the annotator who is actually working.
-    """
-    paths = P.load_paths(args.paths)
-    db = P.open_db(paths, args.db)
-    held = False
-    try:
-        if lock:
-            try:
-                db.acquire_lock(f"cli:{args.command}")
-            except RuntimeError as exc:
-                raise Locked(str(exc)) from None
-            held = True
-        yield paths, db
-    finally:
-        if held:
-            db.release_lock()
-        db.close()
-
-
-def _safety_backup(paths: dict, db: Db, command: str, why: str) -> bool:
-    """Back the database up before a destructive run; ``False`` when it failed.
-
-    A destructive command that could not make its safety copy must stop before
-    it writes anything, so this swallows the three ways the copy can fail --
-    ``OSError`` (a full, missing or read-only ``backup_dir``), ``sqlite3.Error``
-    (the copy itself) and ``ValueError`` (``paths.yaml`` defines no
-    ``backup_dir``) -- and turns each into the same single line. The caller
-    returns :data:`EXIT_ERROR` immediately; the lock is released by
-    :func:`_session` on the way out either way. No traceback ever reaches the
-    annotator: there is nothing in it they could act on.
-    """
-    try:
-        out = db.backup(P.backup_dest(paths), P.backup_keep(paths))
-    except (OSError, sqlite3.Error, ValueError) as exc:
-        print(f"[{command}] backup failed: {exc}; nothing was written")
-        return False
-    print(f"[{command}] {why}: backed the database up first -> {out}")
-    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -121,7 +72,7 @@ def _safety_backup(paths: dict, db: Db, command: str, why: str) -> bool:
 # --------------------------------------------------------------------------- #
 def cmd_build_index(args: argparse.Namespace) -> int:
     """Scan the source trees on F: and write ``cache/index.json`` + its report."""
-    paths = P.load_paths(args.paths)
+    paths = load_paths(args.paths)
     wanted = _desktops(args) or set(P.ALL_DESKTOPS)
     roots = {k: P.require(paths, k) for k in ("oak_root", "scanner_root", "rs_root")}
     out = args.out or P.index_path(paths)
@@ -552,6 +503,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     ``0`` ok, ``1`` a configuration or input error, ``2`` the pipeline order was
     not respected, ``3`` somebody else holds the single-user lock.
+
+    The three exceptions caught here are the ones an annotator causes by typing:
+    a database somebody else has open, an unusable ``paths.yaml``, a ``--desktops``
+    range that reads backwards. Each is one line and no traceback -- there is
+    nothing in a traceback they could act on. Everything else is a bug and keeps
+    its traceback, which is the only place it can be read.
     """
     args = build_parser().parse_args(argv)
     try:
@@ -560,6 +517,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"[{args.command}] refused: {exc}. Close the annotator (or wait for the "
               f"lock to expire) and try again.")
         return EXIT_LOCKED
+    except ConfigError as exc:  # missing, unreadable or invalid paths.yaml
+        print(f"[{args.command}] {exc}")
+        return EXIT_ERROR
     except ValueError as exc:  # bad --desktops spec, bad paths.yaml, bad --dest
         print(f"[{args.command}] {exc}")
         return EXIT_ERROR
