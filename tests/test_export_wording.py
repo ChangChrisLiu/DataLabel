@@ -1,15 +1,11 @@
-"""VLM export: what ``gold`` promises, and what a label reads like.
+"""VLM export: what a question reads like.
 
-``quality`` used to be read off the single compiled row an answer happened to
-cite, so a frame with one verified screw exported "gold" answers about an
-otherwise unreviewed image. Gold now means the *frame* is verified -- the truth
-service's own notion: a human signed the frame off, or every compiled row of it
-is frozen -- **and** every row the answer was read off is. Everything else is
-``silver``; nothing the truth table produces is unreviewed enough to be worse.
-
-And the questions are read by people (and by a model that answers in words), so
+The questions are read by people -- and answered by a model in words -- so
 ``instance_label`` says "PSU 1" and "RAM module 2", not "psu 1". The structured
 fields keep the machine ids.
+
+What ``tier`` and ``verified`` mean is pinned next door in
+``test_export_tier.py``.
 """
 from __future__ import annotations
 
@@ -90,50 +86,3 @@ def test_the_structured_fields_keep_the_ids(db, tax, tmp_path: Path):
     assert components
     assert {c["instance"] for c in components} <= {PSU, SCREW}
     assert {c["class"] for c in components} <= {"psu", "screw"}
-
-
-# --------------------------------------------------------------------------- #
-# gold
-# --------------------------------------------------------------------------- #
-def test_a_fully_verified_frame_is_gold(db, tax, tmp_path: Path):
-    out = tmp_path / "vlm.jsonl"
-    export_vlm(db, tax, [DESKTOP], VIEW, str(out), tasks=("V1",))
-    first = [r for r in _records(out) if r["step"] == 1]
-    assert first and first[0]["quality"] == "gold"
-
-
-def test_one_unverified_row_takes_the_gold_off_the_whole_frame(db, tax, tmp_path: Path):
-    db.put_compiled(FrameKey(DESKTOP, 1, VIEW), "chassis.01", encode_rle(PSU_MASK),
-                    0.0, "visible", "in_chassis", "auto", "h9")
-    db.upsert_instance(InstanceRec(key="chassis.01", desktop=DESKTOP, cls="chassis"))
-    out = tmp_path / "vlm.jsonl"
-    export_vlm(db, tax, [DESKTOP], VIEW, str(out), tasks=("V1",))
-    first = [r for r in _records(out) if r["step"] == 1]
-    assert first and first[0]["quality"] == "silver"
-
-
-def test_the_frames_own_verified_flag_is_enough(db, tax, tmp_path: Path):
-    """A frame a human signed off is verified even where a row still says auto."""
-    db.upsert_frame(FrameKey(DESKTOP, 2, VIEW), "F:/scan/019/002/P_0.png",
-                    {"hw": [64, 64]}, "2025-05-31T10:00:00",
-                    flags={"review_status": "verified"})
-    out = tmp_path / "vlm.jsonl"
-    export_vlm(db, tax, [DESKTOP], VIEW, str(out), tasks=("V1",))
-    second = [r for r in _records(out) if r["step"] == 2]
-    # the frame is verified, but the row the answer was read off is not
-    assert second and second[0]["quality"] == "silver"
-
-
-def test_the_non_gold_grade_is_silver(db, tax, tmp_path: Path):
-    out = tmp_path / "vlm.jsonl"
-    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
-    grades = {r["quality"] for r in _records(out)}
-    assert grades <= {"gold", "silver"}
-    assert "auto" not in grades
-
-
-def test_only_verified_still_keeps_exactly_the_gold_records(db, tax, tmp_path: Path):
-    out = tmp_path / "vlm.jsonl"
-    export_vlm(db, tax, [DESKTOP], VIEW, str(out), only_verified=True)
-    records = _records(out)
-    assert records and {r["quality"] for r in records} == {"gold"}

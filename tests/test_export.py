@@ -174,13 +174,13 @@ def test_only_verified_filters_rows_and_images(db, tax, tmp_path: Path):
     strict = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "gold.json"))
     assert [im["extra"]["step"] for im in strict["images"]] == [1]
     assert len(strict["annotations"]) == 2
-    assert {a["attributes"]["quality"] for a in strict["annotations"]} == {"gold"}
+    assert {a["attributes"]["verified"] for a in strict["annotations"]} == {True}
 
     full = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "all.json"),
                        only_verified=False)
     assert [im["extra"]["step"] for im in full["images"]] == [1, 2, 3]
     assert len(full["annotations"]) == 3  # the bench row carries no mask
-    assert {a["attributes"]["quality"] for a in full["annotations"]} == {"gold", "auto"}
+    assert {a["attributes"]["verified"] for a in full["annotations"]} == {True, False}
 
 
 def test_images_carry_ids_paths_and_extra(db, tax, tmp_path: Path):
@@ -206,7 +206,7 @@ def test_annotation_geometry_and_attributes(db, tax, tmp_path: Path):
     assert psu["attributes"] == {
         "instance_key": PSU, "state": "installed", "placement": "in_chassis",
         "visibility": "visible", "occlusion_ratio": 0.0, "amodal_complete": False,
-        "quality": "gold",
+        "implied": False, "tier": "gold", "verified": True,
     }
 
     screw = _ann_of(doc, 1, SCREW)
@@ -282,9 +282,9 @@ def test_vlm_writes_at_least_one_record_per_task(db, tax, tmp_path: Path):
     assert len({r["id"] for r in records}) == len(records)
     for rec in records:
         assert set(rec) >= {"id", "task", "desktop", "step", "view", "images",
-                            "question", "answer", "evidence", "rationale", "quality",
-                            "graph_version"}
-        assert rec["quality"] in ("gold", "silver")
+                            "question", "answer", "evidence", "rationale", "tier",
+                            "verified", "graph_version"}
+        assert rec["tier"] == "gold" and isinstance(rec["verified"], bool)
         assert rec["desktop"] == DESKTOP and rec["view"] == VIEW
         assert rec["graph_version"] is None
         assert rec["question"] and isinstance(rec["question"], str)
@@ -358,11 +358,11 @@ def test_vlm_tasks_argument_selects_the_rows(db, tax, tmp_path: Path):
     assert {r["task"] for r in _records(out)} == {"V3"}
 
 
-def test_vlm_only_verified_keeps_gold_records(db, tax, tmp_path: Path):
+def test_vlm_only_verified_keeps_confirmed_records(db, tax, tmp_path: Path):
     out = tmp_path / "vlm.jsonl"
     export_vlm(db, tax, [DESKTOP], VIEW, str(out), only_verified=True)
     records = _records(out)
-    assert records and {r["quality"] for r in records} == {"gold"}
+    assert records and {r["verified"] for r in records} == {True}
     # step 1 is the only verified frame; the V3 pair (1, 2) still reads it
     assert {r["step"] for r in records} == {1, 2}
 

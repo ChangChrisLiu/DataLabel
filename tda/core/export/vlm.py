@@ -3,7 +3,14 @@
 One JSON object per line::
 
     {"id", "task", "desktop", "step", "view", "images", "question",
-     "answer", "evidence", "rationale", "quality", "graph_version"}
+     "answer", "evidence", "rationale", "tier", "verified", "graph_version"}
+
+``tier`` is the **view's** annotation standard (spec 8.1: scanner and OAK1 gold,
+OAK2 silver, RealSense bronze) and is the same for every record of one file;
+``verified`` says whether a human confirmed the frame and every row this
+particular answer was read off. They are two fields because they are two facts:
+one field spelling both -- "gold" when confirmed, "auto" when not -- answered
+the review question in the tier's vocabulary.
 
 * **V1** (perception): one record per frame -- every component the view can be
   pointed at, with its box, ``on_bench`` parts included.
@@ -48,14 +55,13 @@ from tda.core.db import Db
 from tda.core.export.coco import (
     ANSWERABLE,
     NO_CHANGE_STEP_TYPES,
-    QUALITY_GOLD,
-    QUALITY_SILVER,
     VERIFIED,
     DesktopCtx,
     frame_file_name,
     frame_is_verified,
     load_ctx,
     row_bbox_xywh,
+    view_tier,
 )
 from tda.core.model import ActionRec, FrameKey, InstanceRec
 from tda.core.taxonomy import Taxonomy
@@ -192,12 +198,14 @@ def _rationale(steps: list[dict]) -> dict:
 
 
 def _record(rec_id: str, task: str, key: FrameKey, images: list[str], question: str,
-            answer: dict, evidence: dict, rationale: dict, quality: str) -> dict:
+            answer: dict, evidence: dict, rationale: dict, verified: bool) -> dict:
+    """One JSONL record. ``tier`` is filled in by :func:`export_vlm`: it is the
+    view's, so it is the same for every record of one file."""
     return {
         "id": rec_id, "task": task, "desktop": key.desktop, "step": key.step,
         "view": key.view, "images": images, "question": question, "answer": answer,
-        "evidence": evidence, "rationale": rationale, "quality": quality,
-        "graph_version": None,
+        "evidence": evidence, "rationale": rationale, "verified": bool(verified),
+        "tier": None, "graph_version": None,
     }
 
 
@@ -205,21 +213,26 @@ def _frame_id(key: FrameKey) -> str:
     return f"D{key.desktop:02d}-{key.view}-s{key.step:03d}"
 
 
-def _quality(rows: Iterable[dict], frame_verified: bool) -> str:
-    """``gold`` only when the whole *frame* is verified and so is every row cited.
+def _verified(rows: Iterable[dict], frame_verified: bool) -> bool:
+    """Has a human confirmed everything this answer rests on?
 
-    Reading the grade off the cited rows alone was not enough: a V2 question
-    about the one screw a human happened to confirm came out ``gold`` on a frame
-    nobody had otherwise looked at, and a V1 record listing that screw claimed
-    the same about the whole image. Gold now needs both -- the frame
-    (:func:`tda.core.export.coco.frame_is_verified`) and every row the answer
-    was read off. Everything else is ``silver``: it came out of the compiled
-    truth table, which is derived and complete, just not signed off.
+    Both halves are needed. Reading it off the cited rows alone was not enough:
+    a V2 question about the one screw a human happened to confirm came out
+    confirmed on a frame nobody had otherwise looked at, and a V1 record listing
+    that screw claimed the same about the whole image. So the *frame* has to be
+    verified (:func:`tda.core.export.coco.frame_is_verified`) **and** every row
+    the answer was read off with it.
+
+    A record with **no** evidence rows -- "how many screws are still fastened?"
+    on a frame where none is visible, answered off the state machine -- follows
+    its frame. Requiring a non-empty evidence list here dropped every such fact
+    out of a verified export, which is the opposite of what those exports are
+    for: an answer nobody could see is exactly the kind a model has to learn to
+    reason to.
     """
-    used = list(rows)
-    if frame_verified and used and all(row.get("status") == VERIFIED for row in used):
-        return QUALITY_GOLD
-    return QUALITY_SILVER
+    return bool(frame_verified) and all(
+        row.get("status") == VERIFIED for row in rows
+    )
 
 
 def _pointable(ctx: DesktopCtx, rows: dict[str, dict],
@@ -264,7 +277,7 @@ def _v1(ctx: DesktopCtx, key: FrameKey, image: str,
     rec_id = f"V1-{_frame_id(key)}"
     return _record(rec_id, "V1", key, [image], _pick(V1_QUESTIONS, rec_id),
                    {"components": components}, _evidence(bboxes), _rationale(steps),
-                   _quality(used, verified))
+                   _verified(used, verified))
 
 
 # --------------------------------------------------------------------------- #
@@ -288,7 +301,7 @@ def _v2_states(ctx: DesktopCtx, key: FrameKey, image: str,
             _evidence({instance: box}),
             _rationale([_observe(instance, inst_state.state, key.view, box,
                                  row.get("visibility"))]),
-            _quality([row], verified),
+            _verified([row], verified),
         ))
     return records
 
@@ -326,7 +339,7 @@ def _v2_counts(ctx: DesktopCtx, key: FrameKey, image: str,
             rec_id, "V2", key, [image],
             V2_COUNT_QUESTION.format(role=role.replace("_", " ")),
             {"count": len(fastened)}, _evidence(bboxes), _rationale(steps),
-            _quality([pointable[i][0] for i in fastened if i in pointable], verified),
+            _verified([pointable[i][0] for i in fastened if i in pointable], verified),
         ))
     return records
 
@@ -379,7 +392,7 @@ def _v3(ctx: DesktopCtx, key: FrameKey, images: list[str], actions: list[ActionR
     # V3 pair is usually the *earlier* one: the part is gone from the later.
     return _record(rec_id, "V3", key, images, _pick(V3_QUESTIONS, rec_id), answer,
                    _evidence(bboxes, from_step=source_step), _rationale(steps),
-                   _quality([source[target][0]] if target in source else [],
+                   _verified([source[target][0]] if target in source else [],
                             verified.get(source_step, False)))
 
 
@@ -401,20 +414,26 @@ def export_vlm(
 
     Records are grouped by frame in step order and, inside a frame, by task, so
     two exports of the same database are byte-identical. ``only_verified``
-    restricts every question to the compiled rows a human confirmed, which makes
-    each record's ``quality`` ``gold``.
+    restricts every question to the compiled rows a human confirmed and keeps
+    only the records that come out ``verified``.
+
+    Every record carries the view's ``tier`` (spec 8.1, from
+    ``configs/taxonomy.yaml``) -- the same value for the whole file, because a
+    tier is a property of the camera, not of one answer.
 
     Returns ``{"path", "records", "by_task", "desktops", "view"}``.
     """
     wanted = [t for t in TASKS if t in set(tasks)]
     records: list[dict] = []
+    tier = view_tier(view, tax)
 
     def emit(record: Optional[dict]) -> None:
         """Keep a record, unless ``only_verified`` and nothing verified backs it."""
         if record is None:
             return
-        if only_verified and record["quality"] != QUALITY_GOLD:
+        if only_verified and not record["verified"]:
             return
+        record["tier"] = tier
         records.append(record)
 
     service = truth or TruthService(db, tax)

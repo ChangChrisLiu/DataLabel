@@ -31,6 +31,21 @@ on_bench_needs_geom: true
 # list is deliberately short and lives in the vocabulary rather than in code.
 implied_when_referenced: [motherboard]
 
+# Annotation tier per view (spec 8.1). This is a statement about the *view* --
+# how carefully that camera's frames are annotated at all -- and it travels with
+# every exported annotation and every VLM record as `tier`. It is NOT about
+# review: whether a human confirmed one particular frame is the separate
+# `verified` field, and the two must never be read off each other.
+#
+#   gold    the scanner and OAK1: every instance, amodal masks, full review
+#   silver  OAK2: model drafts corrected frame by frame, staging area as boxes
+#   bronze  RealSense: the coarsest tier (`too_small` is common)
+view_tiers:
+  scan: gold
+  oak1: gold
+  oak2: silver
+  rs: bronze
+
 classes:
   # --- 结构 / structure ------------------------------------------------------
   chassis:
