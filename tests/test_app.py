@@ -902,3 +902,28 @@ def test_the_log_records_the_session_the_frames_and_the_commits(qapp, tmp_path):
     finally:
         close_window(win)
     assert "window closed" in log_text(win)
+
+
+def test_the_log_records_every_sam_prompt(window):
+    """SAM timings existed only in the smoke report; the log said nothing.
+
+    And ``tda.models.sam_service``'s own lines never reached the file at all,
+    because the handler was on ``tda.app`` rather than on ``tda``.
+    """
+    import logging
+
+    card = [r for r in window.session.task_card() if r.get("instance")]
+    window.task_card.sigRequestEdit.emit(str(card[0]["instance"]))
+    window.act_tool("sam_point")
+    window.sam_point.on_press(32.0, 32.0, None)
+    window.sam_queue.flush(multimask=True)
+    QApplication.processEvents()
+
+    logging.getLogger("tda.models.sam_service").info("hello from the service")
+    text = log_text(window)
+    assert "sam prompt" in text
+    assert "points=1" in text and "candidates=3" in text and "ms=" in text
+    assert "hello from the service" in text, "the service's logger is not attached"
+
+    window.act_cycle_candidate()
+    assert "sam candidate" in log_text(window)

@@ -118,6 +118,13 @@ def make_settings(paths: dict) -> QSettings:
 def get_logger(paths: dict) -> logging.Logger:
     """The application logger, with exactly one rotating handler.
 
+    The handler goes on the **``tda`` root**, not on ``tda.app``: everything
+    the application does runs through ``tda.core``, ``tda.ui`` and
+    ``tda.models``, and with the handler one level down none of their lines
+    reached the file -- the SAM service's load and failure messages included.
+    ``tda`` keeps ``propagate=False``, so nothing of ours reaches Python's root
+    logger and a library that configures logging cannot capture it.
+
     Handlers pointing at any *other* file are closed and removed: a window
     opened on a second workspace (or a test using ``tmp_path``) would otherwise
     leave the previous run's file open for the life of the process, and every
@@ -125,14 +132,22 @@ def get_logger(paths: dict) -> logging.Logger:
     """
     target = Path(log_path(paths))
     target.parent.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger("tda")
+    root.setLevel(logging.INFO)
+    root.propagate = False  # Python's root logger is not ours to write to
     logger = logging.getLogger("tda.app")
     logger.setLevel(logging.INFO)
-    logger.propagate = False  # the root logger is not ours to write to
+    logger.propagate = True  # ... up to "tda", which holds the handler
     resolved = str(target.resolve())
-    for handler in list(logger.handlers):
+    for handler in list(root.handlers) + list(logger.handlers):
         if getattr(handler, "_tda_target", None) == resolved:
+            if handler in logger.handlers:   # an older window put it here
+                logger.removeHandler(handler)
+                root.addHandler(handler)
             return logger
-        logger.removeHandler(handler)
+        for owner in (root, logger):
+            if handler in owner.handlers:
+                owner.removeHandler(handler)
         handler.close()
     handler = RotatingFileHandler(
         str(target), maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS,
@@ -142,15 +157,21 @@ def get_logger(paths: dict) -> logging.Logger:
         logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     )
     handler._tda_target = resolved  # type: ignore[attr-defined]
-    logger.addHandler(handler)
+    root.addHandler(handler)
     return logger
 
 
 def close_logger(logger: logging.Logger) -> None:
-    """Close and drop the handlers a window added (called from ``shutdown``)."""
-    for handler in list(logger.handlers):
-        logger.removeHandler(handler)
-        handler.close()
+    """Close and drop the handlers a window added (called from ``shutdown``).
+
+    The handler lives on the ``tda`` root (see :func:`get_logger`), so that is
+    where it is taken from; anything an older build left on ``tda.app`` goes
+    too, or a second window in the same process writes to two files.
+    """
+    for owner in (logging.getLogger("tda"), logger):
+        for handler in list(owner.handlers):
+            owner.removeHandler(handler)
+            handler.close()
 
 
 def install_excepthook(

@@ -28,6 +28,9 @@ on the GUI thread.
 """
 from __future__ import annotations
 
+import logging
+import time
+
 from typing import Any, Optional, Sequence
 
 import cv2
@@ -43,6 +46,8 @@ from tda.ui.canvas.sam_crop import (
     viewport_crop,
 )
 from tda.ui.canvas.tools import Box, Point, Rect, Tool
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "MAX_SAM_SIDE",
@@ -136,6 +141,8 @@ class SamToolBase(Tool):
         self._candidate_identity: Any = None
         #: ``(frame token, instance)`` the prompt being built belongs to.
         self._prompt_identity: Any = None
+        #: When the in-flight prompt was submitted, for the log line.
+        self._submitted_at: float = 0.0
         self._renders: Optional[list[Optional[np.ndarray]]] = None
         self._bridge = SamResultBridge(self)
         self._bridge.sigResult.connect(
@@ -330,6 +337,8 @@ class SamToolBase(Tool):
             self.sigHint.emit(HINT_EDITED)
             return 0
         self._candidate_index = (match + int(step)) % len(renders)
+        log.info("sam candidate instance=%s picked=%d/%d",
+                 self._target_instance(), self._candidate_index + 1, len(renders))
         self._apply_candidate()
         return self._candidate_index
 
@@ -398,6 +407,10 @@ class SamToolBase(Tool):
         )
         self._reset_candidates()
         self._token += 1
+        self._submitted_at = time.perf_counter()
+        log.info("sam prompt instance=%s points=%d box=%s refine=%s multimask=%s",
+                 self._target_instance(), len(crop_points), crop_box is not None,
+                 bool(self.refine), bool(req.multimask))
         stamp = (self._token, self._identity())
         bridge, refine = self._bridge, self.refine
         # on_error matters as much as the callback: without it a failed
@@ -458,6 +471,11 @@ class SamToolBase(Tool):
             self.sigError.emit(ERR_OUT_OF_BOUNDS)
             return
 
+        elapsed = ((time.perf_counter() - self._submitted_at) * 1000.0
+                   if self._submitted_at else -1.0)
+        log.info("sam result instance=%s candidates=%d ms=%.0f picked=1",
+                 self._target_instance(),
+                 len(result.candidates or [result.mask]), elapsed)
         self.last_result = result
         self._candidates = [
             np.asarray(mask).astype(bool)
