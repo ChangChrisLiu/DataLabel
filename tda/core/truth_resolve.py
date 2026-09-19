@@ -151,9 +151,10 @@ class ResolveMixin:
                 f"conflict {conflict['id']} is stale: {instance} has no truth row on "
                 f"step {key.step} any more"
             )
-        diff = None if compiled_inst is None else disagreement(row, compiled_inst)
         if compiled_inst is None:
             diff = self._payload_area(row_payload(row))
+        else:
+            diff = disagreement(row, compiled_inst)
         if diff is None:
             return (
                 f"conflict {conflict['id']} is stale: the inputs changed again and now "
@@ -163,10 +164,16 @@ class ResolveMixin:
         new_payload = (
             None if values is None else geom_payload(values.visible_rle, values.box)
         )
-        self._queue_conflict(key, instance, row_payload(row), new_payload, diff, None)
+        _queue, inserted = self._queue_conflict(
+            key, instance, row_payload(row), new_payload, diff, None
+        )
+        # The deduplication may have found this exact disagreement already open:
+        # saying "queued again" then sends the annotator looking for a second
+        # entry that was never written.
+        outcome = ("was queued again" if inserted else "is already queued")
         return (
             f"conflict {conflict['id']} is stale: the inputs changed after it was queued, "
-            f"so the disagreement about {instance} on step {key.step} was queued again"
+            f"so the disagreement about {instance} on step {key.step} {outcome}"
         )
 
     def _keep_old(self, key: FrameKey, instance: str, conflict: dict) -> None:

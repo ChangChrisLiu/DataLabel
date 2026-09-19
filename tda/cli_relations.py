@@ -45,6 +45,8 @@ from tda.core.graph_infer import (
     unresolved_kind,
     unresolved_relations,
 )
+from tda.core.implied import OP_KIND as IMPLIED_OP_KIND
+from tda.core.implied import implied_instances
 from tda.core.model import InstanceRec
 from tda.core.states import events_from_actions
 from tda.core.taxonomy import Taxonomy, load_taxonomy
@@ -79,6 +81,8 @@ class DesktopRelations:
     fills: list[str] = field(default_factory=list)
     unresolved: list[str] = field(default_factory=list)
     changed: int = 0  # instances whose stored row was rewritten
+    #: One line per instance ``--add-implied`` created for this desktop.
+    implied: list[str] = field(default_factory=list)
     error: str = ""
 
     def unresolved_of(self, kind: str) -> int:
@@ -92,6 +96,9 @@ class RelationsRun:
 
     dry_run: bool = False
     runs: list[DesktopRelations] = field(default_factory=list)
+    #: Desktops of the selection that carry nothing frozen, so a second run
+    #: narrowed to them would go through. Filled only when the run was refused.
+    rest: list[int] = field(default_factory=list)
 
     @property
     def applied(self) -> list[DesktopRelations]:
@@ -121,6 +128,10 @@ class RelationsRun:
     def changed(self) -> int:
         return sum(r.changed for r in self.runs)
 
+    @property
+    def implied(self) -> int:
+        return sum(len(r.implied) for r in self.runs)
+
     def tally(self) -> str:
         """``N unresolved (A ambiguous, C no candidate)`` for a summary line.
 
@@ -138,6 +149,25 @@ class RelationsRun:
 # --------------------------------------------------------------------------- #
 # what changed
 # --------------------------------------------------------------------------- #
+def refusal_line(run: RelationsRun) -> str:
+    """The one sentence a refused run ends with.
+
+    Said once, not once by the runner and again by the command, and it carries
+    the argument that acts on it: the exact ``--desktops`` list of everything in
+    the selection that *would* have gone through, ready to paste. Without that
+    the annotator's only offered move is ``--force``, which is the one thing the
+    refusal exists to slow down.
+    """
+    listed = ", ".join(f"D{r.desktop:02d}" for r in run.refused)
+    rest = (f", or run the rest with --desktops {','.join(str(d) for d in run.rest)}"
+            if run.rest else "")
+    return (
+        f"[infer-relations] refused before touching anything: {listed} carry verified "
+        f"frames, whose frozen rows would be re-checked and may raise conflicts. "
+        f"Re-run with --force to fill them anyway{rest}."
+    )
+
+
 def _snapshot(rec: InstanceRec) -> dict[str, Any]:
     """The tracked fields of one instance, deep enough to compare afterwards."""
     return {
@@ -155,34 +185,60 @@ def _diff(before: dict[str, Any], after: dict[str, Any]) -> tuple[dict, dict]:
 # --------------------------------------------------------------------------- #
 # one desktop
 # --------------------------------------------------------------------------- #
-def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool) -> DesktopRelations:
+def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
+               add_implied: bool = False, reset_declined: bool = False) -> DesktopRelations:
     """Infer, and (unless ``dry_run``) write, one desktop's relational fields.
 
-    The whole desktop lands in one transaction: the changed instance rows, an
-    ``op_log`` row per changed instance, and -- only when something actually
-    changed -- the stored automatic state events, which are recompiled because
-    the cascade of spec 3.3 reads ``attached``/``parent`` off the instance
-    table. (:func:`tda.core.truth_inputs.events_of` re-derives that log on every
-    read and ignores the stored ``auto=True`` rows, so this is about the copy
+    The whole desktop lands in one transaction: the implied instances, the
+    changed instance rows, an ``op_log`` row per new or changed instance, and --
+    only when something actually changed -- the stored automatic state events,
+    which are recompiled because the cascade of spec 3.3 reads
+    ``attached``/``parent`` off the instance table.
+    (:func:`tda.core.truth_inputs.events_of` re-derives that log on every read
+    and ignores the stored ``auto=True`` rows, so this is about the copy
     :mod:`tda.ui.steps_model` and the status report read directly.)
+
+    ``add_implied`` runs :func:`tda.core.implied.implied_instances` **before**
+    the heuristic, exactly as ``import-logs`` does, so the references the four
+    never-lifted motherboards leave behind resolve onto the new instance in the
+    same pass. A class the annotator deleted in S1 stays refused unless
+    ``reset_declined`` takes that back -- which it does first, and only for the
+    desktops this run was pointed at.
     """
+    if reset_declined and not dry_run:
+        db.reset_declined_implied(desktop)
+    declined = set() if reset_declined else db.declined_implied(desktop)
     instances = db.instances(desktop)
     actions = db.actions(desktop)
+    new_instances = (implied_instances(instances, actions, tax, declined)
+                     if add_implied else [])
+    for rec in new_instances:
+        instances[rec.key] = rec
     before = {key: _snapshot(rec) for key, rec in instances.items()}
     fills = infer_relational_fields(instances, tax, actions)
+    made = {rec.key for rec in new_instances}
     changes = []
     for key, rec in sorted(instances.items()):
         new, old = _diff(before[key], _snapshot(rec))
-        if new:
+        if new and key not in made:
             changes.append((key, new, old))
     out = DesktopRelations(
         desktop=desktop, status="applied", fills=fills,
         unresolved=unresolved_relations(instances, tax, actions),
         changed=len(changes),
+        implied=[f"implied instance {rec.key}: {rec.attrs.get('note', '')}"
+                 for rec in new_instances],
     )
-    if dry_run or not changes:
+    if dry_run or not (changes or new_instances):
         return out
     with db.transaction():
+        for rec in new_instances:
+            db.upsert_instance(instances[rec.key])
+            db.log_op(
+                desktop, OP_VIEW, IMPLIED_OP_KIND,
+                {"instance": rec.key, "cls": rec.cls, "attrs": dict(instances[rec.key].attrs)},
+                {"instance": rec.key}, ANNOTATOR,
+            )
         for key, new, old in changes:
             db.upsert_instance(instances[key])
             db.log_op(
@@ -200,14 +256,18 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool) -> DesktopRel
 # the run
 # --------------------------------------------------------------------------- #
 def verified_frames(db: Db, desktop: int) -> int:
-    """How many compiled rows of this desktop a human has frozen (spec 3.4)."""
-    return int(db.conn.execute(
-        "SELECT COUNT(*) FROM compiled_mask WHERE desktop=? AND status='verified'",
-        (desktop,),
-    ).fetchone()[0])
+    """How many *frames* of this desktop a human has frozen (spec 3.4).
+
+    One frame is one ``(view, step)``. Counting ``compiled_mask`` rows instead
+    -- one per instance of the frame -- is what made this report "43 verified
+    frames" for a desktop with two, which reads like a reason to stop rather
+    than like the truth. :meth:`tda.core.db.Db.verified_frame_count` owns the
+    query now, so the guard and the re-check queue cannot drift apart.
+    """
+    return db.verified_frame_count(desktop)
 
 
-def _queue_rechecks(db: Db, desktop: int, log) -> None:
+def _queue_rechecks(db: Db, desktop: int, log=None) -> int:
     """Queue this desktop's verified frames for a re-check by the truth service.
 
     The relational fills can change which instances a later frame needs, so
@@ -215,15 +275,14 @@ def _queue_rechecks(db: Db, desktop: int, log) -> None:
     (one request per view). Nothing frozen is lost either way: the truth
     service raises a conflict when a verified row disappears from a recompiled
     frame; queueing only makes the annotator meet it now rather than later.
+
+    The queueing happens whether or not there is anywhere to report it: a
+    ``log`` of ``None`` is a caller that prints nothing, not a caller that wants
+    the frozen frames left unchecked. Returns how many were queued.
     """
-    rows = db.conn.execute(
-        "SELECT DISTINCT view, step FROM compiled_mask "
-        "WHERE desktop=? AND status='verified' ORDER BY view, step",
-        (desktop,),
-    ).fetchall()
     by_view: dict[str, list[int]] = {}
-    for view, step in rows:
-        by_view.setdefault(str(view), []).append(int(step))
+    for view, step in db.verified_frames(desktop):
+        by_view.setdefault(view, []).append(step)
     queued = 0
     for view, steps in by_view.items():
         queued += len(db.add_rechecks(desktop, view, steps))
@@ -231,6 +290,7 @@ def _queue_rechecks(db: Db, desktop: int, log) -> None:
         log(f"[infer-relations] D{desktop:02d}: queued {queued} verified frames for "
             f"re-check (open the desktop in the app, or run `python -m tda.cli check "
             f"--desktop {desktop}`)")
+    return queued
 
 
 def _selected(db: Db, desktops: Optional[set[int]], log) -> list[int]:
@@ -252,6 +312,8 @@ def infer_relations_into_db(
     dry_run: bool = False,
     force: bool = False,
     log=None,
+    add_implied: bool = False,
+    reset_declined: bool = False,
 ) -> RelationsRun:
     """Run the heuristic over every desktop in the database, one transaction each.
 
@@ -265,22 +327,32 @@ def infer_relations_into_db(
     """
     run = RelationsRun(dry_run=dry_run)
     prefix = "[infer-relations]" + (" (dry run)" if dry_run else "")
-    for desktop in _selected(db, desktops, log):
-        frozen = verified_frames(db, desktop)
+    selected = _selected(db, desktops, log)
+
+    # Pre-scan: a run that would refuse desktop 40 must not first have rewritten
+    # thirty-nine. The whole selection is checked before anything is written, so
+    # the annotator can decide once -- --force, or a narrower --desktops.
+    frozen_by_desktop = {d: verified_frames(db, d) for d in selected}
+    for desktop, frozen in frozen_by_desktop.items():
         if frozen and log:
             log(f"{prefix} D{desktop:02d} has {frozen} verified frames; their frozen "
                 f"rows will be re-checked and may raise conflicts")
-        if frozen and not (force or dry_run):
-            run.runs.append(DesktopRelations(
-                desktop=desktop, status="refused",
-                error=f"{frozen} verified frames; re-run with --force to proceed",
-            ))
-            if log:
-                log(f"{prefix} D{desktop:02d}: refused, nothing written "
-                    f"(use --force to proceed anyway)")
-            continue
+    if not (force or dry_run) and any(frozen_by_desktop.values()):
+        for desktop, frozen in frozen_by_desktop.items():
+            if frozen:
+                run.runs.append(DesktopRelations(
+                    desktop=desktop, status="refused",
+                    error=f"{frozen} verified frames; re-run with --force to proceed",
+                ))
+        run.rest = [d for d in selected if not frozen_by_desktop[d]]
+        if log:
+            log(refusal_line(run))
+        return run
+
+    for desktop in selected:
+        frozen = frozen_by_desktop[desktop]
         try:
-            one = _apply_one(db, tax, desktop, dry_run)
+            one = _apply_one(db, tax, desktop, dry_run, add_implied, reset_declined)
         except Exception as exc:  # one bad desktop must not end the run
             one = DesktopRelations(
                 desktop=desktop, status="failed",
@@ -289,12 +361,23 @@ def infer_relations_into_db(
         run.runs.append(one)
         if log:
             _log_desktop(log, prefix, one)
-        if frozen and one.changed and not dry_run:
+        # A new implied instance is not in `changed` -- it is a row that did not
+        # exist, not one that was rewritten -- but it is the *biggest* change
+        # there is for a frozen frame: `needs_geom` gains an instance on every
+        # single frame of the desktop.
+        if frozen and (one.changed or one.implied) and not dry_run:
             _queue_rechecks(db, desktop, log)
     if log:
-        log(f"{prefix} {len(run.applied)} desktops, {run.fills} fills on {run.changed} "
-            f"instances, {run.tally()}, {len(run.refused)} refused, "
-            f"{len(run.failed)} failed")
+        log(f"{prefix} {len(run.applied)} desktops, {run.implied} implied instances, "
+            f"{run.fills} fills on {run.changed} instances, {run.tally()}, "
+            f"{len(run.refused)} refused, {len(run.failed)} failed")
+        if run.failed:
+            # the one thing a reader wants after a stack of per-desktop lines:
+            # is the rest of the database in the state this command promises?
+            log(f"{prefix} {len(run.failed)} desktops failed; every other desktop was "
+                f"applied. Re-run for them once the cause is fixed: "
+                f"--desktops "
+                + ",".join(str(r.desktop) for r in run.failed))
     return run
 
 
@@ -303,10 +386,12 @@ def _log_desktop(log, prefix: str, one: DesktopRelations) -> None:
     if one.status == "failed":
         log(f"{prefix} D{one.desktop:02d}: FAILED, {one.error}")
         return
-    log(f"{prefix} D{one.desktop:02d}: {len(one.fills)} fills on {one.changed} "
-        f"instances, {len(one.unresolved)} unresolved "
+    log(f"{prefix} D{one.desktop:02d}: {len(one.implied)} implied, {len(one.fills)} "
+        f"fills on {one.changed} instances, {len(one.unresolved)} unresolved "
         f"({one.unresolved_of(AMBIGUOUS)} {AMBIGUOUS}, "
         f"{one.unresolved_of(NO_CANDIDATE)} {NO_CANDIDATE})")
+    for text in one.implied:
+        log(f"{prefix}   {text}")
     for text in one.fills:
         log(f"{prefix}   {text}")
     for text in one.unresolved:
@@ -321,22 +406,22 @@ def cmd_infer_relations(args: argparse.Namespace) -> int:
     # late import: tda.cli imports this module to register the subcommand
     from tda.cli import EXIT_ERROR, EXIT_OK, _desktops, _safety_backup, _session
 
+    if args.reset_declined and not args.add_implied:
+        print("[infer-relations] --reset-declined only means something with "
+              "--add-implied: it forgets the implied instances S1 deleted so "
+              "that they can be created again.")
+        return EXIT_ERROR
+
     with _session(args, lock=True) as (paths, db):
-        if not args.dry_run:
-            try:
-                _safety_backup(paths, db, "infer-relations",
-                               "it rewrites the relational fields of every desktop")
-            except OSError as exc:  # a full or unwritable backup_dir, no traceback
-                print(f"[infer-relations] backup failed: {exc}; nothing was written")
-                return EXIT_ERROR
+        if not args.dry_run and not _safety_backup(
+                paths, db, "infer-relations",
+                "it rewrites the relational fields of every desktop"):
+            return EXIT_ERROR  # the line is printed and nothing was written
         run = infer_relations_into_db(
-            db, load_taxonomy(), _desktops(args), args.dry_run, args.force, log=print
+            db, load_taxonomy(), _desktops(args), args.dry_run, args.force, log=print,
+            add_implied=args.add_implied, reset_declined=args.reset_declined,
         )
-        if run.refused:
-            listed = ", ".join(f"D{r.desktop:02d}" for r in run.refused)
-            print(f"[infer-relations] refused: {listed} carry verified frames. Re-run "
-                  f"with --force to fill them anyway (their frozen rows are then "
-                  f"re-checked), or select the other desktops with --desktops.")
+        # the refusal is printed by the runner itself (`log=print`), once
         if run.failed or run.refused:
             return EXIT_ERROR
         return EXIT_OK
@@ -356,4 +441,15 @@ def _add_infer_relations(sub) -> None:
     p.add_argument("--force", action="store_true",
                    help="also fill desktops that already carry verified frames, whose "
                         "frozen rows are then re-checked and may raise conflicts")
+    p.add_argument("--add-implied", action="store_true",
+                   help="first create the instances configs/taxonomy.yaml's "
+                        "implied_when_referenced allows: a part the desktop clearly "
+                        "has (the motherboard of D49/D62/D63/D64) that its log never "
+                        "operates on. OFF here because this command exists to repair "
+                        "a database in place; import-logs always does it")
+    p.add_argument("--reset-declined", action="store_true",
+                   help="with --add-implied, first forget which implied instances "
+                        "were deleted in S1 on the selected desktops, so they are "
+                        "created again. Without it a deleted one stays deleted, "
+                        "through every re-import")
     p.set_defaults(func=cmd_infer_relations)

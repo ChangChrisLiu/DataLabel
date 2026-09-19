@@ -22,6 +22,15 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from tda.core import dbrows as R
+from tda.core.db_backup import (  # re-exported: the lock helpers are part of this API
+    LOCK_SUFFIX,
+    LOCK_TTL,
+    BackupLockMixin,
+    acquire_lock_file,
+    lock_path_for,
+    read_lock_file,
+    release_lock_file,
+)
 from tda.core.db_pose import PoseSegmentMixin
 from tda.core.db_recheck import RecheckMixin
 from tda.core.db_status import StatusMixin
@@ -44,9 +53,11 @@ from tda.core.model import (
 )
 
 SCHEMA_VERSION = 3
-LOCK_TTL = timedelta(hours=12)
-#: Suffix of the single-user lock file, next to the database (spec 3.5).
-LOCK_SUFFIX = ".lock"
+#: ``desktop`` meta key holding the classes whose implied instance the annotator
+#: has deleted (:meth:`Db.declined_implied`). Meta rather than a table: it is one
+#: short list per desktop and it has to survive a ``--force`` re-import, which
+#: rewrites every row this desktop has *except* its meta.
+DECLINED_IMPLIED_KEY = "implied_declined"
 #: How a conflict may be closed. The first three are a human's decision;
 #: ``superseded`` is what the truth service records when the inputs moved on
 #: before anybody got to the conflict (spec 3.4).
@@ -54,13 +65,15 @@ RESOLUTIONS = ("keep_old", "accept_new", "edited", "superseded")
 
 
 class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
-         RecheckMixin, DigestMixin):
+         RecheckMixin, DigestMixin, BackupLockMixin):
     """Repository over the TDA SQLite file. Every write commits immediately --
     unless it runs inside :meth:`~tda.core.dbconn.ConnectionMixin.transaction`;
     :mod:`tda.core.db_pose` and :mod:`tda.core.db_status` mix in more readers,
     :mod:`tda.core.dbdelete` the undo-side row removals,
-    :mod:`tda.core.db_recheck` the queue of frames awaiting a truth re-check and
-    :mod:`tda.core.db_digest` the per-frame input digests."""
+    :mod:`tda.core.db_recheck` the queue of frames awaiting a truth re-check,
+    :mod:`tda.core.db_digest` the per-frame input digests and
+    :mod:`tda.core.db_backup` the verified safety copy and the single-user
+    lock."""
 
     def __init__(self, path: str):
         self.path = str(path)
@@ -142,6 +155,44 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
         out.update(R.loads(row["meta_json"]) or {})
         return out
 
+    def _merge_desktop_meta(self, desktop: int, updates: dict) -> None:
+        """Change part of one desktop's meta, keeping what everything else wrote."""
+        meta = self.get_desktop(desktop) or {}
+        meta.pop("id", None)
+        meta.update(updates)
+        self.upsert_desktop(desktop, {k: v for k, v in meta.items() if v is not None})
+
+    def declined_implied(self, desktop: int) -> set[str]:
+        """Classes this desktop's annotator has refused an implied instance for.
+
+        An implied instance (:mod:`tda.core.implied`) is a judgement about what
+        the dataset should contain, so deleting one in S1 is an answer, not an
+        accident -- and it has to outlive the next ``import-logs``, which implies
+        again from scratch every time. The refusal is kept per class rather than
+        per key: the whole point is that ``motherboard.01`` would be created
+        again under exactly that name.
+        """
+        stored = (self.get_desktop(desktop) or {}).get(DECLINED_IMPLIED_KEY) or []
+        return {str(c) for c in stored} if isinstance(stored, list) else set()
+
+    def decline_implied(self, desktop: int, cls: str) -> None:
+        """Record that no implied instance of ``cls`` is wanted here. Idempotent."""
+        found = self.declined_implied(desktop)
+        if cls in found:
+            return
+        with self._tx():
+            self._ensure_desktop(desktop)
+            self._merge_desktop_meta(
+                desktop, {DECLINED_IMPLIED_KEY: sorted(found | {str(cls)})}
+            )
+
+    def reset_declined_implied(self, desktop: int) -> None:
+        """Forget every refusal of this desktop (``--reset-declined``)."""
+        if not self.declined_implied(desktop):
+            return
+        with self._tx():
+            self._merge_desktop_meta(desktop, {DECLINED_IMPLIED_KEY: None})
+
     def upsert_frame(
         self, key: FrameKey, path: str, aux: dict, ts: str | None, flags: dict | None = None
     ) -> None:
@@ -218,14 +269,37 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
                      R.instance_data(inst), desktop=inst.desktop)
 
     def delete_instance(self, desktop: int, key: str) -> None:
-        """Drop one instance identity row; unknown keys are a no-op.
+        """Drop one instance identity row and the **cache** derived from it.
 
-        Only the identity row goes: the caller decides what to do with the
-        geometry, events and relations that may still name the key (stage S1
-        refuses the deletion outright while any of them do, see
-        :meth:`instance_reference_counts`).
+        The identity row goes, and with it the instance's ``auto`` compiled rows
+        and the ``frame_digest`` of every frame they were part of. Those rows are
+        not annotator work: the compiler writes one per instance the frame needs
+        -- geometry or not -- and re-derives them from the instance table on the
+        next refresh, which is exactly why leaving them behind made every
+        instance the app had ever compiled undeletable. Dropping the digest is
+        what makes that next refresh actually happen.
+
+        A ``verified`` row is a human's signature and is never touched here;
+        stage S1 refuses the deletion outright while one exists, along with the
+        keyframes, overrides, conflicts, manual events, relation edges and
+        z-order entries that may still name the key
+        (:meth:`instance_reference_counts`). Unknown keys are a no-op.
         """
+        frames = self.conn.execute(
+            "SELECT DISTINCT view, step FROM compiled_mask "
+            "WHERE desktop=? AND instance=? AND status<>'verified'",
+            (desktop, key),
+        ).fetchall()
         with self._tx():
+            self.conn.execute(
+                "DELETE FROM compiled_mask WHERE desktop=? AND instance=? "
+                "AND status<>'verified'",
+                (desktop, key),
+            )
+            for row in frames:
+                self.clear_frame_digest(
+                    FrameKey(desktop, int(row["step"]), str(row["view"]))
+                )
             self.conn.execute(
                 'DELETE FROM instance WHERE desktop=? AND "key"=?', (desktop, key)
             )
@@ -244,6 +318,21 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
         ``action``, which the step table owns. Only *manual* state events count
         -- the automatic ones are derived and go with
         :meth:`delete_auto_events`.
+
+        ``compiled_mask`` counts **verified** rows only. An ``auto`` row is a
+        cache: the compiler writes one per instance the frame needs, geometry or
+        not, and re-derives it on the next refresh, so counting those made every
+        instance the app had ever compiled in the background undeletable -- the
+        implied motherboard, whose whole purpose is to be said no to, most of
+        all. :meth:`delete_instance` drops them; :meth:`instance_cache_counts`
+        reports them for information, deliberately apart from this dict, which
+        is a list of *reasons to refuse*.
+
+        ``zorder`` is counted from the JSON list rather than by a join: it holds
+        one ``(instance_key, part)`` total order per ``(view, pose_segment)``,
+        and a deleted key would sit in it as a layer the compiler can never
+        resolve (``zorder_missing``). The count is how many of those order lists
+        name it.
         """
         counts = {
             "frame_override": self._count(
@@ -253,7 +342,8 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
                 "SELECT COUNT(*) FROM pair_override WHERE desktop=? AND (above=? OR below=?)",
                 (desktop, key, key)),
             "compiled_mask": self._count(
-                "SELECT COUNT(*) FROM compiled_mask WHERE desktop=? AND instance=?",
+                "SELECT COUNT(*) FROM compiled_mask WHERE desktop=? AND instance=? "
+                "AND status='verified'",
                 (desktop, key)),
             "conflict": self._count(
                 "SELECT COUNT(*) FROM conflict WHERE desktop=? AND instance=? AND status='open'",
@@ -261,8 +351,46 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
             "state_event": self._count(
                 "SELECT COUNT(*) FROM state_event WHERE desktop=? AND target=? AND auto=0",
                 (desktop, key)),
+            "zorder": self._zorder_references(desktop, key),
         }
         return {table: n for table, n in counts.items() if n}
+
+    def instance_cache_counts(self, desktop: int, key: str) -> dict[str, int]:
+        """Derived rows naming one instance: information, never a refusal.
+
+        Kept apart from :meth:`instance_reference_counts` on purpose -- that one
+        is read as "reasons this cannot be deleted", and these rows are not a
+        reason, they are what :meth:`delete_instance` cleans up.
+        """
+        counts = {
+            "compiled_mask_auto": self._count(
+                "SELECT COUNT(*) FROM compiled_mask WHERE desktop=? AND instance=? "
+                "AND status<>'verified'",
+                (desktop, key)),
+        }
+        return {table: n for table, n in counts.items() if n}
+
+    def _zorder_references(self, desktop: int, key: str) -> int:
+        """How many of a desktop's layer orders name ``key`` (see above).
+
+        An order list that will not parse, or that is not a list of pairs, is
+        counted as naming nothing: it is already broken in a way the compiler
+        reports, and it must not turn into an undeletable instance here.
+        """
+        rows = self.conn.execute(
+            "SELECT order_json FROM zorder WHERE desktop=?", (desktop,)
+        ).fetchall()
+        found = 0
+        for row in rows:
+            try:
+                order = R.loads(row["order_json"])
+            except (ValueError, TypeError):
+                continue  # not JSON at all: broken, and broken names nothing
+            if not isinstance(order, list):
+                continue
+            if any(isinstance(p, (list, tuple)) and p and p[0] == key for p in order):
+                found += 1
+        return found
 
     def delete_auto_events(self, desktop: int, target: str) -> None:
         """Drop the derived state events of one target; hand-written ones stay."""
@@ -608,121 +736,3 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
             (desktop, view, limit),
         ).fetchall()
         return [R.json_row(r, "payload", "inverse") for r in rows]
-
-    # ------------------------------------------------------------ backup/lock
-
-    def backup(self, dest_dir: str) -> str:
-        """Copy the live database with the SQLite backup API; returns the new path."""
-        dest = Path(dest_dir)
-        dest.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out = dest / f"tda_{stamp}.sqlite"
-        serial = 1
-        while out.exists():
-            out = dest / f"tda_{stamp}_{serial}.sqlite"
-            serial += 1
-        target = sqlite3.connect(str(out))
-        try:
-            self.conn.backup(target)
-        finally:
-            target.close()
-        return str(out)
-
-    def _read_lock(self) -> Optional[dict]:
-        """Parse the lock file, or None when it is missing, unreadable or not an object.
-
-        A lock whose content is not a JSON object carries no annotator, so it is
-        treated like a stale one and the next ``acquire_lock`` takes it over.
-        """
-        try:
-            held = json.loads(self._lock_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        return held if isinstance(held, dict) else None
-
-    def acquire_lock(self, annotator: str) -> None:
-        """Take the single-user lock; raises if another annotator holds a fresh one.
-
-        :func:`acquire_lock_file` does the same thing *without* a ``Db``, which
-        is what the application uses: opening the database replays the schema
-        and the migrations, so the lock has to be taken before that, not after.
-        """
-        held = self._read_lock()
-        if held and held.get("annotator") != annotator:
-            try:
-                ts = datetime.fromisoformat(str(held.get("ts")))
-            except ValueError:
-                ts = None  # unreadable timestamp: treat the lock as stale
-            if ts is not None:
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                if datetime.now(timezone.utc) - ts < LOCK_TTL:
-                    raise RuntimeError(
-                        f"database locked by {held.get('annotator')!r} since {held.get('ts')}"
-                    )
-        self._lock_path.write_text(
-            json.dumps({"annotator": annotator, "ts": R.now_iso()}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        self._lock_annotator = annotator
-
-    def release_lock(self) -> None:
-        """Remove the lock file if present; safe to call more than once."""
-        self._lock_path.unlink(missing_ok=True)
-        self._lock_annotator = None
-
-
-# --------------------------------------------------------------------------- #
-# the single-user lock, without a Db
-# --------------------------------------------------------------------------- #
-def lock_path_for(db_path: str) -> Path:
-    """The lock file that belongs to a database path."""
-    return Path(str(db_path) + LOCK_SUFFIX)
-
-
-def read_lock_file(db_path: str) -> Optional[dict]:
-    """The holder recorded in a lock file, or ``None`` when there is none."""
-    try:
-        held = json.loads(lock_path_for(db_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return held if isinstance(held, dict) else None
-
-
-def acquire_lock_file(db_path: str, annotator: str) -> None:
-    """Take the single-user lock **without opening the database**.
-
-    :meth:`Db.__init__` creates the file when it is missing and replays the
-    schema and the migrations on an existing one, so by the time a ``Db`` exists
-    the database has already been written to.  The application therefore has to
-    take the lock first: a refused launch must leave the file exactly as it was,
-    down to its modification time.
-
-    Raises ``RuntimeError`` when a *fresh* lock is held by somebody else; a lock
-    older than :data:`LOCK_TTL`, or one whose timestamp cannot be read, counts as
-    abandoned and is taken over -- the same rule as :meth:`Db.acquire_lock`.
-    """
-    held = read_lock_file(db_path)
-    if held and held.get("annotator") != annotator:
-        try:
-            ts = datetime.fromisoformat(str(held.get("ts")))
-        except ValueError:
-            ts = None  # unreadable timestamp: treat the lock as stale
-        if ts is not None:
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if datetime.now(timezone.utc) - ts < LOCK_TTL:
-                raise RuntimeError(
-                    f"database locked by {held.get('annotator')!r} since {held.get('ts')}"
-                )
-    path = lock_path_for(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"annotator": annotator, "ts": R.now_iso()}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-
-def release_lock_file(db_path: str) -> None:
-    """Drop the lock file; safe to call more than once."""
-    lock_path_for(db_path).unlink(missing_ok=True)

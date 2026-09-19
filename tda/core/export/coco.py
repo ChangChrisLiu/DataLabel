@@ -7,9 +7,16 @@ carries geometry, and the 23 taxonomy classes as categories 1..23 in
 ``configs/taxonomy.yaml`` keeps its order.
 
 Beyond the COCO fields every annotation carries an ``attributes`` block (state,
-placement, visibility, occlusion ratio, amodal completeness and a quality
-grade), because the spec's downstream users -- and the VLM export next door --
-need the truth table's semantics, not only its pixels.
+placement, visibility, occlusion ratio, amodal completeness, provenance, the
+view's ``tier`` and whether it is ``verified``), because the spec's downstream
+users -- and the VLM export next door -- need the truth table's semantics, not
+only its pixels.
+
+``tier`` and ``verified`` are two fields on purpose. The tier is the **view's**
+(spec 8.1: scanner and OAK1 gold, OAK2 silver, RealSense bronze) and is read
+from ``configs/taxonomy.yaml``; ``verified`` says whether a human confirmed this
+row. One field spelling both -- "gold" for confirmed, "auto" for not -- answered
+the second question in the first question's vocabulary.
 
 Coordinates
 -----------
@@ -25,7 +32,9 @@ name the same frame the same way.
 
 The export **writes**: it brings the truth table up to date first
 (:meth:`~tda.core.truth.TruthService.ensure_fresh`), so a caller needs the
-single-user lock of spec 3.5. What it never does is change an annotation and nothing imports Qt.
+single-user lock of spec 3.5. What it never writes is annotation *content* --
+it only reads out what the database already implies -- and nothing here imports
+Qt.
 """
 from __future__ import annotations
 
@@ -37,6 +46,7 @@ from typing import Any, Optional, Sequence
 from tda.core import masks
 from tda.core.compiler import select_keyframe
 from tda.core.db import Db
+from tda.core.implied import is_implied
 from tda.core.model import (
     VIEWS,
     ActionRec,
@@ -63,12 +73,14 @@ __all__ = [
     "export_coco",
     "frame_file_name",
     "frame_hw",
+    "frame_is_verified",
     "image_id",
     "load_ctx",
     "mask_bbox_xywh",
     "roi_of",
     "row_bbox_xywh",
     "view_index",
+    "view_tier",
 ]
 
 #: ``desktop * 100000 + step * 10 + view_index`` keeps ids unique and readable.
@@ -82,8 +94,6 @@ ANSWERABLE = (
     Visibility.VISIBLE_TINY.value,
 )
 
-QUALITY_GOLD = "gold"
-QUALITY_AUTO = "auto"
 VERIFIED = "verified"
 GEOM_BOX = "box"
 DEFAULT_EXT = ".png"
@@ -325,19 +335,50 @@ def _clip_box(box: list, roi: tuple[int, int, int, int]) -> Optional[list]:
 # --------------------------------------------------------------------------- #
 # annotations
 # --------------------------------------------------------------------------- #
-def _quality(row: dict) -> str:
-    """Quality grade of one compiled row.
+def frame_is_verified(db: Db, key: FrameKey, rows: dict[str, dict]) -> bool:
+    """Has a human signed this whole *frame* off? (spec 3.4)
 
-    Only ``gold`` (a human confirmed it) and ``auto`` exist so far; the
-    silver/bronze grades of spec 8.1 arrive with the review levels.
+    The frame-level notion :meth:`tda.core.truth.TruthService._frame_is_verified`
+    works with, narrowed the safe way: the frame's own ``review_status``, or
+    **every** compiled row of it frozen. The truth service can settle for *any*
+    frozen row because it only needs to know whether a demotion is due; a
+    quality grade cannot, or one confirmed screw would make the whole image gold.
     """
-    return QUALITY_GOLD if row.get("status") == VERIFIED else QUALITY_AUTO
+    frame = db.get_frame(key)
+    if frame is not None and frame.get("review_status") == VERIFIED:
+        return True
+    return bool(rows) and all(row.get("status") == VERIFIED for row in rows.values())
+
+
+def view_tier(view: str, tax: Taxonomy) -> Optional[str]:
+    """The annotation tier of one view (spec 8.1), or ``None`` for an unknown one.
+
+    Read from ``configs/taxonomy.yaml``'s ``view_tiers`` and never written down
+    in code: which camera is annotated to which standard is a decision about the
+    dataset, and it has already been changed once. ``None`` rather than a guess,
+    because a view the configuration does not describe is a configuration
+    problem, not a bronze one.
+    """
+    return tax.view_tiers.get(str(view))
 
 
 def _attributes(ctx: DesktopCtx, instance: str, row: dict, step: int,
-                keyframe: Optional[ShapeKeyframe]) -> dict:
-    """The truth-table semantics carried alongside every annotation."""
+                keyframe: Optional[ShapeKeyframe], tier: Optional[str]) -> dict:
+    """The truth-table semantics carried alongside every annotation.
+
+    ``tier`` and ``verified`` are deliberately two fields. The tier is the
+    *view's* (spec 8.1: scanner and OAK1 gold, OAK2 silver, RealSense bronze)
+    and says how carefully these frames are annotated at all; ``verified`` says
+    whether a human confirmed this particular row. The single ``quality`` field
+    that used to hold ``gold``/``auto`` answered the second question with the
+    first question's vocabulary.
+
+    ``implied`` is provenance: the instance was created by
+    :mod:`tda.core.implied` because the desktop plainly has one and its log
+    never touched it, not because a step named it.
+    """
     inst_state = ctx.state_at(step).get(instance)
+    rec = ctx.instances.get(instance)
     return {
         "instance_key": instance,
         "state": None if inst_state is None else inst_state.state,
@@ -345,7 +386,9 @@ def _attributes(ctx: DesktopCtx, instance: str, row: dict, step: int,
         "visibility": row.get("visibility"),
         "occlusion_ratio": row.get("occlusion_ratio"),
         "amodal_complete": None if keyframe is None else bool(keyframe.amodal_complete),
-        "quality": _quality(row),
+        "implied": bool(rec is not None and is_implied(rec)),
+        "tier": tier,
+        "verified": row.get("status") == VERIFIED,
     }
 
 
@@ -452,6 +495,7 @@ def export_coco(
     ann_id = 1
     service = truth or TruthService(db, tax)
 
+    tier = view_tier(view, tax)  # the view's, so it is read once for the file
     for desktop in desktops:
         ctx = load_ctx(db, tax, desktop, view)
         # the compiled rows of an unverified frame are a cache the
@@ -493,7 +537,7 @@ def export_coco(
                                            segment)
                 ann = _annotation(
                     ann_id, img_id, cat_of[cls], row,
-                    _attributes(ctx, instance, row, key.step, keyframe),
+                    _attributes(ctx, instance, row, key.step, keyframe, tier),
                     roi, include_boxes,
                 )
                 if ann is not None:

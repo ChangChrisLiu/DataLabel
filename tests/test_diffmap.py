@@ -605,3 +605,50 @@ def test_a_one_pixel_shift_of_a_real_frame_is_quiet():
     assert top_bogus < real[0].score / 5.0, (
         f"a 1 px shift scores {top_bogus:.0f} against a real change {real[0].score:.0f}"
     )
+
+
+# ---------------------------------------------------------------------------
+# what the guards do when they fire
+# ---------------------------------------------------------------------------
+def _speckled(n: int = 40, size: int = 400) -> np.ndarray:
+    """A dE map with ``n`` well-separated square components."""
+    arr = np.zeros((size, size), np.float32)
+    side = int(np.ceil(np.sqrt(n)))
+    pitch = size // side
+    for i in range(n):
+        y, x = (i // side) * pitch, (i % side) * pitch
+        arr[y:y + 12, x:x + 12] = BLOB_DELTA_E + 5.0
+    return arr
+
+
+def test_truncating_the_components_says_so(caplog):
+    """A pathological pair silently lost most of its change map before."""
+    caplog.set_level("WARNING", logger="tda.core.diffmap")
+    diff_blobs(_speckled(40), min_area=16, max_components=5, merge_gap_px=0)
+    assert any("max_components" in r.message for r in caplog.records)
+    assert any("5" in r.message and "40" in r.message for r in caplog.records)
+
+
+def test_no_warning_when_nothing_was_truncated(caplog):
+    caplog.set_level("WARNING", logger="tda.core.diffmap")
+    diff_blobs(_speckled(4), min_area=16, max_components=100, merge_gap_px=0)
+    assert [r for r in caplog.records if "max_components" in r.message] == []
+
+
+def test_hitting_the_merge_round_cap_says_so(caplog, monkeypatch):
+    import tda.core.diffmap as DM
+
+    caplog.set_level("WARNING", logger="tda.core.diffmap")
+    monkeypatch.setattr(DM, "MAX_MERGE_ROUNDS", 1)
+    # a chain of touching boxes needs more than one round to settle
+    parts = [((i * 10, 0, i * 10 + 12, 12), np.ones((12, 12), bool)) for i in range(12)]
+    DM._merge_parts(parts, 4)
+    assert any("MAX_MERGE_ROUNDS" in r.message for r in caplog.records)
+
+
+def test_a_converged_merge_warns_about_nothing(caplog):
+    caplog.set_level("WARNING", logger="tda.core.diffmap")
+    parts = [((0, 0, 10, 10), np.ones((10, 10), bool)),
+             ((100, 100, 110, 110), np.ones((10, 10), bool))]
+    _merge_parts(parts, 4)
+    assert [r for r in caplog.records if "MAX_MERGE_ROUNDS" in r.message] == []

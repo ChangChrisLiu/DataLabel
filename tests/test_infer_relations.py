@@ -492,6 +492,7 @@ def test_infer_relations_dry_run_writes_nothing(env, capsys):
     finally:
         db.close()
     before = Path(env["db_path"]).read_bytes()
+    backups = set(Path(env["cfg"]["backup_dir"]).glob("tda_*.sqlite"))
 
     capsys.readouterr()
     assert run(env, "infer-relations", "--desktops", "13", "--dry-run") == EXIT_OK
@@ -499,7 +500,8 @@ def test_infer_relations_dry_run_writes_nothing(env, capsys):
     assert "screw.cpu_cooler.01.parent = cpu_cooler.fan.01" in out
     assert "dry run" in out.lower()
     assert Path(env["db_path"]).read_bytes() == before
-    assert not list(Path(env["cfg"]["backup_dir"]).glob("tda_*.sqlite"))
+    # a dry run takes no copy of its own (load-index's is already there)
+    assert set(Path(env["cfg"]["backup_dir"]).glob("tda_*.sqlite")) == backups
     db = open_db(env)
     try:  # the bytes may be stable for other reasons; the rows must be identical
         assert _rows(db, OP_ROWS) == ops_before

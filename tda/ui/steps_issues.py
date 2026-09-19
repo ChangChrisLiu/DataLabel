@@ -29,6 +29,7 @@ from __future__ import annotations
 from typing import Callable, Iterable, Iterator, Optional
 
 from tda.core.graph_infer import is_provisional, real_instances
+from tda.core.implied import is_implied
 from tda.core.logs import CHASSIS_KEY, NO_ACTION_TYPES, UNRESOLVED
 from tda.core.model import ActionRec, InstanceRec, StepType
 from tda.core.taxonomy import Taxonomy
@@ -78,11 +79,17 @@ def action_issues(action: ActionRec, tax: Taxonomy, class_of: ClassOf) -> Iterat
 def orphan_issues(
     instances: dict[str, InstanceRec], actions: Iterable[ActionRec]
 ) -> Iterator[str]:
-    """Instances nothing operates on; ``chassis`` is implicit and exempt."""
+    """Instances nothing operates on; ``chassis`` is implicit and exempt.
+
+    So is an *implied* instance (:mod:`tda.core.implied`): "no action names it"
+    is its definition, not a defect, and :func:`unresolved_issues` already asks
+    the one question that matters about it.
+    """
     targeted = {action.target for action in actions}
     for key in sorted(instances):
-        if key != CHASSIS_KEY and key not in targeted:
-            yield f"no action references {key} - delete it or retarget a step at it"
+        if key == CHASSIS_KEY or key in targeted or is_implied(instances[key]):
+            continue
+        yield f"no action references {key} - delete it or retarget a step at it"
 
 
 def dangling_issues(instances: dict[str, InstanceRec], tax: Taxonomy) -> Iterator[str]:
@@ -127,9 +134,14 @@ def unresolved_issues(
       the part comes out (spec 7.1), which only happens if ``parent`` names it;
       without one the screw is left behind ``loosened`` and in the chassis, and
       the annotator is asked for its shape on every later frame.
+    * **implied instance** -- a part :mod:`tda.core.implied` created because the
+      desktop clearly has one and the log simply stops before touching it (the
+      motherboard of D49/D62/D63/D64). It is a judgement, so it is put to the
+      annotator once: keeping it costs a mask on every frame, deleting it leaves
+      the references unresolved again.
 
     Deliberately yielded *after* :func:`orphan_issues` and
-    :func:`dangling_issues`: neither is a broken record, only work still to do.
+    :func:`dangling_issues`: none is a broken record, only work still to do.
     Provisional ``ls:*`` drafts carry no relations yet and are skipped.
     """
     for key in sorted(instances):
@@ -143,6 +155,12 @@ def unresolved_issues(
             yield (
                 f"captive screw without parent: {key} is captive but leaves the "
                 f"chassis with nothing - name the part it stays in"
+            )
+        if is_implied(inst):
+            yield (
+                f"implied instance {key}: never operated in the log - keep it (it "
+                f"gets a mask on every frame) or delete it in the Instances tab; "
+                f"deleting it is remembered, so no re-import brings it back"
             )
 
 

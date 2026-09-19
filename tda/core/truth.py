@@ -233,7 +233,7 @@ class TruthService(FreshMixin, ResolveMixin):
                     result["skipped"] += 1
                     continue
                 values = row_values(compiled_inst)
-                queued = self._queue_conflict(
+                queued, _new = self._queue_conflict(
                     key, instance, row_payload(row),
                     geom_payload(values.visible_rle, values.box), diff, queued,
                 )
@@ -246,7 +246,7 @@ class TruthService(FreshMixin, ResolveMixin):
             row = stored[instance]
             if row["status"] == VERIFIED:
                 old_payload = row_payload(row)
-                queued = self._queue_conflict(
+                queued, _new = self._queue_conflict(
                     key, instance, old_payload, None, self._payload_area(old_payload), queued
                 )
                 result["conflicts"] += 1
@@ -488,7 +488,7 @@ class TruthService(FreshMixin, ResolveMixin):
         new_payload: Optional[dict],
         pixels: int,
         queued: Optional[list[dict]],
-    ) -> list[dict]:
+    ) -> tuple[list[dict], bool]:
         """Queue one frozen-vs-recompiled disagreement, unless it is queued already.
 
         Deduplication is on the **open** queue only, keyed by
@@ -496,8 +496,12 @@ class TruthService(FreshMixin, ResolveMixin):
         not pile up copies of one disagreement, while a conflict a human already
         resolved may legitimately be raised again -- the resolution writes the
         inputs it settled on, so an identical conflict coming back means the
-        inputs moved again. Returns the queue it read, so one refresh reads it
-        at most once.
+        inputs moved again.
+
+        Returns ``(the queue it read, whether a row was inserted)``. The queue
+        comes back so one refresh reads it at most once; the flag comes back
+        because a caller that tells the annotator what happened must not say
+        "queued again" about an insert the deduplication suppressed.
         """
         if queued is None:
             queued = self.db.conflicts(key.desktop, key.view, open_only=True)
@@ -508,9 +512,9 @@ class TruthService(FreshMixin, ResolveMixin):
                 and conflict["instance"] == instance
                 and self._geom_id(conflict["new_rle"]) == wanted
             ):
-                return queued
+                return queued, False
         self.db.add_conflict(key, instance, old_payload, new_payload, int(pixels))
-        return queued
+        return queued, True
 
     @staticmethod
     def _geom_id(payload: Optional[dict]) -> Optional[str]:

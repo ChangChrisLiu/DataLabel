@@ -32,6 +32,17 @@ from typing import Any, Callable, Iterable, Optional
 import cv2
 import numpy as np
 
+from tda.core.cache_roi_detect import (  # re-exported: suggest_roi's two strategies
+    ROI_MAX_AREA_FRAC,
+    ROI_MIN_AREA_FRAC,
+    best_candidate,
+    board_mask,
+    box_plausibility,
+    scan_bed_box,
+    scan_bed_candidates,
+    scan_chassis_box,
+    scan_chassis_candidates,
+)
 from tda.core.cache_thumbs import (DbRoiLookup, add_thumb_args, build_thumbs,  # re-exported
                                    run_thumb_cli, thumb_path)
 from tda.core.index import DEFAULT_PATHS_PATH, REPO_ROOT, DesktopIndex, FrameFile, load_index
@@ -39,7 +50,8 @@ from tda.core.model import FrameKey
 
 __all__ = [
     "DbRoiLookup", "build_cache", "build_thumbs", "burst_metrics", "cache_path",
-    "choose_scan_image", "suggest_roi", "thumb_path",
+    "choose_scan_image", "scan_bed_candidates", "scan_chassis_candidates",
+    "suggest_roi", "thumb_path",
 ]
 
 # --- burst metrics -------------------------------------------------------
@@ -68,18 +80,6 @@ METRICS_VERSION = 1  # bump whenever burst_metrics changes what it measures (a n
 #                      re-decided from stale numbers.  A record written before the
 #                      stamp existed counts as version 1.
 SINGLE_REASON = "only"  # views without a burst have nothing to choose
-
-# --- ROI suggestion ------------------------------------------------------
-YELLOW_LO = (10, 60, 60)  # HSV bounds of the yellow/orange tape square
-YELLOW_HI = (40, 255, 255)
-TAPE_MIN_AREA_FRAC = 0.005  # ignore yellow specks: no tape found -> fallback
-TAPE_MIN_SPAN_FRAC = 0.5  # ... and a tape square frames the board, so it has to
-#                           span at least half the frame; a smaller yellow blob is
-#                           something else (a label, a cable) -> fallback
-DARK_MAX = 90  # gray below this counts as "dark object" (chassis)
-DARK_MIN_AREA_FRAC = 0.005
-ROI_PAD_FRAC = 0.03  # pad the chassis box by 3% of its own size
-CENTRAL_FRAC = 0.70  # fallback / non-scan views: central 70% box
 
 _P_RE = re.compile(r"P_(\d+)", re.IGNORECASE)
 
@@ -210,6 +210,9 @@ def choose_scan_image(metrics: list[dict]) -> tuple[int, str]:
 # ---------------------------------------------------------------------------
 # ROI suggestion
 # ---------------------------------------------------------------------------
+CENTRAL_FRAC = 0.70  # fallback / non-scan views: central 70% box
+
+
 def _central_box(width: int, height: int) -> tuple[int, int, int, int]:
     """The central :data:`CENTRAL_FRAC` box of a ``width`` x ``height`` image."""
     bw, bh = int(round(width * CENTRAL_FRAC)), int(round(height * CENTRAL_FRAC))
@@ -217,88 +220,30 @@ def _central_box(width: int, height: int) -> tuple[int, int, int, int]:
     return (x0, y0, x0 + bw, y0 + bh)
 
 
-def _pad_box(box: tuple[int, int, int, int], width: int, height: int,
-             frac: float = ROI_PAD_FRAC) -> tuple[int, int, int, int]:
-    """Grow ``box`` by ``frac`` of its own size, clipped to the image."""
-    x0, y0, x1, y1 = box
-    px, py = int(round((x1 - x0) * frac)), int(round((y1 - y0) * frac))
-    return (max(0, x0 - px), max(0, y0 - py), min(width, x1 + px), min(height, y1 + py))
-
-
-def _odd(value: float, minimum: int = 3) -> int:
-    """Nearest odd kernel size >= ``minimum``."""
-    return max(minimum, int(round(value)) | 1)
-
-
-def _largest_component(mask: np.ndarray) -> tuple[Optional[int], np.ndarray, np.ndarray]:
-    """Label of the biggest non-background blob in ``mask`` plus the label image."""
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
-    if count <= 1:
-        return None, labels, stats
-    return 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA])), labels, stats
-
-
-def _scan_chassis_box(bgr: np.ndarray) -> Optional[tuple[int, int, int, int]]:
-    """Chassis box of a scanner frame, or None when the tape square is absent.
-
-    The board is framed by a yellow tape square; the chassis is the largest dark
-    object inside it.  Small gaps in the tape (and the loose corner scraps) are
-    bridged by a dilation, the filled convex hull of the bridged square gives the
-    board region, and the tape band itself is then removed from it.
-    """
-    height, width = bgr.shape[:2]
-    small_k = _odd(min(height, width) * 0.005)
-    bridge_k = _odd(min(height, width) * 0.02)
-
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    yellow = cv2.inRange(hsv, YELLOW_LO, YELLOW_HI)
-    yellow = cv2.morphologyEx(yellow, cv2.MORPH_CLOSE, np.ones((small_k, small_k), np.uint8))
-    bridged = cv2.dilate(yellow, np.ones((bridge_k, bridge_k), np.uint8))
-
-    label, labels, stats = _largest_component(bridged)
-    if label is None or stats[label, cv2.CC_STAT_AREA] < TAPE_MIN_AREA_FRAC * height * width:
-        return None
-    if (stats[label, cv2.CC_STAT_WIDTH] < TAPE_MIN_SPAN_FRAC * width
-            or stats[label, cv2.CC_STAT_HEIGHT] < TAPE_MIN_SPAN_FRAC * height):
-        return None  # not a square framing the board
-
-    contours, _ = cv2.findContours((labels == label).astype(np.uint8),
-                                   cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-    board = np.zeros((height, width), np.uint8)
-    cv2.fillConvexPoly(board, cv2.convexHull(max(contours, key=cv2.contourArea)), 255)
-    board = cv2.erode(board, np.ones((bridge_k, bridge_k), np.uint8))  # undo the bridging
-    board[yellow > 0] = 0  # the tape band is not part of the inner region
-
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    dark = ((gray < DARK_MAX) & (board > 0)).astype(np.uint8)
-    dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, np.ones((small_k, small_k), np.uint8))
-
-    label, _, stats = _largest_component(dark)
-    if label is None or stats[label, cv2.CC_STAT_AREA] < DARK_MIN_AREA_FRAC * height * width:
-        return None
-    x, y, w, h = (int(v) for v in stats[label, :4])
-    return _pad_box((x, y, x + w, y + h), width, height)
-
-
 def suggest_roi(img: np.ndarray, view: str) -> tuple[int, int, int, int]:
     """Suggest the chassis ROI ``(x0, y0, x1, y1)`` in original image pixels.
 
-    For ``scan`` this is the largest dark object inside the yellow tape square,
-    padded by 3%.  Any other view - and any scanner frame where the tape square
-    or a dark object cannot be found - falls back to the central 70% box.  The
-    suggestion is always confirmed by a human (spec 2.4); frames where the
-    chassis covers the tape are the ones that usually need correcting.
+    A scanner frame is measured twice by :mod:`tda.core.cache_roi_detect` -- as
+    the darkest object on the board and as whatever is not the scan bed -- and
+    the better answer wins.  The dark-object stage is asked first and kept
+    whenever it is plausible: it is the stage the thresholds were calibrated on,
+    it is tighter on the 55 machines it gets right, and preferring the
+    higher-scoring box instead re-cropped most of the 66 real frames for no
+    benefit.  The bed stage is the answer for a light or silver machine, where
+    the dark one measures something that is not a chassis at all.
+
+    Any other view, and a scanner frame where neither convinces, falls back to
+    the central 70 % box.  The suggestion is always confirmed by a human
+    (spec 2.4).
     """
     if img is None or getattr(img, "size", 0) == 0:
         raise ValueError("suggest_roi() needs a non-empty image")
     height, width = img.shape[:2]
     if view == "scan":
         bgr = img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        box = _scan_chassis_box(bgr)
-        if box is not None:
-            return box
+        for found in (scan_chassis_box(bgr), scan_bed_box(bgr)):
+            if found is not None:
+                return found[0]
     return _central_box(width, height)
 
 

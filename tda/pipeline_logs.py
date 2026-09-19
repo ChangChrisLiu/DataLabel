@@ -24,6 +24,8 @@ from typing import Optional
 
 from tda.core.db import Db
 from tda.core.graph_rules import infer_relational_fields, unresolved_relations
+from tda.core.implied import OP_KIND as IMPLIED_OP_KIND
+from tda.core.implied import implied_instances
 from tda.core.index import DesktopIndex
 from tda.core.log_report import _expected_steps
 from tda.core.logs import LogImport, import_log, iter_desktop_csvs, read_desktop_csv
@@ -42,10 +44,17 @@ MAX_STEP_SECONDS = 1800.0
 #: Heading of the import report's per-desktop list of inferred relational
 #: fields. They are guesses, and every one of them is an S1 question.
 INFERRED_HEADING = "inferred relational fields (heuristic - confirm in S1)"
+#: ``op_log`` is scoped per ``(desktop, view)``; an identity row belongs to no
+#: view, so the implied-instance rows get this placeholder (same as
+#: :data:`tda.cli_relations.OP_VIEW`).
+OP_VIEW = "-"
+#: ``op_log.annotator`` of an implied instance -- this is machinery, not a person.
+IMPLIED_ANNOTATOR = "cli:import-logs"
 
 __all__ = [
-    "DesktopRun", "INFERRED_HEADING", "LogsRun", "brand_model", "chassis_type",
-    "desktop_fields", "expected_steps", "import_logs_into_db", "inferred_section",
+    "DesktopRun", "INFERRED_HEADING", "LogsRun", "add_implied_instances", "brand_model",
+    "chassis_type", "desktop_fields", "expected_steps", "import_logs_into_db",
+    "inferred_section",
 ]
 
 
@@ -127,19 +136,23 @@ class DesktopRun:
 
     desktop: int
     source: str
-    status: str  # imported | skipped | failed
+    status: str  # imported | skipped | refused | failed
     steps: int = 0
     actions: int = 0
     instances: int = 0
     events: int = 0
     durations: int = 0
     ls_notes: int = 0  # steps whose Label Studio notes were carried over
+    #: Notes the re-imported sheet had no matching row for (it was renumbered).
+    ls_notes_dropped: int = 0
     brand: str = ""
     issues: list[str] = field(default_factory=list)
     #: ``"<key>.<field> = <value>"`` per relational field the heuristic filled.
     fills: list[str] = field(default_factory=list)
     #: ``"unresolved: ..."`` per reference it deliberately did not guess at.
     unresolved: list[str] = field(default_factory=list)
+    #: One line per instance :mod:`tda.core.implied` created for this desktop.
+    implied: list[str] = field(default_factory=list)
 
 
 def inferred_section(run: DesktopRun) -> list[str]:
@@ -149,9 +162,10 @@ def inferred_section(run: DesktopRun) -> list[str]:
     everything adds no noise. Kept here rather than in :mod:`tda.cli` so the
     heading and the bullet format live next to the run record that carries them.
     """
-    if not (run.fills or run.unresolved):
+    if not (run.fills or run.unresolved or run.implied):
         return []
     lines = [f"**{INFERRED_HEADING}**", ""]
+    lines.extend(f"- {text}" for text in run.implied)
     lines.extend(f"- {text}" for text in run.fills)
     lines.extend(f"- {text}" for text in run.unresolved)
     lines.append("")
@@ -182,9 +196,24 @@ class LogsRun:
         return self._with("failed")
 
     @property
+    def refused(self) -> list[DesktopRun]:
+        """Desktops skipped because they carry verified frames (see ``--force-verified``)."""
+        return self._with("refused")
+
+    @property
     def with_ls_notes(self) -> list[int]:
-        """Desktops whose Label Studio notes a forced re-import carried over."""
-        return [r.desktop for r in self.imported if r.ls_notes]
+        """Desktops that **had** Label Studio notes when a forced re-import ran.
+
+        Gated on having had them, not on how many survived: the desktop whose
+        sheet was renumbered kept none at all, and that is precisely the one
+        whose ``import-ls`` needs re-running.
+        """
+        return [r.desktop for r in self.imported if r.ls_notes or r.ls_notes_dropped]
+
+    @property
+    def dropped_ls_notes(self) -> list[DesktopRun]:
+        """Desktops where a renumbered sheet cost some notes their home."""
+        return [r for r in self.imported if r.ls_notes_dropped]
 
 
 # --------------------------------------------------------------------------- #
@@ -255,38 +284,78 @@ def _apply_index(
 # --------------------------------------------------------------------------- #
 # writing one desktop
 # --------------------------------------------------------------------------- #
-def carry_ls_notes(steps: list[StepRec], previous: list[StepRec]) -> int:
+def carry_ls_notes(steps: list[StepRec], previous: list[StepRec]) -> tuple[int, int]:
     """Copy the ``LS:`` note lines of the stored steps onto the freshly parsed ones.
 
     The Label Studio import folds the annotators' form fields into
     ``Step.notes`` (:mod:`tda.core.ls_import`), and
     :meth:`~tda.core.db.Db.replace_steps` would drop them on a forced
-    re-import. They are matched by step number and re-appended, so re-importing
-    the sheets costs nothing that a second ``import-ls`` would have to rebuild.
-    Returns how many steps kept a line.
+    re-import, so they are re-appended here.
+
+    A note is carried over only when the step number **and** the raw step name
+    agree with the row it came from. Matching on the number alone was wrong in
+    the one case that matters: a re-exported sheet with a row inserted moves
+    every later operation down by one, and the note describing "CPU Fan Screw 1"
+    would have been re-attached to whatever now sits at that number -- silently,
+    while the warning still read "(carried over)". A wrong note is worse than a
+    missing one, because only the missing one can be rebuilt by re-running
+    ``import-ls``. The raw names are compared stripped, since a trailing space
+    in a hand-edited sheet is not a renumbering.
+
+    Returns ``(steps that kept a line, notes that could not be carried over)``.
     """
     by_step = {s.step: s for s in steps}
-    kept = 0
+    kept = dropped = 0
     for old in previous:
         lines = [
             line for line in (old.notes or "").splitlines()
             if line.startswith(LS_NOTES_PREFIX)
         ]
+        if not lines:
+            continue
         step = by_step.get(old.step)
-        if not lines or step is None:
+        if step is None or step.raw_name.strip() != old.raw_name.strip():
+            dropped += 1
             continue
         base = (step.notes or "").strip()
         step.notes = "\n".join(([base] if base else []) + lines)
         kept += 1
-    return kept
+    return kept, dropped
+
+
+def add_implied_instances(db: Db, li: LogImport, tax: Taxonomy) -> list[str]:
+    """Create the instances the sheet implies but never operates on.
+
+    Runs *before* the relational heuristic and inside the caller's transaction:
+    the point of an implied ``motherboard.01`` is that the 33 references the
+    four never-lifted boards leave behind then resolve onto it. Each one gets
+    an ``op_log`` row of kind :data:`~tda.core.implied.OP_KIND`, so the run is
+    auditable and a single record can be undone. Returns one report line each.
+
+    A class the annotator has already deleted in S1 is skipped: the desktop's
+    ``implied_declined`` meta is the one part of it a ``--force`` re-import does
+    not rewrite, which is exactly why the refusal lives there.
+    """
+    lines = []
+    declined = db.declined_implied(li.desktop)  # survives --force, by design
+    for rec in implied_instances(li.instances, li.actions, tax, declined):
+        li.instances[rec.key] = rec
+        db.log_op(
+            li.desktop, OP_VIEW, IMPLIED_OP_KIND,
+            {"instance": rec.key, "cls": rec.cls, "attrs": dict(rec.attrs)},
+            {"instance": rec.key}, IMPLIED_ANNOTATOR,
+        )
+        lines.append(f"implied instance {rec.key}: {rec.attrs.get('note', '')}")
+    return lines
 
 
 def _write_import(
     db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec]
-) -> tuple[int, int, list[str], list[str]]:
+) -> tuple[int, int, int, list[str], list[str], list[str]]:
     """Write one desktop's import atomically.
 
-    Returns ``(events, steps with LS notes, fills, unresolved)``.
+    Returns ``(events, steps with LS notes, notes dropped, fills, unresolved,
+    implied)``.
 
     The relational heuristic of spec 7.3 runs here, *before* the instances are
     written and inside the same transaction: ``logs.py`` leaves ``fastens``,
@@ -301,29 +370,70 @@ def _write_import(
     :func:`tda.core.truth_inputs.events_of` re-derives on every read agree.
     """
     with db.transaction():
-        kept = carry_ls_notes(li.steps, previous)
+        kept, dropped = carry_ls_notes(li.steps, previous)
         merge_desktop_meta(db, li.desktop, desktop_fields(li.meta))
         db.replace_steps(li.desktop, li.steps, li.actions)
+        implied = add_implied_instances(db, li, tax)
         fills = infer_relational_fields(li.instances, tax, li.actions)
         for inst in li.instances.values():
             db.upsert_instance(inst)
         events = events_from_actions(li.instances, li.actions, tax)
         db.replace_events(li.desktop, events, auto_only=True)
         split_pose_segments(db, li.desktop)
-    return len(events), kept, fills, unresolved_relations(li.instances, tax, li.actions)
+    return (len(events), kept, dropped, fills,
+            unresolved_relations(li.instances, tax, li.actions), implied)
+
+
+def dropped_notes_line(desktop: int, dropped: int) -> str:
+    """The one line that says a renumbered sheet cost this desktop its notes.
+
+    It counts *steps*: one step's notes are one carry-over, however many ``LS:``
+    lines the Label Studio import folded onto it.
+    """
+    return (
+        f"D{desktop:02d}: {dropped} steps with LS notes could not be carried over "
+        f"(sheet renumbered) - re-run import-ls"
+    )
 
 
 def _force_warning(db: Db, desktop: int, previous: list[StepRec]) -> str:
-    """What a ``--force`` run is about to overwrite, in one line."""
+    """What a ``--force`` run is about to overwrite, in one line.
+
+    "carried over" is a promise about the notes whose step number *and* raw name
+    survive the re-import; how many did not is only known afterwards and is said
+    then (:func:`dropped_notes_line`).
+    """
     ls_steps = db.steps_with_note_prefix(desktop, LS_NOTES_PREFIX)
     notes = (
-        f"{len(ls_steps)} steps carry Label Studio notes (carried over); "
+        f"{len(ls_steps)} steps carry Label Studio notes (carried over where the "
+        f"step number and name still match); "
         if ls_steps else ""
     )
     return (
         f"[import-logs] D{desktop:02d}: --force, replacing {len(previous)} steps / "
         f"{len(db.actions(desktop))} actions; {notes}every other manual edit to the step "
-        f"table is lost"
+        f"table is lost, and so is every relational field a human set on an instance "
+        f"(fastens, parent, mounted_on, socket_host): the instances are re-created from "
+        f"the sheet and the heuristic fills them again"
+    )
+
+
+def _verified_refusal(db: Db, desktop: int, frozen: int, log: Optional[Log]) -> DesktopRun:
+    """Report and refuse a forced re-import of a desktop with frozen frames.
+
+    ``infer-relations`` only fills empty relational fields and still asks twice
+    before touching a desktop a human has signed off on; a forced re-import
+    rewrites the entire step table underneath those frames, which is strictly
+    worse, so it asks too. ``--force-verified`` is the second answer.
+    """
+    if log:
+        log(f"[import-logs] D{desktop:02d} has {frozen} verified frames; a forced "
+            f"re-import would rewrite the step table underneath them. Refused, "
+            f"nothing written - pass --force-verified to do it anyway")
+    return DesktopRun(
+        desktop, "", "refused",
+        issues=[f"D{desktop:02d}: {frozen} verified frames; re-run with "
+                f"--force-verified to re-import anyway"],
     )
 
 
@@ -338,14 +448,18 @@ def import_logs_into_db(
     desktops: Optional[set[int]] = None,
     force: bool = False,
     log: Optional[Log] = None,
+    force_verified: bool = False,
 ) -> LogsRun:
     """Import the exported Drive sheets into steps, actions, instances and events.
 
     A desktop that already has steps is **skipped** unless ``force`` is given:
     the step table is where the annotator resolves the ``?`` targets and the
     compound rows, and :meth:`tda.core.db.Db.replace_steps` would throw that
-    work away. A sheet that cannot be read is recorded as ``failed`` and the run
-    carries on to the next desktop.
+    work away. A desktop that additionally carries **verified frames** is
+    ``refused`` even then, unless ``force_verified`` says so as well: those
+    frames were compiled from the step table this would replace. A sheet that
+    cannot be read is recorded as ``failed`` and the run carries on to the next
+    desktop.
     """
     index = index or {}
     run = LogsRun(directory=str(directory))
@@ -359,6 +473,13 @@ def import_logs_into_db(
                 log(f"[import-logs] D{desktop:02d}: skipped, the database already has "
                     f"steps (use --force to overwrite)")
             continue
+        frozen = db.verified_frame_count(desktop) if previous else 0
+        if frozen and not force_verified:
+            run.runs.append(_verified_refusal(db, desktop, frozen, log))
+            continue
+        if frozen and log:
+            log(f"[import-logs] D{desktop:02d} has {frozen} verified frames; "
+                f"--force-verified was given, so they are re-imported over")
         if previous and log:
             log(_force_warning(db, desktop, previous))
         try:
@@ -387,18 +508,26 @@ def _import_one(
             f"D{desktop:02d}: the sheet's own Desktop ID is {sheet_id}; "
             f"kept the file's number"
         )
-    events, kept, fills, unresolved = _write_import(db, li, tax, previous)
+    events, kept, dropped, fills, unresolved, implied = _write_import(db, li, tax, previous)
+    if dropped:
+        issues.append(dropped_notes_line(desktop, dropped))
     if log:
+        extra = f", {len(implied)} implied instance(s)" if implied else ""
         log(f"[import-logs] D{desktop:02d}: {len(li.steps)} steps, {len(li.actions)} "
             f"actions, {len(li.instances)} instances, {events} events, "
             f"{filled} durations, {len(fills)} inferred relational fields, "
-            f"{len(li.issues) + len(issues)} issues")
+            f"{len(li.issues) + len(issues)} issues{extra}")
+        for text in implied:
+            log(f"[import-logs]   {text}")
+        if dropped:
+            log(f"[import-logs]   {dropped_notes_line(desktop, dropped)}")
     return DesktopRun(
         desktop=desktop, source=str(path), status="imported", steps=len(li.steps),
         actions=len(li.actions), instances=len(li.instances), events=events,
-        durations=filled, ls_notes=kept,
+        durations=filled, ls_notes=kept, ls_notes_dropped=dropped,
         brand=str(li.meta.get("brand_model_raw") or ""),
         issues=list(li.issues) + issues, fills=fills, unresolved=unresolved,
+        implied=implied,
     )
 
 

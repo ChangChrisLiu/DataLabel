@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from contextlib import contextmanager
 from typing import Callable, Iterator, Optional
 
@@ -94,10 +95,25 @@ def _session(
         db.close()
 
 
-def _safety_backup(paths: dict, db: Db, command: str, why: str) -> None:
-    """Back the database up before a destructive run, and say where it went."""
-    out = db.backup(P.backup_dest(paths))
+def _safety_backup(paths: dict, db: Db, command: str, why: str) -> bool:
+    """Back the database up before a destructive run; ``False`` when it failed.
+
+    A destructive command that could not make its safety copy must stop before
+    it writes anything, so this swallows the three ways the copy can fail --
+    ``OSError`` (a full, missing or read-only ``backup_dir``), ``sqlite3.Error``
+    (the copy itself) and ``ValueError`` (``paths.yaml`` defines no
+    ``backup_dir``) -- and turns each into the same single line. The caller
+    returns :data:`EXIT_ERROR` immediately; the lock is released by
+    :func:`_session` on the way out either way. No traceback ever reaches the
+    annotator: there is nothing in it they could act on.
+    """
+    try:
+        out = db.backup(P.backup_dest(paths))
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        print(f"[{command}] backup failed: {exc}; nothing was written")
+        return False
     print(f"[{command}] {why}: backed the database up first -> {out}")
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -135,7 +151,13 @@ def _add_build_index(sub) -> None:
 # load-index
 # --------------------------------------------------------------------------- #
 def cmd_load_index(args: argparse.Namespace) -> int:
-    """Write the frames and pose segments of ``index.json`` into the database."""
+    """Write the frames and pose segments of ``index.json`` into the database.
+
+    Destructive, quietly: a re-built index can move a ``reorient`` step, which
+    re-cuts the pose segments, and a segment whose reference frame leaves it
+    loses the corners, homography and ROI a human clicked (spec 2.4). So it
+    takes the same safety copy as the other three.
+    """
     with _session(args, lock=True) as (paths, db):
         target = args.index or P.index_path(paths)
         try:
@@ -143,9 +165,20 @@ def cmd_load_index(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"[load-index] cannot read {target}: {exc}; run build-index first")
             return EXIT_ERROR
+        if not _safety_backup(paths, db, "load-index",
+                              "it re-cuts the pose segments"):
+            return EXIT_ERROR
         counts = P.load_index_into_db(db, index, _desktops(args), log=print)
+        failed = counts.get("failed") or []
         print(f"[load-index] {counts['desktops']} desktops, {counts['frames']} frames, "
-              f"{counts['missing']} missing, {counts['segments']} pose segments")
+              f"{counts['missing']} missing, {counts['segments']} pose segments, "
+              f"{len(failed)} failed")
+        if failed:
+            for text in failed:
+                print(f"[load-index] FAILED {text}")
+            print(f"[load-index] {len(failed)} desktops failed; every other desktop "
+                  f"was loaded. Re-run build-index for them, then load-index again.")
+            return EXIT_ERROR
         return EXIT_OK
 
 
@@ -175,6 +208,7 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
         "",
         f"- desktops imported: {len(imported)}",
         f"- desktops skipped (already had steps): {len(run.skipped)}",
+        f"- desktops refused (verified frames, no --force-verified): {len(run.refused)}",
         f"- desktops that failed to import: {len(run.failed)}",
         f"- steps: {sum(r.steps for r in imported)}",
         f"- actions: {sum(r.actions for r in imported)}",
@@ -200,8 +234,8 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
             f"| {len(r.issues)} |"
         )
     lines.append("")
-    for r in run.failed:
-        lines.append(f"## D{r.desktop:02d} - FAILED")
+    for r in run.failed + run.refused:
+        lines.append(f"## D{r.desktop:02d} - {r.status.upper()}")
         lines.append("")
         lines.extend(f"- {text}" for text in r.issues)
         lines.append("")
@@ -219,40 +253,56 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
 
 def cmd_import_logs(args: argparse.Namespace) -> int:
     """Import the Drive sheets into steps, actions, instances and state events."""
+    if args.force_verified and not args.force:
+        print("[import-logs] --force-verified only means something with --force: "
+              "without --force a desktop that already has steps is skipped before "
+              "its verified frames are ever looked at.")
+        return EXIT_ERROR
     with _session(args, lock=True) as (paths, db):
         directory = args.dir or P.drive_dir(paths)
         index = P.read_index(paths, args.index)
         if not index:
             print("[import-logs] no index.json; step durations will stay unset")
-        if args.force:
-            _safety_backup(paths, db, "import-logs", "--force rewrites the step tables")
+        if args.force and not _safety_backup(
+                paths, db, "import-logs", "--force rewrites the step tables"):
+            return EXIT_ERROR
         run = L.import_logs_into_db(
-            db, directory, load_taxonomy(), index, _desktops(args), args.force, log=print
+            db, directory, load_taxonomy(), index, _desktops(args), args.force,
+            log=print, force_verified=args.force_verified,
         )
         imported = run.imported
         print(f"[import-logs] {len(imported)} desktops imported, {len(run.skipped)} skipped, "
-              f"{len(run.failed)} failed; {sum(r.steps for r in imported)} steps, "
+              f"{len(run.refused)} refused, {len(run.failed)} failed; "
+              f"{sum(r.steps for r in imported)} steps, "
               f"{sum(r.actions for r in imported)} actions, "
               f"{sum(r.instances for r in imported)} instances, "
               f"{sum(r.events for r in imported)} events, "
               f"{sum(len(r.issues) for r in imported)} issues")
+        for r in run.dropped_ls_notes:
+            print(f"[import-logs] {L.dropped_notes_line(r.desktop, r.ls_notes_dropped)}")
         carried = run.with_ls_notes
         if carried:
             listed = ", ".join(f"D{d:02d}" for d in carried)
-            print(f"[import-logs] Label Studio notes were carried over on {listed}; "
+            print(f"[import-logs] {listed} had Label Studio notes; "
                   f"run 'python -m tda.cli import-ls' to rebuild them from the export "
                   f"if anything looks wrong")
+        if run.refused:
+            listed = ", ".join(f"D{r.desktop:02d}" for r in run.refused)
+            print(f"[import-logs] refused: {listed} carry verified frames, which were "
+                  f"compiled from the step table this would replace. Re-run with "
+                  f"--force-verified to re-import them anyway, or select the other "
+                  f"desktops with --desktops.")
         # A run that imported nothing has nothing to report, and overwriting the
         # file would throw away the issue list of the run that did the work.
         if not imported and not run.failed:
             print("[import-logs] nothing imported, kept the previous report")
-            return EXIT_OK
+            return EXIT_ERROR if run.refused else EXIT_OK
         report = args.report or P.cache_file(paths, P.LOGS_REPORT_NAME)
         with open(report, "w", encoding="utf-8") as fh:
             fh.write(logs_report(run, L.expected_steps(directory)))
         run.report_path = report
         print(f"[import-logs] wrote {report}")
-        return EXIT_ERROR if run.failed else EXIT_OK
+        return EXIT_ERROR if (run.failed or run.refused) else EXIT_OK
 
 
 def _add_import_logs(sub) -> None:
@@ -263,8 +313,13 @@ def _add_import_logs(sub) -> None:
     p.add_argument("--report", default=None, help="issue report Markdown")
     p.add_argument("--force", action="store_true",
                    help="re-import desktops that already have steps: the database is "
-                        "backed up first and the Label Studio notes are kept, but every "
-                        "other manual edit to the step table is lost")
+                        "backed up first and the Label Studio notes are kept where the "
+                        "step number and name still match, but every other manual edit "
+                        "to the step table is lost")
+    p.add_argument("--force-verified", action="store_true",
+                   help="with --force, also re-import desktops that carry verified "
+                        "frames. Those frames were compiled from the step table this "
+                        "replaces, so they are refused without it")
     p.set_defaults(func=cmd_import_logs)
 
 
@@ -290,9 +345,10 @@ def cmd_import_ls(args: argparse.Namespace) -> int:
                   f"build-index -> load-index -> import-logs -> import-ls; run import-logs "
                   f"first, or pass --allow-missing-steps.")
             return EXIT_ORDER
-        if args.purge_all:
-            _safety_backup(paths, db, "import-ls",
-                           "--purge-all drops every desktop's Label Studio rows")
+        if args.purge_all and not _safety_backup(
+                paths, db, "import-ls",
+                "--purge-all drops every desktop's Label Studio rows"):
+            return EXIT_ERROR
         summary = import_ls_export(
             export, db, load_taxonomy(), P.read_index(paths, args.index),
             progress=args.progress, purge_all=args.purge_all,
@@ -327,9 +383,19 @@ def _add_import_ls(sub) -> None:
 # backup
 # --------------------------------------------------------------------------- #
 def cmd_backup(args: argparse.Namespace) -> int:
-    """Copy the live database into ``backup_dir`` with the SQLite backup API."""
+    """Copy the live database into ``backup_dir`` with the SQLite backup API.
+
+    A bad ``--dest`` is a usage error and goes through :func:`main`; a copy that
+    could not be made or could not be verified is reported like every other
+    backup failure, without a traceback.
+    """
     with _session(args) as (paths, db):
-        out = db.backup(P.backup_dest(paths, args.dest))
+        dest = P.backup_dest(paths, args.dest)
+        try:
+            out = db.backup(dest)
+        except (OSError, sqlite3.Error) as exc:
+            print(f"[backup] backup failed: {exc}")
+            return EXIT_ERROR
         print(f"[backup] wrote {out}")
         return EXIT_OK
 
@@ -337,7 +403,11 @@ def cmd_backup(args: argparse.Namespace) -> int:
 def _add_backup(sub) -> None:
     p = sub.add_parser("backup", help="back the database up into backup_dir")
     p.add_argument("--dest", default=None,
-                   help="a folder inside paths.yaml's backup_dir (the default)")
+                   help="a folder inside paths.yaml's backup_dir (the default). It "
+                        "narrows that setting and never replaces it: without a "
+                        "backup_dir in paths.yaml there is nowhere a backup may go, "
+                        "and any --dest outside it is refused. A differently cased "
+                        "or subst-mapped spelling of the same folder is accepted")
     p.set_defaults(func=cmd_backup)
 
 

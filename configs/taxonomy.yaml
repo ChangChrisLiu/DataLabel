@@ -16,6 +16,36 @@ version: 1
 # state it is in. `chassis` never goes on the bench, so it is excluded.
 on_bench_needs_geom: true
 
+# Classes an *implied* instance may be created for (tda.core.implied).
+#
+# Four teardowns (D49, D62, D63, D64) stop before the motherboard is lifted out:
+# the sheet unscrews it, unplugs it and then ends, so the log importer never
+# names a `motherboard` and 33 connectors/screws are left pointing at a class
+# with no instance -- while the board itself is plainly visible in every frame
+# of those machines and would go unlabelled in the detection/segmentation data.
+#
+# For a class listed here, and ONLY for such a class, one instance is created
+# when the desktop references it but has none of its own: it stays `installed` /
+# `in_chassis` for the whole sequence because nothing ever operates on it. It is
+# a judgement about what the dataset should contain, not an observation, so the
+# list is deliberately short and lives in the vocabulary rather than in code.
+implied_when_referenced: [motherboard]
+
+# Annotation tier per view (spec 8.1). This is a statement about the *view* --
+# how carefully that camera's frames are annotated at all -- and it travels with
+# every exported annotation and every VLM record as `tier`. It is NOT about
+# review: whether a human confirmed one particular frame is the separate
+# `verified` field, and the two must never be read off each other.
+#
+#   gold    the scanner and OAK1: every instance, amodal masks, full review
+#   silver  OAK2: model drafts corrected frame by frame, staging area as boxes
+#   bronze  RealSense: the coarsest tier (`too_small` is common)
+view_tiers:
+  scan: gold
+  oak1: gold
+  oak2: silver
+  rs: bronze
+
 classes:
   # --- 结构 / structure ------------------------------------------------------
   chassis:

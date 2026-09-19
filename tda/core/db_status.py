@@ -6,6 +6,11 @@ accessors in ``db.py``. The callers name a *counter*, never a table or a
 clause: the SQL is written here and the name is looked up in
 :data:`DESKTOP_COUNTERS` / :data:`VIEW_COUNTERS`, so nothing from the command
 line can reach the query.
+
+:meth:`StatusMixin.verified_frames` and :meth:`StatusMixin.verified_frame_count`
+sit here for the same reason: two commands ask "has a human frozen anything
+here yet?" before they overwrite it, and neither should be writing its own SQL
+to find out -- nor disagreeing about whether a *frame* is a row.
 """
 from __future__ import annotations
 
@@ -67,6 +72,30 @@ class StatusMixin:
             "GROUP BY step_type ORDER BY step_type", (desktop,)
         ).fetchall()
         return {r["step_type"]: r["n"] for r in rows}
+
+    def verified_frames(self, desktop: int) -> list[tuple[str, int]]:
+        """The ``(view, step)`` frames of one desktop a human has frozen (spec 3.4).
+
+        A *frame* is one ``(view, step)``, not one compiled row: a frame holds
+        one row per instance, so counting rows made ``import-logs`` and
+        ``infer-relations`` report "43 verified frames" for a desktop with two.
+        Ascending by view then step, which is the order both the warnings and
+        the re-check queue want.
+        """
+        rows = self.conn.execute(
+            "SELECT DISTINCT view, step FROM compiled_mask "
+            "WHERE desktop=? AND status='verified' ORDER BY view, step",
+            (desktop,),
+        ).fetchall()
+        return [(str(r["view"]), int(r["step"])) for r in rows]
+
+    def verified_frame_count(self, desktop: int) -> int:
+        """How many frames of one desktop are frozen -- see :meth:`verified_frames`."""
+        return int(self.conn.execute(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT view, step FROM compiled_mask "
+            "WHERE desktop=? AND status='verified')",
+            (desktop,),
+        ).fetchone()[0])
 
     def steps_with_note_prefix(self, desktop: int, prefix: str) -> list[int]:
         """Steps of one desktop carrying a note line that starts with ``prefix``.
