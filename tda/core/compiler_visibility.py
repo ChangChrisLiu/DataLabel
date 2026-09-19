@@ -93,19 +93,9 @@ def _sha1(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
-def _counts(rle: Optional[dict]) -> Optional[str]:
-    """The ``counts`` string of an RLE, decoded when it arrives as bytes."""
-    if not rle:
-        return None
-    counts = rle.get("counts")
-    if isinstance(counts, bytes):
-        return counts.decode("ascii")
-    return None if counts is None else str(counts)
-
-
 def _rle_digest(rle: Optional[dict]) -> Optional[str]:
     """sha1 of an RLE's counts string -- short, stable and JSON-safe."""
-    counts = _counts(rle)
+    counts = masks.rle_counts(rle)
     return None if counts is None else _sha1(counts)
 
 

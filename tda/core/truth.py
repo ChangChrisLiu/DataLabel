@@ -523,10 +523,7 @@ class TruthService(FreshMixin, ResolveMixin):
             return None
         if "box" in payload:
             return "box:" + ",".join(f"{float(v):.3f}" for v in payload["box"])
-        counts = payload.get("counts")
-        if isinstance(counts, bytes):
-            counts = counts.decode("ascii")
-        return None if counts is None else str(counts)
+        return masks.rle_counts(payload)
 
     def _review_status(self, key: FrameKey) -> Optional[str]:
         frame = self.db.get_frame(key)

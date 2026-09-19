@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 
+from tda.core import masks
 from tda.core.compiler import select_keyframe
 from tda.core.model import FrameKey, Placement
 from tda.core.truth_inputs import FrameInputs, annotatable_steps
@@ -63,9 +64,9 @@ def digest_of(inputs: FrameInputs, compiler_version: str) -> str:
         str((inputs.zorder.version, inputs.zorder.order)),
         str([(p.above, p.below) for p in inputs.overrides]),
         str(_selected(inputs)),
-        str(sorted((o.occluder_type, (o.rle or {}).get("counts"))
+        str(sorted((o.occluder_type, masks.rle_counts(o.rle))
                    for o in inputs.occluders)),
-        str(sorted((i, (o.visible_rle or {}).get("counts"), o.visibility)
+        str(sorted((i, masks.rle_counts(o.visible_rle), o.visibility)
                    for i, o in inputs.frame_overrides.items())),
         compiler_version,
     ]

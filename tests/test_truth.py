@@ -202,6 +202,24 @@ def test_refresh_skips_every_row_when_the_input_hash_is_unchanged(scene: Scene, 
     assert calls == []
 
 
+def test_input_digest_ignores_whether_an_rle_carries_str_or_bytes_counts(scene: Scene):
+    """pycocotools hands out ``bytes`` counts; a digest that saw them never matched."""
+    from tda.core.truth_fresh import digest_of
+    from tda.core.truth_inputs import gather
+
+    key = scene.key(1)
+    inputs = gather(scene.db, scene.tax, key)
+    rle = masks.encode_rle(rect(0, 0, 8, 8))
+    raw = {"size": list(rle["size"]), "counts": rle["counts"].encode("ascii")}
+
+    def digest(payload) -> str:
+        inputs.occluders = [OccluderMask(key, "hand", dict(payload))]
+        inputs.frame_overrides = {PSU: FrameOverride(key, PSU, dict(payload), "visible")}
+        return digest_of(inputs, "1")
+
+    assert digest(raw) == digest(rle)
+
+
 def test_refresh_reports_problems_without_refusing_to_write(scene: Scene):
     scene.add_frame(4)  # beyond every anchor: no shape applies any more
 

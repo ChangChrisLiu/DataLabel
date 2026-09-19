@@ -29,6 +29,7 @@ __all__ = [
     "decode_rle",
     "rle_area",
     "rle_bbox_xywh",
+    "rle_counts",
     "bbox",
     "min_side",
     "area",
@@ -93,6 +94,25 @@ def encode_rle(mask: np.ndarray) -> dict:
         "size": [int(rle["size"][0]), int(rle["size"][1])],
         "counts": rle["counts"].decode("ascii"),
     }
+
+
+def rle_counts(rle: Optional[dict]) -> Optional[str]:
+    """The ``counts`` of an RLE as a ``str``, whatever it was handed as.
+
+    Three places identify an RLE by its run lengths rather than by its pixels --
+    the compiler's ``input_hash``, the truth table's conflict deduplication and
+    the input digest -- and all three have to agree on what "the same mask"
+    means. :func:`encode_rle` produces ``str`` counts, but pycocotools produces
+    ``bytes`` and a caller may hand one straight on: the digest that compared
+    them without normalising simply never matched its own stored value again, so
+    that frame was recompiled for ever. ``None`` means "no RLE / no counts".
+    """
+    if not rle:
+        return None
+    counts = rle.get("counts")
+    if isinstance(counts, bytes):
+        return counts.decode("ascii")
+    return None if counts is None else str(counts)
 
 
 def _coco_rle(rle: dict) -> dict:
