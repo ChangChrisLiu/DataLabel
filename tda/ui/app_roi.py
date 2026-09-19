@@ -19,6 +19,9 @@ from tda.ui import session_api as api
 
 __all__ = ["RoiMixin"]
 
+#: What :meth:`SessionLike.instance_rows` calls a part lying in the staging area.
+ON_BENCH = "on_bench"
+
 
 class RoiMixin:
     """The chassis rectangle, bench boxes, conflict verdicts, crash recovery."""
@@ -36,7 +39,14 @@ class RoiMixin:
 
     @S.guard
     def act_edit_roi(self) -> None:
-        """``Shift+R``: draw the chassis rectangle again."""
+        """``Shift+R``: draw the chassis rectangle again -- through the gate.
+
+        Arming the ROI tool takes ``Enter`` and ``Esc`` away from an uncommitted
+        editing layer and gives them to a rectangle, so it is a way out of the
+        edit like every other one and is refused the same way.
+        """
+        if not self.can_leave_edit():
+            return
         self.start_roi_edit()
 
     def start_roi_edit(self) -> None:
@@ -107,13 +117,17 @@ class RoiMixin:
 
         The instance an ``add_bench_box`` card item armed the tool for wins:
         that is the one the annotator activated, whatever the instance table
-        happens to have selected.
+        happens to have selected.  With nothing armed the selected row is used
+        only when the *frame* says that part is on the bench -- a rectangle
+        drawn over a part that is still in the machine is a mistake, and filing
+        it as that part's bench box is not a guess worth making.
         """
-        instance = (getattr(self, "bench_instance", None)
-                    or self.instances.selected_instance()
-                    or self.task_card.current_instance())
+        instance = getattr(self, "bench_instance", None)
         if not instance:
-            self.report("select the instance the bench box belongs to first")
+            instance = self._selected_bench_instance()
+        if not instance:
+            self.report("先选中台面上的零件（或用任务卡的 ▭ 项）/ "
+                        "select a part the frame says is on the bench first")
             return
         self.canvas.set_rubber_band(None)
         try:
@@ -121,9 +135,20 @@ class RoiMixin:
         except ValueError as refused:
             self.report_error(f"refused: {refused}")
             return
-        self.bench_instance = None
+        self.disarm_bench()
         self.refresh_overlay()
         self.report(f"bench box stored for {instance}")
+
+    def _selected_bench_instance(self) -> Optional[str]:
+        """The selected instance, but only while this frame has it on the bench."""
+        instance = (self.instances.selected_instance()
+                    or self.task_card.current_instance())
+        if not instance:
+            return None
+        on_bench = any(str(row.get("key")) == instance
+                       and row.get("placement") == ON_BENCH
+                       for row in self.session.instance_rows())
+        return instance if on_bench else None
 
     def act_move_instance(self, direction: int) -> None:
         """``Ctrl+Up`` / ``Ctrl+Down`` from the window's keyboard."""
@@ -148,8 +173,7 @@ class RoiMixin:
     @S.guard
     def resolve_selected(self, resolution: str) -> None:
         """Resolve the conflict the review panel has selected."""
-        item = self.review.list_for(api.QUEUE_CONFLICTS).currentItem()
-        cid = None if item is None else item.data(int(Qt.ItemDataRole.UserRole) + 1)
+        cid = self.review.selected_conflict()
         if cid is None:
             self.report("select a conflict first")
             return

@@ -2,14 +2,14 @@
 
 Conflicts, needs-review, missing shapes and unexplained differences each get a
 tab whose label carries the queue's size, so the remaining work is visible
-without opening anything.  Activating an entry opens its frame in the canvas
-(``session.goto``); ``Enter`` confirms the frame that is open and ``R`` marks
-it for rework, which the panel only reports (:attr:`ReviewPanel.sigRework`) --
-what rework means is the main window's business.
+without opening anything.  Activating an entry asks for its frame; ``Enter``
+confirms the frame that is open and ``R`` marks it for rework.
 
-A conflict is resolved with the two buttons, which pass the entry's id and one
-of :data:`api.RESOLUTIONS` to the session; the queues are then re-read, never
-patched locally.
+The panel decides nothing: the buttons and the lists **report**
+(:attr:`ReviewPanel.sigResolve`, :attr:`ReviewPanel.sigOpenStep`,
+:attr:`ReviewPanel.sigRework`) and the window acts.  A resolution has three
+possible outcomes and opening another frame can be refused; neither answer is
+the panel's to give.  The queues are then re-read, never patched locally.
 """
 from __future__ import annotations
 
@@ -62,12 +62,20 @@ class ReviewPanel(QWidget):
 
     #: The annotator marked a step for rework.
     sigRework = Signal(int)
+    #: A queue entry was activated: the window should open that step -- through
+    #: the gate.  The panel used to call ``session.goto`` itself, un-forced, and
+    #: an uncommitted layer then made it raise out of a Qt slot.
+    sigOpenStep = Signal(int)
+    #: A resolution button was pressed; the payload is one of :data:`api.RESOLUTIONS`.
+    sigResolve = Signal(str)
 
     def __init__(self, session: Optional[api.SessionLike] = None,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._session: Optional[api.SessionLike] = None
         self._problems: list[str] = []
+        #: The queue list whose row was activated and not yet answered for.
+        self._activated: Optional[QListWidget] = None
 
         self._tabs = QTabWidget()
         self._lists: dict[str, QListWidget] = {}
@@ -91,11 +99,13 @@ class ReviewPanel(QWidget):
         for button in (self.keep_old_button, self.accept_new_button):
             button.setMinimumWidth(1)
             button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        # Report, do not act: a resolution has three possible outcomes and only
+        # the window can say which one the annotator got.
         self.keep_old_button.clicked.connect(
-            lambda: self.resolve_selected(api.RESOLVE_KEEP_OLD)
+            lambda: self.sigResolve.emit(api.RESOLVE_KEEP_OLD)
         )
         self.accept_new_button.clicked.connect(
-            lambda: self.resolve_selected(api.RESOLVE_ACCEPT_NEW)
+            lambda: self.sigResolve.emit(api.RESOLVE_ACCEPT_NEW)
         )
 
         self._problems_label = QLabel("Problems")
@@ -187,33 +197,28 @@ class ReviewPanel(QWidget):
             return int(self._session.current().step)
         return None
 
-    def open_selected(self) -> None:
-        """Open the selected entry's frame in the canvas."""
-        item = self._lists[self.current_queue()].currentItem()
-        if item is not None:
-            self._goto(item)
-
-    def resolve_selected(self, resolution: str) -> None:
-        """Resolve the selected conflict with ``keep_old`` or ``accept_new``."""
-        if self._session is None:
-            return
+    def selected_conflict(self) -> Optional[int]:
+        """Id of the selected conflict, or ``None``."""
         item = self._lists[api.QUEUE_CONFLICTS].currentItem()
-        if item is None:
-            return
-        cid = item.data(CID_ROLE)
-        if cid is None:
-            return
-        self._session.resolve_conflict(int(cid), resolution)
-        self.refresh()
+        cid = None if item is None else item.data(CID_ROLE)
+        return None if cid is None else int(cid)
 
-    def confirm(self) -> bool:
-        """Accept the frame (``Enter``); on refusal keep the session's problems."""
-        if self._session is None:
-            return False
-        self._problems = []
-        ok = self._session.confirm_frame()
-        self._show_problems([] if ok else self._problems)
-        return ok
+    def select_current_step(self) -> None:
+        """Put the highlight back on the frame that is open, after a refusal.
+
+        Qt selects the row before the click is delivered, so a refused move left
+        the queue pointing at a step the canvas is not showing.  Only the list
+        the annotator actually activated is touched: restoring all four cleared
+        a conflict they had picked in another tab, and the ``K`` / ``N`` keys
+        then had nothing to act on.
+        """
+        lw, self._activated = self._activated, None
+        if self._session is None or lw is None:
+            return
+        step = int(self._session.current().step)
+        rows = [r for r in range(lw.count())
+                if int(lw.item(r).data(STEP_ROLE)) == step]
+        lw.setCurrentRow(rows[0] if rows else -1)
 
     def rework(self) -> None:
         """Mark the selected step for rework (``R``)."""
@@ -231,14 +236,16 @@ class ReviewPanel(QWidget):
 
     # -- slots --------------------------------------------------------------
     def _on_item_activated(self, item: QListWidgetItem) -> None:
-        self._goto(item)
-
-    def _goto(self, item: QListWidgetItem) -> None:
         step = item.data(STEP_ROLE)
-        if self._session is not None and step is not None and int(step) >= 0:
-            self._session.goto(int(step))
+        if step is None or int(step) < 0:
+            return
+        # Remember which list asked, so that a refusal puts back that one and
+        # leaves the other three tabs' selections alone.
+        self._activated = item.listWidget()
+        self.sigOpenStep.emit(int(step))
 
     def _on_frame_changed(self, _key: object) -> None:
+        self._activated = None      # the move happened: there is nothing to put back
         self.refresh()
 
     def _on_problems(self, problems: list) -> None:

@@ -187,6 +187,9 @@ class ShellMixin:
         self.timeline = TimelinePanel(self.session)
         self.task_card = TaskCardPanel(self.session)
         self.instances = InstanceListPanel(self.session)
+        # The compiled frame holds only what is *in* the picture, so what has
+        # already been taken out has to come from the frame's state.
+        self.instances.set_removed_source(lambda: compat.removed_rows(self.session))
         self.review = ReviewPanel(self.session)
         # The dock decides its own width; the table scrolls inside it.
         self.instances.table().setSizeAdjustPolicy(
@@ -352,14 +355,16 @@ class ShellMixin:
             self.resize(*DEFAULT_WINDOW_SIZE)
         if state is not None:
             self.restoreState(state)
-            self._reject_a_starved_canvas()
         else:
             self.apply_default_layout()
 
     def showEvent(self, event) -> None:  # noqa: D102 - Qt override
-        # The dock widths a restored layout really produces only exist once the
-        # window has been laid out, so the guard runs here as well as at restore
-        # time -- once, so that a deliberate later drag is left alone.
+        # The only place the guard may run.  Here in ``restore_window_state`` it
+        # measured a canvas that has never been laid out -- the ``QWidget``
+        # default of 640 px -- against a window ``restoreGeometry`` had just made
+        # 1920 px wide, so it fired at every launch and threw away the layout the
+        # annotator had chosen, blaming them for it in the status bar.  Once, so
+        # that a deliberate later drag is left alone.
         super().showEvent(event)
         if not getattr(self, "_layout_checked", False):
             self._layout_checked = True

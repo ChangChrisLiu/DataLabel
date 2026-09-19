@@ -91,6 +91,15 @@ class CommitMixin:
         A pixel scope with nothing changed is a no-op: loading a shape and
         pressing Enter must not mint a new version of it.  An explicit layering
         scope is always honoured, because there the pixels are not the point.
+
+        A layering commit never discards painted pixels.  The editing layer is
+        the instance's *amodal* shape, so pixels added inside ``B`` are by
+        definition not in ``A``'s shape yet and no order change can make them
+        ``A``'s: ``zorder:above:<B>`` with added pixels therefore re-traces the
+        keyframe **and** writes the ``PairOverride``, as one undoable op.  The
+        eraser direction is different: the pixels erased lie in ``A ∩ B`` and
+        saying "B was on top all along" merely hides them, so ``A``'s shape is
+        left exactly as it was.
         """
         if not self.layer.active:
             raise RuntimeError("commit_edit() needs begin_edit() first")
@@ -99,7 +108,15 @@ class CommitMixin:
         if pair is None and not self.layer.changed():
             return {"changed": False, "affected": [], "conflicts": 0, "problems": {},
                     "scope": scope}
-        if pair is not None:
+        if pair is not None and self._added_pixels(pair):
+            other, _above = pair
+            edit.require_instance(self._known_instances(), other)
+            self._refuse_mask_on_bench(key, instance)
+            result = edit.commit_edit(self.db, self.truth, key, instance,
+                                      self.layer.mask(), self._shape_scope(scope),
+                                      direction, self.annotator, pair=other)
+            self.layer.settle()   # the pixels went to the database with the pair
+        elif pair is not None:
             other, above = pair
             result = edit.commit_pair_override(
                 self.db, self.truth, key,
@@ -115,13 +132,41 @@ class CommitMixin:
             # on goto/open/close sees a settled layer rather than refusing to
             # leave a frame whose work is already saved.
             #
-            # A layering scope deliberately does **not** settle: it writes a
-            # PairOverride and no pixels, so the painted ones are still nobody's
-            # but the annotator's to keep or discard.  The window clears them
-            # after such a commit; a direct API user is left holding them rather
-            # than having them silently marked as written.
+            # A pure layering scope -- the eraser direction above -- deliberately
+            # does **not** settle: it writes a PairOverride and no pixels, so the
+            # erased ones are still nobody's but the annotator's to keep or
+            # discard.  The window clears them after such a commit; a direct API
+            # user is left holding them rather than having them silently marked
+            # as written.
             self.layer.settle()
         return self._after_edit(result)
+
+    @staticmethod
+    def _shape_scope(scope: str) -> str:
+        """Which pixel scope the shape half of a layering commit is written with.
+
+        ``Enter`` re-traces the keyframe in force; ``Ctrl+K`` on the same
+        suggestion (``split+zorder:above:<B>``) cuts a new version from here and
+        records the pair with it -- a split that dropped the pair wrote the
+        pixels and left them hidden under ``B``, so nothing on screen moved.
+        """
+        return api.SCOPE_SPLIT if edit.splits_the_shape(scope) else api.SCOPE_KEYFRAME
+
+    def _added_pixels(self, pair: tuple[str, bool]) -> bool:
+        """Does this layering gesture carry pixels the shape does not have yet?
+
+        Only the "go above" direction can: ``added = edited & ~before`` is what
+        the annotator painted *into* the neighbour, and it is exactly what an
+        order change on its own would throw away.
+        """
+        _other, above = pair
+        if not above:
+            return False
+        mask, before = self.layer.mask(), self.layer.before()
+        if mask is None or before is None:
+            return False
+        return bool(np.any(np.asarray(mask, dtype=bool)
+                           & ~np.asarray(before, dtype=bool)))
 
     def _known_instances(self) -> set[str]:
         """The instances this frame has, which a layering gesture may name."""
@@ -153,15 +198,27 @@ class CommitMixin:
         ``{"steps", "verified_steps"}`` -- the frames the scope would change and
         the already-confirmed ones among them, i.e. the "影响 N 帧 / 将产生 N 个
         冲突" strip.  Nothing is written and no pixels are touched.
+
+        A layering answer that carries new pixels writes a keyframe as well, so
+        its reach is the union of both: the pair holds where both instances are
+        mask layers, the shape wherever its keyframe does.
         """
         if self.editing_instance is None:
             return {"steps": [], "verified_steps": []}
         pair = edit.split_zorder_scope(scope)
         if pair is not None:
-            other, above = pair
+            other, _above = pair
             edit.require_instance(self._known_instances(), other)
-            return edit.preview_pair(self.db, self.truth, self.current(),
-                                     self.editing_instance, other)
+            reach = edit.preview_pair(self.db, self.truth, self.current(),
+                                      self.editing_instance, other)
+            if not self._added_pixels(pair):
+                return reach
+            shape = edit.preview(self.db, self.truth, self.current(),
+                                 self.editing_instance, self._shape_scope(scope),
+                                 direction)
+            return {"steps": sorted(set(reach["steps"]) | set(shape["steps"])),
+                    "verified_steps": sorted(set(reach["verified_steps"])
+                                             | set(shape["verified_steps"]))}
         geom = GEOM_BOX if edit.placement_of(
             self.db, self.tax, self.current(), self.editing_instance
         ) == ON_BENCH else None

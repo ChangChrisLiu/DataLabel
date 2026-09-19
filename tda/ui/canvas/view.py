@@ -96,19 +96,44 @@ class OverlayItem(QGraphicsItem):
 class MiniMap(QWidget):
     """Thumbnail of the whole frame with the current viewport outlined.
 
-    Display only (spec 4.5 asks for a minimap, not for a navigator): the widget
-    is transparent to mouse events so it never steals a brush stroke.
+    A click (or a drag) centres the canvas on that point.  It used to be
+    transparent to mouse events, which does not mean "the click is ignored": it
+    means the press goes to the canvas *underneath*, at the minimap's own corner
+    of the image, so aiming at the thumbnail painted a brush stroke in the far
+    corner of the frame.
     """
 
     MAX_SIDE = 160
+
+    #: Where on the image the annotator asked to look, in image pixels.
+    sigCentreOn = Signal(float, float)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.image_hw: tuple[int, int] = (0, 0)
         self.view_rect: Rect = (0, 0, 0, 0)
         self._thumb = QPixmap()
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setVisible(False)
+
+    # -- navigation ---------------------------------------------------------
+    def mousePressEvent(self, event) -> None:  # noqa: D102 - Qt override
+        self._centre_on(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: D102 - Qt override
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._centre_on(event)
+
+    def _centre_on(self, event) -> None:
+        """Turn a position on the thumbnail into one on the image, and ask."""
+        event.accept()          # swallowed either way: never a stroke underneath
+        h, w = self.image_hw
+        if w <= 0 or h <= 0 or self._thumb.isNull():
+            return
+        point = event.position() if hasattr(event, "position") else event.pos()
+        x = float(point.x()) * w / max(1, self._thumb.width())
+        y = float(point.y()) * h / max(1, self._thumb.height())
+        self.sigCentreOn.emit(min(max(x, 0.0), float(w)), min(max(y, 0.0), float(h)))
 
     def set_image(self, pixmap: QPixmap, hw: tuple[int, int]) -> None:
         self.image_hw = (int(hw[0]), int(hw[1]))
@@ -212,6 +237,7 @@ class ImageCanvas(QGraphicsView):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._minimap.raise_()
+        self._minimap.sigCentreOn.connect(lambda x, y: self.center_on((x, y)))
         for bar in (self.horizontalScrollBar(), self.verticalScrollBar()):
             bar.valueChanged.connect(lambda _v: self._sync_minimap())
 

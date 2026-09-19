@@ -249,7 +249,12 @@ class SessionLike(Protocol):
         """Move ``instance`` directly above ``above_of`` in the z-order."""
 
     def confirm_frame(self) -> bool:
-        """Verify the frame; ``False`` (with ``sigProblems``) when it has problems."""
+        """Verify the frame; ``False`` (with ``sigProblems``) when it has problems.
+
+        Raises :class:`SessionRefusal` when the editing layer still holds
+        uncommitted pixels: confirming steps the frame back, so it is a way out
+        of the edit like any other and it is not the caller's to skip.
+        """
 
     # -- review -------------------------------------------------------------
     def queues(self) -> dict[str, list[dict]]:
