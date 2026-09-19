@@ -72,6 +72,41 @@ def _pending_rechecks(truth, desktop: int, view: str) -> list[int]:
         return []
 
 
+def _open_conflicts(truth, db, desktops: Sequence[int], view: str) -> int:
+    """How many conflicts of these ``(desktop, view)`` are still open.
+
+    An open conflict is a frozen row the recompile disagrees with: a human has
+    to choose between the two, and until they do the view's truth table is not
+    one to ship (spec 3.4).  ``check`` reported only the conflicts *this run*
+    raised, so a queue somebody left behind yesterday read as a clean desktop.
+
+    Worker F1 owns ``TruthService.open_conflicts``; it is preferred as soon as
+    it exists, and until then the same question is answered straight from the
+    table it will read anyway.
+    """
+    found = getattr(truth, "open_conflicts", None)
+    if not callable(found):
+        def found(desktop: int, view: str) -> list:
+            return db.conflicts(desktop, view)
+    return sum(len(found(int(desktop), str(view))) for desktop in desktops)
+
+
+def _call_export(export, *args, allow_conflicts: bool, **kw):
+    """Call an exporter, passing ``allow_conflicts`` only when it takes it.
+
+    The keyword is F1's; an exporter that predates it must still run rather
+    than die of an unexpected argument.  A ``TypeError`` raised *inside* the
+    exporter says nothing about ``allow_conflicts`` and is left alone -- it is
+    a bug, and swallowing it would hide it behind a second, argument-less call.
+    """
+    try:
+        return export(*args, allow_conflicts=allow_conflicts, **kw)
+    except TypeError as exc:
+        if "allow_conflicts" not in str(exc):
+            raise
+        return export(*args, **kw)
+
+
 def _prepare_truth(db, tax, desktops: Sequence[int], view: str,
                    refresh: bool = True) -> dict:
     """Bring the compiled truth of ``desktops`` up to date before it is read.
@@ -159,13 +194,19 @@ def cmd_check(args: argparse.Namespace) -> int:
     """Recompile one view and print what the compiler is unhappy about.
 
     Exit code 1 when anything is reported, so a shell loop over the desktops
-    can stop on the first machine that needs attention.
+    can stop on the first machine that needs attention. "Anything" is three
+    things, not one: the compiler's problems, the conflicts still standing
+    open, and the re-checks still queued. A desktop with none of the first and
+    six of the second is not a desktop to export, and answering 0 there was how
+    an open conflict survived all the way into a release artefact.
     """
     with session(args, lock=True) as (_paths, db):
-        stats = _prepare_truth(db, load_taxonomy(), [int(args.desktop)],
-                               str(args.view), refresh=True)
+        desktop = int(args.desktop)
+        stats = _prepare_truth(db, load_taxonomy(), [desktop], str(args.view),
+                               refresh=True)
         problems = list(stats["problems"])
-        print(f"[check] D{args.desktop:02d} {args.view}: {stats['steps']} steps, "
+        standing = _open_conflicts(stats["truth"], db, [desktop], str(args.view))
+        print(f"[check] D{desktop:02d} {args.view}: {stats['steps']} steps, "
               f"{stats['updated']} rows written, {stats['conflicts']} conflicts")
         if stats["pending"]:
             print(f"[check] {len(stats['pending'])} frames are still queued for "
@@ -175,7 +216,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         if len(problems) > int(args.limit):
             print(f"  ... {len(problems) - int(args.limit)} more")
         print(f"problems: {len(problems)}")
-        return EXIT_ERROR if problems else EXIT_OK
+        print(f"open conflicts: {standing}")
+        return EXIT_ERROR if (problems or standing or stats["pending"]) else EXIT_OK
 
 
 def _add_check(sub) -> None:
@@ -238,12 +280,18 @@ def _add_build_cache(sub) -> None:
 # exports
 # --------------------------------------------------------------------------- #
 def _export_prologue(args, db, desktops: Sequence[int], command: str):
-    """``(exit code, truth)``: refuse while re-checks are still queued, else go.
+    """``(exit code, truth)``: refuse while anything is unresolved, else go.
 
     An export is a release artefact: shipping a frame whose stored geometry the
-    session had already marked stale is worse than not shipping at all, so the
-    command stops and says which frames to run ``check`` on.  The service it
-    built is handed back so the exporter refreshes through the same one.
+    session had already marked stale -- or one a human is still being asked to
+    adjudicate -- is worse than not shipping at all, so the command stops and
+    says what to run ``check`` on.  The service it built is handed back so the
+    exporter refreshes through the same one.
+
+    Two reasons to stop, and the annotator can only overrule the second:
+    a queued re-check is a job this command could not finish, while an open
+    conflict is a question only they can answer.  ``--allow-conflicts`` says
+    they have decided to ship over it.
     """
     stats = _prepare_truth(db, load_taxonomy(), desktops, str(args.view),
                            refresh=bool(getattr(args, "refresh", True)))
@@ -252,6 +300,14 @@ def _export_prologue(args, db, desktops: Sequence[int], command: str):
               f"pending a re-check ({sorted(stats['pending'])[:10]}). Run "
               f"'python -m tda.cli check --desktop N --view {args.view}' first.")
         return EXIT_ERROR, stats["truth"]
+    if not bool(getattr(args, "allow_conflicts", False)):
+        standing = _open_conflicts(stats["truth"], db, desktops, str(args.view))
+        if standing:
+            print(f"[{command}] refused: {standing} open conflict"
+                  f"{'' if standing == 1 else 's'} on the requested desktops. "
+                  f"Resolve them in the annotator, or pass --allow-conflicts to "
+                  f"export the frozen rows as they stand.")
+            return EXIT_ERROR, stats["truth"]
     return None, stats["truth"]
 
 
@@ -268,9 +324,12 @@ def cmd_export_coco(args: argparse.Namespace) -> int:
         refused, truth = _export_prologue(args, db, desktops, "export-coco")
         if refused is not None:
             return refused
-        stats = export_coco(db, load_taxonomy(), desktops, str(args.view), str(out),
-                            only_verified=bool(args.only_verified),
-                            roi_crop=bool(args.roi_crop), truth=truth)
+        stats = _call_export(
+            export_coco, db, load_taxonomy(), desktops, str(args.view), str(out),
+            allow_conflicts=bool(args.allow_conflicts),
+            only_verified=bool(args.only_verified),
+            roi_crop=bool(args.roi_crop), truth=truth,
+        )
         # ``images``/``annotations`` are the *lists*: printing them put the
         # whole COCO document on the terminal.
         print(f"[export-coco] {_count(stats, 'images')} images, "
@@ -293,11 +352,16 @@ def _add_export_coco(sub) -> None:
 
 
 def _add_refresh_flags(p) -> None:
-    """Whether the export recompiles first (it does; ``--no-refresh`` skips it)."""
+    """What an export does before it reads the truth table, and what stops it."""
     p.add_argument("--refresh", dest="refresh", action="store_true", default=True,
                    help="recompile the requested frames first (the default)")
     p.add_argument("--no-refresh", dest="refresh", action="store_false",
                    help="export what is stored, only draining the re-check queue")
+    p.add_argument("--allow-conflicts", dest="allow_conflicts", action="store_true",
+                   help="export even though frames of these desktops still carry "
+                        "an open conflict. Without it the export refuses: a "
+                        "conflict is a frozen row the recompile disagrees with, "
+                        "and only a human can say which of the two ships")
 
 
 def cmd_export_vlm(args: argparse.Namespace) -> int:
@@ -314,9 +378,11 @@ def cmd_export_vlm(args: argparse.Namespace) -> int:
         if refused is not None:
             return refused
         tasks = [t.strip() for t in str(args.tasks).split(",") if t.strip()] or list(TASKS)
-        stats = export_vlm(db, load_taxonomy(), desktops, str(args.view), str(out),
-                           tasks=tasks, only_verified=bool(args.only_verified),
-                           truth=truth)
+        stats = _call_export(
+            export_vlm, db, load_taxonomy(), desktops, str(args.view), str(out),
+            allow_conflicts=bool(args.allow_conflicts), tasks=tasks,
+            only_verified=bool(args.only_verified), truth=truth,
+        )
         print(f"[export-vlm] {stats.get('records', 0)} records "
               f"({stats.get('by_task', {})}) -> {out}")
         return EXIT_OK
