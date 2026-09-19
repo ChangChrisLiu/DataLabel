@@ -46,6 +46,9 @@ def box_mask(w: int, h: int) -> np.ndarray:
     ("screw", int(ROI_AREA), "a whole-ROI screw"),
     ("screw", 1_502_386, "the rehearsal's 1.5 M px screw"),
     ("psu", int(1600 * 1600), "a whole-frame psu"),
+    # The finding's own case: 0.856 of the ROI committed as a psu.  With one K
+    # for every class the ceiling reached the cap and this was not remarkable.
+    ("psu", 619_923, "the rehearsal's 619,923 px psu"),
     ("ram_latch", int(ROI_AREA), "a whole-ROI latch"),
 ])
 def test_an_implausible_mask_warns(priors, cls, pixels, why):
@@ -57,6 +60,11 @@ def test_an_implausible_mask_warns(priors, cls, pixels, why):
 # --------------------------------------------------------------------------- #
 # what must stay silent
 # --------------------------------------------------------------------------- #
+def test_a_motherboard_that_fills_the_roi_is_still_plausible(priors):
+    """It *is* the machine: 627,046 px (0.87 of the ROI) is a motherboard."""
+    assert area_warning(mask_of(627_046), "motherboard", ROI_AREA, priors) is None
+
+
 @pytest.mark.parametrize("cls,w,h", [
     ("screw", 14, 14), ("screw", 60, 60),
     ("connector", 25, 20), ("connector", 70, 40),

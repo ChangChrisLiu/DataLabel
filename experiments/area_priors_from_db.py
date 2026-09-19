@@ -38,18 +38,25 @@ if str(REPO) not in sys.path:
 #: The lower bound is ``p05 / MARGIN_LOW``: tiny-but-valid happens (a screw head
 #: half behind a bracket), so there is slack on this side.
 MARGIN_LOW = 4.0
-#: The upper bound is ``p95 * MARGIN_HIGH``, **capped**.  It used to be
-#: ``max(observed) * 6`` and the window then multiplied by another 10, which put
-#: the ceiling for a screw at 1.9 ROIs and for a motherboard at 10 -- a mask of
-#: the whole frame is 3.5 ROIs, so the rule could not fire at all.
+#: The upper bound is ``p95 * K``, **capped**, and ``K`` depends on the size
+#: regime.  It used to be ``max(observed) * 6`` and the window then multiplied
+#: by another 10, which put the ceiling for a screw at 1.9 ROIs and for a
+#: motherboard at 10 -- a mask of the whole frame is 3.5 ROIs, so the rule could
+#: not fire at all.
 #:
-#: The ruling suggested 4.  Measured against the sizes the reviewer listed as
-#: plausible, 4 is too tight at the small end: these percentiles come from the
-#: *draft* masks, which under-draw a screw (p95 = 0.055 % of the ROI, about
-#: 20x20 px), and a hand-drawn 60x60 screw -- explicitly plausible -- is nine
-#: times that.  Ten clears every plausible size the reviewer named while still
-#: warning on a whole-ROI screw, which is what the bar is for.
-MARGIN_HIGH = 10.0
+#: One K for every class cannot work, because the two ends fail in opposite
+#: directions.  Small parts are *under-drawn* in the draft masks these
+#: percentiles come from -- a screw's p95 is 0.055 % of the ROI, about 20x20 px,
+#: while a hand-drawn 60x60 screw is plausible and nine times that -- so they
+#: need a wide factor.  Large parts do not: with a wide factor a psu's ceiling
+#: reaches the cap and the 619,923-pixel mask the rehearsal committed as one
+#: (0.86 of the ROI) stops being remarkable.
+#:
+#: So: ``K = 10`` for a class whose p95 is under :data:`SMALL_P95` of the ROI,
+#: ``K = 4`` for the rest.
+SMALL_P95 = 0.005
+MARGIN_HIGH_SMALL = 10.0
+MARGIN_HIGH_LARGE = 4.0
 #: No class may exceed one ROI ...
 CAP_FRAC = 1.0
 #: ... except the ones that *are* the machine, which can fill it and spill over
@@ -163,8 +170,13 @@ def percentile(values: list[float], q: float) -> float:
     return float(ordered[index])
 
 
+def margin_high(p95: float) -> float:
+    """``K`` for this class's size regime (see :data:`SMALL_P95`)."""
+    return MARGIN_HIGH_SMALL if p95 < SMALL_P95 else MARGIN_HIGH_LARGE
+
+
 def priors(samples: dict[str, list[float]], min_samples: int) -> dict[str, dict]:
-    """Robust bounds per class: ``p05 / 4`` to ``min(p95 * 4, cap)``.
+    """Robust bounds per class: ``p05 / 4`` to ``min(p95 * K, cap)``.
 
     Percentiles rather than the extremes, because the draft masks these come
     from include the mistakes this warning is meant to catch: one 1.5-million
@@ -180,7 +192,7 @@ def priors(samples: dict[str, list[float]], min_samples: int) -> dict[str, dict]
         cap = STRUCTURE_CAP_FRAC if cls in STRUCTURE_CLASSES else CAP_FRAC
         out[cls] = {
             "min_frac": round(float(p05 / MARGIN_LOW), 6),
-            "max_frac": round(float(min(p95 * MARGIN_HIGH, cap)), 6),
+            "max_frac": round(float(min(p95 * margin_high(p95), cap)), 6),
             "p05_frac": round(float(p05), 6),
             "median_frac": round(float(median), 6),
             "p95_frac": round(float(p95), 6),
