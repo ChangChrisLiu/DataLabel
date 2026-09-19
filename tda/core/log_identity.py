@@ -14,9 +14,10 @@ are open instead:
 * :meth:`InstanceLedger.numbered_matches` -- the strict test of spec 3.2: an
   explicit instance number, a matching :func:`identity`, and a verb the instance
   has not had yet;
-* :func:`physical_reuse` -- the narrow one below, for the unnumbered
-  ``displace``-then-``remove`` pair that is one part in the world and was two in
-  the draft.
+* :func:`reuse_candidates` -- the narrow one below, for the unnumbered
+  ``displace``-then-``remove`` pair (and the failed-attempt-then-``remove`` one)
+  that is one part in the world and was two in the draft. Exactly one candidate
+  is a reuse; several are a question the caller reports rather than answers.
 
 Both report; nothing here ever merges silently.
 """
@@ -216,41 +217,3 @@ def reuse_candidates(
         elif attempted is not None:
             found.append((key, f"failed {attempted}"))
     return found
-
-
-def physical_reuse(
-    ledger: InstanceLedger,
-    cls: str,
-    disc: str,
-    attrs: dict,
-    state_of: Callable[[str], Optional[str]],
-) -> Optional[tuple[str, str]]:
-    """The one instance an unnumbered successful ``remove`` may operate again.
-
-    ``(key, how it was last acted on)``, or ``None`` when the row is a part of
-    its own.  Every condition has to hold:
-
-    * an earlier **unnumbered** row created it with the same class and the same
-      :func:`identity` discriminators -- a numbered candidate belongs to the
-      strict test, and a different ``of`` or cable owner is a different part;
-    * it is not removed already, so the row is not lifting out something that
-      has gone (``state_of`` folds the verbs that succeeded);
-    * **and** the sheet left it in one of exactly two situations:
-
-      - its latest successful verb is a non-terminal one -- swung aside, opened,
-        unscrewed: D22's ``Open Power Module`` (step 12) then ``Power module``
-        (step 20);
-      - or its latest action is a **failed attempt**, whatever the verb. A
-        failed attempt changes no state, so the part is by definition still
-        where it was, and the later successful ``remove`` is the same part:
-        D35/D36/D45's ``Try to remove power module (failed)`` then
-        ``Power module``.
-
-    * it is the only candidate on the desktop.  Two displaced power supplies and
-      one ``Power module`` row is a question for a human, not a coin toss.
-
-    Without this, each of those sheets drafted two keys for one physical power
-    supply, both needing an in-chassis mask on the same frames.
-    """
-    found = reuse_candidates(ledger, cls, disc, attrs, state_of)
-    return found[0] if len(found) == 1 else None

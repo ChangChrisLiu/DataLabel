@@ -401,8 +401,9 @@ class _Importer:
         Only a **successful** ``remove`` may take this door: an attempt that did
         not happen says the part is untouched, not that it is being finished
         off, and merging it would put two verbs of the same name on one
-        instance. :func:`tda.core.log_identity.physical_reuse` owns the rest of
-        the conditions, and the reuse is reported so stage S1 sees it.
+        instance. :func:`tda.core.log_identity.reuse_candidates` owns the rest
+        of the conditions; exactly one candidate is a reuse, and several are
+        reported rather than guessed between. Either way stage S1 sees it.
         """
         if verb != "remove" or result != "success":
             return None
