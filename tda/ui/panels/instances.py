@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from tda.ui import session_api as api
 from tda.ui.canvas.overlay import palette_color
+from tda.ui.panels import session_is_open
 
 __all__ = ["InstanceListPanel"]
 
@@ -185,7 +186,8 @@ class InstanceListPanel(QWidget):
         frame itself.
         """
         keep = self.selected_instance()
-        self._rows = self._session.instance_rows() if self._session is not None else []
+        self._rows = (self._session.instance_rows()
+                      if session_is_open(self._session) else [])
         self._gone = self._removed_rows()
         self._loading = True
         header = self._table.horizontalHeader()

@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from tda.ui import session_api as api
+from tda.ui.panels import session_is_open
 
 __all__ = ["ReviewPanel", "QUEUE_TITLES"]
 
@@ -166,7 +167,7 @@ class ReviewPanel(QWidget):
     # -- content ------------------------------------------------------------
     def refresh(self) -> None:
         """Re-read ``session.queues()`` into the four lists."""
-        queues = self._session.queues() if self._session is not None else {}
+        queues = self._session.queues() if session_is_open(self._session) else {}
         for index, queue in enumerate(api.QUEUE_NAMES):
             entries = list(queues.get(queue, []))
             lw = self._lists[queue]
@@ -193,7 +194,7 @@ class ReviewPanel(QWidget):
         item = self._lists[self.current_queue()].currentItem()
         if item is not None:
             return int(item.data(STEP_ROLE))
-        if self._session is not None:
+        if session_is_open(self._session):
             return int(self._session.current().step)
         return None
 
@@ -213,7 +214,7 @@ class ReviewPanel(QWidget):
         then had nothing to act on.
         """
         lw, self._activated = self._activated, None
-        if self._session is None or lw is None:
+        if lw is None or not session_is_open(self._session):
             return
         step = int(self._session.current().step)
         rows = [r for r in range(lw.count())

@@ -84,6 +84,19 @@ def seed_pose_segments(db: Db, two: bool = False) -> None:
         db.set_pose_segment(DESKTOP, VIEW, 1, 1, LAST_STEP, LAST_STEP, None, None)
 
 
+def seed_second_view(db: Db, view: str = "oak1", steps=(1, 2)) -> None:
+    """Frame rows for a second camera, with no images.
+
+    Enough for the window to be *allowed* to switch to it: a view with no frame
+    rows at all is refused now (there would be nothing to show and the previous
+    view's pixels would stay on screen), so the tests that switch views need a
+    view that exists.
+    """
+    for step in steps:
+        db.upsert_frame(FrameKey(DESKTOP, int(step), view), "",
+                        {"hw": [HW[0], HW[1]]}, None, {"missing": True})
+
+
 def seed_db(db: Db, tax, cache_dir: Path, last_step: int = LAST_STEP,
             missing=(), two_segments: bool = False) -> None:
     """Import the D13 sheet, truncate it, write the frames and the segments."""
@@ -102,6 +115,7 @@ def seed_db(db: Db, tax, cache_dir: Path, last_step: int = LAST_STEP,
             rec.fastens = COOLER
         db.upsert_instance(rec)
     write_frames(db, cache_dir, range(1, last_step + 1), missing=missing)
+    seed_second_view(db)
     seed_pose_segments(db, two=two_segments)
 
 

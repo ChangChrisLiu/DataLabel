@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from tda.ui import session_api as api
+from tda.ui.panels import session_is_open
 
 __all__ = ["TaskCardPanel", "KIND_ICONS"]
 
@@ -160,7 +161,7 @@ class TaskCardPanel(QWidget):
     def refresh(self) -> None:
         """Rebuild the card from ``session.task_card()``."""
         self._list.clear()
-        rows = self._session.task_card() if self._session is not None else []
+        rows = self._session.task_card() if session_is_open(self._session) else []
         first_open = -1
         for i, row in enumerate(rows):
             kind = str(row.get("kind", api.KIND_CONFIRM))

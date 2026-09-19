@@ -573,7 +573,66 @@ def resume_target(config: dict, annotator: str, desktop: Optional[int],
         target["view"] = VIEWS[0]
     if target["desktop"] is None:
         target["desktop"] = _lowest_desktop_with_frames(db_path)
+    asked = {"desktop": desktop is not None, "view": view is not None,
+             "step": step is not None}
+    return _validated(target, db_path, asked)
+
+
+def _validated(target: dict, db_path: str, asked: dict) -> dict:
+    """Fall back to something that exists; a stale INI must not stop the launch.
+
+    The INI is written from whatever was last on screen, so a view with no
+    frames could be stored as "last view" -- and the next launch then died in
+    ``MainWindow.__init__`` (the timeline asks the session for a frame that is
+    not there) and the app would not start until somebody edited the file.
+    Every part of the target that came from the INI is checked against the
+    database here and replaced when it is not there.
+
+    What the annotator asked for on the command line is **not** second-guessed:
+    ``--desktop 42`` opens 42, and if it has no frames the window says so
+    (spec 4.5) rather than opening something else without being asked.
+    """
+    rows = _frame_index(db_path)
+    if not rows:
+        return target
+    desktop = target["desktop"]
+    if not asked["desktop"] and (desktop is None or int(desktop) not in rows):
+        desktop = min(rows)
+        target["step"] = None      # a step of another machine means nothing
+    target["desktop"] = int(desktop)
+    views = rows.get(int(desktop), {})
+    if not asked["view"] and views and target["view"] not in views:
+        target["view"] = next((v for v in VIEWS if v in views), sorted(views)[0])
+        target["step"] = None
+    steps = views.get(target["view"], set())
+    if not asked["step"] and target["step"] is not None and int(target["step"]) not in steps:
+        target["step"] = None      # the session opens on its own starting frame
     return target
+
+
+def _frame_index(db_path: str) -> dict[int, dict[str, set[int]]]:
+    """``{desktop: {view: {steps}}}`` straight from ``frame``, read-only.
+
+    One query, no ``Db`` (which replays the schema): this runs before the
+    database is opened for writing, and before the lock is anybody's.
+    """
+    import sqlite3
+
+    index: dict[int, dict[str, set[int]]] = {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return index
+    try:
+        for desktop, view, step in conn.execute(
+            "SELECT desktop, view, step FROM frame"
+        ):
+            index.setdefault(int(desktop), {}).setdefault(str(view), set()).add(int(step))
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
+    return index
 
 
 def _lowest_desktop_with_frames(db_path: str) -> int:

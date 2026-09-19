@@ -688,7 +688,8 @@ def test_the_chooser_count_follows_a_view_switch(window):
 
     window.act_set_view("oak1")
 
-    assert "[0/" in chooser_text(window), chooser_text(window)
+    assert window.session.view == "oak1"
+    assert "[0/2]" in chooser_text(window), chooser_text(window)
 
 
 def test_the_chooser_count_follows_the_sweeper(window, monkeypatch):
@@ -719,3 +720,75 @@ def test_the_zoom_percentage_follows_the_wheel(window):
 
     assert window.canvas.zoom_factor() != pytest.approx(float(before.rstrip("%")) / 100)
     assert window.zoom_label.text() != before
+
+
+# --------------------------------------------------------------------------- #
+# a view with no frames at all (item 7)
+# --------------------------------------------------------------------------- #
+EMPTY_VIEW = "rs"
+
+
+def test_switching_to_a_view_with_no_frames_is_refused(window):
+    """It left the PREVIOUS view's image, masks and timeline on screen.
+
+    `render_frame` returned early on a closed session, so everything the
+    annotator could see still belonged to the view they had left -- and the
+    brush was still armed over it.
+    """
+    before = window.session.view
+    step = window.session.current().step
+
+    window.act_set_view(EMPTY_VIEW)
+
+    assert window.session.view == before
+    assert window.session.current().step == step
+    assert window.session.is_open is True
+    assert "没有" in window.status_message() or "no frames" in window.status_message()
+    assert window.view_buttons[before].isChecked() is True
+
+
+def test_switching_to_a_desktop_with_no_frames_is_refused(window):
+    before = int(window.session.desktop)
+    missing = max(window.db.desktop_ids()) + 7
+
+    window.act_set_desktop(missing)
+
+    assert int(window.session.desktop) == before
+    assert window.session.is_open is True
+
+
+def test_a_closed_session_leaves_nothing_of_the_last_frame_on_screen(window):
+    """Whatever put the session in this state, the window must not lie."""
+    window.session.open(int(window.session.desktop), EMPTY_VIEW, force=True)
+    window.render_frame()
+    QApplication.processEvents()
+
+    assert window.session.is_open is False
+    assert window.stack.currentWidget() is window.placeholder_label
+    assert window.active_tool is None or window.tools_enabled is False
+    assert window.timeline.list_widget().count() == 0
+    assert window.instances.table().rowCount() == 0
+    assert window.task_card.list_widget().count() == 0
+
+
+def test_a_poisoned_last_frame_in_the_ini_cannot_stop_the_launch(qapp, tmp_path):
+    """The next launch raised out of __init__ and the app would not start.
+
+    A view with no frames was saved as "last view"; on the next launch the
+    timeline asked the session for a frame that does not exist.
+    """
+    from tda.ui.app_shell import resume_target
+
+    paths = make_paths(tmp_path)
+    make_session(tmp_path).close(force=True)          # build the scene's database
+    settings = S.make_settings(paths)
+    settings.setValue("last/tester/desktop", 999)
+    settings.setValue("last/tester/view", "nonsense")
+    settings.setValue("last/tester/step", 4242)
+    settings.sync()
+
+    target = resume_target(paths, "tester", None, None, None, paths["db_path"])
+
+    assert int(target["desktop"]) == DESKTOP
+    assert target["view"] == VIEW            # the only view the scene has frames for
+    assert target["step"] in (None, LAST_STEP)

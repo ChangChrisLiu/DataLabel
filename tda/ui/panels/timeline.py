@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from tda.ui import session_api as api
+from tda.ui.panels import session_is_open
 
 __all__ = ["TimelinePanel", "STATUS_COLORS", "status_brush"]
 
@@ -260,7 +261,7 @@ class TimelinePanel(QWidget):
         cache_key = self._cache_key(step)
         if cache_key in self._thumbs:
             return self._thumbs[cache_key]
-        if self._session is None:
+        if not session_is_open(self._session):
             return None
         path = self._session.thumb_path(step)
         pm: Optional[QPixmap] = None
@@ -305,14 +306,14 @@ class TimelinePanel(QWidget):
 
     # -- internals ----------------------------------------------------------
     def _ordered_steps(self) -> list[int]:
-        if self._session is None:
+        if not session_is_open(self._session):
             return []
         steps = sorted(self._session.steps())
         return list(reversed(steps)) if self._descending else steps
 
     def _current_context(self) -> Optional[tuple[int, str]]:
         """``(desktop, view)`` of the open frame, which the cache is keyed by."""
-        if self._session is None:
+        if not session_is_open(self._session):
             return None
         key = self._session.current()
         return (key.desktop, key.view)
@@ -322,7 +323,7 @@ class TimelinePanel(QWidget):
         return (desktop, view, step)
 
     def _status(self, step: int) -> str:
-        if self._session is None:
+        if not session_is_open(self._session):
             return api.STATUS_UNLABELED
         return self._session.frame_status(step)
 
@@ -334,7 +335,7 @@ class TimelinePanel(QWidget):
         return None
 
     def _select_current(self) -> None:
-        if self._session is None:
+        if not session_is_open(self._session):
             return
         item = self._item_for(self._session.current().step)
         if item is None:

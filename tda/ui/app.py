@@ -135,6 +135,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         for tool in (self.sam_point, self.sam_box):
             tool.paused = False
         if not compat.is_open(self.session):
+            self._render_nothing()
             return
         key = self.session.current()
         image = self.session.image()
@@ -165,6 +166,22 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
 
         self.on_frame_changed_edit(key)
         self.on_frame_changed_assist(key)
+        self.update_status()
+
+    def _render_nothing(self) -> None:
+        """Show that there is nothing open, rather than the last thing there was.
+
+        A desktop/view with no frame rows leaves the session closed.  Returning
+        early here left the *previous* view's image, masks, instance list and
+        timeline on screen with a tool armed over them: everything the annotator
+        could see was about a frame they were no longer on.
+        """
+        self.tools_enabled = False
+        self._segment = None
+        self._detach_tool()
+        self.stack.setCurrentWidget(self.placeholder_label)
+        for panel in (self.timeline, self.task_card, self.instances, self.review):
+            panel.refresh()
         self.update_status()
 
     def _pose_segment(self, key: FrameKey) -> Optional[int]:
@@ -367,6 +384,10 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         """Show another camera of the same machine."""
         if view == self.session.view:
             return
+        if not self._has_frames(self.session.desktop, view):
+            self.report(f"{view}: 这台机器没有这个视图的帧 / no frames in this view")
+            self._sync_view_buttons()
+            return
         step = self.session.current().step if compat.is_open(self.session) else None
 
         def switch() -> None:
@@ -378,8 +399,27 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
             self.refresh_desktop_counts()   # the count is per view
 
         self.leave_frame(switch)
+        self._sync_view_buttons()
+
+    def _sync_view_buttons(self) -> None:
+        """Check the button of the view that is actually open."""
         for name, button in self.view_buttons.items():
             button.setChecked(name == self.session.view)
+
+    def _has_frames(self, desktop: Optional[int], view: str) -> bool:
+        """Does this desktop/view have any frame rows at all?
+
+        Opening one that has none left the *previous* view's image, masks and
+        timeline on screen with a brush armed over them, and then saved that
+        view as "last view" -- after which the next launch died in ``__init__``.
+        Both moves are refused instead, with a line that says why.
+        """
+        if desktop is None:
+            return False
+        try:
+            return bool(self.db.frames_for(int(desktop), str(view)))
+        except Exception:  # noqa: BLE001 - a read that fails is not a reason to move
+            return False
 
     @S.guard
     def _on_desktop_chosen(self, index: int) -> None:
@@ -390,6 +430,11 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
     @S.guard
     def act_set_desktop(self, desktop: int) -> None:
         """Open another machine in the current view."""
+        if not self._has_frames(int(desktop), self.session.view):
+            self.report(f"D{desktop}: 这个视图没有帧 / no frames in this view")
+            self._sync_desktop_combo()
+            return
+
         def switch() -> None:
             self.session.open(int(desktop), self.session.view, force=True)
             if self._steps_panel is not None:
@@ -398,11 +443,15 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
             self.render_frame()
 
         if not self.leave_frame(switch):
-            index = self.desktop_combo.findData(int(self.session.desktop))
-            if index >= 0:
-                blocked = self.desktop_combo.blockSignals(True)
-                self.desktop_combo.setCurrentIndex(index)
-                self.desktop_combo.blockSignals(blocked)
+            self._sync_desktop_combo()
+
+    def _sync_desktop_combo(self) -> None:
+        """Point the chooser back at the machine that is open."""
+        index = self.desktop_combo.findData(int(self.session.desktop))
+        if index >= 0 and index != self.desktop_combo.currentIndex():
+            blocked = self.desktop_combo.blockSignals(True)
+            self.desktop_combo.setCurrentIndex(index)
+            self.desktop_combo.blockSignals(blocked)
 
     # ------------------------------------------------------ navigation slots
     @S.guard
