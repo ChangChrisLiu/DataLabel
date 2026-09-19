@@ -109,7 +109,23 @@ def _sha1(text: str) -> str:
 
 
 def _rle_digest(rle: Optional[dict]) -> Optional[str]:
-    """sha1 of an RLE's counts string -- short, stable and JSON-safe."""
+    """sha1 of an RLE's counts string -- short, stable and JSON-safe.
+
+    The ``size`` is deliberately **not** in here, and must not be added: every
+    ``input_hash`` and every ``frame_digest`` in every existing database was
+    computed without it, so putting it in would move all of them and mass-queue
+    the frozen frames of every desktop (which is what
+    :meth:`~tda.core.truth_fresh.FreshMixin._refuse_foreign_digests` exists to
+    stop happening by accident).
+
+    Nothing is missed by that. A mask is only ever reshaped by re-tracing it,
+    and :meth:`~tda.core.db.Db.update_keyframe` bumps ``version``, which is in
+    the keyframe token beside this digest; the canvas the mask is drawn on is
+    in the hash as ``hw``; and a mask whose size does not match the canvas is
+    reported as ``shape_size_mismatch`` and dropped rather than composited. The
+    gap is a rewrite of an RLE's ``size`` in the database, in place, leaving
+    both the version and the counts alone -- which nothing in the tool does.
+    """
     counts = masks.rle_counts(rle)
     return None if counts is None else _sha1(counts)
 
