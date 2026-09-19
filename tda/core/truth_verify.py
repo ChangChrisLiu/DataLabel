@@ -19,7 +19,15 @@ from typing import Optional
 
 from tda.core.compiler import CompiledFrame
 from tda.core.model import FrameKey, Placement
-from tda.core.truth_conflicts import row_payload, row_values
+from tda.core.truth_conflicts import (
+    disagreement,
+    geom_payload,
+    label_changes,
+    label_text,
+    row_payload,
+    row_values,
+)
+from tda.core.truth_fresh import digest_of
 
 __all__ = ["BLOCKING_PROBLEMS", "VerifyMixin"]
 
@@ -41,7 +49,9 @@ class VerifyMixin:
     def verify_frame(self, key: FrameKey, annotator: str) -> None:
         """Freeze every row of one frame after a human confirmed it (spec 4.2).
 
-        Raises :class:`ValueError` and writes no truth row in three cases:
+        Raises :class:`ValueError` and writes no truth row in four cases, and
+        the last two are the same rule twice: **a confirmation may never be how
+        a frozen row changes**.
 
         * an **open conflict** of this frame. A disagreement is the one thing
           in the truth table only a human can settle, and until it is settled
@@ -54,11 +64,17 @@ class VerifyMixin:
           -- a missing chassis shape, a contradictory z-order. Warnings, such as
           a bench part nobody has boxed yet, do not stop the confirmation; they
           only leave ``bench_annotated`` false.
-        * a **frozen row the inputs no longer contain**. A human confirmed that
-          instance here, so its disappearance is a disagreement like any other:
-          it goes into the conflict queue and the frame is left for that
-          decision. Only an ``auto`` row -- a cache the compiler owns -- may be
-          dropped by a confirmation.
+        * a **frozen row the inputs no longer contain**.
+        * a **frozen row the inputs have moved under** -- still in the frame,
+          but its geometry or its labels no longer agree. This is the case a
+          queued re-check exists for, and until that re-check runs the row is
+          the only record of what the human signed: overwriting it here and
+          stamping the digest turned the re-check into a no-op, so the conflict
+          was never raised at all.
+
+        Either way the disagreement goes into the conflict queue and the frame
+        is left for that decision. Only an ``auto`` row -- a cache the compiler
+        owns -- is ever rewritten or dropped by a confirmation.
 
         Every write goes into one transaction: a frame is either confirmed
         whole -- rows, flag and op log -- or not at all.
@@ -71,22 +87,16 @@ class VerifyMixin:
                 + ", ".join(str(cid) for cid in open_ids)
                 + " are still open; settle them in the review queue first"
             )
-        _, compiled = self._compile(key)
+        inputs, compiled = self._compile(key)
         blocking = [p for p in compiled.problems if p.startswith(BLOCKING_PROBLEMS)]
         if blocking:
             raise ValueError(refused + ", ".join(blocking))
         stored = self.db.compiled(key)
         gone = sorted(set(stored) - set(compiled.instances))
-        vanished = [i for i in gone if stored[i]["status"] == VERIFIED]
-        if vanished:
-            self._queue_vanished(key, stored, vanished)
-            raise ValueError(
-                refused + ", ".join(vanished) + " no longer "
-                + ("belong" if len(vanished) > 1 else "belongs")
-                + " to this frame, but a human confirmed "
-                + ("them" if len(vanished) > 1 else "it")
-                + " here; the disagreement is now in the review queue"
-            )
+        disputed = self._queue_frozen_disagreements(key, stored, compiled, inputs, gone)
+        if disputed:
+            raise ValueError(refused + "; ".join(disputed)
+                             + "; the disagreement is now in the review queue")
         previous = self._review_status(key)
         with self.db.transaction():
             for instance in sorted(compiled.instances):
@@ -98,7 +108,7 @@ class VerifyMixin:
                 # `auto` only: the guard above turned every frozen one away
                 self.db.delete_compiled(key, instance)
             self._mark_bench(key, compiled)
-            self._stamp(key, self.inputs_digest(key))
+            self._stamp(key, digest_of(inputs, self.compiler_version))
             self.db.set_frame_flags(key, review_status=VERIFIED)
             self.db.log_op(
                 key.desktop, key.view, "verify_frame",
@@ -129,25 +139,54 @@ class VerifyMixin:
             if int(row["step"]) == int(key.step)
         )
 
-    def _queue_vanished(self, key: FrameKey, stored: dict[str, dict],
-                        vanished: list[str]) -> None:
-        """Queue "this confirmed instance is no longer in the frame" (spec 3.4).
+    def _queue_frozen_disagreements(self, key: FrameKey, stored: dict[str, dict],
+                                    compiled, inputs, gone: list[str]) -> list[str]:
+        """Queue every frozen row this compilation disagrees with; say which.
 
-        The same entry :meth:`~tda.core.truth.TruthService.refresh` would have
-        made, in its own transaction, so the refusal the caller is about to
-        raise leaves the annotator with something to act on rather than a frame
-        they cannot confirm and cannot see the reason for. The frame's digest
-        goes with it: the rows keep their frozen values and therefore do not
-        describe these inputs.
+        Exactly the entries :meth:`~tda.core.truth.TruthService.refresh` would
+        have made, written in one transaction of their own, so the refusal the
+        caller is about to raise leaves the annotator with something to act on
+        rather than a frame they cannot confirm and cannot see the reason for.
+        The frame's digest goes with them: the rows keep their frozen values and
+        therefore do not describe these inputs -- stamping it here is what used
+        to turn the queued re-check into a no-op.
+
+        Returns one sentence per instance, in key order, or ``[]`` when nothing
+        a human signed is in dispute.
         """
+        reasons: list[tuple[str, str, Optional[dict], Optional[dict], int]] = []
+        for instance in gone:
+            if stored[instance]["status"] != VERIFIED:
+                continue
+            payload = row_payload(stored[instance])
+            reasons.append((instance, f"{instance} is no longer in this frame",
+                            payload, None, self._payload_area(payload)))
+        for instance in sorted(set(stored) & set(compiled.instances)):
+            row = stored[instance]
+            if row["status"] != VERIFIED:
+                continue
+            compiled_inst = compiled.instances[instance]
+            diff = disagreement(row, compiled_inst)
+            labels = label_changes(row, compiled_inst,
+                                   inputs.frame_overrides.get(instance))
+            if diff is None and not labels:
+                continue
+            what = label_text(labels) if labels else f"{diff} px differ"
+            values = row_values(compiled_inst)
+            reasons.append((
+                instance, f"the confirmed {instance} no longer agrees ({what})",
+                row_payload(row),
+                geom_payload(values.visible_rle, values.box, labels), int(diff or 0),
+            ))
+        if not reasons:
+            return []
         queued: Optional[list[dict]] = None
         with self.db.transaction():
-            for instance in vanished:
-                payload = row_payload(stored[instance])
-                queued, _new = self._queue_conflict(
-                    key, instance, payload, None, self._payload_area(payload), queued
-                )
+            for instance, _text, old, new, pixels in reasons:
+                queued, _new = self._queue_conflict(key, instance, old, new,
+                                                    pixels, queued)
             self.db.clear_frame_digest(key)
+        return [text for _inst, text, *_rest in reasons]
 
     def _review_status(self, key: FrameKey) -> Optional[str]:
         frame = self.db.get_frame(key)

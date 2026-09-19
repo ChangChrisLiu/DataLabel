@@ -349,6 +349,47 @@ def test_verify_frame_queues_a_vanished_frozen_row_instead_of_deleting_it(scene:
     assert scene.row(2, SCREW)["status"] == "verified"
 
 
+def test_verify_frame_refuses_a_frozen_row_the_inputs_have_moved_under(scene: Scene):
+    """The re-check has not run yet, and Space must not do its job for it.
+
+    A frozen row that is still *in* the frame but no longer agrees with it was
+    the one disagreement the gate did not look for: ``_put_row`` wrote the new
+    geometry over the human's signature and ``_stamp`` then turned the queued
+    re-check into a no-op, so the conflict was never raised at all.
+    """
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    frozen = scene.counts(2, PSU)
+    replace_parts(scene, scene.psu_kf,
+                  [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 34)))])
+    # the sweeper has not drained it yet: the truth table still holds the old row
+    scene.svc.queue_rechecks(DESKTOP, VIEW, [2])
+    assert scene.db.conflicts(DESKTOP) == []
+
+    with pytest.raises(ValueError, match=PSU):
+        scene.svc.verify_frame(scene.key(2), "lin")
+
+    assert scene.counts(2, PSU) == frozen
+    assert scene.row(2, PSU)["status"] == "verified"
+    assert [c["instance"] for c in scene.db.conflicts(DESKTOP)] == [PSU]
+    assert scene.db.frame_digest(scene.key(2)) is None
+
+
+def test_verify_frame_refuses_a_frozen_row_whose_label_moved(scene: Scene):
+    """The same gate, for the half of the truth that is not pixels."""
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(1), "lin")
+    scene.db.set_frame_override(
+        FrameOverride(scene.key(1), PSU, None, "occluded_partial")
+    )
+
+    with pytest.raises(ValueError, match="visibility"):
+        scene.svc.verify_frame(scene.key(1), "lin")
+
+    assert scene.row(1, PSU)["visibility"] == "visible"
+    assert [c["instance"] for c in scene.db.conflicts(DESKTOP)] == [PSU]
+
+
 def test_verify_frame_still_drops_an_auto_row_the_inputs_lost(scene: Scene):
     """Only a frozen row is a signature; an ``auto`` row is a cache."""
     scene.refresh_all()
