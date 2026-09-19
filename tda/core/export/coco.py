@@ -206,6 +206,15 @@ class DesktopCtx:
     reads exactly the log the truth service compiled the frames from: always
     derived from the recorded actions, with the hand-written (``auto=False``)
     events merged on top.
+
+    **``instances`` holds only real instances.** A Label Studio draft
+    (:func:`tda.core.model.is_provisional`) carries a real taxonomy class, so a
+    loop that asks "every screw of this role" finds it and counts it -- which is
+    how ``ls:Screw#7`` came to answer a V2 counting question and to appear in
+    its rationale, on a frame the compiler never put it in. Filtering here
+    rather than at each call site is the point: the drafts are not in the
+    mapping, so a loop cannot walk past the rule. What was dropped is kept in
+    :attr:`drafts` for a caller that has to say so.
     """
 
     desktop: int
@@ -215,10 +224,19 @@ class DesktopCtx:
     actions: list[ActionRec]
     steps: dict[int, StepRec]
     keyframes: dict[tuple[str, str, int], list[ShapeKeyframe]] = field(default_factory=dict)
+    #: The provisional keys :meth:`__post_init__` took out of ``instances``.
+    drafts: dict[str, InstanceRec] = field(default_factory=dict, repr=False)
     _states: dict[int, FrameState] = field(default_factory=dict, repr=False)
 
+    def __post_init__(self) -> None:
+        drafts = {k: v for k, v in self.instances.items() if is_provisional(k)}
+        if drafts:
+            self.drafts = drafts
+            self.instances = {k: v for k, v in self.instances.items()
+                              if k not in drafts}
+
     def state_at(self, step: int) -> FrameState:
-        """State of every instance at ``step`` (memoised)."""
+        """State of every instance at ``step`` (memoised); drafts are not in it."""
         if step not in self._states:
             self._states[step] = state_at(self.instances, self.events, step, self.tax)
         return self._states[step]
@@ -226,20 +244,12 @@ class DesktopCtx:
     def cls_of(self, instance: str) -> Optional[str]:
         """Taxonomy class of an exportable instance key, else ``None``.
 
-        **The exports' choke point for provisional keys.** ``None`` covers three
-        things, and all three are skipped rather than allowed to crash or leak
-        into a release:
-
-        * an instance that is not in the table at all;
-        * one carrying a class the taxonomy does not know;
-        * a Label Studio draft (:func:`tda.core.model.is_provisional`). The
-          importer gives those a *real* taxonomy class, so nothing else here
-          would have stopped them -- and a draft nobody has resolved onto a real
-          instance was published under ``tier: gold`` as if a human had signed
-          it off.
+        ``None`` covers three things, and all three are skipped rather than
+        allowed to crash or leak into a release: an instance that is not in the
+        table at all, one carrying a class the taxonomy does not know, and a
+        Label Studio draft -- which is not in ``instances`` to begin with, so
+        this answers ``None`` for it without a rule of its own.
         """
-        if is_provisional(instance):
-            return None
         rec = self.instances.get(instance)
         if rec is None or rec.cls not in self.tax.classes:
             return None

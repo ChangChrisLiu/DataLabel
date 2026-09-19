@@ -521,6 +521,75 @@ def _queue_conflict(d: Db, step: int = 1) -> int:
                           encode_rle(PSU_MASK), encode_rle(SCREW_MASK), 400)
 
 
+# --------------------------------------------------------------------------- #
+# a draft must not reach an export by any road
+# --------------------------------------------------------------------------- #
+DRAFT_SCREW = "ls:Screw#7"
+
+
+def _add_draft_screw(d: Db) -> None:
+    """A draft carrying the *same* class and role as the real screw.
+
+    ``ls:Motherboard#1`` never reaches the counting path; a screw does, because
+    the count is read off the instance table rather than off the frame.
+    """
+    d.upsert_instance(InstanceRec(
+        key=DRAFT_SCREW, desktop=DESKTOP, cls="screw",
+        attrs={"role": "motherboard", "head": "PH2", "captive": False},
+        raw_names=["Motherboard Screw"],
+    ))
+
+
+def test_a_draft_screw_is_counted_by_nothing_and_named_by_nothing(
+    db, tax, tmp_path: Path
+):
+    """The one loop that walked the instance table without the choke point.
+
+    "How many motherboard screws are still fastened?" is answered off the state
+    machine, so a draft the compiler never puts in a frame still entered the
+    count -- 2 where the truth is 1, and 1 after the real screw came out where
+    the truth is 0 -- and ``ls:Screw#7`` appeared in the rationale as a
+    ``propagate_state`` step.
+    """
+    _add_draft_screw(db)
+    out = tmp_path / "v.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    records = _records(out)
+
+    counts = {r["step"]: r["answer"]["count"] for r in records
+              if r["task"] == "V2" and "count" in r["answer"]}
+    # only step 1 can be asked (the question needs a screw this view can point
+    # at), and the answer there is the one real motherboard screw, not two
+    assert counts == {1: 1}
+    assert "ls:" not in out.read_text(encoding="utf-8")
+
+
+def test_no_road_through_either_export_reaches_a_draft(db, tax, tmp_path: Path):
+    """V1, V2 states, V2 counts, V3 and COCO, with a draft of a real class."""
+    _add_draft_screw(db)
+
+    doc = export_coco(db, tax, [DESKTOP], VIEW, str(tmp_path / "c.json"),
+                      only_verified=False, include_boxes=True)
+    assert "ls:" not in json.dumps(doc)
+
+    out = tmp_path / "v.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    assert {r["task"] for r in _records(out)} >= {"V1", "V2", "V3"}
+    assert "ls:" not in out.read_text(encoding="utf-8")
+
+
+def test_the_desktop_context_drops_drafts_however_it_is_built(db, tax):
+    """The filtering is the type's, not one call site's."""
+    _add_draft_screw(db)
+    ctx = load_ctx(db, tax, DESKTOP, VIEW)
+
+    assert DRAFT_SCREW not in ctx.instances
+    assert DRAFT_SCREW not in ctx.state_at(1)
+    assert ctx.cls_of(DRAFT_SCREW) is None
+    assert SCREW in ctx.instances
+    assert sorted(ctx.drafts) == [DRAFT_SCREW]
+
+
 def test_the_vlm_export_stamps_the_graph_version_when_the_tool_can_say(
     db, tax, tmp_path: Path, monkeypatch
 ):
