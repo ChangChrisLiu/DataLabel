@@ -73,13 +73,16 @@ DEFAULT_MAX_SIDE = 192  # a timeline row is ~120 px tall on a HiDPI screen
 DEFAULT_QUALITY = 85  # JPEG quality; 85 is visually lossless at this size
 ROI_PAD_FRAC = 0.04  # grow a chassis box by 4% of its own size before cropping
 ROI_SAMPLES = 5  # how many steps the fallback ROI is measured over
-#: A measured box outside these bounds is not a chassis and is thrown away.
-#: :func:`~tda.core.cache.suggest_roi` now applies the same bounds itself -- it
-#: has a second strategy for the light chassis this floor used to be a stopgap
-#: for (D64) and picks between them by shape -- so this is the guard on the
-#: *median over sampled steps* below, which ``suggest_roi`` never sees.  They are
+#: A measured box outside these bounds is not a chassis and is thrown away, and
+#: the desktop is then not cropped at all.
+#: :func:`~tda.core.cache.suggest_roi` applies the same bounds itself -- it has a
+#: second strategy for the light chassis this floor used to be a stopgap for
+#: (D64) and picks between them by shape -- so this is the guard on the *median
+#: over sampled steps* below, which ``suggest_roi`` never sees.  They are
 #: deliberately the same numbers: a box this tier would reject is not one to cut
-#: a timeline with, whichever stage measured it.
+#: a timeline with, whichever stage measured it.  The upper bound is also what
+#: turns ``suggest_roi``'s "no crop" answer (the whole frame) into ``None``
+#: here.
 ROI_MIN_AREA_FRAC = 0.20
 ROI_MAX_AREA_FRAC = 0.95  # ... and one this big is not a crop worth making
 
@@ -223,12 +226,16 @@ def _auto_box(cache_dir, keys: list[FrameKey], view: str) -> Optional[list[int]]
     largest silhouette of the run.  If that frame's box is implausible (a
     detector that latched onto the motherboard of a light-coloured chassis, or
     onto the whole bed), the component-wise median over the sampled steps is
-    tried, and then the frame's central box - which is what ``suggest_roi``
-    itself falls back to when it finds no chassis at all, and still a better
-    timeline picture than the whole bench.  ``None`` only when not one sampled
-    frame could be read.
+    tried, and if that is implausible too the desktop is **not cropped at all**.
+
+    ``None`` means "no crop", and it means two different things that want the
+    same answer: not one sampled frame could be read, or nothing measurable on
+    them is chassis-shaped.  Cropping to a central box instead - the old
+    behaviour - cut the machine in half on every one of the nine real desktops
+    whose chassis covers its own tape square, which are exactly the desktops
+    that get here.  :func:`_plan_groups` records the group as ``"none"``.
     """
-    from tda.core.cache import VIEW_EXT, _central_box, cache_path  # late: see the docstring
+    from tda.core.cache import VIEW_EXT, cache_path  # late: see the docstring
 
     ext = VIEW_EXT.get(view, "png")
     sampled = _sample(keys)
@@ -241,9 +248,7 @@ def _auto_box(cache_dir, keys: list[FrameKey], view: str) -> Optional[list[int]]
         return [int(v) for v in box]
     median = np.median(np.array([m[0] for m in measured], dtype=float), axis=0)
     box = tuple(int(round(v)) for v in median)
-    if not _plausible(box, width, height):
-        box = _central_box(width, height)
-    return [int(v) for v in box]
+    return [int(v) for v in box] if _plausible(box, width, height) else None
 
 
 def _plan_groups(cache_dir, keys: list[FrameKey], view: str,
@@ -258,7 +263,11 @@ def _plan_groups(cache_dir, keys: list[FrameKey], view: str,
     the whole desktop+view, which is computed only if some frame needs it.
 
     Each group is ``{"source", "segment", "steps": [first, last], "box"}`` with
-    ``_steps`` carrying the actual step numbers for the caller.
+    ``_steps`` carrying the actual step numbers for the caller.  ``source`` is
+    ``"db"`` (a pose segment's own ROI), ``"auto"`` (measured here) or
+    ``"none"`` -- and ``"none"`` with a ``box`` of ``None`` means the thumbnail
+    is cut from the **whole frame**, which is the right answer for a chassis
+    that fills it.
     """
     segment_of = getattr(roi_lookup, "segment_of", None)
     groups: dict[tuple, dict] = {}

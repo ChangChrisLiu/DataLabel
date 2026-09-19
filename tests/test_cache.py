@@ -309,9 +309,9 @@ def test_suggest_roi_finds_the_chassis_in_a_real_scanner_frame():
 def test_suggest_roi_on_a_synthetic_tape_square():
     img = np.full((400, 400, 3), 245, np.uint8)
     cv2.rectangle(img, (40, 40), (360, 360), (40, 190, 230), 14)   # yellow tape band
-    cv2.rectangle(img, (140, 120), (280, 300), (60, 60, 60), -1)   # dark chassis
+    cv2.rectangle(img, (110, 90), (300, 320), (60, 60, 60), -1)    # dark chassis
     x0, y0, x1, y1 = suggest_roi(img, "scan")
-    assert x0 <= 140 and y0 <= 120 and x1 >= 280 and y1 >= 300
+    assert x0 <= 110 and y0 <= 90 and x1 >= 300 and y1 >= 320
     assert x0 >= 45 and y0 >= 45 and x1 <= 355 and y1 <= 355
 
 
@@ -321,18 +321,20 @@ def test_suggest_roi_ignores_a_yellow_blob_that_does_not_frame_the_board():
     img = np.full((400, 400, 3), 245, np.uint8)
     cv2.rectangle(img, (150, 150), (260, 250), (40, 190, 230), -1)   # yellow patch
     cv2.rectangle(img, (170, 170), (240, 230), (60, 60, 60), -1)     # dark blob in it
-    assert suggest_roi(img, "scan") == _central_box_of(400, 400)
+    assert suggest_roi(img, "scan") == (0, 0, 400, 400)
 
 
-def test_suggest_roi_falls_back_to_the_central_box_without_tape():
+def test_suggest_roi_falls_back_to_the_whole_frame_without_tape():
+    """A crop that cuts the machine is worse than no crop at all."""
     img = cv2.imread(str(CROP_FIXTURE))
-    assert suggest_roi(img, "scan") == (135, 135, 765, 765)
+    height, width = img.shape[:2]
+    assert suggest_roi(img, "scan") == (0, 0, width, height)
 
 
-def test_suggest_roi_uses_the_central_box_for_other_views():
+def test_suggest_roi_uses_the_whole_frame_for_other_views():
     img = np.zeros((720, 1280, 3), np.uint8)
-    assert suggest_roi(img, "oak1") == (192, 108, 1088, 612)
-    assert suggest_roi(img, "rs") == (192, 108, 1088, 612)
+    assert suggest_roi(img, "oak1") == (0, 0, 1280, 720)
+    assert suggest_roi(img, "rs") == (0, 0, 1280, 720)
 
 
 def test_suggest_roi_accepts_a_grayscale_image():
