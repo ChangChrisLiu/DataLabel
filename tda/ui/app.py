@@ -39,30 +39,33 @@ from tda.ui import app_support as S
 from tda.ui.app_assist import AssistMixin
 from tda.ui.app_commit import CommitMixin
 from tda.ui.app_edit import EditMixin
+from tda.ui.app_keys import FLASH_UNNAMED, KeysMixin
 from tda.ui.app_roi import RoiMixin
 from tda.ui.app_shell import (
     MODE_TITLES,
     ShellMixin,
+    StatusMixin,
     confirm_discard_dialog,
     main,
     take_lock,
+)
+from tda.ui.app_view import (
+    CANDIDATES_DROPPED,
+    GRID_OFF,
+    OPACITY_STEP,
+    ToolsMixin,
 )
 from tda.ui.canvas.overlay import LabelOverlay
 
 __all__ = ["MainWindow", "main", "take_lock"]
 
-#: How much one ``,``/``.`` press moves the overlay alpha.
-OPACITY_STEP = 20
-#: Zoom the pixel grid is disabled at (the canvas draws it above ``GRID_ZOOM``).
-GRID_OFF = 1e9
-#: ``_flashing`` when a neighbour is on screen but its step number is unknown.
-FLASH_UNNAMED = -1
-#: Said when a tool switch cancels a SAM prompt that still had proposals.
-CANDIDATES_DROPPED = ("切到画笔会丢弃其余候选 / switching tool discards the other "
-                      "SAM candidates")
+# Re-exported so that ``from tda.ui.app import ...`` keeps working wherever it
+# already did; the definitions live with the code that uses them.
+__all__ += ["CANDIDATES_DROPPED", "FLASH_UNNAMED", "GRID_OFF", "OPACITY_STEP"]
 
 
-class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMainWindow):
+class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, KeysMixin,
+                 ToolsMixin, StatusMixin, ShellMixin, QMainWindow):
     """One annotator, one desktop/view, three modes."""
 
     def __init__(self, session, paths: dict, annotator: str, *,
@@ -238,106 +241,6 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         self.overlay.set_instances(masks, order)
         self.canvas.refresh()
 
-    # -------------------------------------------------------------- keyboard
-    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: D102
-        kind = event.type()
-        if self.closed:
-            return False  # a window on its way out must not eat anybody's keys
-        if kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
-            focus = QApplication.focusWidget()
-            if focus is None or focus is self or self.isAncestorOf(focus):
-                if self.handle_key(event):
-                    return True
-        return super().eventFilter(obj, event)
-
-    def handle_key(self, event) -> bool:
-        """Run the action bound to ``event``; ``True`` when it was consumed.
-
-        Auto-repeat is answered per action, because holding a key means three
-        different things:
-
-        * a **repeat** action fires again on every repeat -- holding ``]`` grows
-          the brush, holding ``PgDn`` walks back through the machine.  Swallowing
-          the repeats for every binding (which is what used to happen) left the
-          annotator pressing ``]`` forty times;
-        * a **hold** action (``Tab``) consumes the repeat without firing: letting
-          it through would walk Qt's focus chain into a combo box, after which
-          :func:`~tda.ui.app_actions.blocks_shortcuts` switched the whole
-          keyboard off until the annotator clicked somewhere;
-        * everything else ignores the repeat: a held ``Enter`` commits once.
-
-        An auto-repeat of a key that is *not* bound is left alone, so ordinary
-        widgets keep their repeats.
-        """
-        if not self._shortcut_context_ok():
-            return False
-        focus = self._focus_widget()
-        if A.blocks_shortcuts(focus) or A.navigates_a_list(focus, event.key()):
-            return False
-        action = A.action_for(event.key(), event.modifiers(), self.mode)
-        if action is None:
-            # Any other key is the annotator moving on: a flash that is still up
-            # because its release went missing ends here.
-            if event.type() == QEvent.Type.KeyPress:
-                self.end_flash()
-            return False
-        if not action.hold and event.type() == QEvent.Type.KeyPress:
-            self.end_flash()
-        if event.isAutoRepeat() and not action.repeat:
-            return True
-        pressed = event.type() == QEvent.Type.KeyPress
-        if action.hold:
-            self.dispatch(action, pressed)
-        elif pressed:
-            self.dispatch(action)
-        return True
-
-    def _shortcut_context_ok(self) -> bool:
-        """Are the window's shortcuts live at all right now?
-
-        Not while a modal dialog is up, and not while the focus sits in another
-        **visible** window of ours -- the cheat sheet is a child dialog, so
-        without this its ``Esc`` would also discard the edit underneath it.
-
-        The visibility check matters: Qt keeps the application focus on a widget
-        of a window that has been closed but not yet deleted, so a torn-down
-        window would otherwise switch off the keyboard of the one that replaced
-        it -- which is exactly what made a whole suite fail when another suite
-        had run first.
-        """
-        if QApplication.activeModalWidget() is not None:
-            return False
-        focus = QApplication.focusWidget()
-        if focus is None:
-            return True
-        other = focus.window()
-        if other is self._cheat_sheet and other is not None:
-            # The sheet is read-only and non-modal, and it is precisely what
-            # somebody has open while they are still learning the keys: it must
-            # not be the reason none of them work.
-            return True
-        return other is self or not other.isVisible()
-
-    def _focus_widget(self) -> Optional[QWidget]:
-        """The focused widget *of this window*, or ``None``.
-
-        ``QApplication.focusWidget()`` is authoritative while the window is
-        active; when it is not (or nothing has been shown yet) the window's own
-        ``focusWidget()`` still knows which child last took the focus, which is
-        what makes the text-field guard work before the first activation.
-        """
-        focus = QApplication.focusWidget()
-        if focus is not None and not (focus is self or self.isAncestorOf(focus)):
-            focus = None
-        return focus if focus is not None else self.focusWidget()
-
-    def dispatch(self, action: A.Action, *extra) -> None:
-        """Call the window slot an action names."""
-        slot = getattr(self, action.slot, None)
-        if slot is None:
-            self.report_error(f"no slot {action.slot!r} for {action.name}")
-            return
-        slot(*(tuple(extra) if action.hold else tuple(action.args)))
 
     # ----------------------------------------------------------------- modes
     @S.guard
@@ -516,220 +419,6 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         if not self.leave_frame(lambda: self.session.goto(int(step), force=True)):
             self.timeline.select_current_step()
             self.review.select_current_step()
-
-    @S.guard
-    def act_flash_compare(self, pressed: bool, other: bool = False) -> None:
-        """Hold ``Tab`` to see the neighbour frame without moving the view.
-
-        The neighbour is the frame the task card is written against -- the one
-        the annotator came from, ``j + 1`` in reverse order.  ``Shift+Tab``
-        shows the other side instead.
-
-        While it is held the canvas is showing a frame that is **not** the one
-        being annotated, so nothing may be drawn on it: every tool is detached
-        and the SAM tools refuse to prompt.  A brush stroke or a SAM click on
-        the flashed image asked about the neighbour's pixels and wrote the
-        answer into this frame's layer -- and in reverse order the part the card
-        asks for is *absent* in j+1, so the mask was confidently wrong.
-        """
-        if not pressed:
-            self.end_flash()
-            return
-        if self._flashing is not None or not compat.is_open(self.session):
-            return
-        image = compat.flash_image(self.session, other=other)
-        if image is None:
-            return
-        # The step shown, so the status bar can name it; ``FLASH_UNNAMED`` when
-        # the adapter cannot say which one it handed back.
-        step = compat.flash_step(self.session, other=other)
-        self._flashing = FLASH_UNNAMED if step is None else int(step)
-        self._pause_tools(True)
-        self._show_image(image)
-        self.update_status()
-
-    def end_flash(self) -> None:
-        """Put the frame back on the canvas; safe to call at any time.
-
-        Called from everywhere a release might never arrive: the key release,
-        the window losing focus (``Alt+Tab`` while holding ``Tab`` is the one
-        the reviewer hit), any other key, and every frame change.  Without it
-        the canvas stayed on the neighbour's image with this frame's overlay and
-        status, and every tool stayed live over it.
-        """
-        if self._flashing is None:
-            return
-        self._flashing = None
-        self._pause_tools(False)
-        image = self.session.image() if compat.is_open(self.session) else None
-        if image is not None:
-            self._show_image(image)
-        self.update_status()
-
-    def is_flashing(self) -> bool:
-        """Is the canvas showing a neighbour frame rather than the open one?"""
-        return self._flashing is not None
-
-    def _show_image(self, image) -> None:
-        """Swap the picture under the overlay, keeping zoom and centre."""
-        zoom, centre = self.canvas.zoom_factor(), self._canvas_centre()
-        self.canvas.set_image(image)
-        self.canvas.set_zoom(zoom)
-        self.canvas.center_on(centre)
-        self.canvas.refresh()
-
-    def _pause_tools(self, paused: bool) -> None:
-        """Make every tool inert, or arm the chosen one again."""
-        for tool in (self.sam_point, self.sam_box):
-            tool.paused = bool(paused)
-        if paused:
-            self._detach_tool()
-        else:
-            self._attach_tool()
-
-    def event(self, ev) -> bool:  # noqa: D102 - Qt override
-        # A lost key release (Alt+Tab, a focus steal, a system dialog) would
-        # otherwise leave the canvas stuck on the neighbour for good.  Qt
-        # delivers the deactivation here, not through ``changeEvent``.
-        kind = ev.type()
-        if kind in (QEvent.Type.WindowDeactivate, QEvent.Type.FocusOut) or (
-            kind == QEvent.Type.ActivationChange and not self.isActiveWindow()
-        ):
-            self.end_flash()
-        return super().event(ev)
-
-    @S.guard
-    def act_flash_other(self, pressed: bool) -> None:
-        """``Shift+Tab``: flash the frame on the *other* side of this one."""
-        self.act_flash_compare(pressed, other=True)
-
-    # ----------------------------------------------------------- tool slots
-    def _all_tools(self) -> tuple:
-        return (self.brush, self.eraser, self.occluder, self.sam_point,
-                self.sam_box, self.roi_tool, self.bench_tool)
-
-    @S.guard
-    def act_tool(self, name: str) -> None:
-        """Arm one tool; the SAM tools refuse when no model is loaded."""
-        if name in ("sam_point", "sam_box") and not self.sam_available:
-            self.report(f"SAM is unavailable: {self.sam_reason}")
-            return
-        if name != "bench_box":
-            self.disarm_bench()   # the arm belongs to the box tool, not to the brush
-        if name not in ("sam_point", "sam_box") and self._candidate_tool() is not None:
-            # ``detach()`` cancels the prompt, which takes the other proposals
-            # with it.  That is the right thing to do -- they belong to a tool
-            # that is no longer listening -- but it has to be said, or ``C``
-            # simply stops working after a detour through the brush.
-            self.report(CANDIDATES_DROPPED)
-        self.cancel_roi_edit()
-        self._tool_name = name
-        self._attach_tool()
-        self.update_status()
-
-    @property
-    def active_tool(self):
-        """The tool receiving the canvas mouse signals, or ``None`` in Review.
-
-        Review mode is **read-only on the canvas**: an edit begun there could
-        not be settled (``Enter`` and ``Esc`` belong to Annotate mode and the
-        mode switch is blocked by the very layer it would create), so no tool is
-        armed and ``R`` takes the frame into Annotate mode instead.
-        """
-        if self.mode == A.MODE_REVIEW:
-            return None
-        return self._tool_for(self._tool_name)
-
-    def _tool_for(self, name: str):
-        return {
-            "brush": self.brush, "eraser": self.eraser, "occluder": self.occluder,
-            "sam_point": self.sam_point, "sam_box": self.sam_box,
-            "bench_box": self.bench_tool, "roi": self.roi_tool,
-        }.get(name, self.brush)
-
-    def _attach_tool(self) -> None:
-        """Exactly one tool listens to the canvas; a SAM tool is re-armed after.
-
-        In Review mode none is: the canvas is there to look at the frame a queue
-        entry points to, not to edit it.
-        """
-        wanted = (None if self.mode == A.MODE_REVIEW
-                  else self._tool_for("roi" if self.roi_editing else self._tool_name))
-        for tool in self._all_tools():
-            if tool is not wanted:
-                tool.detach()
-        if self.tools_enabled and wanted is not None:
-            wanted.attach()
-            if wanted in (self.sam_point, self.sam_box):
-                self.rearm_sam()
-
-    def _detach_tool(self) -> None:
-        for tool in self._all_tools():
-            tool.detach()
-
-    @S.guard
-    def act_radius(self, delta: int) -> None:
-        """``[`` / ``]``: every pixel tool shares one radius."""
-        radius = max(0, self.brush.radius + int(delta))
-        for tool in (self.brush, self.eraser, self.occluder):
-            tool.set_radius(radius)
-        self.update_status()
-
-    # --------------------------------------------------------- display slots
-    @S.guard
-    def act_toggle_overlays(self) -> None:
-        if self.overlay is not None:
-            self.overlay.visible = not self.overlay.visible
-            self.canvas.refresh()
-
-    @S.guard
-    def act_toggle_outline(self) -> None:
-        self.canvas.overlay_outline = not self.canvas.overlay_outline
-        self.canvas.refresh()
-
-    @S.guard
-    def act_opacity(self, delta: int) -> None:
-        alpha = self.canvas.overlay_alpha + int(delta) * OPACITY_STEP
-        self.canvas.overlay_alpha = int(min(255, max(0, alpha)))
-        self.canvas.refresh()
-        self.report(f"overlay opacity {self.canvas.overlay_alpha}/255")
-
-    @S.guard
-    def act_toggle_grid(self) -> None:
-        """The canvas draws the grid above ``GRID_ZOOM``; this parks the threshold."""
-        default = type(self.canvas).GRID_ZOOM
-        self.canvas.GRID_ZOOM = GRID_OFF if self.canvas.GRID_ZOOM == default else default
-        self.canvas.viewport().update()
-        self.report("pixel grid " + ("off" if self.canvas.GRID_ZOOM > 100 else "on"))
-
-    @S.guard
-    def act_fit_image(self) -> None:
-        self.canvas.fit_image()
-        self.update_status()
-
-    @S.guard
-    def act_fit_roi(self) -> None:
-        roi = self.roi()
-        self.canvas.zoom_to(roi) if roi is not None else self.canvas.fit_image()
-        self.update_status()
-
-    @S.guard
-    def act_cheat_sheet(self) -> None:
-        """The ``?`` / ``F12`` sheet, generated from the same table as the guide."""
-        from PySide6.QtWidgets import QDialog, QTextBrowser
-
-        if self._cheat_sheet is None:
-            dialog = QDialog(self)
-            dialog.setWindowTitle("快捷键 / Shortcuts")
-            browser = QTextBrowser(dialog)
-            browser.setHtml(A.cheat_sheet_html())
-            layout = QVBoxLayout(dialog)
-            layout.addWidget(browser)
-            dialog.resize(520, 640)
-            self._cheat_sheet = dialog
-        self._cheat_sheet.show()
-        self._cheat_sheet.raise_()
-
     # -------------------------------------------------------- session slots
     @S.guard
     def act_save(self) -> None:
