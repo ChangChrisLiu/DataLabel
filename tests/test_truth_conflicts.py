@@ -184,6 +184,92 @@ def test_an_instance_dropped_from_an_auto_frame_deletes_its_row(scene: Scene):
 
 
 # --------------------------------------------------------------------------- #
+# verify_frame and the frozen-truth invariant
+# --------------------------------------------------------------------------- #
+def test_verify_frame_refuses_while_a_conflict_of_that_frame_is_open(scene: Scene):
+    """The exact reproduction: Space in the review queue wiped a frozen row.
+
+    Verify the frame; the screw then leaves it, so the refresh queues one
+    conflict and demotes the frame. The annotator meets it in the
+    ``needs_review`` queue and presses Space: ``verify_frame`` recompiled, found
+    the frozen row missing from the compilation, **deleted** it and marked the
+    frame verified again. The disagreement stayed open for ever and a human's
+    signature was gone.
+    """
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    frozen = scene.counts(2, SCREW)
+    scene.db.replace_events(
+        DESKTOP,
+        [StateEvent(DESKTOP, 2, SCREW, "placement", "in_chassis", "elsewhere", auto=False)],
+        auto_only=False,
+    )
+    assert scene.svc.refresh(scene.key(2))["conflicts"] == 1
+    assert scene.review_status(2) == "needs_review"
+    cid = scene.db.conflicts(DESKTOP)[0]["id"]
+
+    with pytest.raises(ValueError) as refused:
+        scene.svc.verify_frame(scene.key(2), "lin")
+
+    assert str(cid) in str(refused.value)
+    assert scene.counts(2, SCREW) == frozen  # the frozen row is untouched
+    assert scene.review_status(2) == "needs_review"
+    assert [c["id"] for c in scene.db.conflicts(DESKTOP)] == [cid]
+
+    # settling it is what makes the frame confirmable again
+    scene.svc.resolve_conflict(cid, "accept_new", "lin")
+    scene.svc.verify_frame(scene.key(2), "lin")
+    assert scene.review_status(2) == "verified"
+    assert scene.db.conflicts(DESKTOP, open_only=True) == []
+
+
+def test_verify_frame_queues_a_vanished_frozen_row_instead_of_deleting_it(scene: Scene):
+    """A confirmed instance the inputs no longer contain is a disagreement.
+
+    ``verify_frame`` dropped such a row outright -- ``delete_compiled`` ignored
+    ``status`` -- so the one thing the compiler may never overwrite was removed
+    by the confirmation itself.
+    """
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    frozen = scene.counts(2, SCREW)
+    assert scene.db.conflicts(DESKTOP) == []
+
+    scene.db.replace_events(
+        DESKTOP,
+        [StateEvent(DESKTOP, 2, SCREW, "placement", "in_chassis", "elsewhere", auto=False)],
+        auto_only=False,
+    )
+
+    with pytest.raises(ValueError) as refused:
+        scene.svc.verify_frame(scene.key(2), "lin")
+
+    assert SCREW in str(refused.value)
+    queued = scene.db.conflicts(DESKTOP)
+    assert [c["instance"] for c in queued] == [SCREW]
+    assert queued[0]["new_rle"] is None
+    assert scene.counts(2, SCREW) == frozen
+    assert scene.row(2, SCREW)["status"] == "verified"
+
+
+def test_verify_frame_still_drops_an_auto_row_the_inputs_lost(scene: Scene):
+    """Only a frozen row is a signature; an ``auto`` row is a cache."""
+    scene.refresh_all()
+    scene.db.replace_events(
+        DESKTOP,
+        [StateEvent(DESKTOP, 2, SCREW, "placement", "in_chassis", "elsewhere", auto=False)],
+        auto_only=False,
+    )
+    assert SCREW in scene.rows(2)  # the stale auto row is still there
+
+    scene.svc.verify_frame(scene.key(2), "lin")
+
+    assert sorted(scene.rows(2)) == [PSU]
+    assert scene.db.conflicts(DESKTOP) == []
+    assert scene.review_status(2) == "verified"
+
+
+# --------------------------------------------------------------------------- #
 # conflict resolution
 # --------------------------------------------------------------------------- #
 def _conflicting_scene(scene: Scene) -> int:

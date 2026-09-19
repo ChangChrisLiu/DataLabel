@@ -347,23 +347,52 @@ class TruthService(FreshMixin, ResolveMixin):
     def verify_frame(self, key: FrameKey, annotator: str) -> None:
         """Freeze every row of one frame after a human confirmed it (spec 4.2).
 
-        Raises :class:`ValueError` when the compilation has a blocking problem
-        (:data:`BLOCKING_PROBLEMS`) -- a frame with a missing chassis shape or a
-        contradictory z-order is not a truth anybody can confirm. Warnings, such
-        as a bench part nobody has boxed yet, do not stop the confirmation; they
-        only leave ``bench_annotated`` false.
+        Raises :class:`ValueError` and writes no truth row in three cases:
+
+        * an **open conflict** of this frame. A disagreement is the one thing
+          in the truth table only a human can settle, and until it is settled
+          nobody knows which value they are confirming. Confirming anyway used
+          to delete the frozen row the conflict was about and leave the
+          disagreement open for ever -- reached simply by pressing Space on the
+          frame in the ``needs_review`` queue, which is where the demotion had
+          just put it.
+        * the compilation has a **blocking problem** (:data:`BLOCKING_PROBLEMS`)
+          -- a missing chassis shape, a contradictory z-order. Warnings, such as
+          a bench part nobody has boxed yet, do not stop the confirmation; they
+          only leave ``bench_annotated`` false.
+        * a **frozen row the inputs no longer contain**. A human confirmed that
+          instance here, so its disappearance is a disagreement like any other:
+          it goes into the conflict queue and the frame is left for that
+          decision. Only an ``auto`` row -- a cache the compiler owns -- may be
+          dropped by a confirmation.
 
         Every write goes into one transaction: a frame is either confirmed
         whole -- rows, flag and op log -- or not at all.
         """
+        refused = f"frame {key.desktop}/{key.view}/step {key.step} cannot be verified: "
+        open_ids = self._open_conflict_ids(key)
+        if open_ids:
+            raise ValueError(
+                refused + "conflict(s) "
+                + ", ".join(str(cid) for cid in open_ids)
+                + " are still open; settle them in the review queue first"
+            )
         _, compiled = self._compile(key)
         blocking = [p for p in compiled.problems if p.startswith(BLOCKING_PROBLEMS)]
         if blocking:
-            raise ValueError(
-                f"frame {key.desktop}/{key.view}/step {key.step} cannot be verified: "
-                + ", ".join(blocking)
-            )
+            raise ValueError(refused + ", ".join(blocking))
         stored = self.db.compiled(key)
+        gone = sorted(set(stored) - set(compiled.instances))
+        vanished = [i for i in gone if stored[i]["status"] == VERIFIED]
+        if vanished:
+            self._queue_vanished(key, stored, vanished)
+            raise ValueError(
+                refused + ", ".join(vanished) + " no longer "
+                + ("belong" if len(vanished) > 1 else "belongs")
+                + " to this frame, but a human confirmed "
+                + ("them" if len(vanished) > 1 else "it")
+                + " here; the disagreement is now in the review queue"
+            )
         previous = self._review_status(key)
         with self.db.transaction():
             for instance in sorted(compiled.instances):
@@ -371,8 +400,9 @@ class TruthService(FreshMixin, ResolveMixin):
                     key, instance, row_values(compiled.instances[instance]),
                     VERIFIED, compiled.input_hash, verified_by=annotator,
                 )
-            for instance in sorted(set(stored) - set(compiled.instances)):
-                self.db.delete_compiled(key, instance)  # not in this frame at all
+            for instance in gone:
+                # `auto` only: the guard above turned every frozen one away
+                self.db.delete_compiled(key, instance)
             self._mark_bench(key, compiled)
             self._stamp(key, self.inputs_digest(key))
             self.db.set_frame_flags(key, review_status=VERIFIED)
@@ -383,6 +413,33 @@ class TruthService(FreshMixin, ResolveMixin):
                 {"kind": "set_review_status", "step": key.step, "review_status": previous},
                 annotator,
             )
+
+    def _open_conflict_ids(self, key: FrameKey) -> list[int]:
+        """Ids of the open disagreements about one frame, ascending."""
+        return sorted(
+            int(row["id"])
+            for row in self.db.conflicts(key.desktop, key.view, open_only=True)
+            if int(row["step"]) == int(key.step)
+        )
+
+    def _queue_vanished(self, key: FrameKey, stored: dict[str, dict],
+                        vanished: list[str]) -> None:
+        """Queue "this confirmed instance is no longer in the frame" (spec 3.4).
+
+        The same entry :meth:`refresh` would have made, in its own transaction,
+        so the refusal the caller is about to raise leaves the annotator with
+        something to act on rather than a frame they cannot confirm and cannot
+        see the reason for. The frame's digest goes with it: the rows keep their
+        frozen values and therefore do not describe these inputs.
+        """
+        queued: Optional[list[dict]] = None
+        with self.db.transaction():
+            for instance in vanished:
+                payload = row_payload(stored[instance])
+                queued, _new = self._queue_conflict(
+                    key, instance, payload, None, self._payload_area(payload), queued
+                )
+            self.db.clear_frame_digest(key)
 
     def demote_frame(self, key: FrameKey, reason: str) -> None:
         """Send a frame back to the review queue (spec 3.4, "需复核")."""
