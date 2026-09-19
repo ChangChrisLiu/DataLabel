@@ -32,6 +32,7 @@ __all__ = [
     "rle_counts",
     "bbox",
     "min_side",
+    "rle_min_side",
     "area",
     "fill_holes",
     "remove_small_components",
@@ -170,6 +171,19 @@ def min_side(mask: np.ndarray) -> int:
         return 0
     x0, y0, x1, y1 = box
     return int(min(x1 - x0, y1 - y0))
+
+
+def rle_min_side(rle: Optional[dict]) -> int:
+    """:func:`min_side` straight off the run lengths, without decoding.
+
+    The same number as ``min_side(decode_rle(rle))`` -- pycocotools measures the
+    tight box the same way -- for a caller that has a stored RLE and wants one
+    integer out of it, not an ``H x W`` array.
+    """
+    if not rle:
+        return 0
+    _x, _y, width, height = rle_bbox_xywh(rle)
+    return int(min(width, height))
 
 
 def area(mask: np.ndarray) -> int:

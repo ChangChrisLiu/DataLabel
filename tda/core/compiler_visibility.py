@@ -42,6 +42,7 @@ __all__ = [
     "VISIBLE_TINY_PX",
     "derive_visibility",
     "input_hash",
+    "visibility_for",
 ]
 
 OCCLUDED_PARTIAL_RATIO = 0.3
@@ -72,11 +73,25 @@ def derive_visibility(
     A ``FrameOverride.visibility`` is *not* considered here: the caller applies
     it on top, because a manual label always wins (spec 3.3 step 7).
     """
-    if visible is None:
+    return visibility_for(None if visible is None else masks.min_side(visible),
+                          occlusion_ratio)
+
+
+def visibility_for(side: Optional[int], occlusion_ratio: float) -> str:
+    """The ladder itself: the shorter side of the visible box and the ratio.
+
+    Split out of :func:`derive_visibility` because the truth table has to ask
+    the same question of a *stored* row -- whose geometry it holds as an RLE,
+    not as an array -- to tell a label a human forced from one the pixels
+    produced (:func:`tda.core.truth_conflicts.row_visibility`). One ladder, so
+    the two answers cannot drift apart.
+
+    ``side`` is ``None`` when there is no geometry at all.
+    """
+    if side is None:
         return Visibility.OUT_OF_VIEW.value
     if float(occlusion_ratio) >= OCCLUDED_FULL_RATIO:
         return Visibility.OCCLUDED_FULL.value
-    side = masks.min_side(visible)
     if side < TOO_SMALL_PX:
         return Visibility.TOO_SMALL.value
     if side < VISIBLE_TINY_PX:

@@ -11,6 +11,7 @@ from tda.core import masks
 from tda.core.db import Db
 from tda.core.model import FrameOverride, InstanceRec, ShapePart, StateEvent, ZOrderRec
 from tda.core.truth import StaleConflictError
+from tda.core.truth_conflicts import payload_labels
 from truth_scenes import (
     BENCH_BOX,
     DESKTOP,
@@ -206,8 +207,6 @@ def test_a_label_change_on_a_verified_row_is_a_disagreement(scene: Scene):
     ever looked at the frame again. ``visibility`` is exported per annotation
     and is the ground truth of a VLM task.
     """
-    from tda.core.truth_conflicts import payload_labels
-
     scene.refresh_all()
     scene.svc.verify_frame(scene.key(1), "lin")
     scene.db.set_frame_override(
@@ -247,6 +246,65 @@ def test_keeping_the_old_label_pins_it_on_this_frame(scene: Scene):
     scene.svc.refresh(scene.key(1))
     assert scene.row(1, PSU)["visibility"] == "visible"
     assert scene.db.conflicts(DESKTOP, open_only=True) == []
+
+
+def test_removing_a_visibility_override_is_a_disagreement_too(scene: Scene):
+    """Ctrl+Z on the 1-7 shortcut, on a frame somebody had already confirmed.
+
+    The row then carries a label neither a human nor its own pixels stand
+    behind -- and COCO writes that label beside a segmentation that contradicts
+    it. The refresh saw no override to compare against, called it skipped and
+    stamped the digest, so no pass ever looked again.
+    """
+    scene.refresh_all()
+    scene.db.set_frame_override(
+        FrameOverride(scene.key(1), PSU, None, "occluded_full")
+    )
+    scene.svc.refresh(scene.key(1))
+    scene.svc.verify_frame(scene.key(1), "lin")
+    assert scene.row(1, PSU)["visibility"] == "occluded_full"
+
+    scene.db.delete_frame_override(scene.key(1), PSU)
+    out = scene.svc.refresh(scene.key(1))
+
+    assert out["conflicts"] == 1
+    conflict = scene.db.conflicts(DESKTOP)[0]
+    assert payload_labels(conflict["new_rle"]) == [
+        {"field": "visibility", "old": "occluded_full", "new": "visible"}
+    ]
+    assert scene.row(1, PSU)["visibility"] == "occluded_full"  # still frozen
+    assert scene.db.frame_digest(scene.key(1)) is None
+
+    scene.svc.resolve_conflict(conflict["id"], "accept_new", "lin")
+    assert scene.row(1, PSU)["visibility"] == "visible"  # what the pixels say
+
+
+def test_keeping_a_removed_override_pins_it_again(scene: Scene):
+    scene.refresh_all()
+    scene.db.set_frame_override(
+        FrameOverride(scene.key(1), PSU, None, "occluded_full")
+    )
+    scene.svc.refresh(scene.key(1))
+    scene.svc.verify_frame(scene.key(1), "lin")
+    scene.db.delete_frame_override(scene.key(1), PSU)
+    scene.svc.refresh(scene.key(1))
+    cid = scene.db.conflicts(DESKTOP)[0]["id"]
+
+    scene.svc.resolve_conflict(cid, "keep_old", "lin")
+
+    assert scene.db.frame_overrides(scene.key(1))[PSU].visibility == "occluded_full"
+    scene.svc.refresh(scene.key(1))
+    assert scene.row(1, PSU)["visibility"] == "occluded_full"
+    assert scene.db.conflicts(DESKTOP, open_only=True) == []
+
+
+def test_a_frozen_row_the_pixels_agree_with_is_not_re_examined(scene: Scene):
+    """The "was it forced" test must not fire on an ordinary derived label."""
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(1), "lin")
+
+    assert scene.svc.refresh(scene.key(1), ignore_digest=True)["conflicts"] == 0
+    assert scene.db.conflicts(DESKTOP) == []
 
 
 def test_keeping_the_old_placement_is_refused(scene: Scene):

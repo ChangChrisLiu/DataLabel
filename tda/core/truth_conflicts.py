@@ -23,7 +23,8 @@ from typing import NamedTuple, Optional
 
 from tda.core import masks
 from tda.core.compiler import CompiledInstance
-from tda.core.model import FrameOverride
+from tda.core.compiler_visibility import visibility_for
+from tda.core.model import FrameOverride, Visibility
 
 __all__ = [
     "BOX_TOL_PX",
@@ -42,6 +43,8 @@ __all__ = [
     "payload_labels",
     "row_payload",
     "row_values",
+    "row_visibility",
+    "was_forced",
 ]
 
 GEOM_MASK = "mask"
@@ -259,6 +262,43 @@ def disagreement(row: dict, compiled_inst: CompiledInstance) -> Optional[int]:
     return masks.tolerant_sym_diff(old, new) if masks.is_conflict(old, new) else None
 
 
+def row_visibility(row: dict) -> str:
+    """What a stored row's **own geometry** says its visibility is.
+
+    The compiler's ladder (:func:`tda.core.compiler_visibility.visibility_for`)
+    read off the row rather than off an array, so it costs one bbox measurement
+    on the run lengths and no decode. The two branches that do not go through
+    the ladder are reproduced from the same place they come from (spec 3.3
+    step 7): a bench box carries no occlusion and is plainly ``visible``, and a
+    row with no geometry at all is ``out_of_view``.
+
+    Its use is :func:`was_forced`: a row whose stored label is *not* this is one
+    a human typed.
+    """
+    if row.get("geom_type") == GEOM_BOX:
+        return Visibility.VISIBLE.value
+    rle = row.get("visible_rle")
+    if not rle:
+        return Visibility.OUT_OF_VIEW.value
+    return visibility_for(masks.rle_min_side(rle),
+                          float(row.get("occlusion_ratio") or 0.0))
+
+
+def was_forced(row: dict) -> bool:
+    """Did a human put this row's ``visibility`` there? (spec 4.3, the 1-7 keys)
+
+    A frozen row carries no flag saying so, and it needs none: a label the
+    compiler derived is a function of the row's own geometry, so a label that
+    is *not* that function's answer can only have come from a
+    :class:`~tda.core.model.FrameOverride`. That is what makes "the annotator
+    pressed Ctrl+Z on the override" a disagreement the frozen row has to be
+    told about -- otherwise it keeps a label neither a human nor its own pixels
+    stand behind, and the export writes it beside a segmentation that
+    contradicts it.
+    """
+    return (row.get("visibility") or None) != row_visibility(row)
+
+
 def label_changes(row: dict, compiled_inst: CompiledInstance,
                   override: Optional[FrameOverride] = None) -> list[dict]:
     """The non-geometric fields of a frozen row a re-compilation disagrees with.
@@ -272,23 +312,24 @@ def label_changes(row: dict, compiled_inst: CompiledInstance,
     again. ``visibility`` is written into every COCO annotation and is the
     ground truth of a VLM question.
 
-    ``override`` is the frame's :class:`~tda.core.model.FrameOverride` for this
-    instance, and it is what makes ``visibility`` comparable at all. Without one
-    the label is a pure function of the pixels (occlusion ratio and the size of
-    the visible box, spec 3.3 step 7), so two outlines
+    ``visibility`` is compared when **either side of it was a human's**: the
+    frame carries an override stating it now (``override``), or the frozen row
+    itself was forced (:func:`was_forced`, which is how a *removed* override is
+    caught -- Ctrl+Z on the 1-7 keys over a frame somebody had confirmed).
+    Where neither is, the label is a pure function of the pixels (the occlusion
+    ratio and the size of the visible box, spec 3.3 step 7), so two outlines
     :func:`disagreement` calls the same annotation cannot honestly disagree
     about it -- a one-pixel re-trace that happens to cross the 6 px
-    ``too_small`` threshold is noise, not a decision. With one, the label is a
-    human's statement the compiler could not have derived, and a frozen row that
-    contradicts it is wrong.
+    ``too_small`` threshold is noise, not a decision.
 
     ``placement`` needs no such gate: it comes from the state machine.
 
     A stored ``NULL`` is "not recorded" rather than a value to disagree with.
     """
+    stated = override is not None and bool(override.visibility)
     out: list[dict] = []
     for field in LABEL_FIELDS:
-        if field == "visibility" and not (override is not None and override.visibility):
+        if field == "visibility" and not (stated or was_forced(row)):
             continue
         old = row.get(field)
         new = getattr(compiled_inst, field)
