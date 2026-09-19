@@ -26,6 +26,25 @@ class DeleteMixin:
         with self._tx():
             self.conn.execute("DELETE FROM shape_keyframe WHERE id=?", (int(keyframe_id),))
 
+    def delete_draft_keyframes(self, desktop: int, instance: str,
+                               source: str = "labelstudio") -> int:
+        """Drop the imported draft shapes of one instance; returns how many.
+
+        The second exception to "nothing outside undo removes annotation data",
+        and a narrow one: only rows of one instance carrying the *importer's*
+        source, across every view. S1 uses it to delete a Label Studio draft key
+        together with the shapes it was made of -- the two are one thing, and a
+        key nobody adopted would otherwise leave orphaned pixels behind.
+        Anything a human drew onto that key has a different ``source`` and stays
+        (it blocks the delete instead).
+        """
+        with self._tx():
+            cur = self.conn.execute(
+                "DELETE FROM shape_keyframe WHERE desktop=? AND instance=? AND source=?",
+                (int(desktop), str(instance), str(source)),
+            )
+        return int(cur.rowcount or 0)
+
     def delete_pair_override(self, po: PairOverride) -> None:
         """Drop one "above beats below" exception of a (view, pose segment)."""
         with self._tx():

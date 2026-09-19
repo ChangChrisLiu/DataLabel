@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from tda.core.model import ActionRec, InstanceRec, Placement, StateEvent
+from tda.core.model import ActionRec, InstanceRec, Placement, StateEvent, is_provisional
 from tda.core.taxonomy import Taxonomy
 
 __all__ = [
@@ -394,12 +394,17 @@ def needs_geom(
     its work; a rectangle means it is. Leaving the argument out asks the pure
     policy, with no view in mind, which is what a caller that has not resolved a
     frame yet wants -- the value is never read, only its presence.
+
+    A provisional Label Studio key (:func:`tda.core.model.is_provisional`) is
+    draft material rather than a part of the machine and is never asked for
+    either: it has no actions, so it would otherwise stand installed in the
+    chassis for ever and be a missing shape on every frame of its desktop.
     """
     blind = bench_roi is None
     geom: dict[str, str] = {}
     for key, inst in fs.items():
         rec = instances.get(key)
-        if rec is None or gone_with_parent(fs, key):
+        if rec is None or is_provisional(key) or gone_with_parent(fs, key):
             continue
         if inst.placement == IN_CHASSIS:
             kind = "mask"

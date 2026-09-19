@@ -16,7 +16,7 @@ from typing import Optional
 
 import numpy as np
 
-from tda.core.model import FrameKey
+from tda.core.model import FrameKey, is_provisional
 from tda.core.truth_inputs import frame_hw
 from tda.ui import session_api as api
 from tda.ui.session_api import SessionRefusal
@@ -24,6 +24,21 @@ from tda.ui import session_edit as edit
 from tda.ui.session_ops import GEOM_BOX, ON_BENCH
 
 __all__ = ["CommitMixin"]
+
+
+def _refuse_draft(instance: str) -> None:
+    """Refuse to draw on a Label Studio draft key (spec 3.2).
+
+    Its keyframes are the record of what the team traced before this tool
+    existed; a commit would rewrite one of them in place, still stamped
+    ``source="labelstudio"``, and the draft nobody has adopted yet would quietly
+    become somebody's annotation.
+    """
+    if is_provisional(instance):
+        raise SessionRefusal(
+            f"{instance}：Label Studio 草稿不可直接编辑，"
+            f"请先在 S1 中把草稿指派给真实实例"
+        )
 
 
 class CommitMixin:
@@ -44,8 +59,16 @@ class CommitMixin:
         return key
 
     def begin_edit(self, instance: str) -> None:
-        """Load the instance's amodal shape into the editing layer (spec 4.3)."""
+        """Load the instance's amodal shape into the editing layer (spec 4.3).
+
+        Refuses a Label Studio draft key: its keyframes are the record of what
+        the team traced before this tool existed, and a commit would rewrite one
+        of them in place, under its own ``labelstudio`` source. A draft is
+        resolved onto a real instance in S1 first (spec 3.2); only then is there
+        something to draw on.
+        """
         key = self._editable_frame()
+        _refuse_draft(instance)
         found = self.compiled().instances.get(instance)
         self.layer.begin(instance, None if found is None else found.amodal,
                          frame_hw(self.db, key))
@@ -182,7 +205,9 @@ class CommitMixin:
 
     def commit_box(self, instance: str, box, direction: str = edit.REVERSE) -> dict:
         """Draw the staging-area rectangle of a part on the bench (spec 4.2 S4)."""
-        result = edit.commit_box(self.db, self.truth, self._editable_frame(), instance, box,
+        key = self._editable_frame()
+        _refuse_draft(instance)  # the one write that names its own instance
+        result = edit.commit_box(self.db, self.truth, key, instance, box,
                                  direction=direction, annotator=self.annotator)
         return self._after_edit(result)
 

@@ -38,6 +38,7 @@ from tda.core.model import (
     Similarity,
     StateEvent,
     ZOrderRec,
+    is_provisional,
     step_is_annotatable,
 )
 from tda.core.states import (
@@ -365,6 +366,12 @@ def gather(
     :func:`tda.core.states.needs_geom`'s, handed the frame's bench ROI -- the
     same call the queues, the task card and the "affects N frames" strip make,
     so none of them can ask for a different set than the compiler gets.
+
+    Label Studio drafts are left out of ``placements`` as well as of ``needs``:
+    the state snapshot still carries them (they *are* rows of the instance
+    table), but nothing this function hands the compiler may, or the digest of
+    every frame of fourteen desktops would move the moment an export is
+    re-imported (:func:`tda.core.model.is_provisional`).
     """
     cache = cache if cache is not None else InputCache()
     instances = instances_of(db, key.desktop, cache)
@@ -383,7 +390,8 @@ def gather(
         frame_overrides=db.frame_overrides(key),
         transform=db.transform(key),
         placements={inst: st.placement for inst, st in state.items()
-                    if inst in needs or st.placement != ON_BENCH},
+                    if not is_provisional(inst)
+                    and (inst in needs or st.placement != ON_BENCH)},
         pose_segment=seg,
         bench_roi=bench_roi,
     )

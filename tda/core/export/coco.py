@@ -59,6 +59,7 @@ from tda.core.model import (
     StepRec,
     StepType,
     Visibility,
+    is_provisional,
     step_is_annotatable,
 )
 from tda.core.states import FrameState, state_at
@@ -222,13 +223,22 @@ class DesktopCtx:
         return self._states[step]
 
     def cls_of(self, instance: str) -> Optional[str]:
-        """Taxonomy class of an instance key, ``None`` when it has none.
+        """Taxonomy class of an exportable instance key, else ``None``.
 
-        ``None`` covers both an instance that is not in the table at all and one
-        carrying a class the taxonomy does not know -- a provisional ``ls:``
-        draft key, say. Neither can be exported, and both must be skipped rather
-        than crash the export.
+        **The exports' choke point for provisional keys.** ``None`` covers three
+        things, and all three are skipped rather than allowed to crash or leak
+        into a release:
+
+        * an instance that is not in the table at all;
+        * one carrying a class the taxonomy does not know;
+        * a Label Studio draft (:func:`tda.core.model.is_provisional`). The
+          importer gives those a *real* taxonomy class, so nothing else here
+          would have stopped them -- and a draft nobody has resolved onto a real
+          instance was published under ``tier: gold`` as if a human had signed
+          it off.
         """
+        if is_provisional(instance):
+            return None
         rec = self.instances.get(instance)
         if rec is None or rec.cls not in self.tax.classes:
             return None

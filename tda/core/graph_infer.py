@@ -28,7 +28,13 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-from tda.core.model import ActionRec, InstanceRec
+# `LS_PREFIX`/`is_provisional` are re-exported from :mod:`tda.core.model`, which
+# owns the answer: a draft is draft material everywhere in the tool, not only to
+# these heuristics. Here it means the rows take no part in "the one instance of
+# class X" -- neither as the candidate nor as a competitor -- and nothing is
+# ever written onto them (spec 3.2: S1 turns a draft into a real instance, and
+# only then does it carry relations).
+from tda.core.model import LS_PREFIX, ActionRec, InstanceRec, is_provisional
 from tda.core.taxonomy import Taxonomy
 
 __all__ = [
@@ -46,26 +52,6 @@ __all__ = [
     "unresolved_kind",
     "unresolved_relations",
 ]
-
-#: Prefix of the provisional keys :mod:`tda.core.ls_import` writes
-#: (``ls:Motherboard#1``). Those rows are *drafts*: they carry a real taxonomy
-#: class, so a desktop whose sheet named one motherboard can easily hold three
-#: more of them once the Label Studio export is in. They therefore take no part
-#: in "the one instance of class X" -- neither as the candidate nor as a
-#: competitor -- and the heuristics never write onto them (spec 3.2: S1 turns a
-#: draft into a real instance, and only then does it carry relations).
-LS_PREFIX = "ls:"
-
-
-def is_provisional(key: str) -> bool:
-    """Is this a Label Studio draft key rather than a settled instance?
-
-    See :data:`LS_PREFIX`. Drafts are invisible to every class-uniqueness
-    question here, so ``motherboard.01`` stays "the motherboard" of a desktop
-    whose export also drew ``ls:Motherboard#1``.
-    """
-    return key.startswith(LS_PREFIX)
-
 
 def real_instances(instances: dict[str, InstanceRec], cls: str) -> list[str]:
     """Keys of the settled (non-draft) instances of ``cls``, sorted."""

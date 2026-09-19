@@ -41,6 +41,34 @@ class StepType(str, Enum):
 
 
 # --------------------------------------------------------------------------- #
+# Label Studio drafts
+# --------------------------------------------------------------------------- #
+#: Prefix of the provisional keys :mod:`tda.core.ls_import` writes
+#: (``ls:Motherboard#1``).
+LS_PREFIX = "ls:"
+
+
+def is_provisional(key: str) -> bool:
+    """Is this a Label Studio draft key rather than an instance of the machine?
+
+    The importer wrote 414 of these, each with a *real* taxonomy class and the
+    keyframes the team traced before this tool existed. They are draft material
+    an annotator resolves onto a real instance in S1 (spec 3.2), and until then
+    they are not parts of anything: they carry no actions, so the state machine
+    would have them installed and in the chassis for ever, and every one of them
+    would be a missing chassis shape on every frame of its desktop.
+
+    So a draft never needs geometry, is never compiled, never reaches a task
+    card or a queue, and is never exported. Two choke points enforce that --
+    :func:`tda.core.states.needs_geom` for geometry and
+    :meth:`tda.core.export.coco.DesktopCtx.cls_of` for the exports -- and both
+    ask this one question. The draft *keyframes* stay in the database untouched:
+    they are what a later "adopt draft" tool will read.
+    """
+    return str(key).startswith(LS_PREFIX)
+
+
+# --------------------------------------------------------------------------- #
 # what a step type means (spec 6.6)
 # --------------------------------------------------------------------------- #
 #: Step types that describe no annotatable moment of the teardown.
