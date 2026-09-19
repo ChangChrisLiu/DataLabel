@@ -45,7 +45,8 @@ from tda.ui.steps_values import RELATION_FIELDS, EditError
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, fine for typing
     from tda.ui.steps_model import StepTableData
 
-__all__ = ["check_deletable", "delete_instance", "stored_neighbours"]
+__all__ = ["PAIRED_WITH_PARENT", "check_deletable", "delete_instance",
+           "stored_neighbours"]
 
 
 def check_deletable(data: "StepTableData", db: Db, key: str) -> None:
@@ -103,16 +104,38 @@ def stored_neighbours(
     missing a motherboard, and re-creating the instance later
     (``--reset-declined``) would find nothing to hang on. Every other field is
     cleared, exactly as an ordinary delete clears it.
+
+    Clearing ``parent`` also unticks :data:`PAIRED_WITH_PARENT`, because the two
+    are one answer: nothing reads ``attached`` without ``parent``
+    (:func:`tda.core.states._attached_children` needs both), and the heuristics
+    only ever *tick* the flag in the pass that fills the parent
+    (:func:`tda.core.graph_infer._infer_screw`). A ``True`` left behind is
+    therefore a decision about a part that no longer exists, waiting to be
+    inherited by whatever parent is written in next -- for a captive screw and
+    for a board-mounted latch alike. The next inference run refills both
+    together, which is the only place either is meant to be set.
     """
     cleaned: list[InstanceRec] = []
     for other_key, stored in db.instances(desktop).items():
         if other_key == key or not any(getattr(stored, n) == key for n in RELATION_FIELDS):
             continue
-        for name in RELATION_FIELDS:
-            if getattr(stored, name) == key:
-                setattr(stored, name, revert_to if name == REVERTIBLE_FIELD else None)
+        _clear_pointers(stored, key, revert_to)
         cleaned.append(stored)
     return cleaned
+
+
+#: Unticked whenever ``parent`` is cleared; see :func:`stored_neighbours`.
+PAIRED_WITH_PARENT = "attached"
+
+
+def _clear_pointers(rec: InstanceRec, key: str, revert_to: Optional[str]) -> None:
+    """Drop every pointer ``rec`` holds to ``key``, in place."""
+    for name in RELATION_FIELDS:
+        if getattr(rec, name) != key:
+            continue
+        setattr(rec, name, revert_to if name == REVERTIBLE_FIELD else None)
+        if name == "parent":
+            setattr(rec, PAIRED_WITH_PARENT, False)
 
 
 def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
@@ -148,8 +171,9 @@ def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
 
     del data.instances[key]
     for other in data.instances.values():
-        for name in RELATION_FIELDS:
-            if getattr(other, name) == key:
-                setattr(other, name,
-                        implied_cls if name == REVERTIBLE_FIELD else None)
+        _clear_pointers(other, key, implied_cls)
+    if implied_cls:
+        # the same "no" the transaction just wrote, so the questions
+        # `refresh_issues` is about to re-derive do not argue with it
+        data.declined.add(implied_cls)
     data.refresh_issues()

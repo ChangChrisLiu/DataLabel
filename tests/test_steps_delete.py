@@ -108,6 +108,40 @@ def test_delete_instance_clears_the_reference_in_the_database_too(db, orphaned, 
     assert all("captive screw without parent" in text for text in reloaded.issues)
 
 
+def test_deleting_a_parent_unticks_attached_on_the_children_it_held(db, orphaned, tax):
+    """``attached`` is meaningless without a ``parent`` and must not outlive it.
+
+    The two are read together everywhere -- ``states._attached_children`` needs
+    both -- and the heuristic only ever *ticks* the flag in the pass that fills
+    the parent. A True left behind would therefore be re-used, silently, by
+    whatever parent the next run (or the next annotator) writes in.
+    """
+    orphaned.apply_instance_edit(NEIGHBOUR, "parent", ORPHAN)
+    orphaned.apply_instance_edit(NEIGHBOUR, "attached", True)
+    orphaned.save(db)
+    orphaned.delete_instance(db, ORPHAN)
+
+    child = orphaned.instances[NEIGHBOUR]
+    assert (child.parent, child.attached) == (None, False)
+    reloaded = StepTableData.load(db, 13, tax)  # and in the database too
+    assert reloaded.instances[NEIGHBOUR].parent is None
+    assert reloaded.instances[NEIGHBOUR].attached is False
+
+
+def test_deleting_something_that_is_not_the_parent_leaves_attached_alone(db, orphaned, tax):
+    """Only the field that pointed at the deleted key is answered for."""
+    orphaned.apply_instance_edit(NEIGHBOUR, "parent", "cpu_cooler.fan.01")
+    orphaned.apply_instance_edit(NEIGHBOUR, "attached", True)
+    orphaned.apply_instance_edit(NEIGHBOUR, "mounted_on", ORPHAN)
+    orphaned.save(db)
+    orphaned.delete_instance(db, ORPHAN)
+
+    child = orphaned.instances[NEIGHBOUR]
+    assert (child.parent, child.attached, child.mounted_on) \
+        == ("cpu_cooler.fan.01", True, None)
+    assert StepTableData.load(db, 13, tax).instances[NEIGHBOUR].attached is True
+
+
 def test_delete_instance_does_not_flush_the_neighbours_other_unsaved_edits(db, orphaned, tax):
     orphaned.apply_instance_edit(NEIGHBOUR, "parent", ORPHAN)
     orphaned.save(db)
