@@ -108,10 +108,22 @@ def pair_problems(problems: list[str]) -> list[dict]:
     those codes consume a sentence; every other one is explained from
     :data:`PROBLEM_SENTENCES` here, and a code nobody has written a sentence for
     is shown as it is rather than wearing somebody else's.
+
+    A refusal **opens** with the session's own sentence ("frame 13/scan/step 14
+    cannot be verified: ...", "conflict(s) 3, 5 are still open"), which explains
+    no code -- it restates them.  Popping sentences off one flat list handed it
+    to the first ``missing_shape:`` and pushed every real sentence one code
+    along, leaving the last one orphaned under nobody's instance.  So only what
+    comes *after* the first code can be paired; anything before it is its own
+    row.
     """
-    codes = [p for p in problems if _is_code(p)]
-    sentences = [p for p in problems if not _is_code(p)]
-    rows: list[dict] = []
+    first_code = next((i for i, p in enumerate(problems) if _is_code(p)),
+                      len(problems))
+    lead, rest = problems[:first_code], problems[first_code:]
+    codes = [p for p in rest if _is_code(p)]
+    sentences = [p for p in rest if not _is_code(p)]
+    rows: list[dict] = [{"text": text, "code": "", "instance": ""}
+                        for text in lead]
     for code in codes:
         if code.startswith(EXPLAINED_CODES) and sentences:
             text = sentences.pop(0)
@@ -138,6 +150,7 @@ class TaskCardPanel(QWidget):
         super().__init__(parent)
         self._session: Optional[api.SessionLike] = None
         self._problems: list[str] = []
+        self._rows: list[dict] = []
 
         self._list = QListWidget()
         self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
@@ -303,6 +316,18 @@ class TaskCardPanel(QWidget):
             self._show_problems(self._problems)
         return ok
 
+    def problem_count(self) -> int:
+        """How many things there are to fix -- not how many lines are shown.
+
+        The refusal's opening line restates the codes listed under it, so
+        counting it as well told the annotator "3 problem(s)" for two missing
+        shapes.  When it is all there is -- an open conflict, which the
+        compiler cannot name -- it *is* the problem, and counts.
+        """
+        if not self._problems_list.isVisibleTo(self):
+            return 0
+        return len([row for row in self._rows if row["code"]]) or len(self._rows)
+
     def problems(self) -> list[str]:
         """The problems currently on display (empty when none are shown)."""
         if not self._problems_list.isVisibleTo(self):
@@ -355,7 +380,8 @@ class TaskCardPanel(QWidget):
         bug report, and the instance is what a click jumps to.
         """
         self._problems_list.clear()
-        for row in pair_problems(problems):
+        self._rows = pair_problems(problems)
+        for row in self._rows:
             item = QListWidgetItem(row["text"])
             item.setToolTip(row["code"] or row["text"])
             item.setData(INSTANCE_ROLE, row["instance"])
@@ -394,5 +420,6 @@ class TaskCardPanel(QWidget):
 
     def _hide_problems(self) -> None:
         self._problems_list.clear()
+        self._rows = []
         self._problems_label.setVisible(False)
         self._problems_list.setVisible(False)

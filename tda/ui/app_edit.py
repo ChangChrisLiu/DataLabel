@@ -121,8 +121,12 @@ class EditMixin:
         #: The instance an ``add_bench_box`` card item armed the box tool for.
         self.bench_instance: Optional[str] = None
 
-        #: The area warning waiting for a second ``Enter``: ``(scope, text)``.
+        #: The area warning waiting for a second ``Enter``:
+        #: ``(scope, text, facts)``, the facts going into the commit's op log.
         self._pending_warning: Optional[tuple] = None
+        #: Those facts, once the second ``Enter`` has answered the warning, for
+        #: exactly the one commit that follows.
+        self._override_facts: Optional[dict] = None
         self.priors = app_priors.load_priors()
         self.warn_bar = Bar(self)
         self.warn_bar.add_button("Enter 仍然提交", self.act_commit)

@@ -600,16 +600,28 @@ def test_the_hint_is_cleared_on_a_frame_change(window):
 
 
 def test_each_problem_appears_once_with_its_code_in_the_tooltip(window):
-    """The pane listed `missing_shape:x` AND "Draw x on this frame"."""
+    """The pane listed `missing_shape:x` AND "Draw x on this frame".
+
+    The session's refusal opens with its own line, which explains no code and
+    so keeps a row to itself; everything under it is one code, once.
+    """
     window.act_confirm()
 
     rows = window.task_card.problem_rows()
     assert rows, "no problems were shown"
     assert len(rows) == len({r["instance"] for r in rows}), rows
-    for row in rows:
+
+    lead, rest = rows[0], rows[1:]
+    assert "cannot be verified" in lead["text"], lead
+    assert lead["instance"] == "", "the refusal is about the frame, not a part"
+    assert rest, "only the refusal was shown"
+    for row in rest:
         assert not row["text"].startswith("missing_shape:")
         assert row["code"].startswith("missing_shape:")
         assert row["instance"] and row["instance"] in row["code"]
+    # the count in the status bar is of things to fix, not of lines
+    assert window.task_card.problem_count() == len(rest)
+    assert f"{len(rest)} problem(s)" in window.status_message()
 
 
 def test_clicking_a_problem_selects_that_instances_card_item(window):
@@ -840,6 +852,66 @@ def test_an_overridden_warning_is_logged(window):
         handler.flush()
     text = Path(S.log_path(window.paths)).read_text(encoding="utf-8")
     assert "area_warning_overridden" in text and instance in text
+
+
+def test_an_overridden_warning_is_in_the_op_log_of_that_commit(window):
+    """The log line is searchable, but nothing joins it back to the commit it
+    explains.  Whoever audits a mask later reads the op log, so what the
+    annotator was told and went ahead with belongs in that commit's payload.
+    """
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    window.set_editing_mask(tiny_mask(), undoable=True)
+    window.act_commit()
+    window.act_commit()             # the annotator says they meant it
+
+    payloads = [op["payload"] or {} for op in window.session.db.ops(DESKTOP, VIEW)]
+    overridden = [p for p in payloads if p.get("area_warning_overridden")]
+    assert len(overridden) == 1, payloads
+    assert overridden[0]["area_px"] == 3
+    assert "掩码过小" in overridden[0]["area_warning"]
+    # "too small" applies to every class, including one with no band at all
+    assert window.priors.band(window._class_of(instance)) is None
+    assert "area_bounds" not in overridden[0]
+
+
+def test_an_overridden_prior_records_the_band_it_was_judged_against(window,
+                                                                    monkeypatch):
+    """Whoever reads the row later needs to know what "too big" meant that day:
+    the bands are regenerated from the database as it grows."""
+    from tda.ui import app_priors
+
+    instance = first_task_instance(window)
+    monkeypatch.setattr(type(window), "_class_of", lambda _s, _i: "screw")
+    window.priors = app_priors.AreaPriors(
+        {"screw": {"min_frac": 0.00003, "max_frac": 0.0002}})
+    window.task_card.sigRequestEdit.emit(instance)
+    big = np.zeros((64, 64), dtype=bool)
+    big[8:56, 8:56] = True
+    window.set_editing_mask(big, undoable=True)
+
+    window.act_commit()
+    window.act_commit()
+
+    payloads = [op["payload"] or {} for op in window.session.db.ops(DESKTOP, VIEW)]
+    overridden = [p for p in payloads if p.get("area_warning_overridden")]
+    assert len(overridden) == 1, payloads
+    assert overridden[0]["area_bounds"] == [0.00003, 0.0002]
+    assert overridden[0]["area_px"] == 48 * 48
+
+
+def test_a_commit_nobody_was_warned_about_carries_no_override(window):
+    """The flag says a human overrode a warning; an ordinary commit has none."""
+    instance = first_task_instance(window)
+    window.task_card.sigRequestEdit.emit(instance)
+    mask = np.zeros((64, 64), dtype=bool)
+    mask[20:32, 20:32] = True
+    window.set_editing_mask(mask, undoable=True)
+
+    window.act_commit()
+
+    payloads = [op["payload"] or {} for op in window.session.db.ops(DESKTOP, VIEW)]
+    assert not [p for p in payloads if "area_warning_overridden" in p]
 
 
 # --------------------------------------------------------------------------- #

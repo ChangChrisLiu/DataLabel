@@ -49,10 +49,13 @@ def _entry_text(queue: str, entry: dict) -> str:
     """One line for a queue entry."""
     step = entry.get("step", "?")
     if queue == api.QUEUE_CONFLICTS:
-        return (
-            f"Step {step} — {entry.get('instance', '')} "
-            f"(Δ {entry.get('sym_diff_px', 0)} px)"
-        )
+        # A disagreement about a *label* moves no pixels: "visibility: visible
+        # -> occluded_partial" is 0 differing pixels, and the row read "(Δ 0
+        # px)" -- an entry somebody has to settle, described as nothing having
+        # changed.  The queue says what disagrees; the pixel count is its
+        # fallback, and is all an entry queued by an older session carries.
+        what = entry.get("summary") or f"{entry.get('sym_diff_px', 0)} px differ"
+        return f"Step {step} — {entry.get('instance', '')} ({what})"
     if queue == api.QUEUE_MISSING_SHAPE:
         return f"Step {step} — {entry.get('instance', '')}"
     return f"Step {step}"

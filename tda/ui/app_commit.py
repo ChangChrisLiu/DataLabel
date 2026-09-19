@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import time
 
+import numpy as np
+
 from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
 from tda.ui import app_priors
@@ -149,8 +151,11 @@ class CommitMixin:
         mask = self.session.editing_mask()
         pixels = int(mask.sum()) if mask is not None else 0
         started = time.perf_counter()
+        # An override belongs to the one commit it was given for, whether that
+        # commit is taken or refused: it must not ride along on the next one.
+        extra, self._override_facts = self._override_facts, None
         try:
-            result = self.session.commit_edit(scope) or {}
+            result = self.session.commit_edit(scope, extra=extra) or {}
         except ValueError as refused:
             self._pending_scope = None
             self.scope_bar.hide()
@@ -246,7 +251,7 @@ class CommitMixin:
             # One line, whatever the frame is missing.  A real start frame has
             # 60+ missing shapes, which put 2,550 characters into the one-line
             # status bar and asked the window to be 30,612 px wide.
-            count = len(self.task_card.problem_rows())
+            count = self.task_card.problem_count()
             self.report(f"step {step} is not complete: {count} problem(s) — "
                         f"见任务卡 / see the task card")
         return bool(ok)
@@ -269,28 +274,45 @@ class CommitMixin:
         if pending is not None and pending[0] == scope:
             self._pending_warning = None
             self.warn_bar.hide()
-            # Not in the op-log payload: writing it there needs a session
-            # change (``commit_edit`` would have to carry it), and that file
-            # belongs to another worker this round.  The log line is searchable
-            # and carries the same facts.
+            # Both places: the log line is what somebody greps, the payload is
+            # what the commit itself carries.  Nothing joins a log line back to
+            # one row of the op log, and that row is the mask's audit trail.
+            self._override_facts = dict(pending[2])
             self.logger.info("area_warning_overridden instance=%s scope=%s: %s",
                              instance, scope, pending[1])
             return True
         mask = self.session.editing_mask()
         if mask is None:
             return True
-        warning = app_priors.area_warning(
-            mask, self._class_of(instance), self._roi_area(), self.priors)
+        cls = self._class_of(instance)
+        warning = app_priors.area_warning(mask, cls, self._roi_area(), self.priors)
         if warning is None:
             self._pending_warning = None
             self.warn_bar.hide()
             return True
-        self._pending_warning = (scope, warning)
+        self._pending_warning = (scope, warning,
+                                 self._warning_facts(mask, cls, warning))
         self.warn_bar.show_text(f"{warning}  —— Enter 仍然提交 / Esc 回去改")
         self.report(warning)
         self.logger.info("area_warning instance=%s scope=%s: %s",
                          instance, scope, warning)
         return False
+
+    def _warning_facts(self, mask, cls: str, warning: str) -> dict:
+        """What an override of this warning should say in the op log.
+
+        Plain JSON, because the op log is JSON: the size that was questioned,
+        the band it was judged against when the class has one -- the "too
+        small" rule applies to every class, including one the priors have never
+        seen -- and the sentence the annotator read before going ahead.
+        """
+        band = self.priors.band(cls) if cls else None
+        facts: dict = {"area_warning_overridden": True,
+                       "area_px": int(np.count_nonzero(mask)),
+                       "area_warning": str(warning)}
+        if band is not None:
+            facts["area_bounds"] = [float(band[0]), float(band[1])]
+        return facts
 
     def _class_of(self, instance: str) -> str:
         """The taxonomy class of an instance, for the per-class prior."""
