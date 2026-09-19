@@ -26,18 +26,33 @@ from tda.pipeline import backup_dest
 # --------------------------------------------------------------------------- #
 # Db.backup verifies what it wrote
 # --------------------------------------------------------------------------- #
-class _SilentlyDoesNothing:
-    """A connection whose ``backup()`` reports success and writes no bytes.
+class _BadBackup:
+    """A connection whose ``backup()`` misbehaves in a chosen way.
 
     ``sqlite3.Connection`` is immutable, so the shim goes on the ``Db`` instance
     rather than on the class; everything else is forwarded to the real thing.
     """
 
-    def __init__(self, conn):
+    def __init__(self, conn, mode: str):
         self._conn = conn
+        self._mode = mode
 
     def backup(self, target):
-        return None
+        if self._mode == "silent":  # "succeeded", wrote nothing
+            return None
+        if self._mode == "stub":
+            # a *valid* little database: non-empty, and `PRAGMA quick_check`
+            # says ok. Only the fingerprint can tell it from the real thing.
+            target.execute("CREATE TABLE decoy(x)")
+            target.commit()
+            return None
+        if self._mode == "partial":
+            # some bytes land and then the copy dies, which is what leaves an
+            # 8 KB stub under the real backup name
+            target.execute("CREATE TABLE half(x)")
+            target.commit()
+            raise sqlite3.OperationalError("disk I/O error half way through")
+        raise AssertionError(self._mode)
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
@@ -46,7 +61,7 @@ class _SilentlyDoesNothing:
 def test_backup_raises_when_the_copy_did_not_land(tmp_path):
     db = Db(str(tmp_path / "tda.sqlite"))
     try:
-        db.conn = _SilentlyDoesNothing(db.conn)
+        db.conn = _BadBackup(db.conn, "silent")
         with pytest.raises(OSError) as err:
             db.backup(str(tmp_path / "backups"))
         assert "empty" in str(err.value) or "not written" in str(err.value)
@@ -59,12 +74,70 @@ def test_a_verified_backup_is_not_left_behind_as_an_empty_file(tmp_path):
     db = Db(str(tmp_path / "tda.sqlite"))
     dest = tmp_path / "backups"
     try:
-        db.conn = _SilentlyDoesNothing(db.conn)
+        db.conn = _BadBackup(db.conn, "silent")
         with pytest.raises(OSError):
             db.backup(str(dest))
     finally:
         db.close()
     assert list(dest.glob("tda_*.sqlite")) == []
+
+
+def test_a_copy_that_dies_half_way_leaves_no_file_behind(tmp_path):
+    """The 8 KB stub under the real name is what a restore would pick up."""
+    db = Db(str(tmp_path / "tda.sqlite"))
+    dest = tmp_path / "backups"
+    try:
+        db.conn = _BadBackup(db.conn, "partial")
+        with pytest.raises(sqlite3.Error):
+            db.backup(str(dest))
+    finally:
+        db.close()
+    assert list(dest.glob("tda_*.sqlite")) == []
+
+
+def test_a_valid_but_wrong_database_is_refused_and_removed(tmp_path):
+    """It is non-empty and `quick_check` says ok; only the fingerprint knows."""
+    db = Db(str(tmp_path / "tda.sqlite"))
+    dest = tmp_path / "backups"
+    try:
+        db.conn = _BadBackup(db.conn, "stub")
+        with pytest.raises(OSError) as err:
+            db.backup(str(dest))
+        assert "does not match" in str(err.value) or "differs" in str(err.value)
+    finally:
+        db.close()
+    assert list(dest.glob("tda_*.sqlite")) == []
+
+
+def test_a_good_backup_holds_the_same_rows(tmp_path):
+    """The fingerprint is checked against the source, so it has to agree."""
+    from tda.core.model import InstanceRec
+
+    db = Db(str(tmp_path / "tda.sqlite"))
+    try:
+        db.upsert_desktop(13, {"brand": "dell"})
+        db.upsert_instance(InstanceRec("psu.01", 13, "psu"))
+        out = db.backup(str(tmp_path / "backups"))
+    finally:
+        db.close()
+    copy = sqlite3.connect(out)
+    try:
+        assert copy.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert copy.execute("SELECT COUNT(*) FROM instance").fetchone()[0] == 1
+    finally:
+        copy.close()
+
+
+def test_backup_leaves_the_source_usable(tmp_path):
+    """The read transaction the fingerprint is taken in has to be released."""
+    db = Db(str(tmp_path / "tda.sqlite"))
+    try:
+        db.backup(str(tmp_path / "backups"))
+        db.upsert_desktop(1, {"brand": "hp"})  # must not hang or raise
+        assert db.get_desktop(1)["brand"] == "hp"
+        db.backup(str(tmp_path / "backups"))
+    finally:
+        db.close()
 
 
 def test_a_good_backup_has_content(tmp_path):
@@ -205,3 +278,28 @@ def test_a_failed_backup_releases_the_lock(env, capsys, monkeypatch):
     assert run(env, "infer-relations") == EXIT_ERROR
     # the lock is gone, so the next command runs normally rather than refusing
     assert run(env, "status") == EXIT_OK
+
+
+def test_the_backup_command_itself_reports_a_failure_in_one_line(env, capsys, monkeypatch):
+    """`backup` is not a safety copy, but it must not traceback either."""
+    def boom(self, dest_dir):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(Db, "backup", boom)
+    capsys.readouterr()
+    assert run(env, "backup") == EXIT_ERROR
+    out = capsys.readouterr().out
+    assert "[backup] backup failed: disk I/O error" in out
+    assert "Traceback" not in out
+
+
+def test_the_backup_command_reports_a_verification_failure_too(env, capsys):
+    capsys.readouterr()
+    db = Db(env["db_path"])
+    try:
+        db.conn = _BadBackup(db.conn, "stub")
+        with pytest.raises(OSError):
+            db.backup(env["cfg"]["backup_dir"])
+    finally:
+        db.close()
+    assert list(Path(env["cfg"]["backup_dir"]).glob("tda_*.sqlite")) == []

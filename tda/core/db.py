@@ -22,6 +22,15 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from tda.core import dbrows as R
+from tda.core.db_backup import (  # re-exported: the lock helpers are part of this API
+    LOCK_SUFFIX,
+    LOCK_TTL,
+    BackupLockMixin,
+    acquire_lock_file,
+    lock_path_for,
+    read_lock_file,
+    release_lock_file,
+)
 from tda.core.db_pose import PoseSegmentMixin
 from tda.core.db_recheck import RecheckMixin
 from tda.core.db_status import StatusMixin
@@ -44,9 +53,6 @@ from tda.core.model import (
 )
 
 SCHEMA_VERSION = 3
-LOCK_TTL = timedelta(hours=12)
-#: Suffix of the single-user lock file, next to the database (spec 3.5).
-LOCK_SUFFIX = ".lock"
 #: How a conflict may be closed. The first three are a human's decision;
 #: ``superseded`` is what the truth service records when the inputs moved on
 #: before anybody got to the conflict (spec 3.4).
@@ -54,13 +60,15 @@ RESOLUTIONS = ("keep_old", "accept_new", "edited", "superseded")
 
 
 class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
-         RecheckMixin, DigestMixin):
+         RecheckMixin, DigestMixin, BackupLockMixin):
     """Repository over the TDA SQLite file. Every write commits immediately --
     unless it runs inside :meth:`~tda.core.dbconn.ConnectionMixin.transaction`;
     :mod:`tda.core.db_pose` and :mod:`tda.core.db_status` mix in more readers,
     :mod:`tda.core.dbdelete` the undo-side row removals,
-    :mod:`tda.core.db_recheck` the queue of frames awaiting a truth re-check and
-    :mod:`tda.core.db_digest` the per-frame input digests."""
+    :mod:`tda.core.db_recheck` the queue of frames awaiting a truth re-check,
+    :mod:`tda.core.db_digest` the per-frame input digests and
+    :mod:`tda.core.db_backup` the verified safety copy and the single-user
+    lock."""
 
     def __init__(self, path: str):
         self.path = str(path)
@@ -634,153 +642,3 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
             (desktop, view, limit),
         ).fetchall()
         return [R.json_row(r, "payload", "inverse") for r in rows]
-
-    # ------------------------------------------------------------ backup/lock
-
-    def backup(self, dest_dir: str) -> str:
-        """Copy the live database with the SQLite backup API; returns the new path.
-
-        The file name carries **local** time (``tda_YYYYmmdd_HHMMSS.sqlite``),
-        because the one person who reads these names is looking for "the copy
-        from before lunch" on their own clock; two copies inside the same second
-        are told apart by a ``_1``, ``_2`` suffix. The consequence is that a
-        daylight-saving step back can make one name sort before an older one --
-        the file's own mtime is the authority, not the name.
-
-        What is written is **verified**: a backup nobody checked is worse than
-        none, because it is what makes the ``--force`` run that rewrites the step
-        table look safe. A copy that did not land, or landed empty, is removed
-        again and raises ``OSError`` here rather than being left in
-        ``backup_dir`` looking like a real one; ``sqlite3.Error`` from the copy
-        itself propagates unchanged. Every caller of the safety copy turns both
-        into one printed line and exit 1 (:func:`tda.cli._safety_backup`).
-        """
-        dest = Path(dest_dir)
-        dest.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # local time, see above
-        out = dest / f"tda_{stamp}.sqlite"
-        serial = 1
-        while out.exists():
-            out = dest / f"tda_{stamp}_{serial}.sqlite"
-            serial += 1
-        target = sqlite3.connect(str(out))
-        try:
-            self.conn.backup(target)
-        finally:
-            target.close()
-        self._verify_backup(out)
-        return str(out)
-
-    @staticmethod
-    def _verify_backup(out: Path) -> None:
-        """Raise unless ``out`` is a file with something in it; clean up if not."""
-        try:
-            size = out.stat().st_size
-        except OSError:
-            raise OSError(f"the backup was not written: {out}") from None
-        if size > 0:
-            return
-        try:
-            out.unlink()
-        except OSError:  # leaving it is bad, but the error below is the point
-            pass
-        raise OSError(f"the backup is empty and was removed again: {out}")
-
-    def _read_lock(self) -> Optional[dict]:
-        """Parse the lock file, or None when it is missing, unreadable or not an object.
-
-        A lock whose content is not a JSON object carries no annotator, so it is
-        treated like a stale one and the next ``acquire_lock`` takes it over.
-        """
-        try:
-            held = json.loads(self._lock_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        return held if isinstance(held, dict) else None
-
-    def acquire_lock(self, annotator: str) -> None:
-        """Take the single-user lock; raises if another annotator holds a fresh one.
-
-        :func:`acquire_lock_file` does the same thing *without* a ``Db``, which
-        is what the application uses: opening the database replays the schema
-        and the migrations, so the lock has to be taken before that, not after.
-        """
-        held = self._read_lock()
-        if held and held.get("annotator") != annotator:
-            try:
-                ts = datetime.fromisoformat(str(held.get("ts")))
-            except ValueError:
-                ts = None  # unreadable timestamp: treat the lock as stale
-            if ts is not None:
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                if datetime.now(timezone.utc) - ts < LOCK_TTL:
-                    raise RuntimeError(
-                        f"database locked by {held.get('annotator')!r} since {held.get('ts')}"
-                    )
-        self._lock_path.write_text(
-            json.dumps({"annotator": annotator, "ts": R.now_iso()}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        self._lock_annotator = annotator
-
-    def release_lock(self) -> None:
-        """Remove the lock file if present; safe to call more than once."""
-        self._lock_path.unlink(missing_ok=True)
-        self._lock_annotator = None
-
-
-# --------------------------------------------------------------------------- #
-# the single-user lock, without a Db
-# --------------------------------------------------------------------------- #
-def lock_path_for(db_path: str) -> Path:
-    """The lock file that belongs to a database path."""
-    return Path(str(db_path) + LOCK_SUFFIX)
-
-
-def read_lock_file(db_path: str) -> Optional[dict]:
-    """The holder recorded in a lock file, or ``None`` when there is none."""
-    try:
-        held = json.loads(lock_path_for(db_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return held if isinstance(held, dict) else None
-
-
-def acquire_lock_file(db_path: str, annotator: str) -> None:
-    """Take the single-user lock **without opening the database**.
-
-    :meth:`Db.__init__` creates the file when it is missing and replays the
-    schema and the migrations on an existing one, so by the time a ``Db`` exists
-    the database has already been written to.  The application therefore has to
-    take the lock first: a refused launch must leave the file exactly as it was,
-    down to its modification time.
-
-    Raises ``RuntimeError`` when a *fresh* lock is held by somebody else; a lock
-    older than :data:`LOCK_TTL`, or one whose timestamp cannot be read, counts as
-    abandoned and is taken over -- the same rule as :meth:`Db.acquire_lock`.
-    """
-    held = read_lock_file(db_path)
-    if held and held.get("annotator") != annotator:
-        try:
-            ts = datetime.fromisoformat(str(held.get("ts")))
-        except ValueError:
-            ts = None  # unreadable timestamp: treat the lock as stale
-        if ts is not None:
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if datetime.now(timezone.utc) - ts < LOCK_TTL:
-                raise RuntimeError(
-                    f"database locked by {held.get('annotator')!r} since {held.get('ts')}"
-                )
-    path = lock_path_for(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"annotator": annotator, "ts": R.now_iso()}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-
-def release_lock_file(db_path: str) -> None:
-    """Drop the lock file; safe to call more than once."""
-    lock_path_for(db_path).unlink(missing_ok=True)
