@@ -448,6 +448,62 @@ def test_verify_frame_refuses_a_frozen_row_whose_label_moved(scene: Scene):
     assert [c["instance"] for c in scene.db.conflicts(DESKTOP)] == [PSU]
 
 
+def test_verify_frame_leaves_an_agreeing_frozen_row_exactly_as_it_is(scene: Scene):
+    """A re-trace within tolerance is the same annotation, so nothing is written.
+
+    ``refresh`` skips such a row; the confirmation rewrote it -- new pixels, a
+    new ``verified_by``/``verified_at`` -- so pressing Space a second time moved
+    a signature the first Space had already made, and the stored geometry drifted
+    one pixel per confirmation away from what the human actually confirmed.
+    """
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    frozen = {inst: dict(row) for inst, row in scene.rows(2).items()}
+
+    # one pixel row off the PSU: inside the re-tracing tolerance of spec 3.4
+    replace_parts(scene, scene.psu_kf,
+                  [ShapePart("main", masks.encode_rle(rect(10, 10, 50, 49)))])
+    assert scene.svc.refresh(scene.key(2))["conflicts"] == 0
+
+    scene.svc.verify_frame(scene.key(2), "bo")
+
+    assert scene.rows(2) == frozen  # byte for byte, "lin" included
+    assert scene.db.conflicts(DESKTOP) == []
+    assert scene.review_status(2) == "verified"
+    assert scene.db.frame_digest(scene.key(2)) is not None
+
+
+def test_confirming_an_unchanged_frame_again_writes_nothing(scene: Scene, monkeypatch):
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    frozen = {inst: dict(row) for inst, row in scene.rows(2).items()}
+    written: list = []
+    monkeypatch.setattr(scene.db, "put_compiled",
+                        lambda *a, **k: written.append(a))
+
+    scene.svc.verify_frame(scene.key(2), "bo")
+
+    assert written == []
+    assert scene.rows(2) == frozen
+    assert scene.db.frame_digest(scene.key(2)) is not None
+
+
+def test_verify_frame_still_writes_the_auto_rows_and_the_new_instances(scene: Scene):
+    """Only a *frozen* row is protected; everything else is the compiler's."""
+    scene.refresh_all()
+    scene.svc.verify_frame(scene.key(2), "lin")
+    scene.db.upsert_instance(InstanceRec(key=FAN, desktop=DESKTOP, cls="case_fan"))
+    scene.db.add_keyframe(mask_kf(FAN, FAN_RECT, anchor=3))
+    scene.svc.refresh(scene.key(2))
+    assert scene.row(2, FAN)["status"] == "auto"
+
+    scene.svc.verify_frame(scene.key(2), "bo")
+
+    assert scene.row(2, FAN)["status"] == "verified"
+    assert scene.row(2, FAN)["verified_by"] == "bo"
+    assert scene.row(2, PSU)["verified_by"] == "lin"  # the first confirmation stands
+
+
 def test_verify_frame_still_drops_an_auto_row_the_inputs_lost(scene: Scene):
     """Only a frozen row is a signature; an ``auto`` row is a cache."""
     scene.refresh_all()

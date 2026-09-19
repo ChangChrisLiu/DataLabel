@@ -74,7 +74,9 @@ class VerifyMixin:
 
         Either way the disagreement goes into the conflict queue and the frame
         is left for that decision. Only an ``auto`` row -- a cache the compiler
-        owns -- is ever rewritten or dropped by a confirmation.
+        owns -- is ever rewritten or dropped by a confirmation; a frozen row
+        that **agrees** is left exactly as it is, signature included, so
+        confirming an already-confirmed frame writes nothing but the digest.
 
         Every write goes into one transaction: a frame is either confirmed
         whole -- rows, flag and op log -- or not at all.
@@ -100,6 +102,15 @@ class VerifyMixin:
         previous = self._review_status(key)
         with self.db.transaction():
             for instance in sorted(compiled.instances):
+                row = stored.get(instance)
+                if row is not None and row["status"] == VERIFIED:
+                    # It agrees -- the gate above proved it -- so it is the same
+                    # annotation and there is nothing to write. Rewriting it
+                    # moved a signature somebody else had already made, and a
+                    # re-trace within tolerance drifted the stored geometry one
+                    # pixel per confirmation away from what was confirmed.
+                    # `refresh` skips exactly this row for exactly this reason.
+                    continue
                 self._put_row(
                     key, instance, row_values(compiled.instances[instance]),
                     VERIFIED, compiled.input_hash, verified_by=annotator,
