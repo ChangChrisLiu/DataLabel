@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import pytest
 from test_cli import d13_steps, env, open_db, run  # noqa: F401  (re-used fixtures)
-from test_implied import _d64_actions, _d64_like, tax  # noqa: F401
+from test_implied import _d64_actions, _d64_like, _latches_only, tax  # noqa: F401
 
 from tda.cli import EXIT_OK
 from tda.core.db import Db
+from tda.core.graph_infer import NO_CANDIDATE, unresolved_relations
 from tda.core.implied import implied_instances, is_implied
 from tda.core.model import InstanceRec
 from tda.core.taxonomy import load_taxonomy
@@ -291,3 +292,56 @@ def test_the_step_table_says_deleting_is_remembered(tax):
     line = next(text for text in unresolved_issues(instances, tax)
                 if text.startswith("implied instance"))
     assert "remembered" in line
+
+
+# --------------------------------------------------------------------------- #
+# ... and then stops asking for the host it was just told to forget
+#
+# A `host_class` instance with no parent is normally worth a line: the latch
+# will be asked for a mask on every frame after the board leaves. Once the
+# annotator has *declined* the board, that line tells them to undo the decision
+# they have just recorded, on every latch, for ever.
+# --------------------------------------------------------------------------- #
+def test_a_declined_host_stops_the_unresolved_line(tax):
+    instances = _latches_only()
+    nagging = unresolved_relations(instances, tax, [])
+    assert len(nagging) == 2 and all(NO_CANDIDATE in line for line in nagging)
+    assert unresolved_relations(instances, tax, [], declined={"motherboard"}) == []
+
+
+def test_a_declined_host_stops_the_step_table_asking_too(tax):
+    instances = _latches_only()
+    assert len(list(unresolved_issues(instances, tax))) == 2
+    assert list(unresolved_issues(instances, tax, declined={"motherboard"})) == []
+
+
+def test_declining_another_class_leaves_the_latch_question_alone(tax):
+    instances = _latches_only()
+    assert len(list(unresolved_issues(instances, tax, declined={"psu"}))) == 2
+    assert len(unresolved_relations(instances, tax, [], declined={"psu"})) == 2
+
+
+def test_deleting_the_board_stops_the_latches_nagging_for_it(env):
+    """End to end on D63, whose sheet names four RAM clips and a socket lever."""
+    _imported(env)
+    db = open_db(env)
+    try:
+        before = list(unresolved_issues(
+            StepTableData.load(db, 63, load_taxonomy()).instances, load_taxonomy()))
+        assert not any("host-mounted" in line for line in before)  # all have a parent
+    finally:
+        db.close()
+
+    _delete_board(env)
+    db = open_db(env)
+    try:
+        assert db.declined_implied(63) == {"motherboard"}
+        data = StepTableData.load(db, 63, load_taxonomy())
+        # the pointers really were cleared, flag included ...
+        for key in ("ram_latch.01", "cpu_socket_lever.01"):
+            assert data.instances[key].parent is None
+            assert data.instances[key].attached is False
+        # ... and S1 does not answer that with "add a motherboard back"
+        assert not any("host-mounted" in line for line in data.orphans)
+    finally:
+        db.close()

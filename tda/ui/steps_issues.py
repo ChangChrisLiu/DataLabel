@@ -136,7 +136,8 @@ def dangling_issues(instances: dict[str, InstanceRec], tax: Taxonomy) -> Iterato
 
 
 def unresolved_issues(
-    instances: dict[str, InstanceRec], tax: Taxonomy
+    instances: dict[str, InstanceRec], tax: Taxonomy,
+    declined: Optional[Iterable[str]] = None,
 ) -> Iterator[str]:
     """What the relational heuristic left open -- the lowest-priority questions.
 
@@ -160,7 +161,10 @@ def unresolved_issues(
       that declare a ``host_class`` (``ram_latch`` and ``cpu_socket_lever`` ride
       on the motherboard). The desktop has no unique host to hang it on, so the
       latch stands in the chassis once the board is gone and is a missing shape
-      on every frame after it.
+      on every frame after it. **Not** asked when the host class is in
+      ``declined`` (:meth:`tda.core.db.Db.declined_implied`): the annotator has
+      just deleted that implied board, and the only thing this line could tell
+      them is to put it back -- once per latch, on every refresh, for ever.
     * **implied instance** -- a part :mod:`tda.core.implied` created because the
       desktop clearly has one and the log simply stops before touching it (the
       motherboard of D49/D62/D63/D64). It is a judgement, so it is put to the
@@ -171,6 +175,7 @@ def unresolved_issues(
     :func:`dangling_issues`: none is a broken record, only work still to do.
     Provisional ``ls:*`` drafts carry no relations yet and are skipped.
     """
+    refused = {str(c) for c in (declined or ())}
     for key in sorted(instances):
         inst = instances[key]
         if is_provisional(key):
@@ -184,7 +189,7 @@ def unresolved_issues(
                 f"chassis with nothing - name the part it stays in"
             )
         mount = tax.host_class(inst.cls)
-        if mount and not inst.parent:
+        if mount and mount not in refused and not inst.parent:
             yield (
                 f"host-mounted instance without parent: {key} rides on the "
                 f"{mount} and has none - it will be asked for a shape on every "

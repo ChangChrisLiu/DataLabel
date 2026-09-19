@@ -230,7 +230,10 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
             changes.append((key, new, old))
     out = DesktopRelations(
         desktop=desktop, status="applied", fills=fills,
-        unresolved=unresolved_relations(instances, tax, actions),
+        # `declined` is this desktop's own refusals (empty under --reset-declined,
+        # which has just taken them back): a class S1 said no to is not something
+        # to keep asking about once per latch
+        unresolved=unresolved_relations(instances, tax, actions, declined),
         changed=len(changes),
         implied=[f"implied instance {rec.key}: {rec.attrs.get('note', '')}"
                  for rec in new_instances],

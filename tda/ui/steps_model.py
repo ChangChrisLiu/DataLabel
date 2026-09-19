@@ -141,6 +141,11 @@ class StepTableData:
     messages: list[str] = field(default_factory=list)
     #: Instances no action targets any more, re-derived with the row issues.
     orphans: list[str] = field(default_factory=list)
+    #: Classes whose implied instance this desktop's annotator has deleted
+    #: (:meth:`tda.core.db.Db.declined_implied`). Read once at load and updated
+    #: by :func:`tda.ui.steps_delete.delete_instance`, so the questions
+    #: :mod:`tda.ui.steps_issues` asks do not argue with a decision already made.
+    declined: set[str] = field(default_factory=set)
 
     # -- loading ---------------------------------------------------------- #
     @classmethod
@@ -151,7 +156,8 @@ class StepTableData:
         for action in db.actions(desktop):
             by_step.setdefault(action.step, []).append(action)
         rows = [StepRow(step=rec, actions=by_step.get(rec.step, [])) for rec in db.steps(desktop)]
-        data = cls(desktop=desktop, tax=tax, rows=rows, instances=db.instances(desktop))
+        data = cls(desktop=desktop, tax=tax, rows=rows, instances=db.instances(desktop),
+                   declined=set(db.declined_implied(desktop)))
         data.refresh_issues()
         return data
 
@@ -441,7 +447,7 @@ class StepTableData:
         self.orphans = (
             list(orphan_issues(self.instances, self.actions))
             + list(dangling_issues(self.instances, self.tax))
-            + list(unresolved_issues(self.instances, self.tax))
+            + list(unresolved_issues(self.instances, self.tax, self.declined))
             + list(draft_issues(self.instances))  # last: it asks for nothing
         )
 
