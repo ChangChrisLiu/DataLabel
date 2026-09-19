@@ -818,3 +818,49 @@ def test_ctrl_s_outside_steps_mode_still_saves_the_session(window, monkeypatch):
     window.set_mode(A.MODE_ANNOTATE)
     window.act_save()
     assert saved == [1]
+
+
+# --------------------------------------------------------------------------- #
+# the toolbar must not eat the keyboard (item 10)
+# --------------------------------------------------------------------------- #
+def test_the_toolbar_widgets_never_take_the_focus(window):
+    """A click on the chooser or a view button killed every shortcut, silently.
+
+    ``blocks_shortcuts`` is right about a combo box that has the focus -- the
+    annotator may be typing in it -- so the answer is that these never take it.
+    """
+    assert window.desktop_combo.focusPolicy() == Qt.FocusPolicy.NoFocus
+    assert window.mode_tabs.focusPolicy() == Qt.FocusPolicy.NoFocus
+    for button in window.view_buttons.values():
+        assert button.focusPolicy() == Qt.FocusPolicy.NoFocus
+
+
+def test_choosing_a_view_puts_the_focus_back_on_the_canvas(window):
+    """After a top-bar choice the next key belongs to the canvas again."""
+    window.resize(900, 700)
+    window.show()
+    QApplication.processEvents()
+    window.task_card.list_widget().setFocus()
+    QApplication.processEvents()
+
+    window.act_set_view("oak1")          # frame rows, no images: the placeholder
+    QApplication.processEvents()
+    assert window.stack.currentWidget() is window.placeholder_label
+
+    window.act_set_view(VIEW)            # back to the view that has pictures
+    QApplication.processEvents()
+    assert window.canvas.hasFocus() or QApplication.focusWidget() is window.canvas
+
+
+def test_the_cheat_sheet_does_not_switch_the_keyboard_off(window):
+    """It is read-only, and it is exactly what somebody has open while learning."""
+    window.resize(900, 700)
+    window.show()
+    QApplication.processEvents()
+    window.act_cheat_sheet()
+    QApplication.processEvents()
+    try:
+        assert window._cheat_sheet.isVisible()
+        assert window._shortcut_context_ok() is True
+    finally:
+        window._cheat_sheet.close()

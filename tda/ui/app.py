@@ -293,6 +293,11 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
         if focus is None:
             return True
         other = focus.window()
+        if other is self._cheat_sheet and other is not None:
+            # The sheet is read-only and non-modal, and it is precisely what
+            # somebody has open while they are still learning the keys: it must
+            # not be the reason none of them work.
+            return True
         return other is self or not other.isVisible()
 
     def _focus_widget(self) -> Optional[QWidget]:
@@ -344,6 +349,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
             self.review.refresh()
         self._attach_tool()          # Review arms nothing; the others re-arm
         self._sync_mode_tab()
+        self.focus_canvas()
         self.update_status()
 
     def _sync_mode_tab(self) -> None:
@@ -400,11 +406,22 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AssistMixin, ShellMixin, QMai
 
         self.leave_frame(switch)
         self._sync_view_buttons()
+        self.focus_canvas()
 
     def _sync_view_buttons(self) -> None:
         """Check the button of the view that is actually open."""
         for name, button in self.view_buttons.items():
             button.setChecked(name == self.session.view)
+
+    def focus_canvas(self) -> None:
+        """Put the keyboard back where the annotator works.
+
+        The toolbar widgets take no focus at all now, but a mode switch or a
+        dock click can still leave it in a panel; after choosing something from
+        the top bar the next key belongs to the canvas.
+        """
+        if self.stack.currentWidget() is self.canvas:
+            self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _has_frames(self, desktop: Optional[int], view: str) -> bool:
         """Does this desktop/view have any frame rows at all?

@@ -151,6 +151,11 @@ class ShellMixin:
         self.addToolBar(bar)
 
         self.desktop_combo = QComboBox()
+        # Nothing in the toolbar may hold the keyboard.  A click on the chooser
+        # or a view button left the focus there, and ``blocks_shortcuts`` -- which
+        # is right about a combo the annotator may be typing in -- then switched
+        # every shortcut off with no cue at all until they clicked the canvas.
+        self.desktop_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         counts = self._view_counts()  # two aggregate queries, not two per desktop
         for desktop in self.db.desktop_ids():
             self.desktop_combo.addItem(self._desktop_text(desktop, counts), desktop)
@@ -167,6 +172,7 @@ class ShellMixin:
         for i, view in enumerate(VIEWS):
             button = QToolButton()
             button.setText(f"{view} (F{i + 1})")
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.setCheckable(True)
             button.setChecked(view == self.session.view)
             button.clicked.connect(lambda _c=False, v=view: self.act_set_view(v))
@@ -176,6 +182,7 @@ class ShellMixin:
         bar.addSeparator()
 
         self.mode_tabs = QTabBar()
+        self.mode_tabs.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         for title, _mode in MODE_TITLES:
             self.mode_tabs.addTab(title)
         self.mode_tabs.setCurrentIndex(1)
