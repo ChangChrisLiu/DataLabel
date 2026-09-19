@@ -208,6 +208,25 @@ class TruthSweeper(QObject):
             return sorted(self._parked)
 
     # -- the worker ---------------------------------------------------------
+    def _emit(self, signal, *args) -> None:
+        """Emit from the worker thread without letting the emit kill it.
+
+        A sweeper can outlive the window that owns it -- a session nobody
+        closed, a teardown that ran while a frame was in hand -- and then the
+        Qt object behind the signal is already gone and ``emit`` raises
+        ``RuntimeError: wrapped C/C++ object has been deleted``. Raised from
+        inside the worker's *own* error path, that killed the thread with the
+        failure it was trying to report, so nothing was reported at all and the
+        real exception surfaced as an unhandled one somewhere else entirely.
+
+        There is nothing to do about a receiver that no longer exists except
+        note it: the work itself is in the database either way.
+        """
+        try:
+            signal.emit(*args)
+        except RuntimeError:  # the receiving object is gone
+            log.debug("truth sweeper could not deliver %s", signal)
+
     def _run(self) -> None:
         try:
             db = Db(self._db_path)
@@ -216,7 +235,7 @@ class TruthSweeper(QObject):
             with self._lock:
                 self._stopping = True
                 self._idle.set()
-            self.sigError.emit(NO_STEP, f"{type(exc).__name__}: {exc}")
+            self._emit(self.sigError, NO_STEP, f"{type(exc).__name__}: {exc}")
             return
         try:
             # the same local cache the session reads from, so a re-check
@@ -240,7 +259,8 @@ class TruthSweeper(QObject):
                     failed = True
                     step = payload[0] if kind == "recheck" else NO_STEP
                     log.exception("truth sweeper failed on %s step %s", kind, step)
-                    self.sigError.emit(int(step), f"{type(exc).__name__}: {exc}")
+                    self._emit(self.sigError, int(step),
+                               f"{type(exc).__name__}: {exc}")
                     if kind == "recheck":
                         self._schedule_retry(int(step))
                 self._finished(kind, failed)
@@ -327,7 +347,7 @@ class TruthSweeper(QObject):
             else:
                 drained = False
         if done is not None:
-            self.sigProgress.emit(done, total, bad)
+            self._emit(self.sigProgress, done, total, bad)
         self._flush_queue_signal(force=drained)
 
     def _flush_queue_signal(self, force: bool) -> None:
@@ -340,7 +360,7 @@ class TruthSweeper(QObject):
                 return
             self._queues_dirty = False
             self._queues_sent_at = now
-        self.sigQueuesChanged.emit()
+        self._emit(self.sigQueuesChanged)
 
     # -- the work -----------------------------------------------------------
     def _recheck(self, db: Db, truth: TruthService, step: int,
@@ -379,8 +399,8 @@ class TruthSweeper(QObject):
         step, epoch = job
         key = FrameKey(self.desktop, step, self.view)
         stats = truth.refresh(key, want_compiled=True)
-        self.sigPrefetched.emit(step, epoch, stats["compiled"])
+        self._emit(self.sigPrefetched, step, epoch, stats["compiled"])
         rgb = images.get(key)
         if rgb is not None:
             images.clear()  # the GUI side owns the cache; this one just decodes
-            self.sigPrefetchedImage.emit(step, rgb)
+            self._emit(self.sigPrefetchedImage, step, rgb)
