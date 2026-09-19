@@ -383,38 +383,74 @@ def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path):
 
 
 @pytest.mark.slow
-def test_confirming_a_frame_is_under_budget_at_full_scanner_resolution(qapp, tmp_path):
-    """Space is the commonest key in the tool, and it now guards frozen rows.
+def test_confirming_a_frame_is_under_budget_at_full_scanner_resolution(
+    qapp, tmp_path, monkeypatch
+):
+    """Space, in the configuration the annotator actually runs.
 
-    ``verify_frame`` compares every frozen row of the frame against a fresh
-    compilation before it will confirm anything (the I1 gate), and comparing
-    masks means decoding them: at 1600x1600 with forty-odd rows that is half a
-    second the first time and more the second, on the GUI thread, between the
-    annotator pressing Space and the frame changing.
+    Two costs had to go. ``verify_frame`` compares every frozen row against a
+    fresh compilation before it will confirm anything (the I1 gate), and
+    comparing masks means decoding them -- so a row whose stored ``input_hash``
+    is this compilation's is skipped undecoded, the reasoning ``refresh``
+    already uses. And the compilation itself is one the session already has:
+    arriving at a frame compiles it, or the sweeper prefetched it, and Space
+    hands that frame to the truth service rather than paying for it twice.
 
-    The short-circuit is the stored ``input_hash``: a row derived from exactly
-    these inputs cannot disagree with them, so it is not decoded at all -- the
-    same reasoning ``refresh`` uses. What is left to pay for is the compilation
-    the confirmation needs anyway.
+    **The sweeper stays on**, and the frame confirmed is the prefetched ``k-1``:
+    in reverse-order annotation every frame arrives that way, and a budget met
+    only with the background worker switched off is a budget for a tool nobody
+    runs. The compile count is asserted alongside the clock, because a wall time
+    is also met by a fast machine.
     """
     session = make_session(tmp_path, last_step=40, hw=(1600, 1600))
-    session.goto(2)
-    drawn = seed_shapes(session, 2, grid=8, anchor=40)
+    session.goto(3)
+    drawn = seed_shapes(session, 3, grid=8, anchor=40)
     assert len(drawn) >= 30
-    session.sweeper_enabled = False
-    session.sweeper.stop()
+    assert session.sweeper_enabled is True
+
+    compiles = _count_compiles_in(monkeypatch)
 
     def confirm(attempt: int) -> None:
         assert session.confirm_frame() is True
 
     def before_confirm(attempt: int) -> None:
-        session.goto(2)
+        session.goto(3)                       # k, so the sweeper prefetches k-1
+        session.drain_prefetch(timeout=20.0)
+        session.goto(2)                       # ... and arrive on the prefetched one
+        session.drain_prefetch(timeout=20.0)  # which warms step 1 in its turn
         session.db.set_frame_flags(FrameKey(DESKTOP, 2, VIEW), review_status=None)
+        compiles.clear()
 
     _, confirm_runs = best_of(confirm, before_confirm)
-    # the second and third runs are the ones that matter: by then every row of
-    # the frame is frozen, which is the case the gate is about
+    # The frame Space confirmed was compiled by nobody on this thread: it came
+    # from the prefetch and the truth service proved it still current. Stepping
+    # back to step 1 afterwards does compile that frame -- arriving anywhere
+    # does, and the goto budgets above are what covers it.
+    assert [k.step for k in compiles] == [1], f"confirm_frame compiled {compiles}"
     assert len(session.db.compiled(FrameKey(DESKTOP, 2, VIEW))) >= 30
 
     session.close()
     _under(0.6, "confirm_frame", confirm_runs)
+
+
+def _count_compiles_in(monkeypatch) -> list:
+    """Record every pixel compilation made on **this** thread from now on.
+
+    The sweeper compiles on its own thread and is not what is being measured;
+    what is, is whether the GUI thread compiles a frame it was handed.
+    """
+    import threading
+
+    import tda.core.truth as truth_mod
+
+    calls: list = []
+    real = truth_mod.compile_frame
+    here = threading.current_thread()
+
+    def counted(*a, **k):
+        if threading.current_thread() is here:
+            calls.append(a[0])
+        return real(*a, **k)
+
+    monkeypatch.setattr(truth_mod, "compile_frame", counted)
+    return calls
