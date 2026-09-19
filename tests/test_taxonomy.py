@@ -88,14 +88,27 @@ def test_host_class_of_an_unknown_class_is_none():
     assert load_taxonomy().host_class("no_such_class") is None
 
 
-def test_a_host_class_must_name_a_class_of_the_taxonomy(tmp_path):
+def _taxonomy_with(tmp_path, cls: str, host: str):
+    """The real taxonomy with one class's ``host_class`` overwritten, on disk."""
     with open(REPO_ROOT / "configs" / "taxonomy.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
-    cfg["classes"]["ram_latch"]["host_class"] = "flux_capacitor"
+    cfg["classes"][cls]["host_class"] = host
     path = tmp_path / "taxonomy.yaml"
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f)
+    return path
+
+
+def test_a_host_class_must_name_a_class_of_the_taxonomy(tmp_path):
+    path = _taxonomy_with(tmp_path, "ram_latch", "flux_capacitor")
     with pytest.raises(ValueError, match="flux_capacitor"):
+        load_taxonomy(path)
+
+
+def test_a_class_may_not_name_itself_as_its_host(tmp_path):
+    """It would resolve to the instance itself: a parent cycle of length one."""
+    path = _taxonomy_with(tmp_path, "ram_latch", "ram_latch")
+    with pytest.raises(ValueError, match="itself"):
         load_taxonomy(path)
 
 

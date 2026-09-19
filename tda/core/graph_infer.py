@@ -332,12 +332,17 @@ def _infer_host_mounted(instances, rec: InstanceRec, tax: Taxonomy, put,
     annotator who unticked it in S1, and an instance that already carries a
     ``parent`` has been looked at. A desktop with no unique host fills nothing
     and is reported by :func:`unresolved_relations` instead.
+
+    An instance is never made its own parent. ``load_taxonomy`` already refuses
+    a class that names itself as its host, so this can only arrive from a
+    ``Taxonomy`` assembled in code -- and a parent cycle of length one is not
+    something to discover through :func:`tda.core.states._close_attached_cascade`.
     """
     host = tax.host_class(rec.cls)
     if not host or not blank(rec.parent):
         return
     target = unique_of_class(instances, host)
-    if not target:
+    if not target or target == rec.key:
         return
     put(rec, "parent", target)
     if not rec.attached:
@@ -397,6 +402,7 @@ def unresolved_relations(
     instances: dict[str, InstanceRec],
     tax: Taxonomy,
     actions: Optional[Iterable[ActionRec]] = None,
+    declined: Optional[Iterable[str]] = None,
 ) -> list[str]:
     """What :func:`infer_relational_fields` refused to guess, one line each.
 
@@ -412,7 +418,7 @@ def unresolved_relations(
       makes it leave the chassis with its part (spec 3.3);
     * an instance of a class with a ``host_class`` whose desktop has no unique
       host to hang it on (:func:`_infer_host_mounted`) -- the same defect, on
-      the board-mounted latches.
+      the board-mounted latches -- unless that host class is in ``declined``.
 
     Every line starts with :data:`UNRESOLVED` and carries its kind in brackets
     -- :data:`NO_CANDIDATE` or :data:`AMBIGUOUS` -- because the two want
@@ -422,9 +428,17 @@ def unresolved_relations(
     pointer, which the S1 step table already asks about
     (:mod:`tda.ui.steps_issues`). Provisional ``ls:*`` drafts are skipped: they
     carry no relations yet by construction.
+
+    ``declined`` is the desktop's :meth:`tda.core.db.Db.declined_implied` set --
+    the classes whose implied instance the annotator has deleted in S1. The host
+    question is not asked about one of them: the answer would be "add a
+    motherboard back", on every latch, for ever, which is telling the human to
+    undo the decision they have just recorded. It is passed in rather than read
+    here so this function stays pure and takes no database.
     """
     out: list[str] = []
     clock = None if actions is None else _Clock(actions)
+    refused = {str(c) for c in (declined or ())}
     for key, rec in sorted(instances.items()):
         if is_provisional(key):
             continue
@@ -433,7 +447,8 @@ def unresolved_relations(
             if value and value in tax.classes and resolve_ref(instances, value) is None:
                 out.append(_class_line(instances, key, name, value))
         host = tax.host_class(rec.cls)
-        if host and blank(rec.parent) and unique_of_class(instances, host) is None:
+        if (host and host not in refused and blank(rec.parent)
+                and unique_of_class(instances, host) is None):
             out.append(_host_line(instances, key, rec.cls, host))
         if rec.cls != "screw":
             continue

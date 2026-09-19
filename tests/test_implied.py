@@ -14,12 +14,20 @@ removes the board, so nothing may be implied for it.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from test_cli import d13_steps, env, open_db, run  # noqa: F401  (re-used fixtures)
 
 from tda.cli import EXIT_OK
 from tda.core.graph_infer import NO_CANDIDATE, infer_relational_fields, unresolved_relations
-from tda.core.implied import IMPLIED_ATTR, OP_KIND, implied_instances, is_implied
+from tda.core.implied import (
+    IMPLIED_ATTR,
+    OP_KIND,
+    implied_instances,
+    is_implied,
+    referencing_instances,
+)
 from tda.core.model import ActionRec, InstanceRec
 from tda.core.taxonomy import load_taxonomy
 from tda.ui.steps_issues import orphan_issues, unresolved_issues
@@ -168,6 +176,25 @@ def test_a_latch_draft_is_not_a_reference_either(tax):
             "ls:RAM Module Retention Clip#1", 66, "ram_latch"),
     }
     assert implied_instances(instances, [], tax) == []
+
+
+def test_a_host_on_a_connector_or_screw_class_is_counted_all_the_same(tax):
+    """The host check is not an ``elif``: it has to survive the two older ones.
+
+    ``screw`` matches the role branch first and that branch says no -- a psu
+    screw names no motherboard. A class that one day declares both must still
+    be counted once, not dropped and not twice.
+    """
+    hosted = replace(tax, host_classes={**tax.host_classes, "screw": "motherboard"})
+    instances = {
+        "screw.psu.01": InstanceRec("screw.psu.01", 64, "screw", attrs={"role": "psu"}),
+    }
+    assert referencing_instances(instances, "motherboard", hosted) == ["screw.psu.01"]
+    # a screw whose *role* already names the class is still counted exactly once
+    instances["screw.motherboard.01"] = InstanceRec(
+        "screw.motherboard.01", 64, "screw", attrs={"role": "motherboard"})
+    assert referencing_instances(instances, "motherboard", hosted) \
+        == ["screw.motherboard.01", "screw.psu.01"]
 
 
 def test_creating_the_implied_instance_is_idempotent(tax):

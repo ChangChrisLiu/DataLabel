@@ -144,10 +144,14 @@ class Taxonomy:
 def _host_classes(classes: dict[str, dict]) -> dict[str, str]:
     """The per-class ``host_class`` declarations, checked against the classes.
 
-    A host that is not itself a class of the taxonomy would resolve to nothing
-    for ever -- every latch of every desktop silently left without a parent --
-    so it is a configuration error, raised while the file is read rather than
-    discovered as a missing fill months later.
+    Two ways to write one that can never mean anything, both raised while the
+    file is read rather than discovered months later as a field nobody filled:
+
+    * a host that is **not a class** of the taxonomy resolves to nothing for
+      ever, leaving every instance of the declaring class without a parent;
+    * a class naming **itself** would resolve to the instance itself on any
+      desktop with exactly one of them -- a parent cycle of length one, which
+      the spec-3.3 cascade is no place to find out about.
     """
     hosts = {
         cls: str(defn["host_class"]).strip()
@@ -155,6 +159,11 @@ def _host_classes(classes: dict[str, dict]) -> dict[str, str]:
         if str((defn or {}).get("host_class") or "").strip()
     }
     for cls, host in sorted(hosts.items()):
+        if host == cls:
+            raise ValueError(
+                f"taxonomy.yaml: class {cls!r} declares itself as its host_class; "
+                f"an instance cannot ride on itself"
+            )
         if host not in classes:
             raise ValueError(
                 f"taxonomy.yaml: class {cls!r} declares host_class {host!r}, "

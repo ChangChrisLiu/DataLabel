@@ -86,18 +86,24 @@ def referencing_instances(
     them is evidence that the machine has this part: D66 holds eight
     ``ls:Motherboard Screw#k`` drafts and no imported sheet at all, and implying
     a board from those would invent an instance out of a drawing.
+
+    The host test is deliberately **not** another arm of the class chain: a
+    class that one day declares a ``host_class`` *and* is a connector or a screw
+    would otherwise be swallowed by the older arm and silently stop counting.
+    ``hit`` is what keeps it from counting such a row twice instead.
     """
     out: list[str] = []
     for key, rec in sorted(instances.items()):
         if is_provisional(key):
             continue
-        if rec.cls == "connector" and str(rec.socket_host or "").strip() == cls:
-            out.append(key)
+        hit = False
+        if rec.cls == "connector":
+            hit = str(rec.socket_host or "").strip() == cls
         elif rec.cls == "screw":
-            role = str(rec.attrs.get("role") or "")
-            if cls in SCREW_ROLE_CLASSES.get(role, ()):
-                out.append(key)
-        elif tax.host_class(rec.cls) == cls and blank(rec.parent):
+            hit = cls in SCREW_ROLE_CLASSES.get(str(rec.attrs.get("role") or ""), ())
+        if not hit and tax.host_class(rec.cls) == cls and blank(rec.parent):
+            hit = True
+        if hit:
             out.append(key)
     return out
 
