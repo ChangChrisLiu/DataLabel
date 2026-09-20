@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QListWidget,
+    QListWidgetItem,
     QMenu,
     QPushButton,
     QStyledItemDelegate,
@@ -79,6 +80,22 @@ __all__ = [
 
 #: How many targets a compound row is split into unless the annotator says else.
 DEFAULT_SPLIT = 2
+
+#: What an "Open questions" row stores so a double-click can jump to an edge.
+EDGE_ROLE = Qt.UserRole + 2
+
+
+def _edge_to_change(deadlock) -> object:
+    """The edge in a deadlock a human can actually do something about.
+
+    The manual one, if there is one: a rule edge is derived and can only be
+    rejected, so the way out of a loop almost always runs through the edge
+    somebody wrote. Falls back to the first edge of the loop.
+    """
+    for edge in deadlock.edges:
+        if edge.source == "manual":
+            return edge
+    return deadlock.edges[0] if deadlock.edges else None
 
 
 def _default_cache_dir() -> str:
@@ -167,6 +184,7 @@ class StepTablePanel(QWidget):
         # does not, so the window's uncommitted-edit gate is not involved and
         # the Relations tab adds no second path around it.
         self.relations_tab.sigGoToStep.connect(self.show_step)
+        self.issues.itemDoubleClicked.connect(self._on_issue_activated)
 
     def _table(
         self, model, columns: Sequence[Column], row_height: int = 0
@@ -226,6 +244,10 @@ class StepTablePanel(QWidget):
             messages = self.data.save(self.db)
         except Exception as error:  # a failed save must not take the panel down
             self._show_error(f"could not save D{self.desktop:02d}: {error}")
+            self.relations_tab.refresh()
+            self._refresh_issues()
+            # a refused Apply names an edge; put the annotator in front of it
+            self.show_deadlock_edge()
             return
         self.relations_tab.refresh()
         self._refresh_issues()
@@ -389,12 +411,33 @@ class StepTablePanel(QWidget):
         annotator sees it from the Steps and Instances tabs too.
         """
         self.issues.clear()
-        self.issues.addItems(
-            f"约束死锁 / deadlock (Apply refuses): {deadlock.label()}"
-            for deadlock in self.data.relations.cycles()
-        )
+        for deadlock in self.data.relations.cycles():
+            item = QListWidgetItem(
+                f"约束死锁 / deadlock (Apply refuses): {deadlock.label()}")
+            edge = _edge_to_change(deadlock)
+            if edge is not None:
+                # double-clicking jumps to the edge a human can actually change
+                item.setData(EDGE_ROLE, [edge.target, edge.type, edge.blocker])
+            self.issues.addItem(item)
         self.issues.addItems(self.data.issues)
         self.issues.addItems(f"state event: {m}" for m in self.data.messages)
+
+    def _on_issue_activated(self, item: QListWidgetItem) -> None:
+        """A deadlock line points at an edge: show it in the Relations tab."""
+        edge = item.data(EDGE_ROLE)
+        if not edge:
+            return
+        self.tabs.setCurrentWidget(self.relations_tab)
+        self.relations_tab.show_edge(*edge)
+
+    def show_deadlock_edge(self) -> None:
+        """Select the edge of the first deadlock, the one a human can change."""
+        for deadlock in self.data.relations.cycles():
+            edge = _edge_to_change(deadlock)
+            if edge is not None:
+                self.tabs.setCurrentWidget(self.relations_tab)
+                self.relations_tab.show_edge(edge.target, edge.type, edge.blocker)
+                return
 
     def _show_error(self, message: str) -> None:
         self.status.setText(f"Rejected: {message}")

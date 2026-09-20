@@ -43,7 +43,13 @@ from tda.core.model import InstanceRec
 from tda.core.states import FrameState, initial_state
 from tda.core.taxonomy import Taxonomy
 
-__all__ = ["Deadlock", "clearing_action", "find_deadlocks", "remaining_plan"]
+__all__ = ["Deadlock", "Plan", "clearing_actions", "find_deadlocks", "plan_removal",
+           "remaining_plan"]
+
+#: Spec 7.1's weaker necessity: a preference about the order, never a law. The
+#: checker, the legal-action set and the deadlock check all bind ``required``
+#: only, and now so does the planner when the preference leaves it no plan.
+RECOMMENDED = "recommended"
 
 #: The intermediate verbs :func:`remaining_plan` tries, in order, to bring a
 #: goal into a state ``remove`` can start from. ``disconnect`` is here rather
@@ -55,6 +61,30 @@ REMOVAL_PREFIX_VERBS = ("unscrew", "disconnect")
 VERB_PREFERENCE = ("open", "release", "unscrew", "disconnect", "displace", "remove")
 
 
+def _choose_verbs(
+    tax: Taxonomy,
+    rec: InstanceRec,
+    current: str,
+    wanted: frozenset[str],
+) -> list[str]:
+    """Every verb that puts ``rec`` into one of ``wanted``, least destructive first.
+
+    There is usually more than one way to get a blocker out of the way, and they
+    are not gated alike: a ``cable_clip`` is satisfied by ``open`` *or*
+    ``release`` -- both leave it ``open`` -- but ``open`` waits on the clip's own
+    screws and covers while ``release`` waits only on what covers it. Taking the
+    first answer and stopping called a plannable machine deadlocked (the panel
+    then refused a legitimate edge), so the caller gets the whole set and tries
+    them in order.
+    """
+    out: list[str] = []
+    for verb in VERB_PREFERENCE:
+        new = verb_effect(tax, rec.cls, rec.attrs, verb)
+        if new in wanted and verb_applies(tax, rec.cls, rec.attrs, verb, current):
+            out.append(verb)
+    return out
+
+
 def _choose_verb(
     tax: Taxonomy,
     rec: InstanceRec,
@@ -62,11 +92,8 @@ def _choose_verb(
     wanted: frozenset[str],
 ) -> Optional[str]:
     """The least destructive verb that puts ``rec`` into one of ``wanted``."""
-    for verb in VERB_PREFERENCE:
-        new = verb_effect(tax, rec.cls, rec.attrs, verb)
-        if new in wanted and verb_applies(tax, rec.cls, rec.attrs, verb, current):
-            return verb
-    return None
+    verbs = _choose_verbs(tax, rec, current, wanted)
+    return verbs[0] if verbs else None
 
 
 def _removal_chain(tax: Taxonomy, rec: InstanceRec, current: str) -> Optional[list[str]]:
@@ -115,6 +142,56 @@ def _removal_goal(instances: dict[str, InstanceRec], goal: str) -> str:
     return goal
 
 
+@dataclass(frozen=True)
+class Plan:
+    """A removal plan, and whether a preference had to be set aside for it."""
+
+    actions: tuple[VerbTarget, ...]
+    #: ``True`` when the plan ignores the recommended edges because honouring
+    #: them left no plan at all (spec 7.1: ``recommended`` is a preference).
+    relaxed: bool = False
+    #: The recommended edges that were dropped to get it.
+    dropped: tuple[Edge, ...] = ()
+
+    def __iter__(self):
+        return iter(self.actions)
+
+    def __len__(self) -> int:
+        return len(self.actions)
+
+
+def plan_removal(
+    instances: dict[str, InstanceRec],
+    edges: list[Edge],
+    state: FrameState,
+    goal: str,
+    tax: Taxonomy,
+) -> Optional[Plan]:
+    """:func:`remaining_plan`, plus whether a preference was set aside.
+
+    Two passes, because spec 7.1's ``recommended`` is a preference and not a
+    necessity: first with every active edge, so a plan that can honour the
+    preferred order does; and if that leaves no plan, again with the
+    ``required`` edges alone, which is what the checker, the legal-action set
+    and the deadlock check all bind to. The second answer is marked
+    :attr:`Plan.relaxed` and carries the edges it ignored, so a caller can say
+    so instead of pretending the preference was met.
+
+    ``None`` only when there is no plan under the required edges either.
+    """
+    strict = _plan_once(instances, active_edges(edges), state, goal, tax)
+    if strict is not None:
+        return Plan(actions=tuple(strict))
+    required = [e for e in active_edges(edges) if e.necessity != RECOMMENDED]
+    dropped = tuple(e for e in active_edges(edges) if e.necessity == RECOMMENDED)
+    if not dropped:
+        return None
+    relaxed = _plan_once(instances, required, state, goal, tax)
+    if relaxed is None:
+        return None
+    return Plan(actions=tuple(relaxed), relaxed=True, dropped=dropped)
+
+
 def remaining_plan(
     instances: dict[str, InstanceRec],
     edges: list[Edge],
@@ -136,13 +213,27 @@ def remaining_plan(
     unscrewed, a plug is pulled before its cable is taken out, and a captive
     screw is planned as the removal of the parent it can never leave without.
 
-    Recommended edges are honoured as well as required ones. Returns ``[]`` when
-    the goal is already removed, and ``None`` when there is no answer: the goal
-    is not an instance, its class cannot be removed at all (a latch, a lever,
-    the chassis -- spec 6.3), or the constraints are cyclic (spec 7.4 forbids
-    that, and :func:`find_cycles` names the offenders).
+    Recommended edges are honoured when they can be; when they cannot, they are
+    dropped rather than allowed to fail the plan (:func:`plan_removal` says
+    which, and is the call to make when that matters). Returns ``[]`` when the
+    goal is already removed, and ``None`` when there is no answer under the
+    required edges: the goal is not an instance, its class cannot be removed at
+    all (a latch, a lever, the chassis -- spec 6.3), a blocker can never reach a
+    state the edge accepts (a dead end), or the required constraints deadlock
+    (spec 7.4 forbids that, and :func:`find_deadlocks` names the offenders).
     """
-    active = active_edges(edges)
+    plan = plan_removal(instances, edges, state, goal, tax)
+    return None if plan is None else list(plan.actions)
+
+
+def _plan_once(
+    instances: dict[str, InstanceRec],
+    active: list[Edge],
+    state: FrameState,
+    goal: str,
+    tax: Taxonomy,
+) -> Optional[list[VerbTarget]]:
+    """One pass of the planner over exactly the edges it is given."""
     sim: dict[str, str] = {key: inst.state for key, inst in state.items()}
     for key, current in cable_nodes(active, state).items():
         sim.setdefault(key, current)
@@ -178,6 +269,12 @@ def remaining_plan(
             for child in children.get(key, ()):
                 sim[child] = REMOVED
 
+    def applies(key: str, verb: str) -> bool:
+        rec = instances.get(key)
+        cls = rec.cls if rec is not None else "cable"
+        attrs = rec.attrs if rec is not None else {}
+        return verb_applies(tax, cls, attrs, verb, sim.get(key, ""))
+
     def perform(key: str, verb: str) -> bool:
         """Emit ``verb`` on ``key`` after clearing everything that blocks it."""
         if (verb, key) in visiting:
@@ -196,12 +293,27 @@ def remaining_plan(
                     return False
         finally:
             visiting.discard((verb, key))
+        if not applies(key, verb):
+            # clearing the way changed this node too -- a clip that had to be
+            # released so the part could be swung aside is open already, and
+            # emitting "open the clip" now would be an illegal step. The caller
+            # rolls back and tries its next alternative, which finds the world
+            # as it was.
+            return False
         plan.append((verb, key))
         apply(key, verb)
         return True
 
     def ensure(key: str, wanted: frozenset[str]) -> bool:
-        """Get ``key`` into one of ``wanted``, doing whatever that takes."""
+        """Get ``key`` into one of ``wanted``, doing whatever that takes.
+
+        Every verb that would satisfy the edge is tried, least destructive
+        first, and the first one that can actually be planned wins: a cable clip
+        that cannot be ``open``ed (its own screws are in the way) may still be
+        ``release``d. A failed attempt is rolled back -- the actions it emitted
+        and the states it simulated -- so the next alternative starts from where
+        this one did.
+        """
         current = sim.get(key)
         if current is None or current == REMOVED or current in wanted:
             return True  # unknown or already good enough
@@ -210,10 +322,14 @@ def remaining_plan(
             if not key.startswith(CABLE_PREFIX):
                 return True
             rec = InstanceRec(key=key, desktop=0, cls="cable")
-        verb = _choose_verb(tax, rec, current, wanted)
-        if verb is None:
-            return False
-        return perform(key, verb)
+        for verb in _choose_verbs(tax, rec, current, wanted):
+            mark, snapshot = len(plan), dict(sim)
+            if perform(key, verb):
+                return True
+            del plan[mark:]
+            sim.clear()
+            sim.update(snapshot)
+        return False
 
     if sim.get(goal) == REMOVED:
         return []
@@ -225,6 +341,8 @@ def remaining_plan(
     if chain is None:
         return None
     for verb in chain:
+        if sim.get(goal) == REMOVED:
+            break            # an attached cascade took the goal out on the way
         if not perform(target, verb):
             return None
     if sim.get(goal) != REMOVED:  # the plan did not actually achieve the goal
@@ -256,11 +374,19 @@ class Deadlock:
         return f"{self.chain()} [{', '.join(e.label() for e in self.edges)}]"
 
 
-def _binding(edges: Iterable[Edge]) -> list[Edge]:
-    """The edges that actually gate something: active, required, hard, settled."""
+def _binding(edges: Iterable[Edge], necessity: str = "required") -> list[Edge]:
+    """The edges that actually gate something: active, hard, settled.
+
+    ``necessity`` is the weakest level to weigh, like
+    :func:`~tda.core.graph.unmet`: the default ``required`` is what a deadlock
+    is judged on, because a ``recommended`` edge is a preference the planner
+    drops rather than fails on. ``recommended`` weighs both, which is how the
+    panel finds preferences that contradict each other and says so without
+    refusing anything.
+    """
     return [e for e in active_edges(edges)
             if e.type in REQUIRED_STATES
-            and e.necessity != "recommended"
+            and (necessity == RECOMMENDED or e.necessity != RECOMMENDED)
             and not is_provisional(e.target) and not is_provisional(e.blocker)]
 
 
@@ -276,16 +402,24 @@ def _simulated(edges: list[Edge], instances: dict[str, InstanceRec], tax: Taxono
     return sim
 
 
-def clearing_action(
-    edge: Edge, instances: dict[str, InstanceRec], sim: dict[str, str], tax: Taxonomy
-) -> Optional[VerbTarget]:
-    """The action that satisfies ``edge``, or ``None`` when none is needed.
+#: What :func:`clearing_actions` says when the edge needs nothing done at all
+#: (the blocker already satisfies it, or is not a node of this desktop).
+SATISFIED: list[VerbTarget] = []
 
-    The planner's own answer (:func:`_choose_verb`): the least destructive verb
-    that puts the blocker into a state :data:`REQUIRED_STATES` accepts. ``None``
-    when the blocker already satisfies the edge, is not a node of this desktop,
-    or cannot be moved at all -- the last is a dead end rather than a loop, and
-    :func:`remaining_plan` reports it as "no plan" without any cycle.
+
+def clearing_actions(
+    edge: Edge, instances: dict[str, InstanceRec], sim: dict[str, str], tax: Taxonomy
+) -> Optional[list[VerbTarget]]:
+    """Every action that would satisfy ``edge``, least destructive first.
+
+    ``None`` when nothing needs doing -- the blocker already satisfies the edge,
+    or is not a node of this desktop. An **empty list** is the opposite and the
+    important case: something has to change and no verb can change it, a *dead
+    end* rather than a loop (:func:`remaining_plan` answers "no plan" for it and
+    :func:`find_deadlocks` reports nothing, because there is no loop to name).
+
+    The planner's own alternatives (:func:`_choose_verbs`), so the two agree on
+    what "clearing a blocker" can mean.
     """
     wanted = REQUIRED_STATES.get(edge.type, frozenset())
     current = sim.get(edge.blocker)
@@ -296,8 +430,8 @@ def clearing_action(
         if not edge.blocker.startswith(CABLE_PREFIX):
             return None
         rec = InstanceRec(key=edge.blocker, desktop=0, cls="cable")
-    verb = _choose_verb(tax, rec, current, wanted)
-    return None if verb is None else (verb, edge.blocker)
+    return [(verb, edge.blocker)
+            for verb in _choose_verbs(tax, rec, current, wanted)]
 
 
 def _goal_actions(instances: dict[str, InstanceRec], sim: dict[str, str],
@@ -318,51 +452,92 @@ def find_deadlocks(
     instances: dict[str, InstanceRec],
     tax: Taxonomy,
     state: Optional[FrameState] = None,
+    necessity: str = "required",
 ) -> list[Deadlock]:
     """Every deadlock of actions the graph holds (spec 7.4), in a stable order.
 
     Nodes are ``(verb, instance)`` actions reachable from some part's removal;
-    ``(v, T)`` depends on :func:`clearing_action` of every active required edge
-    ``(T, B)`` whose type and mode gate ``v``. A strongly connected component of
-    that graph (or a self-loop) is a deadlock: each action in it waits for the
-    next, so none of them can ever be done, and :func:`remaining_plan` answers
-    ``None`` for every node in the loop.
+    ``(v, T)`` waits on :func:`clearing_actions` of every binding edge ``(T, B)``
+    whose type and mode gate ``v``. The dependency is **AND over the edges, OR
+    over each edge's alternatives**: a part waits for *all* of its edges, but
+    each edge is satisfied by *any* verb that would put its blocker into an
+    accepted state -- a cable clip can be opened or released, and the two are
+    not gated alike.
 
-    ``state`` defaults to the initial state, which is the state the graph is
-    written about.
+    So the answer is computed in three steps:
+
+    1. expand the reachable action graph from the goal actions;
+    2. a least fixpoint over it: an action is **doable** when every edge gating
+       it either needs nothing or has at least one doable alternative. Iterating
+       from the actions that wait on nothing settles it;
+    3. what is left is stuck, for one of two reasons. An edge with **no**
+       alternative at all is a *dead end* -- nothing can ever clear it, which is
+       a modelling gap, not a loop, and is not reported here (the planner
+       answers "no plan" for it). An edge all of whose alternatives are stuck is
+       a *loop*: those are the arrows this looks for a cycle in, and each cycle
+       found is one :class:`Deadlock`.
+
+    ``necessity`` is the weakest level that binds (see :func:`_binding`):
+    ``required`` by default, because a recommended edge is a preference the
+    planner drops. ``state`` defaults to the initial state, which is the state
+    the graph is written about.
     """
-    binding = _binding(edges)
+    binding = _binding(edges, necessity)
     sim = _simulated(binding, instances, tax, state)
     by_target: dict[str, list[Edge]] = {}
     for edge in binding:
         by_target.setdefault(edge.target, []).append(edge)
 
-    def dependencies(action: VerbTarget) -> list[tuple[VerbTarget, Edge]]:
+    def gating(action: VerbTarget) -> list[tuple[Edge, list[VerbTarget]]]:
+        """The edges in this action's way, each with its alternatives."""
         verb, node = action
-        out: list[tuple[VerbTarget, Edge]] = []
+        out: list[tuple[Edge, list[VerbTarget]]] = []
         for edge in by_target.get(node, ()):
             if verb not in gated_verbs(edge.type, edge.mode):
                 continue
-            clear = clearing_action(edge, instances, sim, tax)
-            if clear is not None:
-                out.append((clear, edge))
-        return sorted(out, key=lambda pair: pair[0])
+            alternatives = clearing_actions(edge, instances, sim, tax)
+            if alternatives is not None:      # None: nothing to do for this edge
+                out.append((edge, sorted(alternatives)))
+        return out
 
-    # expand from the goal actions only: an action nobody could ever ask for is
-    # not a deadlock, it is unreachable
-    graph: dict[VerbTarget, list[VerbTarget]] = {}
-    why: dict[tuple[VerbTarget, VerbTarget], Edge] = {}
+    # 1. the reachable action graph (an action nobody could ask for is not a
+    #    deadlock, it is unreachable)
+    waits: dict[VerbTarget, list[tuple[Edge, list[VerbTarget]]]] = {}
     queue = sorted(set(_goal_actions(instances, sim, tax)))
     while queue:
         action = queue.pop()
-        if action in graph:
+        if action in waits:
             continue
-        deps = dependencies(action)
-        graph[action] = [nxt for nxt, _edge in deps]
-        for nxt, edge in deps:
-            why.setdefault((action, nxt), edge)
-            if nxt not in graph:
-                queue.append(nxt)
+        waits[action] = gating(action)
+        for _edge, alternatives in waits[action]:
+            queue.extend(a for a in alternatives if a not in waits)
+
+    # 2. least fixpoint: who can be done at all
+    doable: set[VerbTarget] = set()
+    changed = True
+    while changed:
+        changed = False
+        for action, gates in waits.items():
+            if action in doable:
+                continue
+            if all(any(a in doable for a in alternatives) for _edge, alternatives in gates):
+                doable.add(action)
+                changed = True
+
+    # 3. among the stuck ones, the arrows that are loops rather than dead ends
+    graph: dict[VerbTarget, list[VerbTarget]] = {}
+    why: dict[tuple[VerbTarget, VerbTarget], Edge] = {}
+    for action, gates in waits.items():
+        if action in doable:
+            continue
+        successors: list[VerbTarget] = []
+        for edge, alternatives in gates:
+            if not alternatives or any(a in doable for a in alternatives):
+                continue                      # satisfied, or a dead end: no arrow
+            for nxt in alternatives:
+                successors.append(nxt)
+                why.setdefault((action, nxt), edge)
+        graph[action] = sorted(set(successors))
 
     found: list[Deadlock] = []
     for component in _components(graph):

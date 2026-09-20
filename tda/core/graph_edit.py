@@ -281,9 +281,13 @@ def remove_manual_edge(edges: list[Edge], src: str, kind: str, dst: str) -> list
                 f"your own: keep it as a manual edge, or clear it"
             )
         raise GraphEditError(
-            f"{found.source} 边不能手工删除 / a {found.source} edge cannot be deleted "
-            f"by hand -- a rule edge is derived again on every derivation and an "
-            f"override is a decision about one; reject it instead (spec 7.3)"
+            f"{found.source} 边不能手工删除 / "
+            + ("an override is a decision about a rule edge, not an edge of your "
+               "own: clear the decision instead"
+               if found.source == OVERRIDE else
+               "a rule edge is derived again on every derivation, so deleting it "
+               "by hand would come back silently: reject it instead")
+            + " (spec 7.3)"
         )
     return [e for e in edges if e is not found]
 

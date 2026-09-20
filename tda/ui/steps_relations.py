@@ -156,6 +156,19 @@ class RelationsData:
         """The spec 7.4 deadlock check over the staged **active** graph."""
         return find_deadlocks(self.view().edges, self.data.instances, self.data.tax)
 
+    def soft_conflicts(self) -> list:
+        """Recommended edges that contradict each other -- a note, not a refusal.
+
+        Spec 7.1 calls ``recommended`` a preference: it cannot make a graph
+        impossible, and the planner drops it rather than fail. Two preferences
+        that point at each other are still worth saying out loud, because the
+        order they ask for cannot be honoured.
+        """
+        strict = {d.actions for d in self.cycles()}
+        return [d for d in find_deadlocks(self.view().edges, self.data.instances,
+                                          self.data.tax, necessity="recommended")
+                if d.actions not in strict]
+
     def names(self, key: str) -> list[Edge]:
         """The **staged** edges naming ``key``, which a delete has to answer for."""
         staged = {self._triple(e) for e in self.edges} - {self._triple(e) for e in self.stored}

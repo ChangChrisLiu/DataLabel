@@ -433,3 +433,65 @@ def test_the_status_column_never_elides(tab):
     from PySide6.QtWidgets import QHeaderView
 
     assert tab.view.horizontalHeader().sectionResizeMode(STATUS_COLUMN) ==         QHeaderView.ResizeToContents
+
+
+# --------------------------------------------------------------------------- #
+# round 3: preferences are a note, and a refused Apply points at the edge
+# --------------------------------------------------------------------------- #
+def contradictory_preferences(panel) -> None:
+    """Two recommended edges pointing at each other: not a law, still worth saying."""
+    panel.data.relations.add(DRIVE, "blocked_by", PSU, mode="tool_access",
+                             necessity="recommended", note="prefer the PSU first")
+    panel.data.relations.add(PSU, "blocked_by", DRIVE, mode="tool_access",
+                             necessity="recommended", note="prefer the drive first")
+    panel.relations_tab.refresh()
+
+
+def test_contradictory_preferences_are_a_note_not_a_refusal(tab, panel, db):
+    contradictory_preferences(panel)
+
+    assert not tab.cycles_label.styleSheet(), "not red: nothing is wrong"
+    assert "建议顺序互相矛盾" in tab.cycles_label.text()
+    assert DRIVE in tab.cycles_label.text()
+    assert panel.data.relations.cycles() == []
+
+    panel.apply()
+
+    assert ("blocked_by", DRIVE, PSU) in triples(edges_from_db(db, DESKTOP))
+    assert "Saved" in panel.status.text()
+
+
+def deadlocked(panel) -> None:
+    """The I-2 sequence, staged: a rule edge and a manual edge that wait on each other."""
+    screw = "screw.cpu_cooler.01"
+    panel.data.apply_instance_edit(screw, "fastens", "")
+    panel.apply()
+    panel.data.relations.add(screw, "blocked_by", "cpu_cooler.fan.01",
+                             mode="tool_access", note="盖住了")
+    panel.apply()
+    panel.data.apply_instance_edit(screw, "fastens", "cpu_cooler.fan.01")
+    panel.relations_tab.refresh()
+    panel._refresh_issues()
+
+
+def test_a_refused_apply_puts_the_manual_edge_on_screen(tab, panel):
+    deadlocked(panel)
+
+    panel.apply()
+
+    assert "deadlock" in panel.status.text() or "死锁" in panel.status.text()
+    assert panel.tabs.currentWidget() is tab
+    row = tab.model.row_of("screw.cpu_cooler.01", "blocked_by", "cpu_cooler.fan.01")
+    assert row >= 0 and tab.view.currentIndex().row() == row
+
+
+def test_the_open_question_jumps_to_the_edge_too(tab, panel):
+    deadlocked(panel)
+    item = next(panel.issues.item(i) for i in range(panel.issues.count())
+                if "deadlock" in panel.issues.item(i).text())
+
+    panel._on_issue_activated(item)
+
+    assert panel.tabs.currentWidget() is tab
+    row = tab.model.row_of("screw.cpu_cooler.01", "blocked_by", "cpu_cooler.fan.01")
+    assert tab.view.currentIndex().row() == row

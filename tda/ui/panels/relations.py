@@ -269,14 +269,23 @@ class RelationsTab(QWidget):
         for, so it is loud here and the ``Apply`` refuses it.
         """
         cycles = self.data.relations.cycles()
-        if not cycles:
-            self.cycles_label.setStyleSheet("")
+        if cycles:
+            named = "; ".join(deadlock.label() for deadlock in cycles)
+            self.cycles_label.setStyleSheet("color: #b00020; font-weight: bold;")
+            self.cycles_label.setText(
+                f"动作死锁 / DEADLOCK, which spec 7.4 forbids and Apply refuses: {named}")
+            return
+        self.cycles_label.setStyleSheet("")
+        soft = self.data.relations.soft_conflicts()
+        if not soft:
             self.cycles_label.setText("Deadlocks: none (spec 7.4 satisfied)")
             return
-        named = "; ".join(deadlock.label() for deadlock in cycles)
-        self.cycles_label.setStyleSheet("color: #b00020; font-weight: bold;")
+        # a preference is not a law (spec 7.1): nothing is refused, but an order
+        # that cannot be honoured is worth saying
+        named = "; ".join(deadlock.label() for deadlock in soft)
         self.cycles_label.setText(
-            f"动作死锁 / DEADLOCK, which spec 7.4 forbids and Apply refuses: {named}")
+            f"这些建议顺序互相矛盾，规划时已忽略 / these recommended edges contradict "
+            f"each other and are ignored when planning: {named}")
 
     # -- commands ----------------------------------------------------------- #
     def add_edge(self) -> None:
