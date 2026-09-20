@@ -26,7 +26,7 @@ from tda.core.graph import (
     active_edges,
     edge_digest,
     edges_from_db,
-    find_cycles,
+    find_deadlocks,
     graph_version,
     legal_actions,
     propose_edges,
@@ -49,9 +49,13 @@ from tda.core.states import state_at, events_from_actions
 from tda.core.taxonomy import load_taxonomy
 
 
+TAX = load_taxonomy()
+BENCH = bench_instances()
+
+
 @pytest.fixture(scope="module")
 def tax():
-    return load_taxonomy()
+    return TAX
 
 
 @pytest.fixture
@@ -66,7 +70,8 @@ def rules(instances, tax) -> list[Edge]:
 
 
 def add(edges, instances, target, kind, blocker, **kw):
-    return add_manual_edge(edges, target, kind, blocker, instances=instances, **kw)
+    return add_manual_edge(edges, target, kind, blocker, instances=instances,
+                           tax=TAX, **kw)
 
 
 BLOCK = {"mode": "physical_path"}
@@ -154,7 +159,7 @@ def test_a_duplicate_of_a_manual_edge_is_refused(rules, instances):
 def test_a_duplicate_of_a_rejected_edge_is_still_a_duplicate(rules, instances):
     """The row exists; a second one cannot, the unique index says so."""
     rejected = set_rule_decision(rules, "motherboard.01", "fastened_by",
-                                 "screw.motherboard.01", "rejected")
+                                 "screw.motherboard.01", "rejected", instances=BENCH, tax=TAX)
     refusal(rejected, instances, "motherboard.01", "fastened_by", "screw.motherboard.01")
 
 
@@ -204,9 +209,9 @@ def test_a_longer_cycle_is_refused_too(rules, instances):
 def test_a_cycle_through_a_rejected_edge_is_not_a_cycle(rules, instances):
     """A rejected edge gates nothing, so it cannot close a loop either."""
     without = set_rule_decision(rules, "cpu.01", "covered_by", "cpu_cooler.fan.01",
-                                "rejected")
+                                "rejected", instances=BENCH, tax=TAX)
     out = add(without, instances, "cpu_cooler.fan.01", "blocked_by", "cpu.01", **BLOCK)
-    assert find_cycles(active_edges(out)) == []
+    assert find_deadlocks(out, instances, TAX) == []
 
 
 def test_a_cable_node_may_block(rules, instances):
@@ -251,7 +256,7 @@ def one(edges, kind, target, blocker) -> Edge:
 
 
 def test_rejecting_a_rule_edge_records_an_override(rules):
-    out = set_rule_decision(rules, "cpu.01", "covered_by", "cpu_cooler.fan.01", "rejected")
+    out = set_rule_decision(rules, "cpu.01", "covered_by", "cpu_cooler.fan.01", "rejected", instances=BENCH, tax=TAX)
     edge = one(out, "covered_by", "cpu.01", "cpu_cooler.fan.01")
     assert edge.source == OVERRIDE
     assert edge.status == "rejected"
@@ -261,33 +266,33 @@ def test_rejecting_a_rule_edge_records_an_override(rules):
 
 
 def test_accepting_a_rule_edge_records_an_override_too(rules):
-    out = set_rule_decision(rules, "cpu.01", "covered_by", "cpu_cooler.fan.01", "accepted")
+    out = set_rule_decision(rules, "cpu.01", "covered_by", "cpu_cooler.fan.01", "accepted", instances=BENCH, tax=TAX)
     edge = one(out, "covered_by", "cpu.01", "cpu_cooler.fan.01")
     assert (edge.source, edge.status) == (OVERRIDE, "accepted")
     assert edge in active_edges(out)
 
 
 def test_a_decision_can_be_taken_back(rules):
-    out = set_rule_decision(rules, "cpu.01", "covered_by", "cpu_cooler.fan.01", "rejected")
-    back = set_rule_decision(out, "cpu.01", "covered_by", "cpu_cooler.fan.01", "proposed")
+    out = set_rule_decision(rules, "cpu.01", "covered_by", "cpu_cooler.fan.01", "rejected", instances=BENCH, tax=TAX)
+    back = set_rule_decision(out, "cpu.01", "covered_by", "cpu_cooler.fan.01", "proposed", instances=BENCH, tax=TAX)
     assert back == rules, "clearing a decision leaves the rules' own edge"
 
 
 def test_deciding_about_a_manual_edge_is_refused(rules, instances):
     out = add(rules, instances, "storage_drive.hdd.01", "blocked_by", "psu.01", **BLOCK)
     with pytest.raises(GraphEditError) as excinfo:
-        set_rule_decision(out, "storage_drive.hdd.01", "blocked_by", "psu.01", "rejected")
+        set_rule_decision(out, "storage_drive.hdd.01", "blocked_by", "psu.01", "rejected", instances=BENCH, tax=TAX)
     assert "/" in str(excinfo.value)
 
 
 def test_an_unknown_decision_is_refused(rules):
     with pytest.raises(GraphEditError):
-        set_rule_decision(rules, "cpu.01", "covered_by", "cpu_cooler.fan.01", "maybe")
+        set_rule_decision(rules, "cpu.01", "covered_by", "cpu_cooler.fan.01", "maybe", instances=BENCH, tax=TAX)
 
 
 def test_deciding_about_an_edge_that_is_not_there_is_refused(rules):
     with pytest.raises(GraphEditError):
-        set_rule_decision(rules, "psu.01", "blocked_by", "motherboard.01", "rejected")
+        set_rule_decision(rules, "psu.01", "blocked_by", "motherboard.01", "rejected", instances=BENCH, tax=TAX)
 
 
 # --------------------------------------------------------------------------- #
@@ -303,14 +308,14 @@ def reversed_pair(rules, instances) -> list[Edge]:
     Both steps are legal on their own: the rejected edge gates nothing, so the
     reverse closes no loop while it stands.
     """
-    out = set_rule_decision(rules, *COVER_EDGE, "rejected")
+    out = set_rule_decision(rules, *COVER_EDGE, "rejected", instances=BENCH, tax=TAX)
     return add(out, instances, COOLER, "blocked_by", CPU, **BLOCK)
 
 
 def test_accepting_an_edge_back_into_a_cycle_is_refused(rules, instances):
     staged = reversed_pair(rules, instances)
     with pytest.raises(GraphEditError) as excinfo:
-        set_rule_decision(staged, *COVER_EDGE, "accepted")
+        set_rule_decision(staged, *COVER_EDGE, "accepted", instances=BENCH, tax=TAX)
     text = str(excinfo.value)
     assert "/" in text and "->" in text
     assert CPU in text and COOLER in text
@@ -319,27 +324,27 @@ def test_accepting_an_edge_back_into_a_cycle_is_refused(rules, instances):
 def test_clearing_a_decision_back_into_a_cycle_is_refused(rules, instances):
     staged = reversed_pair(rules, instances)
     with pytest.raises(GraphEditError) as excinfo:
-        set_rule_decision(staged, *COVER_EDGE, "proposed")
+        set_rule_decision(staged, *COVER_EDGE, "proposed", instances=BENCH, tax=TAX)
     assert "->" in str(excinfo.value)
 
 
 def test_the_panel_path_cannot_store_a_cycle(rules, instances):
     """The C1 reproduction, end to end: the third Apply is the one refused."""
     staged = reversed_pair(rules, instances)
-    assert find_cycles(active_edges(staged)) == []
+    assert find_deadlocks(staged, instances, TAX) == []
     for decision in ("accepted", "proposed"):
         with pytest.raises(GraphEditError):
-            set_rule_decision(staged, *COVER_EDGE, decision)
-    assert find_cycles(active_edges(staged)) == []
+            set_rule_decision(staged, *COVER_EDGE, decision, instances=BENCH, tax=TAX)
+    assert find_deadlocks(staged, instances, TAX) == []
 
 
 def test_rejecting_an_edge_that_breaks_a_cycle_is_allowed(rules, instances):
     """A database can already hold a loop; rejecting is how you get out of it."""
     looped = [*rules, Edge(type="blocked_by", target=COOLER, blocker=CPU,
                            mode="physical_path", source=MANUAL, status="accepted")]
-    assert find_cycles(active_edges(looped))
-    out = set_rule_decision(looped, *COVER_EDGE, "rejected")
-    assert find_cycles(active_edges(out)) == []
+    assert find_deadlocks(looped, instances, TAX)
+    out = set_rule_decision(looped, *COVER_EDGE, "rejected", instances=BENCH, tax=TAX)
+    assert find_deadlocks(out, instances, TAX) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -356,7 +361,7 @@ def orphaned(rules) -> list[Edge]:
 
 def test_an_orphan_can_be_kept_as_a_manual_edge(rules, instances):
     out = adopt_orphan(orphaned(rules), *COVER_EDGE, note="真的压在上面",
-                       instances=instances)
+                       instances=instances, tax=TAX)
     edge = one(out, "covered_by", CPU, COOLER)
     assert (edge.source, edge.status) == (MANUAL, "accepted")
     assert edge.reason == "真的压在上面"
@@ -368,14 +373,15 @@ def test_keeping_an_orphan_runs_the_add_time_checks(rules, instances):
     """It becomes a new manual edge, so it has to pass what a new edge passes."""
     staged = add(orphaned(rules), instances, COOLER, "blocked_by", CPU, **BLOCK)
     with pytest.raises(GraphEditError) as excinfo:
-        adopt_orphan(staged, *COVER_EDGE, instances=instances)
+        adopt_orphan(staged, *COVER_EDGE, note="mine", instances=instances, tax=TAX)
     assert "->" in str(excinfo.value)
 
 
 def test_keeping_an_orphan_whose_endpoint_is_gone_is_refused(rules, instances):
     del instances[COOLER]
     with pytest.raises(GraphEditError) as excinfo:
-        adopt_orphan(orphaned(rules), *COVER_EDGE, instances=instances)
+        adopt_orphan(orphaned(rules), *COVER_EDGE, note="mine", instances=instances,
+                     tax=TAX)
     assert COOLER in str(excinfo.value)
 
 
@@ -393,7 +399,8 @@ def test_only_an_orphan_can_be_cleared_that_way(rules):
 def test_an_orphan_is_not_accepted_or_rejected(rules):
     """There is no rule edge to decide about any more."""
     with pytest.raises(GraphEditError) as excinfo:
-        set_rule_decision(orphaned(rules), *COVER_EDGE, "accepted")
+        set_rule_decision(orphaned(rules), *COVER_EDGE, "accepted",
+                          instances=BENCH, tax=TAX)
     assert "/" in str(excinfo.value)
 
 
@@ -416,8 +423,8 @@ def test_rejecting_a_rule_edge_puts_an_action_back_into_the_legal_set(instances,
     state = state_at(instances, [], 1, tax)
     assert ("remove", "cpu.01") not in legal_actions(
         instances, active_edges(rules), state, tax, strict=False)
-    out = set_rule_decision(rules, "cpu.01", "covered_by", "cpu_cooler.fan.01", "rejected")
-    out = set_rule_decision(out, "cpu.01", "locked_by", "cpu_socket_lever.01", "rejected")
+    out = set_rule_decision(rules, "cpu.01", "covered_by", "cpu_cooler.fan.01", "rejected", instances=BENCH, tax=TAX)
+    out = set_rule_decision(out, "cpu.01", "locked_by", "cpu_socket_lever.01", "rejected", instances=BENCH, tax=TAX)
     assert ("remove", "cpu.01") in legal_actions(
         instances, active_edges(out), state, tax, strict=False)
 
@@ -517,7 +524,7 @@ def test_the_rerun_keeps_a_rejected_rule_edge_rejected(db, tax):
     rerun(db, tax)
     stored = edges_from_db(db, DESKTOP)
     decided = set_rule_decision(stored, "cpu.01", "covered_by", "cpu_cooler.fan.01",
-                                "rejected")
+                                "rejected", instances=BENCH, tax=TAX)
     from tda.core.graph import edges_to_db
 
     edges_to_db(db, DESKTOP, decided)

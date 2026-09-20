@@ -37,9 +37,8 @@ from tda.core.graph import (
     HARD_TYPES,
     NECESSITY_ORDER,
     Edge,
-    active_edges,
     constraint_edges,
-    find_cycles,
+    find_deadlocks,
     is_provisional,
     validate_sequence,
 )
@@ -192,15 +191,23 @@ def _check_duplicate(edges: Iterable[Edge], target: str, kind: str, blocker: str
     )
 
 
-def _check_no_new_cycle(before: list[Edge], after: list[Edge]) -> None:
-    """Spec 7.4: the graph is acyclic. Name the loop the edge would close."""
-    was = {tuple(c) for c in find_cycles(constraint_edges(active_edges(before)))}
-    now = [c for c in find_cycles(constraint_edges(active_edges(after)))
-           if tuple(c) not in was]
+def _check_no_new_deadlock(before: list[Edge], after: list[Edge], instances, tax) -> None:
+    """Spec 7.4: no deadlock. Name the loop of actions the edit would close.
+
+    A *deadlock*, not a loop of instances: an edge gates only some verbs, so
+    "the bracket sits on the screw head" -- ``fastened_by(bracket, screw)`` plus
+    ``blocked_by(screw, bracket, physical_path)`` -- is a pair the planner
+    unwinds through ``unscrew``, and refusing it would refuse the very edge this
+    editor exists to record. See :func:`~tda.core.graph_plan.find_deadlocks`.
+    """
+    was = {d.actions for d in find_deadlocks(constraint_edges(before), instances, tax)}
+    now = [d for d in find_deadlocks(constraint_edges(after), instances, tax)
+           if d.actions not in was]
     if now:
-        named = "; ".join(" -> ".join(cycle) for cycle in now)
+        named = "; ".join(d.label() for d in now)
         raise GraphEditError(
-            f"这条边会形成环 / that edge closes a cycle, which spec 7.4 forbids: {named}"
+            f"这条边会造成动作死锁 / that edit deadlocks these actions, which spec 7.4 "
+            f"forbids: {named}"
         )
 
 
@@ -217,6 +224,7 @@ def add_manual_edge(
     mode: Optional[str] = None,
     note: str = "",
     instances: dict[str, InstanceRec],
+    tax,
 ) -> list[Edge]:
     """``edges`` plus one hand-written edge ``kind(src, dst)``, or a refusal.
 
@@ -229,8 +237,9 @@ def add_manual_edge(
     edge with that triple already exists whatever its source or status, when
     ``kind`` is not one of the five hard types of spec 7.2, when a
     ``blocked_by`` carries no ``mode`` (or another type carries one), when
-    ``necessity`` is not of spec 7.1, or when the edge would close a cycle
-    (spec 7.4) -- the reason then names the cycle.
+    ``necessity`` is not of spec 7.1, or when the edge would deadlock a loop of
+    actions (spec 7.4) -- the reason then names the loop. ``tax`` is needed for
+    that last check, which asks what each action would have to wait for.
 
     The input list is never mutated. A ``cable:*`` node may be the blocker: a
     clipped cable is a spec 7.3 ``blocked_by`` reason and has no instance row.
@@ -247,7 +256,7 @@ def add_manual_edge(
     edge = Edge(type=kind, target=src, blocker=dst, necessity=necessity, mode=mode,
                 reason=note or "", source=MANUAL, status=MANUAL_STATUS)
     out = [*edges, edge]
-    _check_no_new_cycle(edges, out)
+    _check_no_new_deadlock(edges, out, instances, tax)
     return out
 
 
@@ -255,8 +264,10 @@ def remove_manual_edge(edges: list[Edge], src: str, kind: str, dst: str) -> list
     """``edges`` without the manual edge ``kind(src, dst)``, or a refusal.
 
     Only a manual edge can be removed. A rule edge is re-derived on the next
-    ``constraints`` run, so deleting one would come back silently: the way to
-    disagree with it is :func:`set_rule_decision`.
+    derivation, so deleting one would come back silently, and an override is a
+    decision *about* such an edge: the way out of those is
+    :func:`set_rule_decision`, or -- once the rule behind it is gone --
+    :func:`adopt_orphan` / :func:`drop_orphan`.
     """
     found = _find(edges, src, kind, dst)
     if found is None:
@@ -264,16 +275,22 @@ def remove_manual_edge(edges: list[Edge], src: str, kind: str, dst: str) -> list
             f"没有这条边 / D has no edge {kind}({src}, {dst})"
         )
     if not editable(found):
+        if is_orphan(found):
+            raise GraphEditError(
+                f"这是一条失去规则的决定 / that is an orphaned decision, not an edge of "
+                f"your own: keep it as a manual edge, or clear it"
+            )
         raise GraphEditError(
             f"{found.source} 边不能手工删除 / a {found.source} edge cannot be deleted "
-            f"by hand -- it is derived again on every constraints run; reject it "
-            f"instead (spec 7.3)"
+            f"by hand -- a rule edge is derived again on every derivation and an "
+            f"override is a decision about one; reject it instead (spec 7.3)"
         )
     return [e for e in edges if e is not found]
 
 
 def set_rule_decision(
-    edges: list[Edge], src: str, kind: str, dst: str, decision: str
+    edges: list[Edge], src: str, kind: str, dst: str, decision: str,
+    *, instances: dict[str, InstanceRec], tax,
 ) -> list[Edge]:
     """Record the spec 7.3 decision about a rule edge: accept, reject, or clear.
 
@@ -284,10 +301,10 @@ def set_rule_decision(
     the triple back to the rules.
 
     Either of the two that make the edge **active again** is checked for
-    acyclicity, because rejecting one edge and writing its reverse by hand is a
-    legal pair of edits whose *undo* would close a loop -- and a stored cycle is
-    a graph the planner cannot answer for and the next ``constraints`` run
-    refuses. Rejecting is never refused: it can only take an edge out.
+    deadlock, because rejecting one edge and writing its reverse by hand is a
+    legal pair of edits whose *undo* would close a loop -- and a stored deadlock
+    is a graph the planner cannot answer for and the next derivation refuses.
+    Rejecting is never refused: it can only take an edge out.
 
     A manual edge carries no decision (remove it instead), and neither does an
     orphaned one -- the rule edge it was about is not derived any more, so
@@ -318,7 +335,7 @@ def set_rule_decision(
         new = replace(found, source=OVERRIDE, status=decision)
     out = [new if e is found else e for e in edges]
     if decision != "rejected":
-        _check_no_new_cycle(edges, out)
+        _check_no_new_deadlock(edges, out, instances, tax)
     return out
 
 
@@ -328,17 +345,23 @@ def adopt_orphan(
     kind: str,
     dst: str,
     *,
-    note: str = "",
+    note: str,
     instances: dict[str, InstanceRec],
+    tax,
 ) -> list[Edge]:
     """Keep an orphaned decision as a manual edge of the annotator's own.
 
     The rules stopped deriving the edge this decision was about, so the decision
     has nothing left to be about (:mod:`tda.core.graph_derive`). If the
     annotator still believes the constraint, it becomes theirs: same triple,
-    same mode and necessity, ``source='manual'``, and their own reason. It goes
-    through every check a new edge goes through -- endpoints, cycles, the lot --
-    because that is exactly what it now is.
+    same mode and necessity, ``source='manual'`` -- and **their own** reason,
+    which is why ``note`` is required. The rule's old reason is machine-written
+    ("screw.03 fastens motherboard.01"); carrying it onto a manual row would
+    make the provenance the paper reports a lie, so the caller prefills it as
+    ``was rule: ...`` and the annotator says why they believe it.
+
+    It goes through every check a new edge goes through -- endpoints, deadlock,
+    the lot -- because that is exactly what it now is.
     """
     found = _find(edges, src, kind, dst)
     if found is None or not is_orphan(found):
@@ -346,10 +369,16 @@ def adopt_orphan(
             f"这不是一条已失去规则的决定 / {kind}({src}, {dst}) is not an orphaned "
             f"decision"
         )
+    if not note.strip():
+        raise GraphEditError(
+            f"留一句你自己的理由 / write your own reason before keeping "
+            f"{found.label()} as a manual edge: the rule's wording was the "
+            f"machine's, and this row will say a human wrote it"
+        )
     without = [e for e in edges if e is not found]
     return add_manual_edge(without, src, kind, dst, necessity=found.necessity,
-                           mode=found.mode, note=note or found.reason,
-                           instances=instances)
+                           mode=found.mode, note=note.strip(),
+                           instances=instances, tax=tax)
 
 
 def drop_orphan(edges: list[Edge], src: str, kind: str, dst: str) -> list[Edge]:

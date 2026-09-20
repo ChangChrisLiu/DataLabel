@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Optional
 
 from tda.core.db import Db
 from tda.core.graph_derive import RULE
+from tda.core.graph_rules import HARD_TYPES, active_edges
 from tda.core.implied import is_implied
 from tda.core.logs import CHASSIS_KEY
 from tda.core.ls_import import SOURCE as LS_SOURCE
@@ -48,8 +49,12 @@ from tda.ui.steps_values import RELATION_FIELDS, EditError
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, fine for typing
     from tda.ui.steps_model import StepTableData
 
-__all__ = ["PAIRED_WITH_PARENT", "check_deletable", "delete_instance",
-           "derived_relations", "stored_neighbours"]
+__all__ = ["ANNOTATOR", "OP_KIND", "OP_VIEW", "PAIRED_WITH_PARENT",
+           "check_deletable", "delete_instance", "derived_relations",
+           "stored_neighbours"]
+
+#: ``op_log.annotator`` when the window did not say who is editing.
+ANNOTATOR = "ui:steps"
 
 
 def derived_relations(db: Db, desktop: int, key: str) -> list[tuple[str, str, str]]:
@@ -157,6 +162,35 @@ def stored_neighbours(
 #: Unticked whenever ``parent`` is cleared; see :func:`stored_neighbours`.
 PAIRED_WITH_PARENT = "attached"
 
+#: ``op_log`` scope and kind of the row a delete leaves behind.
+OP_KIND = "instance_delete"
+OP_VIEW = "-"
+
+
+def _restamp(db: Db, data: "StepTableData", key: str, dropped: int) -> None:
+    """Re-stamp the desktop's graph meta after a delete. **In the transaction.**
+
+    The delete takes the instance's rule edges with it, so the stored
+    ``graph_version`` is about a graph that no longer exists -- and an export
+    quoting it would be quoting something else. The version is read back through
+    the accessor, exactly as the derivation and the ``constraints`` command do.
+    """
+    from tda.core.graph import edges_from_db, graph_version   # local: import cycle
+    from tda.core.graph_derive import settled_instances
+    from tda.core.graph_plan import find_deadlocks
+    from tda.pipeline import merge_desktop_meta                # late: heavy module
+
+    left = {k: rec for k, rec in data.instances.items() if k != key}
+    edges = [e for e in edges_from_db(db, data.desktop) if e.type in HARD_TYPES]
+    merge_desktop_meta(db, data.desktop, {
+        "graph_version": graph_version(db, data.desktop),
+        "graph_edges": len(active_edges(edges)),
+        "graph_cycles": len(find_deadlocks(edges, settled_instances(left), data.tax)),
+    })
+    db.log_op(data.desktop, OP_VIEW, OP_KIND,
+              {"instance": key, "relations": dropped},
+              {"instance": key}, ANNOTATOR)
+
 
 def _clear_pointers(rec: InstanceRec, key: str, revert_to: Optional[str]) -> None:
     """Drop every pointer ``rec`` holds to ``key``, in place."""
@@ -199,6 +233,7 @@ def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
                 db.upsert_instance(rec)
             if implied_cls:
                 db.decline_implied(data.desktop, implied_cls)
+            _restamp(db, data, key, len(derived))
     except Exception as error:  # the database rolled back; so must memory
         raise EditError(f"could not delete {key!r}: {error}") from error
 

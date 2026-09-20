@@ -1,7 +1,7 @@
 """``python -m tda.cli constraints``: the constraint graph reaches the database.
 
 Spec 7 has been implemented for a while and nothing ever called it.
-``propose_edges``, ``find_cycles`` and ``validate_sequence`` had no caller
+``propose_edges``, ``find_deadlocks`` and ``validate_sequence`` had no caller
 outside the tests, so the only ``relation`` rows the real database held came
 from the Label Studio import, and ``export/vlm.py`` wrote ``"graph_version":
 None`` because there was nothing to write.
@@ -154,7 +154,7 @@ def test_a_label_studio_edge_is_left_alone(env):
 def test_a_non_constraint_label_studio_row_is_not_part_of_the_graph(env):
     """The import files ``partner_of`` rows in the same table; they gate nothing.
 
-    Feeding them to ``find_cycles`` invented eight cycles on the real database
+    Feeding them to the acyclicity check invented eight cycles on the real database
     out of rows nobody ever claimed were constraints.
     """
     db = open_db(env)
@@ -171,7 +171,8 @@ def test_a_non_constraint_label_studio_row_is_not_part_of_the_graph(env):
     code = run(env, "constraints", "--desktops", str(DESKTOP), "--validate",
                "--report", str(out))
     assert code == EXIT_OK
-    assert "- none (the graph is acyclic" in out.read_text(encoding="utf-8")
+    assert "### deadlocks" in out.read_text(encoding="utf-8")
+    assert "- none (no loop of actions" in out.read_text(encoding="utf-8")
     kept = [r for r in relations(env) if r["type"] == "partner_of"]
     assert len(kept) == 2
 
@@ -235,7 +236,7 @@ def test_the_report_lists_the_edges_by_type(env):
     assert f"D{DESKTOP:02d}" in text
     for etype in ("fastened_by", "connected_to", "locked_by", "covered_by"):
         assert etype in text
-    assert "cycles" in text.lower()
+    assert "deadlocks" in text.lower()
 
 
 def test_the_report_names_the_violations_with_step_and_reason(env):

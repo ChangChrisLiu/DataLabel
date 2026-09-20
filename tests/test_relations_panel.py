@@ -20,7 +20,12 @@ from tda.core.db import Db
 from tda.core.graph import edges_from_db
 from tda.core.graph_edit import MANUAL, OVERRIDE, RULE
 from tda.core.taxonomy import load_taxonomy
-from tda.ui.panels.relations import RELATION_COLUMNS, STEP_ROLE
+from tda.ui.panels.relations import (
+    RELATION_COLUMNS,
+    STATUS_COLUMN,
+    STEP_ROLE,
+    WAS_RULE,
+)
 from tda.ui.panels.steptable import StepTablePanel
 
 DESKTOP = 13
@@ -295,6 +300,7 @@ def test_an_s1_edit_refreshes_the_violations_too(tab, panel):
 # --------------------------------------------------------------------------- #
 def test_the_cycle_line_says_there_are_none(tab):
     assert "none" in tab.cycles_label.text().lower()
+    assert not tab.cycles_label.styleSheet()
 
 
 def test_a_cycle_a_database_already_holds_is_shown(qapp, db, tmp_path, tax):
@@ -309,8 +315,11 @@ def test_a_cycle_a_database_already_holds_is_shown(qapp, db, tmp_path, tax):
     ])
     widget = StepTablePanel(db, DESKTOP, taxonomy=tax, cache_dir=tmp_path / "cache")
     try:
-        assert DRIVE in widget.relations_tab.cycles_label.text()
-        assert "->" in widget.relations_tab.cycles_label.text()
+        text = widget.relations_tab.cycles_label.text()
+        assert DRIVE in text and "->" in text
+        assert "bold" in widget.relations_tab.cycles_label.styleSheet()
+        assert any("deadlock" in widget.issues.item(i).text()
+                   for i in range(widget.issues.count()))
     finally:
         widget.deleteLater()
 
@@ -340,6 +349,9 @@ def test_an_orphan_offers_keeping_or_clearing_but_not_deciding(tab, panel):
 
 def test_keeping_an_orphan_makes_it_manual(tab, panel, db):
     target, kind, blocker = orphan(panel)
+    tab.adopt(target, kind, blocker)          # the first call only prefills
+    assert tab.note_edit.text().startswith(WAS_RULE)
+    tab.note_edit.setText("我看过，确实拧着")
     tab.adopt(target, kind, blocker)
     row = tab.model.row_of(target, kind, blocker)
     assert tab.model.index(row, 0).data() == MANUAL
@@ -402,3 +414,22 @@ def test_the_jump_never_touches_the_session(tab, panel):
     assert not hasattr(panel, "session")
     tab._on_violation_activated(tab.violations.item(0))
     assert panel.data.desktop == DESKTOP
+
+
+def test_keeping_an_orphan_needs_a_reason_of_your_own(tab, panel):
+    """The row is about to say a human wrote it (round 2, minor 4)."""
+    target, kind, blocker = orphan(panel)
+    seen = errors(tab)
+
+    tab.adopt(target, kind, blocker)
+
+    assert seen and "/" in seen[0]
+    assert tab.note_edit.text().startswith(WAS_RULE)
+    row = tab.model.row_of(target, kind, blocker)
+    assert tab.model.index(row, 0).data() == OVERRIDE, "nothing was staged"
+
+
+def test_the_status_column_never_elides(tab):
+    from PySide6.QtWidgets import QHeaderView
+
+    assert tab.view.horizontalHeader().sectionResizeMode(STATUS_COLUMN) ==         QHeaderView.ResizeToContents

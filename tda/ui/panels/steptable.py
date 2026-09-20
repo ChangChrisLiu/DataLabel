@@ -382,7 +382,17 @@ class StepTablePanel(QWidget):
                             if staged else "No constraint edit is staged.")
 
     def _refresh_issues(self) -> None:
+        """Every open question, deadlocks first.
+
+        A deadlock is the one thing in the Relations tab that stops ``Apply``
+        from writing anything at all, so it is also said here, where the
+        annotator sees it from the Steps and Instances tabs too.
+        """
         self.issues.clear()
+        self.issues.addItems(
+            f"约束死锁 / deadlock (Apply refuses): {deadlock.label()}"
+            for deadlock in self.data.relations.cycles()
+        )
         self.issues.addItems(self.data.issues)
         self.issues.addItems(f"state event: {m}" for m in self.data.messages)
 

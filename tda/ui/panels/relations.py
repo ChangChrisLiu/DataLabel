@@ -57,6 +57,11 @@ DEFAULT_KIND = "blocked_by"
 #: ``blocked_by`` is the only type that carries a mode; this is its default.
 DEFAULT_MODE = BLOCKED_MODES[0]
 
+#: Prefix the note box is prefilled with when an orphaned decision is kept as a
+#: manual edge: the rule's own wording was written by the machine, and the row
+#: is about to claim a human wrote it.
+WAS_RULE = "was rule: "
+
 #: What each mode stops, in the annotator's words -- the table of
 #: :data:`~tda.core.graph_rules.BLOCKED_GATES` read out loud.
 MODE_TOOLTIP = "blocked_by 的方式决定它挡住哪些动作 / what this block stops:\n" + "\n".join(
@@ -76,6 +81,9 @@ RELATION_COLUMNS: tuple[Column, ...] = (
 
 #: What the violations list stores on each row so a double-click can jump.
 STEP_ROLE = Qt.UserRole + 1
+
+#: The Status column, which must never elide (``accepted_orphan``).
+STATUS_COLUMN = [c.field for c in RELATION_COLUMNS].index("status")
 
 
 class RelationTableModel(QAbstractTableModel):
@@ -179,6 +187,10 @@ class RelationsTab(QWidget):
         self.view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.view.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.view.horizontalHeader().setStretchLastSection(True)  # the Note column
+        # `accepted_orphan` is the longest thing a status ever says, and eliding
+        # it to "accepted..." would hide the one word that matters
+        self.view.horizontalHeader().setSectionResizeMode(
+            STATUS_COLUMN, QHeaderView.ResizeToContents)
         self.view.verticalHeader().setVisible(False)
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.cycles_label.setWordWrap(True)
@@ -249,18 +261,22 @@ class RelationsTab(QWidget):
             self.violations.addItem(item)
 
     def _fill_cycles(self) -> None:
-        """Spec 7.4: the graph must be acyclic. Say so either way.
+        """Spec 7.4: no deadlock of actions. Say so either way.
 
-        Nothing this panel offers can create one, but a database written
-        elsewhere can already hold one, and a graph with a loop is one the
-        planner cannot answer for -- it must not be invisible here.
+        No single edit can create one -- each is checked -- but two edits either
+        side of an S1 correction can, and a database written elsewhere can
+        already hold one. A deadlocked graph is one the planner cannot answer
+        for, so it is loud here and the ``Apply`` refuses it.
         """
         cycles = self.data.relations.cycles()
         if not cycles:
-            self.cycles_label.setText("Cycles: none (spec 7.4 satisfied)")
+            self.cycles_label.setStyleSheet("")
+            self.cycles_label.setText("Deadlocks: none (spec 7.4 satisfied)")
             return
-        named = "; ".join(" -> ".join(cycle) for cycle in cycles)
-        self.cycles_label.setText(f"环 / CYCLES, which spec 7.4 forbids: {named}")
+        named = "; ".join(deadlock.label() for deadlock in cycles)
+        self.cycles_label.setStyleSheet("color: #b00020; font-weight: bold;")
+        self.cycles_label.setText(
+            f"动作死锁 / DEADLOCK, which spec 7.4 forbids and Apply refuses: {named}")
 
     # -- commands ----------------------------------------------------------- #
     def add_edge(self) -> None:
@@ -283,8 +299,25 @@ class RelationsTab(QWidget):
                       target, kind, blocker)
 
     def adopt(self, target: str, kind: str, blocker: str) -> None:
-        """Keep an orphaned decision as a manual edge of the annotator's own."""
+        """Keep an orphaned decision as a manual edge of the annotator's own.
+
+        The row is about to say a human wrote it, so it needs a human's reason:
+        the first call prefills the note box with the rule's old machine-written
+        wording, marked ``was rule:``, and asks for a word; the second call --
+        once something is in the box -- does it.
+        """
         note = self.note_edit.text().strip()
+        if not note:
+            edge = self.model.edge_at(self.model.row_of(target, kind, blocker))
+            self.note_edit.setText(f"{WAS_RULE}{edge.reason if edge else ''}")
+            self.note_edit.setFocus()
+            self.show_edge(target, kind, blocker)
+            self.sigError.emit(
+                "先写一句你自己的理由，再选一次「保留为手动边」 / say why you believe "
+                "it, then choose 'Keep as a manual edge' again -- the rule's "
+                "wording was the machine's"
+            )
+            return
         self._command(lambda: self.data.relations.adopt(target, kind, blocker, note),
                       target, kind, blocker)
 

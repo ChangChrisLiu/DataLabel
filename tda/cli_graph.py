@@ -6,7 +6,7 @@
                                   [--report PATH]
 
 Spec 7 was implemented and never called. :func:`~tda.core.graph.propose_edges`,
-:func:`~tda.core.graph.find_cycles` and
+:func:`~tda.core.graph.find_deadlocks` and
 :func:`~tda.core.graph.validate_sequence` had no caller outside the tests, so
 the only ``relation`` rows the database held came from the Label Studio import
 and every VLM export wrote ``"graph_version": None``. This command is the
@@ -21,7 +21,7 @@ Per desktop, in one transaction:
    touches nothing else: an edge a human wrote or the Label Studio import
    brought keeps its reason, its status and its provenance, even when the rules
    would have derived the same triple;
-4. :func:`~tda.core.graph.find_cycles` checks the spec 7.4 acyclicity
+4. :func:`~tda.core.graph.find_deadlocks` checks the spec 7.4 acyclicity
    invariant, and ``--validate`` additionally replays the log against the graph;
 5. a content hash of the resulting edge set is stamped in the desktop meta as
    ``graph_version``, so an export can say which graph it shipped.
@@ -52,7 +52,7 @@ from tda.core.graph import (
     Edge,
     edge_digest,
     edges_from_db,
-    find_cycles,
+    find_deadlocks,
     graph_version,
     is_provisional,
     unresolved_fan_owners,
@@ -108,7 +108,7 @@ class DesktopGraph:
     manual: int = 0  # edges a human wrote
     imported: int = 0  # hard edges from the Label Studio import
     protected_other: int = 0  # rows of a type that is not a hard constraint
-    cycles: list[list[str]] = field(default_factory=list)
+    cycles: list[str] = field(default_factory=list)  # deadlock labels
     violations: list[str] = field(default_factory=list)
     unresolved: list[str] = field(default_factory=list)
     version: Optional[str] = None
@@ -202,7 +202,8 @@ def _settled(db: Db, desktop: int) -> dict:
     return {k: rec for k, rec in db.instances(desktop).items() if not is_provisional(k)}
 
 
-def _summary(desktop: int, derivation: Derivation, validate: bool) -> DesktopGraph:
+def _summary(desktop: int, derivation: Derivation, instances: dict, tax: Taxonomy,
+             validate: bool) -> DesktopGraph:
     """The run record of one derivation, before anything is written."""
     counts = derivation.counts()
     return DesktopGraph(
@@ -216,7 +217,7 @@ def _summary(desktop: int, derivation: Derivation, validate: bool) -> DesktopGra
         manual=counts["manual"],
         imported=counts["imported"],
         protected_other=counts["other"],
-        cycles=find_cycles(derivation.edges),
+        cycles=[d.label() for d in find_deadlocks(derivation.edges, instances, tax)],
         version=edge_digest(derivation.edges),
         validated=validate,
     )
@@ -236,7 +237,7 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
     instances = _settled(db, desktop)
     stored = edges_from_db(db, desktop)
     derivation = derive_edges(instances, stored, tax)
-    out = _summary(desktop, derivation, validate)
+    out = _summary(desktop, derivation, instances, tax, validate)
     out.unresolved = unresolved_fan_owners(instances)
     if validate:
         out.violations = validate_sequence(
@@ -320,13 +321,18 @@ def _log_desktop(log, prefix: str, one: DesktopGraph) -> None:
         return
     other = f", {one.protected_other} non-constraint rows untouched" \
         if one.protected_other else ""
-    log(f"{prefix} D{one.desktop:02d}: {one.edges} active edges "
-        f"({one.stored} rule, {one.removed} dropped, {one.decided} decided, "
-        f"{one.manual} manual, {one.imported} imported{other}), "
-        f"{len(one.cycles)} cycles, {len(one.violations)} violations, "
+    # the breakdown is of the ROWS the table holds and does not add up to the
+    # active total (a rejected or orphaned row gates nothing), so it is fenced
+    # off rather than left looking like a sum
+    log(f"{prefix} D{one.desktop:02d}: {one.edges} active edges; rows: "
+        f"{one.stored} rule + {one.decided} decided "
+        f"({one.rejected} rejected, {len(one.orphans)} orphaned) + "
+        f"{one.manual} manual + {one.imported} imported{other}; "
+        f"{one.removed} rule rows dropped; "
+        f"{len(one.cycles)} deadlocks, {len(one.violations)} violations, "
         f"graph_version {one.version or '-'}")
     for cycle in one.cycles:
-        log(f"{prefix}   CYCLE {' -> '.join(cycle)}")
+        log(f"{prefix}   DEADLOCK {cycle}")
     for text in one.orphans:
         log(f"{prefix}   ORPHANED DECISION {text} (its rule edge is no longer derived)")
     for text in one.unresolved:
@@ -353,7 +359,7 @@ def constraints_report(run: GraphRun) -> str:
         f"{sum(r.rejected for r in applied)} rejected, "
         f"{sum(len(r.orphans) for r in applied)} orphaned; "
         f"{sum(r.manual for r in applied)} manual edges",
-        f"- cycles: {run.cycles}",
+        f"- deadlocks (spec 7.4): {run.cycles}",
         f"- violations: {run.violations}"
         + (f" ({sum(len(r.breaches) for r in applied)} likely log gaps, "
            f"{sum(len(r.hints) for r in applied)} failed attempts wanting a "
@@ -361,7 +367,7 @@ def constraints_report(run: GraphRun) -> str:
            else " (not checked; pass --validate)"),
         "",
         "| desktop | active edges | " + " | ".join(HARD_TYPES)
-        + " | cycles | violations | graph_version |",
+        + " | deadlocks | violations | graph_version |",
         "|---|---|" + "---|" * len(HARD_TYPES) + "---|---|---|",
     ]
     for r in run.runs:
@@ -401,10 +407,11 @@ def _desktop_section(r: DesktopGraph) -> list[str]:
         lines.append("")
         lines.extend(f"- {text}" for text in r.orphans)
         lines.append("")
-    lines.append("### cycles")
+    lines.append("### deadlocks (spec 7.4)")
     lines.append("")
-    lines.extend([f"- {' -> '.join(cycle)}" for cycle in r.cycles]
-                 or ["- none (the graph is acyclic, as spec 7.4 requires)"])
+    lines.extend([f"- {cycle}" for cycle in r.cycles]
+                 or ["- none (no loop of actions waits on itself, as spec 7.4 "
+                     "requires; the graph is acyclic in the sense that matters)"])
     lines.append("")
     lines.append("### likely log gaps")
     lines.append("")

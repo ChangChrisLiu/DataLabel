@@ -46,7 +46,7 @@ from tda.core.graph import (
     Edge,
     edge_digest,
     edges_from_db,
-    find_cycles,
+    find_deadlocks,
     graph_version,
     is_provisional,
 )
@@ -152,9 +152,9 @@ class RelationsData:
         return violations_of(settled_instances(self.data.instances), self.view().edges,
                              self.data.actions, self.data.tax)
 
-    def cycles(self) -> list[list[str]]:
-        """The spec 7.4 acyclicity check over the staged **active** graph."""
-        return find_cycles(self.view().edges)
+    def cycles(self) -> list:
+        """The spec 7.4 deadlock check over the staged **active** graph."""
+        return find_deadlocks(self.view().edges, self.data.instances, self.data.tax)
 
     def names(self, key: str) -> list[Edge]:
         """The **staged** edges naming ``key``, which a delete has to answer for."""
@@ -168,7 +168,7 @@ class RelationsData:
         """Stage one hand-written edge; see :func:`~tda.core.graph_edit.add_manual_edge`."""
         self._stage(lambda edges: add_manual_edge(
             edges, target, kind, blocker, necessity=necessity, mode=mode,
-            note=note, instances=self.data.instances,
+            note=note, instances=self.data.instances, tax=self.data.tax,
         ))
 
     def remove(self, target: str, kind: str, blocker: str) -> None:
@@ -177,12 +177,15 @@ class RelationsData:
 
     def decide(self, target: str, kind: str, blocker: str, decision: str) -> None:
         """Stage the spec 7.3 decision about a rule edge: accept / reject / clear."""
-        self._stage(lambda edges: set_rule_decision(edges, target, kind, blocker, decision))
+        self._stage(lambda edges: set_rule_decision(
+            edges, target, kind, blocker, decision,
+            instances=self.data.instances, tax=self.data.tax))
 
     def adopt(self, target: str, kind: str, blocker: str, note: str = "") -> None:
         """Keep an orphaned decision as a manual edge of the annotator's own."""
-        self._stage(lambda edges: adopt_orphan(edges, target, kind, blocker, note=note,
-                                               instances=self.data.instances))
+        self._stage(lambda edges: adopt_orphan(
+            edges, target, kind, blocker, note=note,
+            instances=self.data.instances, tax=self.data.tax))
 
     def drop(self, target: str, kind: str, blocker: str) -> None:
         """Clear an orphaned decision: its rule edge is not derived any more."""
@@ -225,6 +228,7 @@ class RelationsData:
         leave a row in the op log.
         """
         derivation = derive_edges(self.data.instances, self.edges, self.data.tax)
+        self._refuse_deadlock(derivation)
         rows = [*derivation.edges, *derivation.other]
         before = self._by_triple(self.stored)
         after = self._by_triple(rows)
@@ -251,7 +255,7 @@ class RelationsData:
             merge_desktop_meta(db, self.data.desktop, {
                 "graph_version": payload["version"],
                 "graph_edges": len(derivation.active),
-                "graph_cycles": len(find_cycles(derivation.edges)),
+                "graph_cycles": 0,   # refused above if there were any
             })
         db.log_op(
             self.data.desktop, OP_VIEW, OP_KIND, payload,
@@ -260,6 +264,28 @@ class RelationsData:
             self.annotator,
         )
         return payload
+
+    def _refuse_deadlock(self, derivation: Derivation) -> None:
+        """An ``Apply`` may never store a deadlock (spec 7.4).
+
+        Each edit is checked on its own, which is not enough: an S1 correction
+        can re-activate a rule edge that deadlocks with a manual edge written
+        while that rule edge was gone, and neither edit was wrong when it was
+        made. The derivation is where the two meet, so this is where it is
+        caught -- the whole ``Apply`` is refused, the transaction rolls back and
+        the staged edits stay staged, because the annotator is one small change
+        away from a graph that works.
+        """
+        found = find_deadlocks(derivation.edges, self.data.instances, self.data.tax)
+        if not found:
+            return
+        named = "; ".join(d.label() for d in found)
+        raise EditError(
+            f"这次 Apply 会存下动作死锁，已全部回滚 / this Apply would store a deadlock "
+            f"and was rolled back whole: {named}. 改掉环里的手动边，或拒绝环里的规则边，"
+            f"再 Apply / remove or change the manual edge in the loop, or reject the "
+            f"rule edge in it, then Apply again"
+        )
 
     def committed(self) -> None:
         """The transaction went through: what was written is now what is stored."""

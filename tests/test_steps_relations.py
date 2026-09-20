@@ -262,6 +262,26 @@ def test_an_instance_no_edge_names_still_deletes(data, db):
     assert key not in data.instances
 
 
+def test_deleting_an_instance_restamps_the_graph_and_logs_it(data, db):
+    """Round 2, minor 1: the delete changes the graph, so it says so."""
+    key = data.change_target(FIRST_REMOVE, cls="screw", attrs={"role": "motherboard"},
+                             verb="unscrew")
+    data.change_target(FIRST_REMOVE, target=DRIVE, verb="remove")
+    data.apply_instance_edit(key, "fastens", "motherboard.01")
+    data.save(db)
+    before = graph_version(db, DESKTOP)
+
+    data.delete_instance(db, key)
+
+    assert graph_version(db, DESKTOP) != before
+    meta = db.get_desktop(DESKTOP)
+    assert meta["graph_version"] == graph_version(db, DESKTOP)
+    assert meta["graph_cycles"] == 0
+    ops = [op for op in db.ops(DESKTOP, "-") if op["kind"] == "instance_delete"]
+    assert ops and ops[0]["payload"]["instance"] == key
+    assert ops[0]["payload"]["relations"] >= 1, "the rule edges went with it"
+
+
 def test_a_derived_edge_goes_with_the_instance_it_names(data, db):
     """A rule edge is a reading of the instance table, not somebody's decision.
 
@@ -424,6 +444,71 @@ def test_the_violations_follow_the_rederived_rule_edges(data, db):
 
 def test_the_session_reports_the_cycles_of_the_staged_graph(data):
     assert data.relations.cycles() == []
+
+
+# --------------------------------------------------------------------------- #
+# an Apply can never store a deadlock (round 2, I-2)
+# --------------------------------------------------------------------------- #
+COOLER, COOLER_SCREW = "cpu_cooler.fan.01", "screw.cpu_cooler.01"
+
+
+def deadlocking_pair(data, db) -> None:
+    """The reproduction: clear a field, write an edge, restore the field.
+
+    Each of the three edits is legal on its own -- while ``fastens`` is empty
+    there is no rule edge to loop with -- and together they deadlock.
+    """
+    data.apply_instance_edit(COOLER_SCREW, "fastens", "")
+    data.save(db)
+    data.relations.add(COOLER_SCREW, "blocked_by", COOLER, mode="tool_access")
+    data.save(db)
+    data.apply_instance_edit(COOLER_SCREW, "fastens", COOLER)
+
+
+def test_the_apply_that_would_store_a_deadlock_is_refused(data, db):
+    deadlocking_pair(data, db)
+    before_edges = triples(edges_from_db(db, DESKTOP))
+    before_version = graph_version(db, DESKTOP)
+
+    with pytest.raises(EditError) as excinfo:
+        data.save(db)
+
+    text = str(excinfo.value)
+    assert "/" in text and "->" in text
+    assert COOLER_SCREW in text and COOLER in text
+    assert triples(edges_from_db(db, DESKTOP)) == before_edges, "rolled back whole"
+    assert graph_version(db, DESKTOP) == before_version
+    assert db.instances(DESKTOP)[COOLER_SCREW].fastens != COOLER, "the S1 edit too"
+
+
+def test_the_staged_view_shows_the_deadlock_before_the_apply(data, db):
+    deadlocking_pair(data, db)
+    found = data.relations.cycles()
+    assert len(found) == 1
+    assert COOLER_SCREW in found[0].label()
+
+
+def test_the_way_out_is_to_remove_the_manual_edge(data, db):
+    deadlocking_pair(data, db)
+    data.relations.remove(COOLER_SCREW, "blocked_by", COOLER)
+
+    data.save(db)
+
+    assert data.relations.cycles() == []
+    assert ("fastened_by", COOLER, COOLER_SCREW) in triples(edges_from_db(db, DESKTOP))
+
+
+def test_the_other_way_out_is_to_reject_the_rule_edge(data, db):
+    deadlocking_pair(data, db)
+    data.relations.decide(COOLER, "fastened_by", COOLER_SCREW, "rejected")
+
+    data.save(db)
+
+    assert data.relations.cycles() == []
+    stored = next(e for e in edges_from_db(db, DESKTOP)
+                  if (e.type, e.target, e.blocker) == ("fastened_by", COOLER,
+                                                       COOLER_SCREW))
+    assert stored.status == "rejected"
 
 
 def test_a_blocker_that_is_already_gone_does_not_clear_the_hint(data):
