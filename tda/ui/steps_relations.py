@@ -7,21 +7,31 @@ the annotator's edits are **staged**, nothing reaches the database until
 so the steps, the actions, the instances, the pose re-cut and the edges either
 all land or none of them do.
 
-Three things this layer adds to the pure :mod:`tda.core.graph_edit`:
+Four things this layer adds to the pure :mod:`tda.core.graph_edit`:
 
 * the endpoints are checked against the **staged** instance table, so an edge
   may name an instance S1 has only just created (it is written first, in the
   same transaction);
-* ``graph_version`` is re-stamped only when the edge set really changed
-  (:func:`~tda.core.graph.edge_digest` ignores prose, so re-wording a reason is
-  not a new graph), and it is read back through
-  :func:`~tda.core.graph.graph_version` exactly as ``constraints`` does, so the
-  meta stamp and the accessor are the same answer by construction;
+* the rule edges are re-derived from the staged instances by
+  :func:`~tda.core.graph_derive.derive_edges` -- the same function the
+  ``constraints`` command runs. Without it the tab described the instance table
+  the annotator had just corrected: clearing a ``screw.fastens`` left its
+  ``fastened_by`` edge in the graph, and in the spec 7.4 replay, until somebody
+  remembered the command line. The staged view previews the derivation and the
+  ``Apply`` writes it, so what the annotator checked is what is stored;
+* ``graph_version``, ``graph_edges`` and ``graph_cycles`` are re-stamped when
+  the edge set really changed (:func:`~tda.core.graph.edge_digest` ignores
+  prose, so re-wording a reason is not a new graph), the version read back
+  through :func:`~tda.core.graph.graph_version` exactly as ``constraints`` does,
+  so the meta stamp and the accessor are the same answer by construction;
 * the write is recorded in the op log with the inverse patch.
 
-The violations list is the spec 7.4 replay of the *staged* session -- staged
-edges, staged actions -- so adding the right ``blocked_by`` for a failed
-attempt makes the line disappear before ``Apply``, not after it.
+The violations list is the spec 7.4 replay of the *staged* session -- derived
+edges, staged edges, staged actions -- so adding the right ``blocked_by`` for a
+failed attempt makes the line disappear before ``Apply``, not after it. The
+cycle list is :func:`~tda.core.graph.find_cycles` over the same staged graph:
+the panel makes a cycle impossible to create, but a database written elsewhere
+can hold one, and a graph with a loop is one the planner cannot answer for.
 
 No Qt here: :mod:`tda.ui.panels.relations` is the widget layer.
 """
@@ -34,17 +44,19 @@ from tda.core.db import Db
 from tda.core.graph import (
     HARD_TYPES,
     Edge,
-    constraint_edges,
     edge_digest,
     edges_from_db,
-    edges_to_db,
+    find_cycles,
     graph_version,
     is_provisional,
 )
+from tda.core.graph_derive import Derivation, derive_edges, settled_instances, write_derivation
 from tda.core.graph_edit import (
     GraphEditError,
     Violation,
     add_manual_edge,
+    adopt_orphan,
+    drop_orphan,
     remove_manual_edge,
     set_rule_decision,
     violations_of,
@@ -80,29 +92,44 @@ class RelationsData:
     edges: list[Edge] = field(default_factory=list)
     #: Who the op log says did this; the window sets it from its annotator.
     annotator: str = ANNOTATOR
+    #: The last previewed derivation, dropped whenever anything could change it.
+    _view: Optional[Derivation] = None
+    #: What the last :meth:`write` put in the table, for :meth:`committed`.
+    _written: list[Edge] = field(default_factory=list)
 
     # -- loading ----------------------------------------------------------- #
-    @classmethod
-    def load(cls, db: Db, data: "StepTableData") -> "RelationsData":
-        """Read the desktop's stored edges into a fresh session."""
-        out = cls(data=data)
-        out.reload(db)
-        return out
-
     def reload(self, db: Db) -> None:
         """Throw away every staged edit and read the stored edges back."""
         self.stored = edges_from_db(db, self.data.desktop)
         self.edges = list(self.stored)
+        self.invalidate()
+
+    def invalidate(self) -> None:
+        """Forget the previewed derivation (the instance table may have moved)."""
+        self._view = None
+
+    def view(self) -> Derivation:
+        """What the rules make of the staged session right now.
+
+        The same :func:`~tda.core.graph_derive.derive_edges` the ``constraints``
+        command runs, over the **staged** instance table: the tab therefore
+        shows the graph this ``Apply`` will write, not the one the last CLI run
+        left behind.
+        """
+        if self._view is None:
+            self._view = derive_edges(self.data.instances, self.edges, self.data.tax)
+        return self._view
 
     # -- what the panel shows ---------------------------------------------- #
     @property
     def rows(self) -> list[Edge]:
-        """Every edge of this desktop, grouped for display."""
-        return sorted(self.edges, key=edge_sort_key)
+        """Every edge of this desktop, re-derived and grouped for display."""
+        view = self.view()
+        return sorted([*view.edges, *view.other], key=edge_sort_key)
 
     @property
     def dirty(self) -> bool:
-        """Is anything staged that ``Apply`` would write?"""
+        """Is an edit of *this tab* staged? (An S1 edit is dirty on its own.)"""
         return self._by_triple(self.edges) != self._by_triple(self.stored)
 
     def instance_keys(self) -> list[str]:
@@ -122,9 +149,12 @@ class RelationsData:
 
     def violations(self) -> list[Violation]:
         """The spec 7.4 replay of the staged session (same as ``--validate``)."""
-        instances = {k: rec for k, rec in self.data.instances.items()
-                     if not is_provisional(k)}
-        return violations_of(instances, self.edges, self.data.actions, self.data.tax)
+        return violations_of(settled_instances(self.data.instances), self.view().edges,
+                             self.data.actions, self.data.tax)
+
+    def cycles(self) -> list[list[str]]:
+        """The spec 7.4 acyclicity check over the staged **active** graph."""
+        return find_cycles(self.view().edges)
 
     def names(self, key: str) -> list[Edge]:
         """The **staged** edges naming ``key``, which a delete has to answer for."""
@@ -136,71 +166,106 @@ class RelationsData:
     def add(self, target: str, kind: str, blocker: str, *, necessity: str = "required",
             mode: Optional[str] = None, note: str = "") -> None:
         """Stage one hand-written edge; see :func:`~tda.core.graph_edit.add_manual_edge`."""
-        self._stage(lambda: add_manual_edge(
-            self.edges, target, kind, blocker, necessity=necessity, mode=mode,
+        self._stage(lambda edges: add_manual_edge(
+            edges, target, kind, blocker, necessity=necessity, mode=mode,
             note=note, instances=self.data.instances,
         ))
 
     def remove(self, target: str, kind: str, blocker: str) -> None:
         """Stage the removal of a manual edge (a rule edge is refused)."""
-        self._stage(lambda: remove_manual_edge(self.edges, target, kind, blocker))
+        self._stage(lambda edges: remove_manual_edge(edges, target, kind, blocker))
 
     def decide(self, target: str, kind: str, blocker: str, decision: str) -> None:
         """Stage the spec 7.3 decision about a rule edge: accept / reject / clear."""
-        self._stage(lambda: set_rule_decision(self.edges, target, kind, blocker, decision))
+        self._stage(lambda edges: set_rule_decision(edges, target, kind, blocker, decision))
+
+    def adopt(self, target: str, kind: str, blocker: str, note: str = "") -> None:
+        """Keep an orphaned decision as a manual edge of the annotator's own."""
+        self._stage(lambda edges: adopt_orphan(edges, target, kind, blocker, note=note,
+                                               instances=self.data.instances))
+
+    def drop(self, target: str, kind: str, blocker: str) -> None:
+        """Clear an orphaned decision: its rule edge is not derived any more."""
+        self._stage(lambda edges: drop_orphan(edges, target, kind, blocker))
 
     def _stage(self, run) -> None:
+        """Run one edit over the **previewed** graph and record its difference.
+
+        The edit sees the derivation, not the raw stored rows: an orphan status,
+        and a rule edge an S1 correction has just created, are part of what the
+        annotator is looking at and of what the checks (duplicate, cycle) have
+        to weigh. Only the difference is kept, so :attr:`dirty` still means
+        "this tab has an unsaved edit" rather than "the rules moved".
+        """
+        before = self.view().edges
         try:
-            self.edges = run()
+            after = run(before)
         except GraphEditError as error:  # the panel knows this one
             raise EditError(str(error)) from error
+        was = self._by_triple(before)
+        now = self._by_triple(after)
+        staged = self._by_triple(self.edges)
+        for triple in [t for t in staged if t in was and t not in now]:
+            staged.pop(triple)
+        for triple, edge in now.items():
+            if was.get(triple) != edge:
+                staged[triple] = edge
+        self.edges = list(staged.values())
+        self.invalidate()
 
     # -- writing ------------------------------------------------------------ #
     def write(self, db: Db) -> dict:
-        """Write the staged edits. **Call inside the caller's transaction.**
+        """Derive and write this desktop's graph. **Inside the caller's transaction.**
 
-        Returns the op-log payload, or ``{}`` when nothing was staged -- an
-        ``Apply`` that touched no edge must not re-stamp ``graph_version`` or
+        The rule edges are re-derived here, with the same function the
+        ``constraints`` command uses, so an S1 correction of ``fastens`` /
+        ``socket_host`` / ``of`` reaches the graph on the ``Apply`` that made
+        it. Returns the op-log payload, or ``{}`` when nothing changed at all --
+        an ``Apply`` that moved no edge must not re-stamp ``graph_version`` or
         leave a row in the op log.
         """
+        derivation = derive_edges(self.data.instances, self.edges, self.data.tax)
+        rows = [*derivation.edges, *derivation.other]
         before = self._by_triple(self.stored)
-        after = self._by_triple(self.edges)
+        after = self._by_triple(rows)
+        self._written = rows
         dropped = [t for t in before if t not in after]
-        written = [e for t, e in after.items() if before.get(t) != e]
-        if not dropped and not written:
+        changed = [t for t, e in after.items() if t in before and before[t] != e]
+        added = [t for t in after if t not in before]
+        if not dropped and not changed and not added:
             return {}
 
-        for triple in dropped:
-            db.delete_relation(self.data.desktop, *triple)
-        edges_to_db(db, self.data.desktop, written)
-
+        write_derivation(db, self.data.desktop, derivation, self.stored)
         payload = {
-            "added": sum(1 for t, e in after.items() if t not in before),
-            "changed": sum(1 for t, e in after.items()
-                           if t in before and before[t] != e),
+            "added": len(added),
+            "changed": len(changed),
             "removed": len(dropped),
+            "orphaned": len(derivation.orphaned),
+            "readopted": len(derivation.readopted),
             "version": None,
         }
-        if edge_digest(constraint_edges(list(after.values()))) != \
-                edge_digest(constraint_edges(list(before.values()))):
+        if edge_digest(list(after.values())) != edge_digest(list(before.values())):
             from tda.pipeline import merge_desktop_meta   # late: tda.pipeline is heavy
 
             payload["version"] = graph_version(db, self.data.desktop)
             merge_desktop_meta(db, self.data.desktop, {
                 "graph_version": payload["version"],
-                "graph_edges": len(constraint_edges(list(after.values()))),
+                "graph_edges": len(derivation.active),
+                "graph_cycles": len(find_cycles(derivation.edges)),
             })
         db.log_op(
             self.data.desktop, OP_VIEW, OP_KIND, payload,
             {"restore": [asdict(before[t]) for t in dropped],
-             "drop": [list(t) for t, e in after.items() if t not in before]},
+             "drop": [list(t) for t in added]},
             self.annotator,
         )
         return payload
 
     def committed(self) -> None:
-        """The transaction went through: what was staged is now what is stored."""
-        self.stored = list(self.edges)
+        """The transaction went through: what was written is now what is stored."""
+        self.stored = list(self._written)
+        self.edges = list(self._written)
+        self.invalidate()
 
     # -- helpers ------------------------------------------------------------ #
     @staticmethod

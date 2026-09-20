@@ -262,6 +262,25 @@ def test_an_instance_no_edge_names_still_deletes(data, db):
     assert key not in data.instances
 
 
+def test_a_derived_edge_goes_with_the_instance_it_names(data, db):
+    """A rule edge is a reading of the instance table, not somebody's decision.
+
+    Since the S1 Apply derives them, every screw now has one, and refusing the
+    delete over it would make "delete an instance nothing points at" impossible.
+    """
+    key = data.change_target(FIRST_REMOVE, cls="screw", attrs={"role": "motherboard"},
+                             verb="unscrew")
+    data.change_target(FIRST_REMOVE, target=DRIVE, verb="remove")
+    data.apply_instance_edit(key, "fastens", "motherboard.01")
+    data.save(db)
+    assert [e for e in edges_from_db(db, DESKTOP) if key in (e.target, e.blocker)]
+
+    data.delete_instance(db, key)
+
+    assert key not in data.instances
+    assert not [e for e in edges_from_db(db, DESKTOP) if key in (e.target, e.blocker)]
+
+
 # --------------------------------------------------------------------------- #
 # the violations list (the same replay `constraints --validate` prints)
 # --------------------------------------------------------------------------- #
@@ -292,6 +311,119 @@ def test_the_hint_stays_cleared_after_a_constraints_rerun(data, db, tax):
     run = constraints_into_db(db, tax, {DESKTOP}, validate=True)
     assert run.runs[0].violations == []
     assert (BLOCK[0], DRIVE, BLOCK[1]) in triples(edges_from_db(db, DESKTOP))
+
+
+# --------------------------------------------------------------------------- #
+# the S1 Apply re-derives this desktop's rule edges (round 1)
+# --------------------------------------------------------------------------- #
+SCREW = "screw.motherboard.01"
+FASTENED = ("fastened_by", "motherboard.01", SCREW)
+
+
+def test_the_staged_view_shows_the_rules_reading_the_staged_instances(data):
+    assert FASTENED in triples(data.relations.rows)
+
+    data.apply_instance_edit(SCREW, "fastens", "")
+
+    assert FASTENED not in triples(data.relations.rows), \
+        "the tab must not describe the instance table the annotator has just left"
+
+
+def test_apply_writes_the_rederived_rule_edges(data, db):
+    data.apply_instance_edit(SCREW, "fastens", "")
+    data.save(db)
+    assert FASTENED not in triples(edges_from_db(db, DESKTOP))
+
+
+def test_a_new_relational_field_derives_its_edge_on_apply(data, db):
+    data.apply_instance_edit(SCREW, "fastens", "cpu_cooler.fan.01")
+    fresh = ("fastened_by", "cpu_cooler.fan.01", SCREW)
+    assert fresh in triples(data.relations.rows)
+    data.save(db)
+    assert fresh in triples(edges_from_db(db, DESKTOP))
+
+
+def test_a_decision_is_orphaned_when_its_rule_edge_goes(data, db):
+    data.relations.decide("motherboard.01", "fastened_by", SCREW, "accepted")
+    data.save(db)
+    data.apply_instance_edit(SCREW, "fastens", "")
+
+    staged = next(e for e in data.relations.rows
+                  if (e.type, e.target, e.blocker) == FASTENED)
+    assert staged.status == "accepted_orphan"
+    data.save(db)
+    stored = next(e for e in edges_from_db(db, DESKTOP)
+                  if (e.type, e.target, e.blocker) == FASTENED)
+    assert stored.status == "accepted_orphan"
+
+
+def test_an_orphan_can_be_kept_as_a_manual_edge_through_the_session(data, db):
+    data.relations.decide("motherboard.01", "fastened_by", SCREW, "accepted")
+    data.save(db)
+    data.apply_instance_edit(SCREW, "fastens", "")
+    data.save(db)
+
+    data.relations.adopt("motherboard.01", "fastened_by", SCREW, note="我看过，确实拧着")
+    data.save(db)
+
+    stored = next(e for e in edges_from_db(db, DESKTOP)
+                  if (e.type, e.target, e.blocker) == FASTENED)
+    assert (stored.source, stored.status) == (MANUAL, "accepted")
+    assert stored.reason == "我看过，确实拧着"
+
+
+def test_an_orphan_can_be_cleared_through_the_session(data, db):
+    data.relations.decide("motherboard.01", "fastened_by", SCREW, "rejected")
+    data.save(db)
+    data.apply_instance_edit(SCREW, "fastens", "")
+    data.save(db)
+
+    data.relations.drop("motherboard.01", "fastened_by", SCREW)
+    data.save(db)
+
+    assert FASTENED not in triples(edges_from_db(db, DESKTOP))
+
+
+def test_apply_restamps_the_cycle_count_with_the_version(data, db):
+    add_block(data)
+    data.save(db)
+    meta = db.get_desktop(DESKTOP)
+    assert meta["graph_cycles"] == 0
+    assert meta["graph_edges"] == len(
+        [e for e in edges_from_db(db, DESKTOP) if e.status == "proposed"]) + 1
+
+
+def test_a_failing_derivation_rolls_the_whole_apply_back(data, db, monkeypatch):
+    add_block(data)
+    data.apply_edit(FIRST_REMOVE, "difficulty", 5)
+    before = graph_version(db, DESKTOP)
+
+    def explode(*_a, **_kw):
+        raise RuntimeError("the rules blew up")
+
+    monkeypatch.setattr("tda.ui.steps_relations.derive_edges", explode)
+    with pytest.raises(RuntimeError):
+        data.save(db)
+    monkeypatch.undo()
+
+    assert graph_version(db, DESKTOP) == before
+    assert (BLOCK[0], DRIVE, BLOCK[1]) not in triples(edges_from_db(db, DESKTOP))
+    assert [a for a in db.actions(DESKTOP) if a.step == FIRST_REMOVE][0].difficulty != 5
+
+
+def test_the_violations_follow_the_rederived_rule_edges(data, db):
+    """Clearing a `fastens` removes the constraint a breach was about."""
+    data.apply_edit(FIRST_REMOVE, "target", "motherboard.01")
+    data.apply_edit(FIRST_REMOVE, "verb", "remove")
+    assert [v.kind for v in data.relations.violations()].count("breach") > 0
+    for key in [k for k, rec in data.instances.items()
+                if rec.cls == "screw" and rec.fastens == "motherboard.01"]:
+        data.apply_instance_edit(key, "fastens", "")
+    assert "fastened_by" not in " ".join(v.text for v in data.relations.violations())
+
+
+def test_the_session_reports_the_cycles_of_the_staged_graph(data):
+    assert data.relations.cycles() == []
 
 
 def test_a_blocker_that_is_already_gone_does_not_clear_the_hint(data):

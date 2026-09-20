@@ -491,7 +491,14 @@ class StepTableData:
 
         See :mod:`tda.ui.steps_issues` for what is asked about and why the
         importer's own ``LogImport.issues`` are not replayed.
+
+        Every S1 edit funnels through here, which is where the constraint graph
+        is told that the instance table has moved: the spec 7.3 rules read
+        ``fastens`` / ``socket_host`` / ``of``, so the Relations tab has to
+        re-derive rather than keep showing the graph of a table that is gone.
         """
+        if self.relations is not None:
+            self.relations.invalidate()
         for row in self.rows:
             row.issues = list(row_issues(row, self.tax, self.class_of))
         self.orphans = (
