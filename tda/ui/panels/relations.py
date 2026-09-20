@@ -26,8 +26,6 @@ Nothing here writes: every edit is staged in
 """
 from __future__ import annotations
 
-from typing import Optional
-
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -46,8 +44,8 @@ from PySide6.QtWidgets import (
 )
 
 from tda.core.graph import HARD_TYPES, NECESSITY_ORDER
-from tda.core.graph_edit import MANUAL, OVERRIDE, RULE, Violation
-from tda.core.graph_rules import BLOCKED_MODES
+from tda.core.graph_edit import MANUAL, OVERRIDE, RULE, is_orphan
+from tda.core.graph_rules import BLOCKED_GATES, BLOCKED_MODES
 from tda.ui.panels.steptable_models import BLANK, Column
 from tda.ui.steps_model import EditError, StepTableData
 from tda.ui.steps_relations import edge_sort_key
@@ -58,6 +56,12 @@ __all__ = ["RELATION_COLUMNS", "RelationTableModel", "RelationsTab"]
 DEFAULT_KIND = "blocked_by"
 #: ``blocked_by`` is the only type that carries a mode; this is its default.
 DEFAULT_MODE = BLOCKED_MODES[0]
+
+#: What each mode stops, in the annotator's words -- the table of
+#: :data:`~tda.core.graph_rules.BLOCKED_GATES` read out loud.
+MODE_TOOLTIP = "blocked_by 的方式决定它挡住哪些动作 / what this block stops:\n" + "\n".join(
+    f"  {mode}: {', '.join(sorted(BLOCKED_GATES[mode]))}" for mode in BLOCKED_MODES
+)
 
 RELATION_COLUMNS: tuple[Column, ...] = (
     Column("Source", "source", "label"),
@@ -130,7 +134,10 @@ class RelationTableModel(QAbstractTableModel):
         if edge is None:
             return None
         if role == Qt.ToolTipRole:
-            return edge.reason or None
+            # the keys are long and the columns are not: the whole edge, in
+            # words, on every cell of the row
+            return f"{edge.label()}\n{edge.source} / {edge.status}" + (
+                f"\n{edge.reason}" if edge.reason else "")
         if role in (Qt.DisplayRole, Qt.EditRole):
             value = getattr(edge, self.columns[index.column()].field)
             return BLANK if value is None else str(value)
@@ -153,6 +160,7 @@ class RelationsTab(QWidget):
         self.model = RelationTableModel(data, self)
         self.view = QTableView(self)
         self.violations = QListWidget(self)
+        self.cycles_label = QLabel(BLANK, self)
         self.target_box = QComboBox(self)
         self.kind_box = QComboBox(self)
         self.blocker_box = QComboBox(self)
@@ -170,14 +178,17 @@ class RelationsTab(QWidget):
         self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.view.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.view.horizontalHeader().setStretchLastSection(True)  # the Note column
         self.view.verticalHeader().setVisible(False)
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.cycles_label.setWordWrap(True)
 
         self.kind_box.addItems(HARD_TYPES)
         self.kind_box.setCurrentText(DEFAULT_KIND)
         self.necessity_box.addItems(NECESSITY_ORDER)
         self.mode_box.addItems([BLANK, *BLOCKED_MODES])
         self.mode_box.setCurrentText(DEFAULT_MODE)
+        self.mode_box.setToolTip(MODE_TOOLTIP)
         self.note_edit.setPlaceholderText("为什么 / why (kept as the edge's reason)")
 
         row = QHBoxLayout()
@@ -194,10 +205,12 @@ class RelationsTab(QWidget):
         layout.addLayout(row)
         layout.addWidget(QLabel("Constraint violations (spec 7.4)", self))
         layout.addWidget(self.violations, 1)
+        layout.addWidget(self.cycles_label)
 
     def _connect(self) -> None:
         self.add_button.clicked.connect(self.add_edge)
         self.kind_box.currentTextChanged.connect(self._on_kind_changed)
+        self.target_box.currentTextChanged.connect(self._on_target_changed)
         self.view.customContextMenuRequested.connect(self._context_menu)
         self.violations.itemDoubleClicked.connect(self._on_violation_activated)
 
@@ -209,10 +222,11 @@ class RelationsTab(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        """Re-read the staged edges, the pickers and the violations."""
+        """Re-read the derived edges, the pickers, the violations and the cycles."""
         self.model.refresh_structure()
         self._fill_pickers()
         self._fill_violations()
+        self._fill_cycles()
 
     def _fill_pickers(self) -> None:
         """Offer the settled instances only: a draft carries no constraints."""
@@ -225,6 +239,7 @@ class RelationsTab(QWidget):
             if current in keys:
                 box.setCurrentText(current)
             box.blockSignals(blocked)
+        self._on_target_changed(self.target_box.currentText())
 
     def _fill_violations(self) -> None:
         self.violations.clear()
@@ -233,20 +248,30 @@ class RelationsTab(QWidget):
             item.setData(STEP_ROLE, int(violation.step))
             self.violations.addItem(item)
 
-    def violation_at(self, row: int) -> Optional[Violation]:
-        """The violation on a list row, as the record (tests and the menu)."""
-        found = self.data.relations.violations()
-        return found[row] if 0 <= row < len(found) else None
+    def _fill_cycles(self) -> None:
+        """Spec 7.4: the graph must be acyclic. Say so either way.
+
+        Nothing this panel offers can create one, but a database written
+        elsewhere can already hold one, and a graph with a loop is one the
+        planner cannot answer for -- it must not be invisible here.
+        """
+        cycles = self.data.relations.cycles()
+        if not cycles:
+            self.cycles_label.setText("Cycles: none (spec 7.4 satisfied)")
+            return
+        named = "; ".join(" -> ".join(cycle) for cycle in cycles)
+        self.cycles_label.setText(f"环 / CYCLES, which spec 7.4 forbids: {named}")
 
     # -- commands ----------------------------------------------------------- #
     def add_edge(self) -> None:
         """Stage the edge the add row describes."""
         mode = self.mode_box.currentText() or None
+        target, kind = self.target_box.currentText(), self.kind_box.currentText()
+        blocker = self.blocker_box.currentText()
         self._command(lambda: self.data.relations.add(
-            self.target_box.currentText(), self.kind_box.currentText(),
-            self.blocker_box.currentText(), necessity=self.necessity_box.currentText(),
+            target, kind, blocker, necessity=self.necessity_box.currentText(),
             mode=mode, note=self.note_edit.text().strip(),
-        ))
+        ), target, kind, blocker)
 
     def remove_edge(self, target: str, kind: str, blocker: str) -> None:
         """Stage the removal of a manual edge."""
@@ -254,10 +279,26 @@ class RelationsTab(QWidget):
 
     def decide(self, target: str, kind: str, blocker: str, decision: str) -> None:
         """Stage the spec 7.3 decision about a rule edge."""
-        self._command(lambda: self.data.relations.decide(target, kind, blocker, decision))
+        self._command(lambda: self.data.relations.decide(target, kind, blocker, decision),
+                      target, kind, blocker)
 
-    def _command(self, run) -> None:
-        """Run one staged edit; a refusal is shown and changes nothing."""
+    def adopt(self, target: str, kind: str, blocker: str) -> None:
+        """Keep an orphaned decision as a manual edge of the annotator's own."""
+        note = self.note_edit.text().strip()
+        self._command(lambda: self.data.relations.adopt(target, kind, blocker, note),
+                      target, kind, blocker)
+
+    def drop(self, target: str, kind: str, blocker: str) -> None:
+        """Clear an orphaned decision: its rule edge is not derived any more."""
+        self._command(lambda: self.data.relations.drop(target, kind, blocker))
+
+    def _command(self, run, *show) -> None:
+        """Run one staged edit; a refusal is shown and changes nothing.
+
+        ``show`` is the ``(target, kind, blocker)`` of the row the edit is
+        about, which is selected and scrolled to afterwards: on a table of
+        forty edges the one that just changed is otherwise anybody's guess.
+        """
         try:
             run()
         except EditError as error:
@@ -268,7 +309,17 @@ class RelationsTab(QWidget):
             return
         self.note_edit.clear()
         self.refresh()
+        if show:
+            self.show_edge(*show)
         self.sigChanged.emit()
+
+    def show_edge(self, target: str, kind: str, blocker: str) -> None:
+        """Select one edge's row and bring it into view."""
+        row = self.model.row_of(target, kind, blocker)
+        if row < 0:
+            return
+        self.view.selectRow(row)
+        self.view.scrollTo(self.model.index(row, 0))
 
     # -- context menu ------------------------------------------------------- #
     def edge_menu(self, view_row: int) -> QMenu:
@@ -284,6 +335,12 @@ class RelationsTab(QWidget):
             return menu
         if edge.source not in (RULE, OVERRIDE):
             return menu  # an imported row of another kind: not ours to decide
+        if is_orphan(edge):
+            # the rules stopped deriving the edge this decision was about, so
+            # there is nothing left to accept or reject
+            menu.addAction("Keep as a manual edge", lambda: self.adopt(*triple))
+            menu.addAction("Clear the decision", lambda: self.drop(*triple))
+            return menu
         if edge.status != "accepted":
             menu.addAction("Accept this rule edge",
                            lambda: self.decide(*triple, "accepted"))
@@ -306,6 +363,15 @@ class RelationsTab(QWidget):
         blocked = kind == DEFAULT_KIND
         self.mode_box.setEnabled(blocked)
         self.mode_box.setCurrentText(DEFAULT_MODE if blocked else BLANK)
+
+    def _on_target_changed(self, target: str) -> None:
+        """Never offer the target as its own blocker: a self edge is refused."""
+        if not target or self.blocker_box.currentText() != target:
+            return
+        for row in range(self.blocker_box.count()):
+            if self.blocker_box.itemText(row) != target:
+                self.blocker_box.setCurrentIndex(row)
+                return
 
     def _on_violation_activated(self, item: QListWidgetItem) -> None:
         step = item.data(STEP_ROLE)

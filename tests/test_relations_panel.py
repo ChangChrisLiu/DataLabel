@@ -290,6 +290,99 @@ def test_an_s1_edit_refreshes_the_violations_too(tab, panel):
     assert tab.violations.count() == 1
 
 
+# --------------------------------------------------------------------------- #
+# cycles, orphans, and the small things (round 1)
+# --------------------------------------------------------------------------- #
+def test_the_cycle_line_says_there_are_none(tab):
+    assert "none" in tab.cycles_label.text().lower()
+
+
+def test_a_cycle_a_database_already_holds_is_shown(qapp, db, tmp_path, tax):
+    """The panel cannot create one, but a database written elsewhere can hold one."""
+    from tda.core.graph import Edge, edges_to_db
+
+    edges_to_db(db, DESKTOP, [
+        Edge(type="blocked_by", target=DRIVE, blocker=PSU, mode="physical_path",
+             source=MANUAL, status="accepted"),
+        Edge(type="blocked_by", target=PSU, blocker=DRIVE, mode="physical_path",
+             source=MANUAL, status="accepted"),
+    ])
+    widget = StepTablePanel(db, DESKTOP, taxonomy=tax, cache_dir=tmp_path / "cache")
+    try:
+        assert DRIVE in widget.relations_tab.cycles_label.text()
+        assert "->" in widget.relations_tab.cycles_label.text()
+    finally:
+        widget.deleteLater()
+
+
+def orphan(panel) -> tuple[str, str, str]:
+    """Accept a rule edge, then take away the field that derived it."""
+    screw = "screw.motherboard.01"
+    triple = ("motherboard.01", "fastened_by", screw)
+    panel.data.relations.decide(*triple, "accepted")
+    panel.apply()
+    panel.data.apply_instance_edit(screw, "fastens", "")
+    panel.relations_tab.refresh()
+    return triple
+
+
+def test_an_orphaned_decision_is_shown_with_its_own_status(tab, panel):
+    target, kind, blocker = orphan(panel)
+    row = tab.model.row_of(target, kind, blocker)
+    assert tab.model.index(row, 6).data() == "accepted_orphan"
+
+
+def test_an_orphan_offers_keeping_or_clearing_but_not_deciding(tab, panel):
+    target, kind, blocker = orphan(panel)
+    menu = tab.edge_menu(tab.model.row_of(target, kind, blocker))
+    assert labels(menu) == ["Keep as a manual edge", "Clear the decision"]
+
+
+def test_keeping_an_orphan_makes_it_manual(tab, panel, db):
+    target, kind, blocker = orphan(panel)
+    tab.adopt(target, kind, blocker)
+    row = tab.model.row_of(target, kind, blocker)
+    assert tab.model.index(row, 0).data() == MANUAL
+    panel.apply()
+    stored = next(e for e in edges_from_db(db, DESKTOP)
+                  if (e.target, e.type, e.blocker) == (target, kind, blocker))
+    assert stored.source == MANUAL
+
+
+def test_clearing_an_orphan_takes_the_row_away(tab, panel):
+    target, kind, blocker = orphan(panel)
+    tab.drop(target, kind, blocker)
+    assert tab.model.row_of(target, kind, blocker) == -1
+
+
+def test_the_new_row_is_selected_and_scrolled_to(tab):
+    arm(tab)
+    tab.add_edge()
+    assert tab.view.currentIndex().row() == tab.model.row_of(DRIVE, "blocked_by", PSU)
+
+
+def test_a_cell_carries_the_full_key_as_its_tooltip(tab):
+    edge = tab.model.edge_at(0)
+    assert edge.target in tab.model.data(tab.model.index(0, 2), Qt.ToolTipRole)
+    assert edge.blocker in tab.model.data(tab.model.index(0, 3), Qt.ToolTipRole)
+
+
+def test_the_note_column_takes_the_rest_of_the_width(tab):
+    assert tab.view.horizontalHeader().stretchLastSection()
+
+
+def test_the_blocker_picker_never_starts_on_the_target(tab):
+    first = tab.target_box.itemText(0)
+    tab.target_box.setCurrentText(first)
+    assert tab.blocker_box.currentText() != first
+
+
+def test_the_mode_picker_says_what_each_mode_blocks(tab):
+    tip = tab.mode_box.toolTip()
+    for mode in ("cable_tension", "physical_path", "tool_access"):
+        assert mode in tip
+
+
 def test_double_clicking_a_violation_jumps_the_steps_table(tab, panel):
     fail_the_first_removal(panel)
     seen: list[int] = []
