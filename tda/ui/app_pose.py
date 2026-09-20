@@ -216,9 +216,12 @@ class PoseMixin:
             # that was merges the two segments back
             out = self.db.recut_view(int(key.desktop), str(key.view),
                                      annotator=self.annotator)
+            self._record_recut(out)
         self.pose_bar.hide()
-        self._reopen_here(self._recut_message(
-            int(row["step"]), out, "位姿断点已拒绝 / pose break rejected"))
+        self._reopen_here(
+            self._recut_message(int(row["step"]), out,
+                                "位姿断点已拒绝 / pose break rejected"),
+            self._recut_lines(out))
 
     # ------------------------------------------------------------ the re-cut
     def _split_pose_here(self, carry: Optional[bool], proposal: Optional[dict] = None
@@ -255,8 +258,9 @@ class PoseMixin:
             out = self.db.recut_view(int(key.desktop), str(key.view),
                                      carry_at=[int(key.step)] if wanted else (),
                                      annotator=self.annotator)
+            self._record_recut(out)
         self.pose_bar.hide()
-        self._reopen_here(self._recut_message(key.step, out))
+        self._reopen_here(self._recut_message(key.step, out), self._recut_lines(out))
 
     def ask_pose_split(self, key, straddles: int, carry: bool, note: str = ""
                        ) -> Optional[bool]:
@@ -271,14 +275,23 @@ class PoseMixin:
             return None
         return dialog.carry()
 
-    def _recut_message(self, step: int, out: dict, what: str = "") -> str:
-        """What the re-cut did, **including what it could not keep**.
+    def _recut_lines(self, out: dict) -> list[str]:
+        """Every sentence about something this re-cut could not keep."""
+        view = self.session.view if compat.is_open(self.session) else ""
+        lines = [describe_discard(view, d) for d in out["discarded"]]
+        if out["uncarried"]:
+            lines.append(describe_uncarried(out["uncarried"]))
+        return lines
 
-        The status bar is where the annotator learns this: somebody who rejects
-        a break after re-ordering the layers behind it has to be told then, not
-        at the next ``load-index`` (which writes it into a meta field nobody
-        reads on the day).  Same wording as the command line, because
-        :func:`~tda.core.pose_breaks.describe_discard` is the same function.
+    def _recut_message(self, step: int, out: dict, what: str = "") -> str:
+        """The **short** line for the status bar; the detail goes to ``pose_issues``.
+
+        A status bar is 250 px wide, and the full text of a merge that changed
+        nine layer pairs is several hundred characters -- it showed as
+        ``step 8: 位姿断点…``, which is worse than nothing.  So the bar carries
+        the head and the counts, and :meth:`_record_recut` writes the same
+        sentences the command line prints into the desktop's ``pose_issues``,
+        inside the re-cut's own transaction, where they survive the session.
         """
         head = what or f"新位姿段 / new pose segment ({len(out['ranges'])} segments)"
         parts = [f"step {step}: {head}"]
@@ -286,15 +299,40 @@ class PoseMixin:
             parts.append(f"{len(out['carried'])} shapes carried")
         if out["rechecked"]:
             parts.append(f"{len(out['rechecked'])} verified frames queued for re-check")
-        view = self.session.view if compat.is_open(self.session) else ""
-        parts += [describe_discard(view, d) for d in out["discarded"]]
+        counts = []
+        if out["discarded"]:
+            counts.append(f"{len(out['discarded'])} 项层级/ROI 变化")
         if out["uncarried"]:
-            parts.append(describe_uncarried(out["uncarried"]))
+            counts.append(f"{len(out['uncarried'])} 个保留的形状")
+        if counts:
+            parts.append("、".join(counts) + "，详见 pose_issues / see pose_issues")
         return "; ".join(parts)
 
-    def _reopen_here(self, message: str) -> None:
-        """Re-open the session on the same frame: the segment it is in has moved."""
+    def _record_recut(self, out: dict) -> None:
+        """Write what the re-cut could not keep into the desktop's ``pose_issues``.
+
+        The same lines ``load-index`` writes, from the window's own re-cut: a
+        status bar is read once and then gone, and "the layer order you set
+        behind that break lost three pairs" has to outlive the message.
+        """
+        from tda.pipeline import add_desktop_issues
+
+        lines = self._recut_lines(out)
+        if lines and compat.is_open(self.session):
+            add_desktop_issues(self.db, int(self.session.desktop), "pose_issues", lines)
+
+    def _reopen_here(self, message: str, detail: Optional[list] = None) -> None:
+        """Re-open the session on the same frame: the segment it is in has moved.
+
+        ``detail`` is the full text of whatever the short ``message`` counts;
+        it goes on the status bar's tooltip, so it is one hover away as well as
+        in ``pose_issues``.
+        """
         key = self.session.current()
+        # The pieces that came out of the re-cut are new segments, whatever
+        # numbers they carry, and the one that lost its ROI has to be asked
+        # about again (task B1: a large move does not keep the rectangle).
+        self.reset_roi_proposals()
         self.session.open(int(key.desktop), str(key.view), force=True)
         if int(key.step) in self.session.steps():
             self.session.goto(int(key.step), force=True)
@@ -303,3 +341,6 @@ class PoseMixin:
         self.review.refresh()
         self.timeline.refresh_statuses()
         self.report(message)
+        if detail:
+            # after report(), which sets the tooltip to the short line itself
+            self.hint_label.setToolTip("\n".join([message, *detail]))

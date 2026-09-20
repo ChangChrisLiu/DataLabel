@@ -173,11 +173,21 @@ class RoiMixin:
         self.report(f"ROI stored: {accepted}")
 
     def cancel_roi_edit(self) -> None:
-        """Leave ROI editing without storing anything."""
+        """Leave ROI editing without storing anything -- and remember that.
+
+        Every way the proposal leaves the screen without a rectangle ends here:
+        ``Esc``, picking another tool, starting an instance edit, arming a bench
+        box.  All of them are the annotator saying "not now", so the segment is
+        recorded as dismissed and the next frame of it does not ask again.  The
+        memory carries the segment's step range, so the next *re-cut* does ask.
+        """
         if not self.roi_editing:
             return
         self.roi_editing = False
         self.roi_draft = self.roi()
+        dismissed = self.roi_key()
+        if dismissed is not None:
+            self._roi_dismissed.add(dismissed)
         self.canvas.set_rubber_band(None)
         self._attach_tool()
 

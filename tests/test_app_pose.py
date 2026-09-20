@@ -271,7 +271,8 @@ def test_the_bar_is_not_offered_outside_annotate_mode(window: MainWindow):
 # --------------------------------------------------------------------------- #
 # what the re-cut could not keep reaches the status bar (round 1, I-3)
 # --------------------------------------------------------------------------- #
-def test_the_status_bar_says_which_layer_pairs_a_merge_changed(window: MainWindow):
+def _merge_with_a_changed_order(window: MainWindow) -> None:
+    """Split, re-order the earlier half, then put the break back to `proposed`."""
     from tda.core.model import ZOrderRec
 
     window.session.goto(CUT, force=True)
@@ -282,10 +283,40 @@ def test_the_status_bar_says_which_layer_pairs_a_merge_changed(window: MainWindo
     window.db.set_pose_break_status(DESKTOP, VIEW, CUT, "proposed")
     window.render_frame()
 
+
+def test_the_status_bar_stays_short_and_counts_what_changed(window: MainWindow):
+    """M3: a 687-character line showed as "step 8: 位姿断点…" and said nothing."""
+    _merge_with_a_changed_order(window)
+
     window.reject_pose_proposal()
 
-    assert "changed places" in window.status_message()
-    assert "pose break rejected" in window.status_message()
+    message = window.status_message()
+    assert "pose break rejected" in message
+    assert "pose_issues" in message
+    assert len(message) < 200
+    assert "changed places" not in message      # the detail is not in the bar
+
+
+def test_the_window_writes_the_same_lines_into_pose_issues(window: MainWindow):
+    _merge_with_a_changed_order(window)
+
+    window.reject_pose_proposal()
+
+    issues = (window.db.get_desktop(DESKTOP) or {}).get("pose_issues") or []
+    assert any("changed places" in line for line in issues)
+    assert any(VIEW in line for line in issues)
+    # and one hover away, in full
+    assert "changed places" in window.hint_label.toolTip()
+
+
+def test_a_recut_that_kept_everything_writes_no_pose_issue(window: MainWindow):
+    window.session.goto(CUT, force=True)
+    answer(window, carry=False)
+
+    window.act_split_pose()
+
+    assert (window.db.get_desktop(DESKTOP) or {}).get("pose_issues") in (None, [])
+    assert "pose_issues" not in window.status_message()
 
 
 def test_the_status_bar_names_a_carried_shape_the_merge_had_to_keep(window: MainWindow):
@@ -300,8 +331,88 @@ def test_the_status_bar_names_a_carried_shape_the_merge_had_to_keep(window: Main
 
     window.reject_pose_proposal()
 
-    assert carried.instance in window.status_message()
-    assert "were kept" in window.status_message()
+    # the bar counts it, the durable record names it (round 2, M3)
+    assert "1 个保留的形状" in window.status_message()
+    issues = (window.db.get_desktop(DESKTOP) or {}).get("pose_issues") or []
+    assert any(carried.instance in line for line in issues)
+    assert carried.instance in window.hint_label.toolTip()
+
+
+# --------------------------------------------------------------------------- #
+# the ROI the large-move side lost is asked for again (round 2, Important)
+# --------------------------------------------------------------------------- #
+def _store_roi(win: MainWindow, seg: int = 1) -> None:
+    win.db.set_pose_segment_roi(DESKTOP, VIEW, seg, [10, 10, 50, 50],
+                                annotator="tester")
+
+
+def test_the_piece_that_lost_its_roi_asks_for_one_again(window: MainWindow):
+    """The ruling: a large move leaves the earlier piece without a rectangle."""
+    _store_roi(window)
+    window.session.goto(CUT, force=True)
+    window.render_frame()
+    assert window.roi() is not None and not window.roi_editing
+    answer(window, carry=False)
+
+    window.act_split_pose()                       # a hand-typed break: large
+
+    window.session.goto(CUT - 1, force=True)      # walk into the earlier piece
+    window.render_frame()
+    assert window.db.pose_segment_for(window.session.current())["roi"] is None
+    assert window.roi_editing is True             # the proposal is on screen
+    assert window.roi_draft is not None
+
+
+def test_a_dismissed_proposal_does_not_nag_on_the_next_frame(window: MainWindow):
+    _store_roi(window)
+    window.session.goto(CUT, force=True)
+    answer(window, carry=False)
+    window.act_split_pose()
+    window.session.goto(CUT - 1, force=True)
+    window.render_frame()
+    assert window.roi_editing is True
+
+    dismissed = window.roi_key()
+    window.act_clear_edit()                       # Esc: "not now"
+    assert window.roi_editing is False
+    window.session.goto(CUT - 2, force=True)
+    window.render_frame()
+
+    assert window.roi_editing is False            # same segment, not asked again
+    assert window.roi_key() == dismissed
+    assert dismissed in window._roi_dismissed
+
+
+def test_another_recut_asks_again_even_after_a_dismissal(window: MainWindow):
+    _store_roi(window)
+    window.session.goto(CUT, force=True)
+    answer(window, carry=False)
+    window.act_split_pose()
+    window.session.goto(CUT - 1, force=True)
+    window.render_frame()
+    window.act_clear_edit()                       # dismissed for [1, CUT-1]
+    assert window.roi_editing is False
+
+    window.session.goto(CUT - 3, force=True)      # cut the earlier piece again
+    window.render_frame()
+    answer(window, carry=False)
+    window.act_split_pose()
+
+    assert window.roi_editing is True
+
+
+def test_a_segment_that_has_a_roi_is_never_asked_about(window: MainWindow):
+    _store_roi(window)
+    window.session.goto(CUT, force=True)
+    answer(window, carry=False)
+    window.act_split_pose()
+
+    # the later piece keeps the rectangle (it holds the reference step)
+    window.session.goto(LAST_STEP, force=True)
+    window.render_frame()
+
+    assert window.db.pose_segment_for(window.session.current())["roi"] is not None
+    assert window.roi_editing is False
 
 
 # --------------------------------------------------------------------------- #

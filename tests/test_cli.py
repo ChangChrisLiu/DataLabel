@@ -594,7 +594,7 @@ def test_a_discarded_layer_order_does_not_abort_the_whole_import(env):
     })
 
     assert any("1 pair(s) changed places" in line for line in lines)
-    assert any("psu.01 at step 18" in line for line in lines)
+    assert any("psu.01 @ 18" in line for line in lines)
 
 
 def test_a_step_that_stops_being_a_reorient_merges_back_without_crashing(env):

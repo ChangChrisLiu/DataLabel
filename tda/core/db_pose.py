@@ -156,6 +156,33 @@ def _roi_copies(by_seg: dict, plan: "RecutPlan", contributors: dict,
     return out
 
 
+def _range_of(plan: "RecutPlan", seg: int) -> Optional[tuple]:
+    """``(start, end)`` of one new segment, for a report that names steps."""
+    return next(((start, end) for s, start, end in plan.ranges if s == seg), None)
+
+
+def _fallback_box(by_seg: dict, sources: list[int], keeper: Optional[int],
+                  name: str) -> Optional[list]:
+    """One rectangle of the merged segment: the keeper's, else the nearest one.
+
+    The two rectangles are decided **independently**, and "no decision" never
+    beats "a decision": when the piece that keeps the reference frame has no
+    chassis ROI of its own, a rectangle somebody confirmed on another piece is
+    adopted rather than thrown away -- the one whose segment sat closest to the
+    reference frame, so the window it describes is the least stale available.
+    A value that is merely different (two confirmed rectangles) is still
+    reported as discarded by the caller.
+    """
+    kept = (by_seg.get(keeper) or {}).get(name) if keeper is not None else None
+    if kept is not None:
+        return kept
+    with_value = [s for s in sources if (by_seg.get(s) or {}).get(name) is not None]
+    if not with_value:
+        return None
+    best = max(with_value, key=lambda s: (by_seg[s].get("ref_step") or 0, s))
+    return by_seg[best][name]
+
+
 def _keeper_of(by_seg: dict, sources: list[int], start: int, end: int) -> Optional[int]:
     """Which of several merging segments gives the merged one its reference frame.
 
@@ -294,6 +321,11 @@ class PoseSegmentMixin:
             )
         return payload
 
+    def _has_desktop(self, desktop: int) -> bool:
+        """Is this machine in the database at all?"""
+        return self.conn.execute(
+            "SELECT 1 FROM desktop WHERE id=?", (int(desktop),)).fetchone() is not None
+
     def _has_segment(self, desktop: int, view: str, seg: int) -> bool:
         """Does this segment exist? Asked before a write decides it has nothing to do."""
         return self.conn.execute(
@@ -430,9 +462,22 @@ class PoseSegmentMixin:
         rejected after flashing the two frames -- is a decision, not something
         for a re-import to take back. Changing a stored row's verdict is
         :meth:`set_pose_break_status`'s job and nothing else's.
+
+        Raises:
+            ValueError: unknown ``status``, or a desktop this database does not
+                have. A break on a machine with no frames, no steps and no
+                segments is not something anybody can act on, and the foreign
+                key would otherwise make the *repository* invent the machine --
+                after which ``status`` claims one that was never imported. The
+                command line refuses earlier and more kindly; this is the floor
+                under it.
         """
         if status not in STATUSES:
             raise ValueError(f"a pose break's status is one of {STATUSES}, got {status!r}")
+        if not self._has_desktop(int(desktop)):
+            raise ValueError(
+                f"D{int(desktop):02d} is not in this database; run load-index for it "
+                f"before recording a pose break")
         with self._tx():
             self._ensure_desktop(int(desktop))
             self.conn.execute(
@@ -657,29 +702,39 @@ class PoseSegmentMixin:
             ref = stored if (stored is not None and start <= int(stored) <= end) else end
             kept_ref = stored is not None and ref == stored
             boxes = roi_ok.get((keeper, seg), True)
+            sources = contributors.get(seg) or []
+            # "no decision" must not beat "a decision": when the keeper has no
+            # rectangle of its own, the merge falls back to the contributor
+            # closest to the reference frame that does have one, per rectangle.
+            rects = {name: _fallback_box(by_seg, sources, keeper, name) if boxes else None
+                     for name in ("roi", "bench_roi")}
             data = {
                 "start_step": start, "end_step": end, "ref_step": int(ref),
                 "corners_json": R.dumps(src.get("corners")) if kept_ref else None,
                 "homography_json": R.dumps(src.get("homography")) if kept_ref else None,
-                "roi_json": R.dumps(src.get("roi")) if boxes else None,
-                "bench_roi_json": R.dumps(src.get("bench_roi")) if boxes else None,
+                "roi_json": R.dumps(rects["roi"]),
+                "bench_roi_json": R.dumps(rects["bench_roi"]),
             }
             new_rows.append((desktop, view, seg, *data.values()))
             if not kept_ref and src:
                 ref_moves.append({"seg": seg, "start": start, "end": end,
                                   "ref_step": int(ref), "old": src,
                                   "dropped": _has_ref_geometry(src)})
-            for extra in [s for s in (contributors.get(seg) or []) if s != keeper]:
+            for extra in [s for s in sources if s != keeper]:
                 # only what the merge really loses: the pieces of a split carry
                 # copies of one another's rectangles, and reporting those back
-                # as "discarded" would be a warning about nothing
+                # as "discarded" would be a warning about nothing. A rectangle
+                # the merged segment *adopted* is not lost either.
                 other = by_seg.get(extra) or {}
+                kept_now = {"corners": src.get("corners"),
+                            "homography": src.get("homography"), **rects}
                 lost = {n: other.get(n)
                         for n in ("corners", "homography", "roi", "bench_roi")
-                        if other.get(n) is not None and other.get(n) != src.get(n)}
+                        if other.get(n) is not None and other.get(n) != kept_now.get(n)}
                 if lost:
                     discarded.append({"table": "pose_segment", "pose_segment": extra,
-                                      "into": seg, "row": lost})
+                                      "into": seg, "into_range": (start, end),
+                                      "row": lost})
         self.conn.execute("DELETE FROM pose_segment WHERE desktop=? AND view=?",
                           (desktop, view))
         self.conn.executemany(
@@ -739,24 +794,42 @@ class PoseSegmentMixin:
                 order, changed = merge_orders(order, R.loads(row["order_json"]) or [])
                 if changed:
                     reported.append({"table": "zorder", "pose_segment": other,
-                                     "into": seg, "changed_pairs": changed})
+                                     "into": seg, "into_range": _range_of(plan, seg),
+                                     "changed_pairs": changed})
             if present:
-                if seg in orphans:
+                if seg in orphans and seg in z_by_seg:
                     reported.append({"table": "zorder", "pose_segment": seg,
-                                     "into": seg, "orphan": True, "replaced": True})
+                                     "into": seg, "into_range": _range_of(plan, seg),
+                                     "orphan": True, "replaced": True})
                 self.conn.execute(
                     "INSERT OR REPLACE INTO zorder(desktop, view, pose_segment, order_json, "
                     "version) VALUES(?, ?, ?, ?, ?)",
                     (desktop, view, seg, R.dumps(order), version))
+        # Pair overrides are a set, so a merge unions them -- but an orphan set
+        # standing on a number this re-cut writes is not part of that union: it
+        # belongs to a segment that no longer exists, and every one of its rules
+        # is compiler input and part of the frame digest. Same treatment as a
+        # z-order: replaced, and said.
+        p_orphans = {int(r["pose_segment"]) for r in p_rows} - known
+        for seg in sorted(p_orphans & set(targets)):
+            self.conn.execute(
+                "DELETE FROM pair_override WHERE desktop=? AND view=? AND pose_segment=?",
+                (desktop, view, seg))
+            reported.append({"table": "pair_override", "pose_segment": seg, "into": seg,
+                             "into_range": _range_of(plan, seg), "orphan": True,
+                             "replaced": True})
         for row in p_rows:
             for target in self._targets_of(plan, int(row["pose_segment"])):
                 self.conn.execute(
                     "INSERT OR IGNORE INTO pair_override(desktop, view, pose_segment, "
                     "above, below) VALUES(?, ?, ?, ?, ?)",
                     (desktop, view, target, row["above"], row["below"]))
-        reported += [{"table": "zorder" if seg in z_by_seg else "pair_override",
-                      "pose_segment": seg, "into": None, "orphan": True}
-                     for seg in sorted(orphans - set(targets))]
+        for seg in sorted(orphans - set(targets)):
+            for table, present in (("zorder", seg in z_by_seg),
+                                   ("pair_override", seg in p_orphans)):
+                if present:
+                    reported.append({"table": table, "pose_segment": seg, "into": None,
+                                     "orphan": True})
         return reported
 
     def _rows_of(self, table: str, desktop: int, view: str) -> list:

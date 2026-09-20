@@ -30,6 +30,7 @@ from tda.core.model import (
 from tda.core.pose_breaks import (
     boundaries,
     describe_discard,
+    describe_uncarried,
     merge_orders,
     recut_plan,
     straddling,
@@ -165,6 +166,12 @@ def test_a_partially_different_order_reports_only_its_own_inversions():
     assert changed == [[C, B]]
 
 
+def test_merge_orders_never_repeats_a_layer_key():
+    """M4: a duplicate would put one instance twice in the compiler's total order."""
+    merged, _changed = merge_orders([A, B, A], [C, C, B])
+    assert merged == [A, B, C]
+
+
 def test_merging_with_an_empty_order_is_the_other_one():
     assert merge_orders([], [A, B]) == ([A, B], [])
     assert merge_orders([A, B], []) == ([A, B], [])
@@ -192,13 +199,45 @@ def test_many_changed_pairs_are_summarised():
     pairs = [[[f"i{i}", "main"], [f"j{i}", "main"]] for i in range(7)]
     text = describe_discard("scan", {"table": "zorder", "pose_segment": 2, "into": 1,
                                      "changed_pairs": pairs})
-    assert "7 pair(s)" in text and "(+4 more)" in text
+    assert "7 pair(s)" in text and "(+4)" in text
 
 
 def test_a_discarded_segment_row_names_its_fields():
     text = describe_discard("oak1", {"table": "pose_segment", "pose_segment": 2,
                                      "into": 1, "row": {"roi": [1, 2, 3, 4]}})
-    assert "kept its own roi" in text
+    assert "own roi won" in text
+
+
+def test_a_merge_into_the_same_number_names_the_steps_instead(round_2_wording=None):
+    """M4: "merged into segment 1" reads like a segment merging into itself."""
+    text = describe_discard("scan", {"table": "zorder", "pose_segment": 2, "into": 1,
+                                     "into_range": (1, 34), "changed_pairs": [[A, B]]})
+    assert "第 1-34 步" in text
+
+
+def test_a_multi_part_layer_key_says_which_part():
+    text = describe_discard("scan", {
+        "table": "zorder", "pose_segment": 2, "into": 1,
+        "changed_pairs": [[["psu.01", "cable"], ["psu.01", "main"]]]})
+    assert "psu.01[cable] over psu.01" in text
+    assert "psu.01[main]" not in text          # the default part is noise
+
+
+def test_the_line_has_no_leading_space_without_a_view():
+    text = describe_discard("", {"table": "pose_segment", "pose_segment": 2, "into": 1,
+                                 "row": {"roi": [1, 2, 3, 4]}})
+    assert not text.startswith(" ")
+    assert text.startswith("位姿段 2")
+
+
+def test_both_renderers_are_bilingual():
+    """M3: the annotator reads Simplified Chinese with the English term beside it."""
+    order = describe_discard("scan", {"table": "zorder", "pose_segment": 2, "into": 1,
+                                      "changed_pairs": [[A, B]]})
+    kept = describe_uncarried([{"id": 1, "instance": "psu.01", "anchor_step": 18}])
+    for text in (order, kept):
+        assert " / " in text
+        assert any("一" <= ch <= "鿿" for ch in text)
 
 
 def test_an_orphan_row_says_whether_it_was_left_or_replaced():
@@ -478,6 +517,85 @@ def test_an_orphan_standing_on_a_new_segment_number_is_replaced_and_said(scene: 
         == [(2, True)]
 
 
+def test_an_orphan_pair_override_on_a_new_number_is_replaced_not_adopted(scene: Db):
+    """M2: a pair override is compiler input and part of the frame digest."""
+    scene.set_pair_override(PairOverride(DESKTOP, VIEW, 2, FAN, PSU))   # a dead segment's
+
+    out = scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS)
+
+    # segment 2's rules are the ones copied from the segment it came out of
+    assert [(p.above, p.below) for p in scene.pair_overrides(DESKTOP, VIEW, 2)] \
+        == [(PSU, SCREW)]
+    assert [(d["table"], d["pose_segment"], d.get("replaced")) for d in out["discarded"]] \
+        == [("pair_override", 2, True)]
+
+
+def test_both_kinds_of_orphan_on_one_number_are_both_reported(scene: Db):
+    scene.set_zorder(ZOrderRec(DESKTOP, VIEW, 2, [(FAN, "main")]))
+    scene.set_pair_override(PairOverride(DESKTOP, VIEW, 2, FAN, PSU))
+
+    out = scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS)
+
+    assert sorted(d["table"] for d in out["discarded"]) == ["pair_override", "zorder"]
+
+
+def test_both_kinds_of_orphan_at_an_unused_number_are_both_reported(scene: Db):
+    scene.set_zorder(ZOrderRec(DESKTOP, VIEW, 7, [(FAN, "main")]))
+    scene.set_pair_override(PairOverride(DESKTOP, VIEW, 7, FAN, PSU))
+
+    out = scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS)
+
+    assert sorted(d["table"] for d in out["discarded"]) == ["pair_override", "zorder"]
+    assert all(d["into"] is None for d in out["discarded"])
+    # left exactly where they were
+    assert scene.zorder(DESKTOP, VIEW, 7).order == [(FAN, "main")]
+    assert len(scene.pair_overrides(DESKTOP, VIEW, 7)) == 1
+
+
+# --------------------------------------------------------------------------- #
+# "no decision" never beats "a decision" (round 2, Minor 1)
+# --------------------------------------------------------------------------- #
+def test_a_merge_adopts_a_confirmed_roi_the_keeper_does_not_have(scene: Db):
+    scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS)      # a large move: seg 1 NULL
+    assert scene.pose_segments(DESKTOP, VIEW)[0]["roi"] is None
+    scene.set_pose_segment_roi(DESKTOP, VIEW, 1, [9, 9, 50, 50])   # confirmed there
+    scene.conn.execute("UPDATE pose_segment SET roi_json=NULL WHERE desktop=? AND "
+                       "view=? AND seg=2", (DESKTOP, VIEW))
+    scene.conn.commit()
+
+    out = scene.apply_recut(DESKTOP, VIEW, [], STEPS)        # merge back
+
+    rows = {r["seg"]: r for r in scene.pose_segments(DESKTOP, VIEW)}
+    assert rows[1]["roi"] == [9, 9, 50, 50]      # adopted, not thrown away
+    assert out["discarded"] == []                # and not reported as a loss
+
+
+def test_the_two_rectangles_are_adopted_independently(scene: Db):
+    scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS)
+    scene.set_pose_segment_roi(DESKTOP, VIEW, 1, [9, 9, 50, 50])
+    scene.conn.execute("UPDATE pose_segment SET roi_json=NULL WHERE desktop=? AND "
+                       "view=? AND seg=2", (DESKTOP, VIEW))
+    scene.conn.commit()
+
+    scene.apply_recut(DESKTOP, VIEW, [], STEPS)
+
+    rows = {r["seg"]: r for r in scene.pose_segments(DESKTOP, VIEW)}
+    # the ROI came from segment 1, the bench ROI from segment 2 (the keeper)
+    assert rows[1]["roi"] == [9, 9, 50, 50]
+    assert rows[1]["bench_roi"] == [0, 0, 32, 32]
+
+
+def test_two_different_confirmed_rectangles_still_report_the_unused_one(scene: Db):
+    scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS, small_at=[BOUNDARY])
+    scene.set_pose_segment_roi(DESKTOP, VIEW, 1, [9, 9, 50, 50])
+
+    out = scene.apply_recut(DESKTOP, VIEW, [], STEPS)
+
+    rows = {r["seg"]: r for r in scene.pose_segments(DESKTOP, VIEW)}
+    assert rows[1]["roi"] == [4, 4, 60, 60]      # the keeper's own decision wins
+    assert [d["row"] for d in out["discarded"]] == [{"roi": [9, 9, 50, 50]}]
+
+
 def test_a_recut_that_changes_nothing_writes_nothing(scene: Db):
     scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS)
     scene.clear_recheck(DESKTOP, VIEW, 2)
@@ -557,6 +675,18 @@ def test_a_break_is_never_overwritten_by_a_second_import(scene: Db):
 
     assert scene.pose_break(DESKTOP, VIEW, 5)["status"] == "rejected"
     assert scene.pose_breaks(DESKTOP, VIEW, status="accepted") == []
+
+
+def test_a_break_for_a_desktop_that_does_not_exist_is_refused(scene: Db):
+    """M4: the repository must not invent a machine to hold a foreign key."""
+    before = set(scene.desktop_ids())
+
+    with pytest.raises(ValueError) as err:
+        scene.add_pose_break(99, VIEW, 5, status="proposed", source="manual:anna")
+
+    assert "D99" in str(err.value)
+    assert set(scene.desktop_ids()) == before
+    assert scene.pose_breaks(99) == []
 
 
 def test_an_unknown_status_is_refused(scene: Db):

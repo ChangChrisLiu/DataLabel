@@ -110,6 +110,7 @@ def test_a_v4_database_is_refused_by_a_build_that_knows_only_v3(tmp_db_path: str
     from pathlib import Path
 
     db = Db(tmp_db_path)
+    db.upsert_desktop(13, {})          # a break needs a machine that exists
     db.add_pose_break(13, "scan", 32, status="accepted", kind="chassis",
                       magnitude_px=964.75, source="audit:events.csv")
     db.close()

@@ -301,6 +301,9 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, PoseMixin, AssistMixin, KeysM
 
         def reopen() -> None:
             self._steps_dirty = False
+            # Apply re-cuts the pose segments when a step became (or stopped
+            # being) a `reorient`, so the pieces on screen may be new ones.
+            self.reset_roi_proposals()
             self.session.open(int(desktop), self.session.view, force=True)
             if step is not None and step in self.session.steps():
                 self.session.goto(step, force=True)
