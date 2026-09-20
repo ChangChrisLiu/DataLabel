@@ -300,6 +300,31 @@ def test_a_cursor_inside_the_mask_beats_one_only_inside_the_bounding_box(db, tax
     assert found[0].distance == 0.0 and found[1].distance == 0.0
 
 
+def test_the_smaller_of_two_nested_drafts_comes_first(db, tax):
+    """A cursor inside both means the more specific shape, not the alphabet.
+
+    Measured on the real export: ``ls:RAM Module#2`` traced inside
+    ``ls:RAM Module#1`` (IoU 0.31) was unreachable because the key broke the
+    tie -- four of the five real misses in the D13/24/33 reachability probe.
+    """
+    big = add_draft(db, RAM, 1, 20, (10, 10, 40, 40), cls="ram_module")
+    small = add_draft(db, RAM, 2, 20, (20, 20, 26, 26), cls="ram_module")
+    found = drafts_for(db, tax, DESKTOP, VIEW, 20, "ram_module", hw=HW,
+                       cursor=(22, 22))
+    assert keys(found) == [small, big]
+    # standing on the big one where the small one is not: it wins again
+    assert keys(drafts_for(db, tax, DESKTOP, VIEW, 20, "ram_module", hw=HW,
+                           cursor=(12, 12))) == [big, small]
+
+
+def test_the_step_still_beats_the_size(db, tax):
+    small_next_door = add_draft(db, RAM, 1, 21, (20, 20, 24, 24), cls="ram_module")
+    here = add_draft(db, RAM, 2, 20, (10, 10, 40, 40), cls="ram_module")
+    found = drafts_for(db, tax, DESKTOP, VIEW, 20, "ram_module", hw=HW,
+                       cursor=(22, 22))
+    assert keys(found) == [here, small_next_door]
+
+
 def test_drafts_of_another_class_under_the_cursor_are_offered_last(db, tax):
     """Label Studio's labels are noisy, so what is *under* the cursor counts."""
     mine = add_draft(db, SCREW, 1, 20, (2, 2, 6, 6), cls="screw")

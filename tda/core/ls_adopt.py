@@ -237,8 +237,9 @@ def drafts_for(db: Db, tax: Taxonomy, desktop: int, view: str, step: int, cls: s
 
     * with a ``cursor`` (image coordinates), by where the annotator is
       pointing: inside the mask first, then by distance to the bounding box,
-      then ``|Δstep|``, then the key. Drafts of *other* classes whose mask
-      contains the cursor follow the whole same-class list.
+      then ``|Δstep|``, then the **smaller** shape (a hit test's answer to two
+      drafts under one pointer), then the key. Drafts of *other* classes whose
+      mask contains the cursor follow the whole same-class list.
     * with no cursor but a non-empty ``editing`` reference (the editing layer,
       or the difference map's armed proposal), by overlap with it, then step
       distance.
@@ -302,7 +303,13 @@ def drafts_for(db: Db, tax: Taxonomy, desktop: int, view: str, step: int, cls: s
         )
         step_distance = abs(int(kf.anchor_step) - int(step))
         if cursor is not None:
-            order = (0 if inside else 1, distance, step_distance, candidate.key)
+            # Area breaks a tie the same way any hit test does: the *smaller*
+            # shape under the pointer is the more specific answer.  Measured on
+            # the real export, ``ls:RAM Module#2`` traced inside
+            # ``ls:RAM Module#1`` was otherwise unreachable, because a key is
+            # all that was left to decide with.
+            order = (0 if inside else 1, distance, step_distance,
+                     candidate.area, candidate.key)
         elif reference is not None:
             order = (-candidate.iou_with_editing, step_distance, candidate.key)
         else:
