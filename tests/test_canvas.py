@@ -1348,3 +1348,34 @@ def test_a_stroke_lands_where_the_image_coordinates_say_at_any_zoom(qapp):
             )
             checked += 1
     assert checked >= 8, f"only {checked} clicks were inside the frame"
+
+
+def test_the_prompt_point_is_drawn_without_touching_hit_testing(qapp):
+    """``Shift+C`` marks where to click; the mark must not *be* clickable.
+
+    It is painted in ``drawForeground`` like the rubber band rather than added
+    to the scene, so there is nothing under the cursor that could swallow a
+    press or shift the coordinate a tool is handed.
+    """
+    canvas = _shown(ImageCanvas())
+    canvas.set_image(_rgb(400, 400))
+    canvas.set_zoom(1.0)
+    canvas.center_on((200, 200))
+    QApplication.processEvents()
+    assert canvas.prompt_point() is None
+
+    seen: list[tuple[float, float]] = []
+    canvas.sigMousePress.connect(lambda x, y, ev: seen.append((x, y)))
+    centre = QPointF(canvas.viewport().width() / 2, canvas.viewport().height() / 2)
+    QApplication.sendEvent(canvas.viewport(), _press(centre.x(), centre.y()))
+    without = list(seen)
+
+    canvas.set_prompt_point((200, 200))
+    assert canvas.prompt_point() == (200, 200)
+    QApplication.processEvents()
+    seen.clear()
+    QApplication.sendEvent(canvas.viewport(), _press(centre.x(), centre.y()))
+
+    assert seen == without
+    canvas.set_prompt_point(None)
+    assert canvas.prompt_point() is None

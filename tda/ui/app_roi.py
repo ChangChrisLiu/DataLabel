@@ -102,6 +102,10 @@ class RoiMixin:
         # holding them at the same time would leave two things on screen
         # claiming the same two keys.
         self.forget_draft_ghost()
+        # And the ROI is what the difference map was computed inside, so an
+        # alternate box prompt walked to with ``Shift+C`` is an offer about the
+        # rectangle that is being replaced.
+        self.reset_prompt_rank()
         stored = self.roi()
         self._roi_dragged = False
         self._roi_awaiting = stored is None

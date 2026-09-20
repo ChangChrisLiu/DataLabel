@@ -311,6 +311,7 @@ def propose_parts(
     min_area: int = 80,
     delta_e: Optional[np.ndarray] = None,
     max_side: Optional[int] = None,
+    blobs: Optional[Sequence[DiffBlob]] = None,
 ) -> list[PartProposal]:
     """Rank the parts a change between two frames could be about.
 
@@ -334,6 +335,13 @@ def propose_parts(
             for this pair and ROI; the UI has one and must not pay twice.
         max_side: passed to :func:`~tda.core.diffmap.diff_delta_e` when the map
             has to be computed here.
+        blobs: the :func:`~tda.core.diffmap.diff_blobs` regions to split, when
+            the caller already has them -- the window does, and the merge
+            inside ``diff_blobs`` is quadratic in the component count, so
+            re-deriving the same list is the single most expensive thing this
+            function could be made to do twice. The parents must come from
+            **this** dE map; ``None`` derives them here with ``min_area`` and
+            :data:`MAX_PARENTS`.
 
     Returns:
         Up to ``max_proposals`` :class:`PartProposal`, best first. **Empty** when
@@ -358,11 +366,12 @@ def propose_parts(
 
     delta = (np.asarray(delta_e, dtype=np.float32) if delta_e is not None
              else diff_delta_e(prev, cur, roi=roi, max_side=max_side))
-    blobs = diff_blobs(delta, min_area=min_area, max_blobs=MAX_PARENTS)
-    if not blobs:
+    parents = (list(blobs) if blobs is not None
+               else diff_blobs(delta, min_area=min_area, max_blobs=MAX_PARENTS))
+    if not parents:
         return []
 
-    candidates = _tightest(_candidates(delta, blobs, int(min_area), roi_area))
+    candidates = _tightest(_candidates(delta, parents, int(min_area), roi_area))
     if not candidates:
         return []
 

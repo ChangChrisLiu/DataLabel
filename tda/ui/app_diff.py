@@ -15,6 +15,7 @@ and pure functions, so it can be tested without a window.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any, Optional, Sequence
@@ -23,6 +24,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal
 
 from tda.core import masks as _masks
+from tda.core.diff_split import PartProposal, propose_parts
 from tda.core.diffmap import (
     MIN_SCALE_DELTA_E,
     ROBUST_PCT,
@@ -33,8 +35,12 @@ from tda.core.diffmap import (
     heat_to_rgba,
 )
 
-__all__ = ["MAX_DIFF_SIDE", "AssistController", "Box", "best_unexplained",
-           "blob_boxes", "expected_boxes", "expected_payload", "heat_rgba"]
+__all__ = ["ALT_DEDUP_IOU", "MAX_ALTERNATES", "MAX_DIFF_SIDE", "MAX_PROPOSALS",
+           "AssistController", "Box", "alternate_parts", "best_unexplained",
+           "blob_boxes", "expected_boxes", "expected_payload", "heat_rgba",
+           "split_proposals"]
+
+log = logging.getLogger(__name__)
 
 Box = tuple[int, int, int, int]
 
@@ -59,6 +65,17 @@ def _pixels_of(previous: Any) -> Optional[np.ndarray]:
 #: ever used as a box prompt and as a "look here" marker, so the precision the
 #: downscale costs buys nothing.
 MAX_DIFF_SIDE = 1600
+
+#: How many split proposals the worker computes per pair.  Three survive to be
+#: offered, and the one most often dropped is the one that *is* the armed blob,
+#: so it asks for a spare.
+MAX_PROPOSALS = 4
+#: How many alternates ``Shift+C`` walks behind the armed box.
+MAX_ALTERNATES = 3
+#: Two prompt boxes this alike are the same offer; the alternate is dropped.
+#: A split proposal that reproduces the blob it came out of is not an
+#: alternative to it -- it is rank 1 spelled twice.
+ALT_DEDUP_IOU = 0.8
 
 
 def blob_boxes(blobs: Sequence[DiffBlob]) -> list[Box]:
@@ -114,6 +131,77 @@ def heat_rgba(delta: np.ndarray, roi: Optional[Box]) -> np.ndarray:
     return heat_to_rgba(heat)
 
 
+def split_proposals(image: np.ndarray, previous: np.ndarray, roi: Optional[Box],
+                    delta: np.ndarray,
+                    blobs: Sequence[DiffBlob]) -> list[PartProposal]:
+    """Alternate part proposals for the pair the blobs came from; never raises.
+
+    :func:`tda.core.diff_split.propose_parts` splits each blob back apart and
+    ranks the pieces, which measured a median SAM IoU of 0.762 against 0.320 on
+    parts wider than 100 px but over-split nine large parts badly
+    (``experiments_out/plan_b_probe/diff_eval/report.md`` sections 5-6). So the
+    pieces are offered *behind* the blob under ``Shift+C`` and never as rank 1,
+    and this is an **extra**: a splitter that raises must cost the comparison
+    its blobs, which are the product, so the failure is logged and swallowed.
+
+    Two things here are easy to get backwards and both are load-bearing:
+
+    * the **direction**. Annotation runs in reverse, so ``image`` -- the frame
+      on screen -- is the one where the part is still present and ``previous``
+      -- the task card's neighbour -- is where it is gone. That is the opposite
+      of the order :meth:`AssistController.compute` hands them to
+      :func:`~tda.core.diffmap.diff_delta_e`, whose map is symmetric; the
+      splitter's texture-direction cue is not.
+    * the **parents**. ``blobs`` is the very list the annotator is looking at,
+      so an alternate is always a piece of a change they can see, and the
+      quadratic merge inside ``diff_blobs`` is not paid for twice.
+    """
+    try:
+        return propose_parts(image, previous, roi, delta_e=delta, blobs=blobs,
+                             max_proposals=MAX_PROPOSALS)
+    except Exception as exc:  # noqa: BLE001 - the blobs are worth more than these
+        log.warning("split proposals failed (%s: %s); the blobs are unaffected",
+                    type(exc).__name__, exc)
+        return []
+
+
+def _box_iou(a, b) -> float:
+    ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+    ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    if inter <= 0.0:
+        return 0.0
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    union = area_a + area_b - inter
+    return float(inter / union) if union > 0.0 else 0.0
+
+
+def alternate_parts(proposals: Sequence[PartProposal],
+                    armed: Optional[tuple],
+                    limit: int = MAX_ALTERNATES,
+                    iou_max: float = ALT_DEDUP_IOU) -> list[PartProposal]:
+    """The proposals worth offering behind ``armed``, best first.
+
+    ``armed`` is rank 1 -- the box the difference map put there by itself --
+    and anything that reproduces it, or a proposal already in the list, is not
+    a second answer. Dropping those is what makes ``2/4`` on the status bar
+    mean three genuinely different boxes rather than the same one three times.
+    """
+    kept: list[PartProposal] = []
+    for part in proposals or ():
+        box = tuple(float(v) for v in part.box)
+        if armed is not None and _box_iou(box, armed) > float(iou_max):
+            continue
+        if any(_box_iou(box, tuple(float(v) for v in other.box)) > float(iou_max)
+               for other in kept):
+            continue
+        kept.append(part)
+        if len(kept) >= int(limit):
+            break
+    return kept
+
+
 class _Bridge(QObject):
     """Carries a worker-thread payload onto the GUI thread (queued connection)."""
 
@@ -132,8 +220,8 @@ class AssistController(QObject):
     dropped instead of shown for the wrong frame.
 
     Signals:
-        sigBlobs: ``{"key", "explained", "unexplained", "delta", "roi",
-            "expected", "thread"}`` on the GUI thread, or ``None``.
+        sigBlobs: ``{"key", "explained", "unexplained", "proposals", "delta",
+            "roi", "expected", "thread"}`` on the GUI thread, or ``None``.
         sigFailed: the comparison raised; the text is for the status bar.
     """
 
@@ -163,6 +251,12 @@ class AssistController(QObject):
         :func:`expected_payload` builds -- masks are turned into boxes *here*,
         on the worker, so the GUI thread never pays for a bounding box over a
         12 MP array.
+
+        The ``Shift+C`` alternates are computed here too, for the same reason
+        and in the same breath: they are a function of the pair and the ROI and
+        of nothing the annotator can change by drawing, so they travel with the
+        blobs, are dropped with them when a result is superseded, and never run
+        on the GUI thread.
         """
         boxes = expected_boxes(expected)
         delta = diff_delta_e(previous, image, roi=roi, max_side=MAX_DIFF_SIDE)
@@ -173,6 +267,7 @@ class AssistController(QObject):
             "blobs": blobs,
             "explained": explained,
             "unexplained": unexplained,
+            "proposals": split_proposals(image, previous, roi, delta, blobs),
             "delta": delta,
             "roi": roi,
             "expected": boxes,

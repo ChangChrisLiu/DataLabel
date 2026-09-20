@@ -228,6 +228,11 @@ class ImageCanvas(QGraphicsView):
         self._panning = False
         self._pan_origin = QPointF()
         self._rubber_band: Optional[tuple[float, float, float, float]] = None
+        #: A pixel inside the armed box prompt -- "click here" (``Shift+C``).
+        #: Painted in :meth:`drawForeground` next to the rubber band rather
+        #: than added to the scene, so there is nothing under the cursor that
+        #: could swallow a press or shift the coordinate a tool is handed.
+        self._prompt_point: Optional[tuple[int, int]] = None
         self._last_zoom: Optional[float] = None
         # Parented to the view, not the viewport: QGraphicsView scrolls the
         # viewport's child widgets together with the scene, which would drag the
@@ -369,6 +374,26 @@ class ImageCanvas(QGraphicsView):
         """Show (or clear) a dashed box, e.g. while dragging a SAM box prompt."""
         self._rubber_band = box
         self.viewport().update()
+
+    def set_prompt_point(self, point: Optional[tuple]) -> None:
+        """Mark one pixel inside the armed box prompt, or clear it with ``None``.
+
+        The distance-transform point of a ``Shift+C`` alternate: the box tells
+        SAM where to look and this tells the annotator where their own click
+        will be unambiguous.  Setting the value it already holds repaints
+        nothing, which is what keeps the frame-change path free of a repaint it
+        never used to make.
+        """
+        value = (None if point is None
+                 else (int(round(float(point[0]))), int(round(float(point[1])))))
+        if value == self._prompt_point:
+            return
+        self._prompt_point = value
+        self.viewport().update()
+
+    def prompt_point(self) -> Optional[tuple[int, int]]:
+        """The marked pixel, or ``None``."""
+        return self._prompt_point
 
     # -- zoom / pan ---------------------------------------------------------
     def zoom_factor(self) -> float:
@@ -532,6 +557,22 @@ class ImageCanvas(QGraphicsView):
             pen.setCosmetic(True)
             painter.setPen(pen)
             painter.drawRect(QRectF(x0, y0, x1 - x0, y1 - y0))
+        if self._prompt_point is not None:
+            # A cross with a hole in the middle, sized in *screen* pixels, so
+            # the marked pixel itself stays visible at 800 % and the mark stays
+            # findable at 20 %.
+            cx, cy = self._prompt_point[0] + 0.5, self._prompt_point[1] + 0.5
+            arm = 9.0 / max(self.zoom_factor(), 1e-6)
+            gap = arm / 3.0
+            pen = QPen(QColor(255, 232, 64), 1)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.drawLines([
+                QLineF(cx - arm, cy, cx - gap, cy),
+                QLineF(cx + gap, cy, cx + arm, cy),
+                QLineF(cx, cy - arm, cx, cy - gap),
+                QLineF(cx, cy + gap, cx, cy + arm),
+            ])
         if self.zoom_factor() <= self.GRID_ZOOM:
             return
         h, w = self.image_hw()
