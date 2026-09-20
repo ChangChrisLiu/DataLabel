@@ -324,6 +324,7 @@ class TaskCtx:
     _legal: dict[tuple[int, bool], list] = field(default_factory=dict, repr=False)
     _blocked: dict[int, list] = field(default_factory=dict, repr=False)
     _by_target: Optional[dict[str, list[Edge]]] = field(default=None, repr=False)
+    _v12: Optional[set[int]] = field(default=None, repr=False)
 
     # -- shorthand ---------------------------------------------------------- #
     @property
@@ -389,11 +390,31 @@ class TaskCtx:
         The *first* action of the next step that has one. A compound step's
         later actions happen after its first one and are not demonstrated at
         *this* state, so they are not claimed here.
+
+        ``None`` for three reasons, and all three mean "no certainty here":
+        nothing follows, the log and the graph contradict each other at the next
+        step, or the next action changes no state at all. The last is
+        ``reorient``: spec 6.3 gives it no effect and nothing gates it, so
+        "could you do it?" has no answer the constraint graph can grade -- and
+        answering with the step *after* it would be answering a different
+        question.
         """
         nxt = self.next_action_step(step)
         if nxt is None or nxt in self.illegal:
-            return None  # the log and the graph contradict each other here
-        return nxt, self.named_actions(nxt)[0]
+            return None
+        action = self.named_actions(nxt)[0]
+        return (nxt, action) if self.changes_state(action) else None
+
+    def changes_state(self, action: ActionRec) -> bool:
+        """Does this action move the state machine at all? (``reorient`` does not.)"""
+        rec = self.ctx.instances.get(action.target)
+        cls = rec.cls if rec is not None else (
+            CABLE_CLASS if action.target.startswith(CABLE_PREFIX) else None)
+        if cls is None:
+            return False
+        effect = self.tax.apply_verb(cls, rec.attrs if rec is not None else {},
+                                     action.verb)
+        return effect is not None and effect[0] == STATE_ATTR
 
     def named_actions(self, step: int) -> list[ActionRec]:
         """Successful actions of ``step`` whose target this export can name."""
@@ -435,6 +456,36 @@ class TaskCtx:
             hit = blocked_actions(self, step)
             self._blocked[step] = hit
         return hit
+
+    @property
+    def v12_steps(self) -> set[int]:
+        """The steps V12 may ask about, balanced across this desktop.
+
+        Its negatives can only come from ``dupli`` rows (spec 8.2), and there
+        are sixteen of those in the whole dataset against two and a half
+        thousand ordinary steps. Publishing every change would make "yes,
+        something changed" right 99 % of the time, so the positives are
+        subsampled to the number of negatives the desktop actually has, by a
+        seed of the desktop. A desktop with no ``dupli`` row asks nothing.
+        """
+        if self._v12 is None:
+            negative, positive = [], []
+            for step in sorted(self.frames):
+                before = self.frame(step - 1)
+                if before is None or not (before.verified
+                                          and self.frames[step].verified):
+                    continue
+                rec = self.ctx.steps.get(step)
+                kind = self.ctx.step_type(step)
+                if kind == StepType.DUPLI.value or (rec is not None and rec.dupli):
+                    negative.append(step)
+                elif kind not in NO_CHANGE_STEP_TYPES and kind != StepType.FAILED.value:
+                    if self.state(step - 1) != self.state(step):
+                        positive.append(step)
+            chosen = stable_order(positive, f"D{self.desktop}|{self.view}|V12",
+                                  str)[:len(negative)]
+            self._v12 = set(negative) | set(chosen)
+        return self._v12
 
 
 def target_class(ctx: DesktopCtx, target: str) -> Optional[str]:
@@ -1302,7 +1353,7 @@ def gen_v12(tc: TaskCtx, step: int) -> Iterator[dict]:
     frame, before = tc.frame(step), tc.frame(step - 1)
     if frame is None or before is None:
         return
-    if not (frame.verified and before.verified):
+    if not (frame.verified and before.verified) or step not in tc.v12_steps:
         return
     kind = tc.ctx.step_type(step)
     rec = tc.ctx.steps.get(step)
@@ -1532,13 +1583,19 @@ V16_QUESTIONS = (
     "Verify the following sequence. Say whether it can be carried out and, if "
     "not, the index of the first impossible action.",
 )
-#: How many logged actions a candidate plan is made of. Four, so a corruption
-#: can put the first error at index 0, 1, 2 or 3.
-V16_PLAN_LEN = 4
+#: How many logged actions a candidate plan is made of.
+#:
+#: Five, so that the first error can land on index 0, 1, 2 or 3. It can never
+#: land on the **last** index of a rearranged plan, and that is a fact about
+#: disassembly rather than a gap in the corruption search: taking a part out
+#: only ever *clears* preconditions, so an action moved later is never more
+#: blocked than it was, and the step that breaks is always one that has been
+#: pulled forward. The reachable range is therefore ``0 .. len(plan) - 2``.
+V16_PLAN_LEN = 5
 
 
 def _simulate(tc: TaskCtx, step: int, plan: Sequence[tuple[str, str]]
-              ) -> tuple[Optional[int], Optional[Edge]]:
+              ) -> tuple[Optional[int], list[Edge]]:
     """Replay ``plan`` from the state after ``step``; ``(first bad index, edge)``.
 
     Through :func:`unmet_for`, so this asks the constraint graph exactly the
@@ -1551,15 +1608,18 @@ def _simulate(tc: TaskCtx, step: int, plan: Sequence[tuple[str, str]]
     for index, (verb, target) in enumerate(plan):
         rec = tc.ctx.instances.get(target)
         if rec is None:
-            return index, None
+            return index, []
         bad = unmet_for(tc, verb, target, sim)
         if bad:
-            return index, sorted(bad, key=lambda e: (e.type, e.blocker))[0]
+            # every edge this step breaks, not the first one the list happened
+            # to hold: "which constraint stopped it" has no single answer when
+            # a part is both screwed down and still plugged in
+            return index, sorted(bad, key=lambda e: (e.type, e.target, e.blocker))
         current = sim[target].state if target in sim else ""
         if not verb_applies(tc.tax, rec.cls, rec.attrs, verb, current):
-            return index, None
+            return index, []
         _apply_effect(tc.tax, tc.ctx.instances, sim, target, verb)
-    return None, None
+    return None, []
 
 
 def _corruptions(plan: Sequence[tuple[str, str]],
@@ -1576,8 +1636,10 @@ def _corruptions(plan: Sequence[tuple[str, str]],
         swapped = list(plan)
         swapped[i], swapped[i + 1] = swapped[i + 1], swapped[i]
         out.append((f"swap{i}", swapped))
-    for j in range(2, len(plan)):
-        for i in range(0, j - 1):
+    for j in range(len(plan)):
+        for i in range(len(plan)):
+            if abs(i - j) < 2:
+                continue  # that is the adjacent swap, already listed
             moved = list(plan)
             moved.insert(i, moved.pop(j))
             out.append((f"move{j}to{i}", moved))
@@ -1585,14 +1647,14 @@ def _corruptions(plan: Sequence[tuple[str, str]],
 
 
 def _plan_record(tc: TaskCtx, frame: FrameData, plan: Sequence[tuple[str, str]],
-                 first_bad: Optional[int], edge: Optional[Edge], tag: str) -> dict:
+                 first_bad: Optional[int], edges: Sequence[Edge], tag: str) -> dict:
     step = frame.step
     rec_id = f"V16-{frame_id(tc.desktop, tc.view, step)}-{tag}"
     index, question = pick(V16_QUESTIONS, rec_id)
     listed = [{"verb": v, "target": t} for v, t in plan]
     state = tc.state(step)
     chain: list[dict] = []
-    if edge is not None:
+    for edge in edges:
         current = state[edge.blocker].state if edge.blocker in state else None
         chain.append(R.recall_relation(edge.type, edge.target, edge.blocker,
                                        edge.necessity, edge.mode))
@@ -1600,16 +1662,18 @@ def _plan_record(tc: TaskCtx, frame: FrameData, plan: Sequence[tuple[str, str]],
         chain.append(R.check_precondition(edge.blocker,
                                           REQUIRED_STATES.get(edge.type, frozenset()),
                                           current, False))
-    else:
+    if not edges:
         chain.extend(observed(t, state[t].state if t in state else None,
                               tc, frame.pointable) for _, t in plan[:tc.budget])
+    labels = [e.label() for e in edges]
     return record(
         tc, "V16", rec_id, step, [frame],
         question + "\n" + "\n".join(f"{i + 1}. {verb_phrase(v, tc.label(t))}"
                                     for i, (v, t) in enumerate(plan)),
         index,
         {"valid": first_bad is None, "first_error_index": first_bad,
-         "violated_edge": None if edge is None else edge.label()},
+         "violated_edge": labels[0] if labels else None,
+         "violated_edges": labels},
         {"type": "plan", "plan": listed, "metric": "accuracy+localisation",
          "truth_source": DEMONSTRATED if first_bad is None else GRAPH_BLOCKED},
         evidence({t: frame.pointable[t][1] for _, t in plan if t in frame.pointable},
@@ -1640,7 +1704,9 @@ def gen_v16(tc: TaskCtx, step: int) -> Iterator[dict]:
         if candidate in tc.illegal:
             return  # a suffix built on a contradiction is not a plan
         for action in tc.named_actions(candidate):
-            if action.target in tc.ctx.instances:
+            # a plan is a sequence of disassembly actions; `reorient` is a
+            # capture action with no state effect and nothing gating it
+            if action.target in tc.ctx.instances and tc.changes_state(action):
                 plan.append((action.verb, action.target))
         if len(plan) >= V16_PLAN_LEN:
             break
@@ -1650,14 +1716,22 @@ def gen_v16(tc: TaskCtx, step: int) -> Iterator[dict]:
     first_bad, _ = _simulate(tc, step, plan)
     if first_bad is not None:
         return  # the logged suffix does not replay cleanly: say nothing
-    yield _plan_record(tc, frame, plan, None, None, "true")
 
+    corruption = None
     for tag, corrupted in _corruptions(plan, tc.seed(step, "V16")):
         bad_at, broken = _simulate(tc, step, corrupted)
-        if bad_at is None or broken is None:
+        if bad_at is None or not broken:
             continue  # violates nothing: a different plan, not a wrong one
-        yield _plan_record(tc, frame, corrupted, bad_at, broken, tag)
+        corruption = (tag, corrupted, bad_at, broken)
+        break
+    if corruption is None:
+        # no rearrangement of this suffix is certainly wrong -- four screws of
+        # one group commute -- so publishing the true plan alone would make
+        # "yes" the right answer to every V16 question on this desktop
         return
+    yield _plan_record(tc, frame, plan, None, (), "true")
+    tag, corrupted, bad_at, broken = corruption
+    yield _plan_record(tc, frame, corrupted, bad_at, broken, tag)
 
 
 #: ``task id -> generator``. The order is the order records are written.

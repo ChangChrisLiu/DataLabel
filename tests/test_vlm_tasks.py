@@ -541,17 +541,23 @@ def test_v10_reports_the_history_the_progress_and_the_remainder(scene, tmp_path:
     assert last["answer_check"]["done_actions"] == 5
 
 
-def test_v12_takes_its_no_change_from_dupli_and_leaves_failed_alone(
+def test_v12_takes_its_no_change_from_dupli_and_balances_against_it(
     scene, tmp_path: Path
 ):
+    """One ``dupli`` row in this scene, so exactly one change rides with it.
+
+    The negatives can only come from ``dupli`` (spec 8.2) and there are sixteen
+    of those in the whole dataset: publishing every change would make "yes"
+    right 99 % of the time, which is a benchmark that measures nothing.
+    """
     db, tax = scene
     records = {r["step"]: r for r in _of(_run(db, tax, tmp_path / "v.jsonl"), "V12")}
+    assert len(records) == 2
+    assert sum(r["answer"]["changed"] for r in records.values()) == 1
     assert records[3]["answer"] == {"changed": False, "events": []}
     assert records[3]["negative"] == "dupli_no_change"
-    assert records[2]["answer"]["changed"] is True
-    assert records[2]["answer"]["events"] == [
-        {"target": S.SCREW, "old": "fastened", "new": "removed"}
-    ]
+    positive = next(r for r in records.values() if r["answer"]["changed"])
+    assert positive["answer"]["events"]
     assert 6 not in records  # the failed attempt: nothing changed, but a hand moved
 
 

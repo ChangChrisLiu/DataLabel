@@ -291,10 +291,19 @@ class Checker:
         return [a for a in self.successful_actions(step)
                 if _cls_of(self.instances, a.target) is not None]
 
+    def changes_state(self, action) -> bool:
+        """Does this action move the state machine? ``reorient`` does not."""
+        effect = self._effect(action.target, action.verb)
+        return effect is not None and effect[0] == "state"
+
+    def planning_actions(self, step: int) -> list:
+        return [a for a in self.named(step) if self.changes_state(a)]
+
     def demonstrated(self, after: int) -> Optional[tuple[int, Any]]:
         for step in self.log_steps():
             if step > after and self.named(step):
-                return step, self.named(step)[0]
+                action = self.named(step)[0]
+                return (step, action) if self.changes_state(action) else None
         return None
 
     # -- dispatch ----------------------------------------------------------- #
@@ -582,13 +591,15 @@ class Checker:
         label = record["label"]
         answer = self._answer(record)
         frame = {k: dict(v) for k, v in self.state_at(int(label["step"])).items()}
-        first_bad, violated = None, None
+        first_bad, violated = None, []
         for i, item in enumerate(spec["plan"]):
             verb, target = item["verb"], item["target"]
             bad = self.unmet(verb, target, frame)
             if bad or not self.applies(target, verb, frame):
                 first_bad = i
-                violated = None if not bad else _edge_label(bad[0])
+                # every edge the step breaks: which one "stopped" it has no
+                # single answer when a part is both screwed down and plugged in
+                violated = sorted(_edge_label(e) for e in bad)
                 break
             self._apply(frame, target, verb)
         valid = first_bad is None
@@ -599,15 +610,19 @@ class Checker:
         if valid:
             # a valid plan must be one the log actually performed (demonstrated)
             logged = [(a.verb, a.target) for s in self.log_steps()
-                      if s > int(label["step"]) for a in self.named(s)]
+                      if s > int(label["step"]) for a in self.planning_actions(s)]
             wanted = [(i["verb"], i["target"]) for i in spec["plan"]]
             if logged[:len(wanted)] != wanted:
                 _fail(record, "a valid plan that the log never carried out")
+            if answer.get("violated_edges"):
+                _fail(record, "a valid plan that names a violated edge")
             return
-        if answer.get("violated_edge") != violated:
-            _fail(record, f"violated edge {answer.get('violated_edge')} != {violated}")
-        if violated is None:
+        if sorted(answer.get("violated_edges") or []) != violated:
+            _fail(record, f"violated edges {answer.get('violated_edges')} != {violated}")
+        if not violated:
             _fail(record, "an invalid plan that violates no edge")
+        if answer.get("violated_edge") != violated[0]:
+            _fail(record, "violated_edge is not the first of violated_edges")
 
     def _apply(self, frame: dict[str, dict], target: str, verb: str) -> None:
         effect = self._effect(target, verb)
