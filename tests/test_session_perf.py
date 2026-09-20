@@ -20,6 +20,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import statistics
 import time
 from pathlib import Path
 
@@ -331,16 +332,41 @@ def best_of(measure, setup=None, times: int = BEST_OF) -> tuple[float, list[floa
 
 
 def _under(budget: float, what: str, runs: list[float]) -> None:
+    """Assert the **best** of ``runs`` is inside ``budget``.
+
+    Best, not every run: a run that was descheduled while another suite had
+    the machine measures the machine.  The cost of that choice is that one
+    lucky run hides a regression of the typical case, which is why the 12 MP
+    window gestures are also checked on their median (:func:`_median_under`).
+    """
     best = min(runs)
     assert best <= budget, (
-        f"{what} took {best:.3f}s, over the {budget:.2f}s budget; "
-        f"all {len(runs)} runs: " + ", ".join(f"{r:.3f}s" for r in runs)
+        f"{what} took {best:.3f}s at best, over the {budget:.2f}s best-of-"
+        f"{len(runs)} budget; all runs: "
+        + ", ".join(f"{r:.3f}s" for r in runs)
+    )
+
+
+def _median_under(budget: float, what: str, runs: list[float]) -> None:
+    """Assert the **median** of ``runs`` is inside ``budget``.
+
+    The guard the best-of cannot give: a regression that leaves one run fast
+    and the rest slow passes :func:`_under` and fails here.
+    """
+    middle = statistics.median(runs)
+    assert middle <= budget, (
+        f"{what} took {middle:.3f}s at the median of {len(runs)}, over the "
+        f"{budget:.2f}s budget; all runs: "
+        + ", ".join(f"{r:.3f}s" for r in runs)
     )
 
 
 @pytest.mark.slow
 def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path, as_shipped):
-    """A chassis-sized commit at 1600x1600 over 40 steps, plus browsing."""
+    """A chassis-sized commit at 1600x1600 over 40 steps, plus browsing.
+
+    Asserted on the **best of** :data:`BEST_OF` runs (see :func:`_under`).
+    """
     session = make_session(tmp_path, last_step=40, hw=(1600, 1600))
     session.goto(2)  # almost everything is still in the chassis here
     drawn = seed_shapes(session, 2, grid=8, anchor=40)
@@ -405,6 +431,8 @@ def test_confirming_a_frame_is_under_budget_at_full_scanner_resolution(
     qapp, tmp_path, monkeypatch, as_shipped, step: int
 ):
     """Space, in the configuration the annotator actually runs.
+
+    Asserted on the **best of** :data:`BEST_OF` runs (see :func:`_under`).
 
     Two costs had to go. ``verify_frame`` compares every frozen row against a
     fresh compilation before it will confirm anything (the I1 gate), and
@@ -491,6 +519,8 @@ BEST_OF_12MP = 5
 @pytest.mark.slow
 def test_gui_thread_budgets_on_a_12mp_frame_with_forty_instances(qapp, tmp_path, as_shipped):
     """Commit, Space, frame change and timeline jump on a 4032x3040 frame.
+
+    Asserted on the **best of** :data:`BEST_OF_12MP` runs (see :func:`_under`).
 
     **In the shipped configuration**: the sweeper is on, so the prefetch of
     ``k-1`` competes for the same cores and the same database; the frame is the
@@ -613,10 +643,16 @@ def _settle(window) -> None:
 
 
 @pytest.mark.slow
-def test_window_gesture_budgets_on_a_12mp_frame_with_forty_instances(
+def test_window_gesture_budgets_on_a_12mp_frame_best_and_median_of_five(
     qapp, tmp_path, as_shipped
 ):
     """Enter, a frame change, a timeline jump and a repaint, through the window.
+
+    Asserted twice: on the **best** of five, which is what the code costs when
+    the machine is this test's, and on the **median** of five, so that a
+    regression of the typical case cannot hide behind one lucky run.  (The
+    session budgets above are best-of only; this is the newer, stricter shape
+    and the one to copy.)
 
     The session budgets above measure ``commit_edit`` and ``goto``.  What the
     annotator waits for is longer than either: ``Enter`` also asks what the
@@ -735,11 +771,17 @@ def test_window_gesture_budgets_on_a_12mp_frame_with_forty_instances(
         window.hide()
         QApplication.processEvents()
 
-    _under(BUDGET_WINDOW_COMMIT, "the whole Enter gesture", commit_runs)
-    _under(BUDGET_WINDOW_FRAME_CHANGE, "frame change (window)", change_runs)
-    _under(BUDGET_WINDOW_TIMELINE_JUMP, "timeline jump (window)", jump_runs)
+    for check in (_under, _median_under):
+        check(BUDGET_WINDOW_COMMIT, "the whole Enter gesture", commit_runs)
+        check(BUDGET_WINDOW_FRAME_CHANGE, "frame change (window)", change_runs)
+        check(BUDGET_WINDOW_TIMELINE_JUMP, "timeline jump (window)", jump_runs)
+    # A repaint is a fiftieth of the smallest of those, and there are twenty of
+    # them: the best-of is the measurement, the median only says the machine
+    # was not stolen mid-test.
     _under(BUDGET_WINDOW_REPAINT, "pan repaint", pan_runs)
     _under(BUDGET_WINDOW_REPAINT, "zoom repaint", zoom_runs)
+    _median_under(BUDGET_WINDOW_REPAINT, "pan repaint", pan_runs)
+    _median_under(BUDGET_WINDOW_REPAINT, "zoom repaint", zoom_runs)
 
 
 def _count_compiles_in(monkeypatch) -> list:
