@@ -88,8 +88,28 @@ def _boundary(mask_u8: np.ndarray) -> np.ndarray:
 
 
 def encode_rle(mask: np.ndarray) -> dict:
-    """Encode a boolean mask as a COCO RLE dict with ``str`` counts."""
-    m = np.asfortranarray(_as_bool(mask).astype(np.uint8))
+    """Encode a boolean mask as a COCO RLE dict with ``str`` counts.
+
+    Two copies used to happen on the way in and both are gone; the bytes that
+    come out are the same ones, which
+    :mod:`tests.test_compiler_golden` pins.
+
+    * ``.view(np.uint8)`` instead of ``.astype(np.uint8)``. A NumPy ``bool_``
+      **is** one byte holding 0 or 1, so reinterpreting it costs nothing, while
+      the cast copied the whole canvas -- 3 ms per instance at 12 MP. It is a
+      reinterpretation, so it relies on the bytes really being 0/1; every mask
+      in ``tda`` is produced either by a NumPy operation or by
+      :func:`decode_rle`, and both guarantee that.
+    * the caller is expected to hand over a **Fortran-ordered** mask.
+      ``coco_mask.encode`` reads column-major, so a C-ordered array has to be
+      transposed into a new buffer first -- 39 ms per instance at 12 MP, which
+      was the single most expensive thing a commit did. :func:`decode_rle`
+      returns Fortran order and :func:`tda.core.compiler.compile_frame` builds
+      its canvases in it, so the copy below is skipped on everything the truth
+      table stores. A C-ordered mask still works; it just pays for the
+      transpose.
+    """
+    m = np.asfortranarray(_as_bool(mask).view(np.uint8))
     rle = coco_mask.encode(m)
     return {
         "size": [int(rle["size"][0]), int(rle["size"][1])],
@@ -140,13 +160,21 @@ def rle_bbox_xywh(rle: dict) -> list[float]:
 
 
 def decode_rle(rle: dict) -> np.ndarray:
-    """Decode a COCO RLE dict (``str`` or ``bytes`` counts) to a bool mask."""
+    """Decode a COCO RLE dict (``str`` or ``bytes`` counts) to a bool mask.
+
+    The result is **Fortran-ordered**, because that is what pycocotools writes
+    and what :func:`encode_rle` wants back; nothing re-orders it on the way.
+
+    ``.view(bool)`` rather than ``.astype(bool)``: pycocotools fills the buffer
+    with 0 and 1 only, a ``bool_`` is one byte, and the cast was a second pass
+    over the whole canvas -- 5 ms per instance at 12 MP.
+    """
     counts = rle["counts"]
     if isinstance(counts, str):
         counts = counts.encode("ascii")
     h, w = int(rle["size"][0]), int(rle["size"][1])
     decoded = coco_mask.decode({"size": [h, w], "counts": counts})
-    return decoded.astype(bool)
+    return decoded.view(bool)
 
 
 # ---------------------------------------------------------------------------

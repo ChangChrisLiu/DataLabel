@@ -23,8 +23,11 @@ every label -- Chinese ones above all -- into a row of boxes.
 from __future__ import annotations
 
 import argparse
+import cProfile
+import io
 import json
 import os
+import pstats
 import shutil
 import sqlite3
 import sys
@@ -44,6 +47,8 @@ SHOT_LIMIT_MB = 1.5
 #: A 1920x1200 grab of a 12 MP frame is ~2.5 MB of PNG; the documentation only
 #: needs to show the layout, so the images are scaled before they are saved.
 SHOT_WIDTH = 1280
+#: How many lines of each ``--profile`` table go into the report.
+PROFILE_ROWS = 15
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -63,6 +68,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--draw", action="append", default=None, metavar="STEP:INSTANCE",
                     help="draw one named instance on one step "
                          f"(default for D13: {DEFAULT_DRAW[0]})")
+    ap.add_argument("--instances", type=int, default=0, metavar="N",
+                    help="before timing anything, give N instances of the start "
+                         "frame a synthetic rectangle inside the ROI -- what a "
+                         "half-annotated late step costs (0: draw nothing)")
+    ap.add_argument("--profile", action="store_true",
+                    help="cProfile one commit, one Space and one frame change; "
+                         f"the top {PROFILE_ROWS} cumulative rows go into the report")
     ap.add_argument("--settings", default=None,
                     help="INI file to use (default: a temporary one, so the run "
                          "never touches the annotator's own window state)")
@@ -178,6 +190,9 @@ class Smoke:
         self.report["roi_accept_ms"] = (time.perf_counter() - started) * 1000
         self.report["roi"] = list(window.roi() or [])
 
+        if int(self.args.instances) > 0:
+            self.report["seeded"] = self.seed_instances(window, int(self.args.instances))
+
         if self.args.sam:
             started = time.perf_counter()
             from tda.models.sam_service import SamQueue, SamService
@@ -194,6 +209,8 @@ class Smoke:
                                 for spec in self.args.draw]
         self.report["prompt_points"] = self.check_prompt_points(window)
         self.report["timeline_jump_ms"] = self.time_timeline_jumps(window)
+        if self.args.profile:
+            self.report["profiles"] = self.profile_ops(window)
         if self.args.shots:
             self.report["cjk_shot"] = self.shoot_blocked_hint(window)
             self.report["refused_space_shot"] = self.shoot_refused_space(window)
@@ -209,6 +226,133 @@ class Smoke:
         self.report["rss_after_leak_check_mb"] = rss_mb()
         self.report["live_threads"] = _thread_names()
         self.note_peak()
+
+    # -- the half-annotated frame -------------------------------------------
+    def seed_instances(self, window, count: int) -> dict:
+        """Give ``count`` instances of the open frame a rectangle inside the ROI.
+
+        The measured budgets are "a commit on a **late** step", and a late step
+        is one where most of the machine is already drawn: the truth table then
+        holds one row per instance and every one of them is re-derived and
+        re-encoded whenever the frame's inputs move.  A smoke run on a desktop
+        nobody has annotated measures the 1-4-shape case instead, which is the
+        cheap one.
+
+        The shapes are written straight into the copy -- one ``add_keyframe``
+        per instance and one ``set_zorder``, the way ``tests/session_scene.py``
+        seeds a scene -- rather than through ``commit_edit``, because the point
+        is to *arrive* at a drawn frame, not to time forty commits.  They are
+        laid out as a grid of non-overlapping rectangles inside the ROI, so
+        nothing is hidden and the frame compiles without ``empty_visible``.
+        """
+        import numpy as np
+
+        from tda.core import masks
+        from tda.core.model import ShapeKeyframe, ShapePart, ZOrderRec
+        from tda.core.states import needs_geom
+        from tda.core.truth_inputs import (
+            frame_hw,
+            instances_of,
+            pose_segment_of,
+            state_of,
+        )
+
+        session = window.session
+        key = session.current()
+        db, tax = session.db, session.tax
+        state = state_of(db, tax, key.desktop, key.step)
+        wanted = [
+            inst
+            for inst, kind in sorted(needs_geom(instances_of(db, key.desktop),
+                                                state, tax).items())
+            if kind == "mask" and state[inst].placement == "in_chassis"
+        ][:int(count)]
+        out: dict[str, Any] = {"asked": int(count), "available": len(wanted)}
+        if not wanted:
+            return out
+
+        hw = frame_hw(db, key, session.truth.cache_dir)
+        seg = pose_segment_of(db, key)
+        row = db.pose_segment_for(key) or {}
+        anchor = int(row.get("end_step") or max(session.steps()))
+        x0, y0, x1, y1 = window.roi() or (0, 0, hw[1], hw[0])
+        grid = 1
+        while grid * grid < len(wanted):
+            grid += 1
+        cell_w, cell_h = (x1 - x0) // grid, (y1 - y0) // grid
+        order: list[tuple[str, str]] = []
+        started = time.perf_counter()
+        for index, instance in enumerate(wanted):
+            col, row_i = index % grid, index // grid
+            mask = np.zeros(hw, dtype=bool)
+            mx0, my0 = x0 + col * cell_w + 1, y0 + row_i * cell_h + 1
+            mask[my0:my0 + cell_h - 2, mx0:mx0 + cell_w - 2] = True
+            db.add_keyframe(ShapeKeyframe(
+                id=None, instance=instance, desktop=key.desktop, view=key.view,
+                pose_segment=seg, anchor_step=anchor, placement="in_chassis",
+                geom_type="mask",
+                parts=[ShapePart("main", masks.encode_rle(mask))],
+            ))
+            order.append((instance, "main"))
+        db.set_zorder(ZOrderRec(key.desktop, key.view, seg, order))
+        session._invalidate()
+        out["drawn"] = len(order)
+        out["anchor_step"] = anchor
+        out["write_ms"] = (time.perf_counter() - started) * 1000
+        started = time.perf_counter()
+        session.compiled()               # the frame the timings start from
+        out["first_compile_ms"] = (time.perf_counter() - started) * 1000
+        out["rows"] = len(session.compiled().instances)
+        return out
+
+    # -- the profile ---------------------------------------------------------
+    def profile_ops(self, window) -> dict:
+        """cProfile one commit, one Space and one frame change on this frame.
+
+        One run each, after the timings above: a profile is read for *where*
+        the time goes, and the wall clocks next to it are the ones measured
+        without the profiler's overhead.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        out: dict[str, Any] = {}
+        window.act_clear_edit()
+        card = [r for r in window.session.task_card() if r.get("instance")]
+        instance = str(card[0]["instance"]) if card else None
+        if instance is not None:
+            window.on_request_edit(instance)
+            mask = window.session.editing_mask()
+            if mask is not None:
+                painted = mask.copy()
+                x0, y0, x1, y1 = window.roi() or (0, 0, mask.shape[1], mask.shape[0])
+                painted[(y0 + y1) // 2:(y0 + y1) // 2 + 120,
+                        (x0 + x1) // 2:(x0 + x1) // 2 + 120] ^= True
+                window.set_editing_mask(painted, undoable=True)
+                out["commit"] = self._profiled(window.act_commit)
+                window.act_clear_edit()
+        out["confirm"] = self._profiled(window.act_confirm)
+        QApplication.processEvents()
+        out["frame_change"] = self._profiled(lambda: window.act_step(-1))
+        QApplication.processEvents()
+        return out
+
+    @staticmethod
+    def _profiled(call) -> dict:
+        """``{"ms", "rows"}`` -- one call's wall clock and its profile table."""
+        profiler = cProfile.Profile()
+        started = time.perf_counter()
+        profiler.enable()
+        try:
+            call()
+        finally:
+            profiler.disable()
+        elapsed = (time.perf_counter() - started) * 1000
+        buffer = io.StringIO()
+        pstats.Stats(profiler, stream=buffer).sort_stats("cumulative").print_stats(
+            PROFILE_ROWS
+        )
+        lines = [line.rstrip() for line in buffer.getvalue().splitlines() if line.strip()]
+        return {"ms": elapsed, "rows": lines}
 
     def one_frame(self, window, app) -> dict:
         from PySide6.QtWidgets import QApplication
