@@ -332,13 +332,20 @@ class SamToolBase(CandidatesMixin, Tool):
             return
 
         mask_input = self._mask_input(rect, crop.shape[:2])
-        # **The rule of U1 report 1**: SAM may only take pixels away when it was
-        # shown them.  ``mask_input`` is the only thing it is ever shown, so a
-        # request that carries one is a request *about* that mask and its answer
-        # supersedes it (a negative point has to be able to remove something);
-        # a request without one knows nothing about what is in the layer, and
-        # its answer is composed with it instead of replacing it.
-        blended = mask_input is not None
+        # **The rule of U1 report 1, as ruled in round 1**: what may take pixels
+        # away is decided by *the prompt*, not by what SAM was shown.  A prompt
+        # whose points are all positive -- and every box prompt, which has none
+        # -- is the annotator saying "this too", so its answer is composed with
+        # what is already there.  Only once they have right-clicked does the
+        # prompt say "not that", and only then may the answer remove something,
+        # and only inside the crop it was computed on.
+        #
+        # The first version of this fix keyed on ``mask_input`` instead, which
+        # left an ordinary left click deleting hand strokes inside the crop --
+        # the same surprise, one gesture further along.  ``mask_input`` is
+        # still sent exactly when it was: it makes the answer better, and that
+        # is a separate question from what the answer is allowed to do.
+        subtractive = any(int(label) == 0 for _px, _py, label in crop_points)
         req = SamRequest(
             image_crop=crop,
             points=crop_points,
@@ -367,7 +374,7 @@ class SamToolBase(CandidatesMixin, Tool):
         # waiting for a mask that is never coming, with nothing on screen.
         self._submit_to_queue(
             req,
-            lambda res: bridge.deliver((res, rect, blended, stamp)),
+            lambda res: bridge.deliver((res, rect, subtractive, stamp)),
             lambda exc: bridge.deliver_error(f"SAM failed: {exc}"),
         )
 
@@ -403,7 +410,7 @@ class SamToolBase(CandidatesMixin, Tool):
         Every rejection path returns quietly instead of raising: this runs as a
         Qt slot, where an exception would escape into the event loop.
         """
-        result, rect, blended, stamp = payload  # type: ignore[misc]
+        result, rect, subtractive, stamp = payload  # type: ignore[misc]
         token, identity = stamp
         if token != self._token:
             # Superseded.  By a newer prompt -- nothing to report, the annotator
@@ -442,9 +449,9 @@ class SamToolBase(CandidatesMixin, Tool):
         # compounding onto the previous one, and so that a stroke made while
         # the prompt was in flight counts as owned rather than as a proposal.
         self._candidate_base = self.overlay.editing.copy()
-        # Whether the crop's contents may be thrown away: only when SAM was
-        # handed them as ``mask_input`` (see :meth:`_submit`).
-        self._candidate_union = not bool(blended)
+        # Whether the crop's contents may be thrown away: only once the prompt
+        # holds a negative point (see :meth:`_submit`).
+        self._candidate_union = not bool(subtractive)
         self._apply_candidate()
 
 

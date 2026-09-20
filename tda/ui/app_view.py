@@ -44,19 +44,31 @@ NO_TOOL_ZH = "只看不改"
 NO_TOOL_EN = "read-only"
 
 
-def tool_label_text(name: str, radius=None, armed: bool = True) -> tuple[str, str]:
+#: Added to the tooltip when the ring is too big (or too small) to be drawn as
+#: a cursor, so the badge's ``r=<n>`` is the only thing saying how big it is.
+NO_RING_NOTE = "（光标为十字：笔刷比光标能画的还大 / crosshair: the ring is off-scale）"
+
+
+def tool_label_text(name: str, radius=None, armed: bool = True,
+                    ring: bool = True) -> tuple[str, str]:
     """``(what the status bar shows, what its tooltip says)`` for one tool.
 
     ``工具：SAM 框选 X`` rather than ``sam_box``: the annotator reads Chinese,
     the key is what they press to get back to it, and both used to be missing.
+    ``r=<n>`` is always shown for a tool that has a radius -- when the ring is
+    off-scale (``ring=False``) the cursor is a crosshair and this number is the
+    only place the brush's size appears at all.
     """
     if not armed:
         return (f"工具：{NO_TOOL_ZH} / {NO_TOOL_EN}", NO_TOOL_EN)
     zh, en = TOOL_LABELS.get(name, (name, name))
     key = A.tool_key(name)
-    suffix = "" if radius is None else f" r{int(radius)}"
+    suffix = "" if radius is None else f" r={int(radius)}"
     shown = f"工具：{zh}{(' ' + key) if key else ''}{suffix}"
-    return (shown, f"{en}{(' (' + key + ')') if key else ''}{suffix}")
+    tip = f"{en}{(' (' + key + ')') if key else ''}{suffix}"
+    if radius is not None and not ring:
+        tip = f"{tip} {NO_RING_NOTE}"
+    return (shown, tip)
 
 
 class ToolsMixin:

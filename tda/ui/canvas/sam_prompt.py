@@ -25,11 +25,34 @@ FALLBACK_INSTANCE = "editing"
 
 log = logging.getLogger(__name__)
 
-__all__ = ["FALLBACK_INSTANCE", "HINT_EDITED", "CandidatesMixin"]
+__all__ = ["FALLBACK_INSTANCE", "HINT_EDITED", "NEGATIVE_NOTE", "CandidatesMixin",
+           "applied_text"]
 
 #: Emitted on ``sigHint`` when cycling is abandoned because the annotator
 #: painted on the proposal (their edit is never discarded).
 HINT_EDITED = "candidates discarded: the mask was edited"
+
+#: Appended to the status clause when the prompt held a negative point, which
+#: is the only way a *new* SAM result is allowed to take pixels off (R2b).
+NEGATIVE_NOTE = "（含负点 / with a negative point）"
+#: ... and when ``C`` swapped this prompt's contribution for a smaller one,
+#: which is the other -- and only other -- way the layer can shrink under SAM.
+CYCLE_NOTE = "（换候选 / candidate swap）"
+
+
+def applied_text(added: int, removed: int, negative: bool) -> str:
+    """What a SAM application did, in one clause for the status bar.
+
+    ``SAM +12,345 px`` when nothing came off, and ``+a / −r`` with the reason
+    when something did -- a right click, or ``C`` swapping this prompt's
+    contribution for a smaller candidate.  A bare ``SAM +0 px`` over a layer
+    that had just lost 79,333 px (measured, cycling on D13/scan/42) is the
+    silence this whole task is about.
+    """
+    if int(removed) <= 0:
+        return f"SAM +{int(added):,} px"
+    note = NEGATIVE_NOTE if negative else CYCLE_NOTE
+    return f"SAM +{int(added):,} / −{int(removed):,} px{note}"
 
 
 class CandidatesMixin:
@@ -160,18 +183,24 @@ class CandidatesMixin:
         owned = self._candidate_base
         # ``count_nonzero`` throughout and one temporary: ``.sum()`` on a 12 MP
         # boolean accumulates in int64 and costs 4.9 ms a call.
+        before, after = self.stroke_before, layer
+        both = int(np.count_nonzero(before & after))
+        was, now = int(np.count_nonzero(before)), int(np.count_nonzero(after))
+        added, removed = now - both, was - both
         log.info(
             "sam %s instance=%s candidate=%d/%d compose=%s layer %d -> %d px "
-            "owned %d kept %d",
+            "(+%d/-%d) owned %d kept %d",
             why, instance, self._candidate_index + 1, len(renders),
-            "union" if self._candidate_union else "replace-in-crop",
-            int(np.count_nonzero(self.stroke_before)), int(np.count_nonzero(layer)),
+            "add" if self._candidate_union else "add+remove",
+            was, now, added, removed,
             0 if owned is None else int(np.count_nonzero(owned)),
             0 if owned is None else int(np.count_nonzero(owned & layer)),
         )
         self.overlay.set_editing(instance, layer)
         if self.canvas is not None:
             self.canvas.refresh(self._candidate_rect)
+        self.sigHint.emit(applied_text(added, removed,
+                                       negative=not self._candidate_union))
         self.sigStroke.emit(self._candidate_rect)
 
 

@@ -606,6 +606,18 @@ class ImageCanvas(QGraphicsView):
             return 0
         return int(round((2 * spec.radius + 1) * self.zoom_factor()))
 
+    def cursor_is_ring(self) -> bool:
+        """Is the ring actually being drawn, or did it fall back to a crosshair?
+
+        Outside :data:`CURSOR_MIN_PX`..:data:`CURSOR_MAX_PX` the cursor cannot
+        say how big the brush is, so the status badge's ``r=<n>`` becomes the
+        only thing that can -- which is why the window asks.
+        """
+        spec = self._tool_cursor
+        if spec is None or spec.kind != "circle":
+            return False
+        return CURSOR_MIN_PX <= self.cursor_diameter() <= CURSOR_MAX_PX
+
     def _apply_tool_cursor(self) -> None:
         """Put the spec on the viewport, building (and caching) the pixmap."""
         spec = self._tool_cursor

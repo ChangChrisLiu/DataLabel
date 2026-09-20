@@ -1134,6 +1134,24 @@ def test_every_tool_says_what_it_is_under_the_mouse(window, tool, kind):
         assert spec.radius == window._tool_for(tool).radius
 
 
+def test_a_brush_too_big_for_a_ring_still_shows_its_size(window):
+    """The crosshair fallback must not take the size off the screen too."""
+    from tda.ui.canvas.view import CURSOR_MAX_PX
+
+    _answer_roi(window)
+    window.act_tool("brush")
+    window.brush.set_radius(96)
+    window.canvas.set_zoom(1.0)
+    window.sync_tool_cursor()
+    window.update_status()
+
+    assert window.canvas.cursor_diameter() > CURSOR_MAX_PX
+    assert window.canvas.cursor_is_ring() is False
+    assert window.canvas.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
+    assert "r=96" in window.tool_label.text(), window.tool_label.text()
+    assert "十字" in window.tool_label.toolTip()
+
+
 def test_the_brush_and_the_eraser_do_not_look_alike(window):
     _answer_roi(window)
     window.act_tool("brush")

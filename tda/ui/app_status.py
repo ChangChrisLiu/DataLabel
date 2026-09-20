@@ -95,12 +95,13 @@ class StatusMixin:
         self.sam_label.setText(self.sam_status_text())
 
     def _tool_text(self) -> tuple[str, str]:
-        """``工具：画笔 B r8`` and its English tooltip."""
+        """``工具：画笔 B r=8`` and its English tooltip."""
         from tda.ui.app_view import tool_label_text
 
         name = self.armed_tool_name()
         radius = getattr(self._tool_for(name) if name else None, "radius", None)
-        return tool_label_text(name or "", radius, armed=name is not None)
+        return tool_label_text(name or "", radius, armed=name is not None,
+                               ring=self.canvas.cursor_is_ring())
 
     def roi_status_text(self) -> str:
         """``ROI ✓`` / ``ROI 未确认`` / ``无 ROI`` (task U1, ruling U-ROI-3).

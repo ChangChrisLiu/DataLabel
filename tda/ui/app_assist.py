@@ -60,10 +60,13 @@ ALT_ROI_EDITING = ("ROI 框正开着，先 Enter 或 Esc / the ROI rectangle own
 ALT_GHOST = ("草稿幽灵正开着，先 Enter 或 Esc / the draft ghost owns the keys "
              "right now")
 #: Appended when ``Shift+C`` drops a prompt that had already put pixels on
-#: screen.  The pixels stay -- see :meth:`AssistMixin._drop_prompt_for_new_box`
-#: -- and a mask the annotator did not ask to keep must not be kept silently.
-APPLIED_MASK_STAYS = ("；已贴上的掩码留着，Ctrl+Z 撤销 / the mask already "
-                      "applied stays: Ctrl+Z removes it")
+#: screen.  Since round 1 a result is *composed* into the layer rather than
+#: replacing it, so "it stays" is no longer news -- what the annotator needs to
+#: know is that the previous box's pixels are now part of the shape they are
+#: building, and which key takes them back out.
+APPLIED_MASK_STAYS = ("；上一个框的掩码已经并进图层，不要就 Ctrl+Z / the "
+                      "previous box's mask is part of the layer now: Ctrl+Z "
+                      "takes it off")
 
 
 def _covers_most(box, roi, limit: float = MAX_PROMPT_BOX_FRAC) -> bool:
