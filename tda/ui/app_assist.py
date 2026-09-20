@@ -59,6 +59,11 @@ ALT_ROI_EDITING = ("ROI 框正开着，先 Enter 或 Esc / the ROI rectangle own
                    "keys right now")
 ALT_GHOST = ("草稿幽灵正开着，先 Enter 或 Esc / the draft ghost owns the keys "
              "right now")
+#: Appended when ``Shift+C`` drops a prompt that had already put pixels on
+#: screen.  The pixels stay -- see :meth:`AssistMixin._drop_prompt_for_new_box`
+#: -- and a mask the annotator did not ask to keep must not be kept silently.
+APPLIED_MASK_STAYS = ("；已贴上的掩码留着，Ctrl+Z 撤销 / the mask already "
+                      "applied stays: Ctrl+Z removes it")
 
 
 def _covers_most(box, roi, limit: float = MAX_PROMPT_BOX_FRAC) -> bool:
@@ -196,13 +201,22 @@ class AssistMixin:
         """Put the armed box back to rank 1 -- the difference map's own offer.
 
         Hooked into the window-level funnels that already reset the prompt --
-        :meth:`reset_sam_prompt` (a commit, ``Esc``, an undo, a restored
-        sidecar), :meth:`set_sam_instance`, the pause ``Tab`` applies and
-        :meth:`clear_prompt_box` (a frame, view or ROI change) -- rather than
-        into the dozen actions that call them.  The rule is
+        :meth:`reset_sam_prompt` (a commit, ``Esc``, an undo),
+        :meth:`set_sam_instance`, the pause ``Tab`` applies,
+        :meth:`~tda.ui.app_roi.RoiMixin.start_roi_edit`,
+        :meth:`~tda.ui.app_roi.RoiMixin.restore_pending`,
+        :meth:`~tda.ui.app.MainWindow.set_mode` and
+        :meth:`clear_prompt_box` (a frame or view change) -- rather than into
+        the dozen actions that call them.  The rule is
         :meth:`tda.ui.canvas.sam_tools.SamToolBase.reset_prompt`'s and it is
         the same rule: a prompt describes **one part on one frame**, and an
         alternate prompt is a prompt.
+
+        Putting rank 1's box back is itself a box change, so it goes through
+        :meth:`_drop_prompt_for_new_box` as well.  Most of the funnels above
+        reset the tools on their own -- but ``set_mode`` into Steps detaches
+        nothing, and without this an answer to the alternate would have landed
+        on the way back into Annotate.
 
         At rank 1 this returns without touching anything, which is what makes
         an annotator who never presses ``Shift+C`` see byte-identical
@@ -211,7 +225,40 @@ class AssistMixin:
         if self._prompt_rank == 0:
             return
         self._prompt_rank = 0
+        self._drop_prompt_for_new_box()
         self._arm_prompt_box(self._rank_one)
+
+    def _drop_prompt_for_new_box(self) -> str:
+        """Invalidate the prompt because a **different** box is about to be armed.
+
+        :meth:`~tda.ui.canvas.sam_tools.SamToolBase.set_prompt_box` touches
+        neither the request token nor the candidates, so changing the armed box
+        is the one thing that changes a prompt without going through
+        :meth:`~tda.ui.canvas.sam_tools.SamToolBase.reset_prompt`.  Without
+        this the answer to the *previous* box still matched the identity check
+        and was painted into the editing layer while the new box and its
+        crosshair were on screen, and ``C`` afterwards walked the old box's
+        three masks.
+
+        Deliberately **not** inside :meth:`_arm_prompt_box`: that is also the
+        path :meth:`begin_add_shape` arms rank 1 with, and rank 1 has to stay
+        byte-identical to what the difference map did before ``Shift+C``
+        existed.
+
+        The **editing layer is not touched**, which is exactly what
+        ``reset_prompt`` does after ``Esc`` or an instance change: a mask that
+        already landed stays as ordinary uncommitted pixels and ``Ctrl+Z``
+        takes it off.  Rolling it back here is the option that loses work --
+        the annotator may have brushed on top of it already, and one undoable
+        step cannot tell the mask from the mask plus their strokes, which is
+        the same reason ``cycle_candidate`` drops the candidates rather than
+        the edit.  Returns the note the status line owes them when there was
+        such a mask, and ``""`` when there was not.
+        """
+        applied = self._candidate_tool() is not None
+        for tool in (self.sam_point, self.sam_box):
+            tool.reset_prompt()
+        return APPLIED_MASK_STAYS if applied else ""
 
     def _arm_prompt_box(self, box: Optional[tuple],
                         point: Optional[tuple] = None) -> None:
@@ -567,6 +614,10 @@ class AssistMixin:
             return ALT_ROI_EDITING
         if self.showing_draft_ghost():
             return ALT_GHOST
+        if not self.sam_available:
+            # The box prompt exists to be sent to SAM.  ``act_cycle_candidate``
+            # says the reason rather than going quiet, and so does this.
+            return f"SAM 用不了：{self.sam_reason} / SAM unavailable: {self.sam_reason}"
         return ""
 
     @S.guard
@@ -589,12 +640,15 @@ class AssistMixin:
         if not alternates:
             self.report(NO_ALTERNATE)
             return
+        # A new box is a new prompt: whatever is in flight for the old one must
+        # not land, and its candidates are not this box's answers.
+        note = self._drop_prompt_for_new_box()
         total = len(alternates) + 1
         self._prompt_rank = (self._prompt_rank + 1) % total
         if self._prompt_rank == 0:
             self._arm_prompt_box(self._rank_one)
             self.report(f"提示框 1/{total}：差异图原本给的那块 / "
-                        f"prompt box 1/{total}: the difference map's own")
+                        f"prompt box 1/{total}: the difference map's own{note}")
             return
         part = alternates[self._prompt_rank - 1]
         box = tuple(float(v) for v in part.box)
@@ -605,7 +659,7 @@ class AssistMixin:
         self.report(f"提示框 {self._prompt_rank + 1}/{total}："
                     f"{tuple(int(v) for v in part.box)}（{part.area} 像素，"
                     f"在十字处点一下）/ prompt box {self._prompt_rank + 1}/{total} "
-                    f"from the split difference map")
+                    f"from the split difference map{note}")
 
     def unexplained_boxes(self) -> list[Box]:
         """Boxes of the changes nothing on this frame accounts for."""

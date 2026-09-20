@@ -534,6 +534,11 @@ class RoiMixin:
             self.report_error(f"refused: {refused}")
             return
         self.set_sam_instance(offer["instance"])
+        # The layer is about to be replaced from outside the tool, which is
+        # what ``_sync_editing_layer`` handles on every other such path -- and
+        # ``set_sam_instance`` above does nothing at all when the restored
+        # instance is the one already being edited, which is the common case.
+        self.reset_sam_prompt()
         self.set_editing_mask(offer["mask"])
         # The layer is back; so is what it was built from, or the commit that
         # follows would file somebody's adopted draft as hand-drawn work.

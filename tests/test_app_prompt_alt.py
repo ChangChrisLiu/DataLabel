@@ -17,6 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import pytest
+from PySide6.QtGui import QKeyEvent, QKeySequence
 from PySide6.QtWidgets import QApplication
 
 from app_scene import (
@@ -95,6 +96,13 @@ def _stand_on_a_card_item(win) -> None:
         if 0 <= index < len(rows) and rows[index].get("kind") == api.KIND_ADD_SHAPE:
             return
     pytest.skip("no frame of the scene asks for a shape to be drawn")
+
+
+def _key(spec: str) -> QKeyEvent:
+    """A ``QKeyEvent`` for a portable key string, as ``handle_key`` sees it."""
+    combination = QKeySequence.fromString(spec)[0]
+    return QKeyEvent(QKeyEvent.Type.KeyPress, int(combination.key()),
+                     combination.keyboardModifiers())
 
 
 def _start_edit(win) -> str:
@@ -451,8 +459,173 @@ def test_shift_c_is_inert_while_a_draft_ghost_owns_the_keys(window):
 
 
 # --------------------------------------------------------------------------- #
+# a new box is a new prompt (round 1, I-1)
+# --------------------------------------------------------------------------- #
+def _armed_and_clicked(win, clicks: int = 1):
+    """Arm rank 1, start an edit, and leave ``clicks`` SAM prompts in flight."""
+    rank1, alts = _arm_with_alternates(win)
+    _start_edit(win)
+    win.act_tool("sam_point")
+    win.begin_add_shape(rank1)
+    for i in range(clicks):
+        win.sam_point.on_press(float(rank1.box[0] + 2 + i),
+                               float(rank1.box[1] + 2 + i), None)
+    return rank1, alts
+
+
+def test_shift_c_invalidates_the_prompt_that_is_still_in_flight(window):
+    """A new box is a new prompt: the token has to move with it."""
+    _armed_and_clicked(window)
+    assert window.sam_queue.pending() == 1
+    before = (window.sam_point._token, window.sam_box._token)
+
+    window.act_cycle_prompt_box()
+
+    assert (window.sam_point._token, window.sam_box._token) != before
+
+
+def test_a_sam_result_that_lands_after_shift_c_is_not_applied(window):
+    """The answer to the *previous* box must not be painted under the new one."""
+    _armed_and_clicked(window)
+    layer = window.overlay.editing.copy()
+
+    window.act_cycle_prompt_box()
+    window.sam_queue.flush()
+    QApplication.processEvents()
+
+    assert np.array_equal(window.overlay.editing, layer), (
+        "the rank-1 mask landed after the box had already moved to rank 2")
+
+
+def test_c_has_nothing_to_cycle_right_after_shift_c(window):
+    """The three masks belonged to the box that is no longer armed."""
+    _armed_and_clicked(window)
+    window.sam_queue.flush()
+    QApplication.processEvents()
+    assert window.sam_point.candidate_count >= 2, "the stub answered with one mask"
+
+    window.act_cycle_prompt_box()
+
+    assert window.sam_point.candidate_count == 0
+    window.act_cycle_candidate()
+    assert "no other SAM candidate" in window.status_message()
+
+
+def test_points_clicked_before_shift_c_are_gone(window):
+    """A point on the part inside box 1 is not a point on the part inside box 2."""
+    _rank1, alts = _armed_and_clicked(window, clicks=2)
+    assert len(window.sam_point.points) == 2
+
+    window.act_cycle_prompt_box()
+
+    assert window.sam_point.points == []
+    window.sam_queue.requests.clear()
+    window.sam_point.on_press(float(alts[0].point[0]), float(alts[0].point[1]), None)
+    assert len(window.sam_queue.requests) == 1
+    fresh = window.sam_queue.requests[-1]
+    assert len(fresh.points) == 1, "the previous box's points came along"
+    assert fresh.box is not None
+
+
+def test_a_mask_already_applied_for_rank_one_stays_and_undo_removes_it(window):
+    """``reset_prompt`` drops the prompt, never the layer -- and says so.
+
+    The annotator may have brushed on top of the SAM result already, and one
+    undoable step cannot tell "the mask" from "the mask plus my three strokes",
+    so rolling it back here would be the thing that loses work.  It stays as
+    ordinary uncommitted pixels, the status line says so, and ``Ctrl+Z`` takes
+    it off -- exactly what ``Esc`` on the instance change does today.
+    """
+    _armed_and_clicked(window)
+    window.sam_queue.flush()
+    QApplication.processEvents()
+    applied = window.overlay.editing.copy()
+    assert applied.any(), "the stub applied no mask"
+
+    window.act_cycle_prompt_box()
+
+    assert np.array_equal(window.overlay.editing, applied)
+    message = window.status_message()
+    assert "Ctrl+Z" in message and ("留着" in message or "stays" in message)
+
+    window.act_undo()
+    QApplication.processEvents()
+    assert not window.overlay.editing.any(), "Ctrl+Z did not take the mask off"
+
+
+# --------------------------------------------------------------------------- #
+# the rest of the funnels (round 1, minors 3 and 4)
+# --------------------------------------------------------------------------- #
+def test_a_detour_through_review_mode_puts_the_box_back_to_rank_one(window):
+    rank1, _alts = _arm_with_alternates(window)
+    window.act_cycle_prompt_box()
+    assert window.prompt_rank() == 2
+
+    window.set_mode(A.MODE_REVIEW)
+    window.set_mode(A.MODE_ANNOTATE)
+
+    assert window.prompt_rank() == 1
+    assert window._prompt_box == tuple(float(v) for v in rank1.box)
+    assert window.canvas.prompt_point() is None
+
+
+def test_restoring_a_sidecar_for_the_instance_already_in_edit_resets_the_rank(window):
+    """The layer is replaced from outside the tool; the rank goes with it."""
+    rank1, _alts = _arm_with_alternates(window)
+    instance = _start_edit(window)
+    window.begin_add_shape(rank1)
+    window.act_cycle_prompt_box()
+    assert window.prompt_rank() == 2
+
+    mask = np.zeros(window.overlay.hw, dtype=bool)
+    mask[2:8, 2:8] = True
+    window._restore_offer = {"instance": instance, "mask": mask,
+                             "key": window.session.current(), "adopted": []}
+    window.restore_pending()
+
+    assert window.session.editing_instance == instance, "the restore was refused"
+    assert window.prompt_rank() == 1
+    assert window._prompt_box == tuple(float(v) for v in rank1.box)
+    assert window.sam_point.points == []
+
+
+# --------------------------------------------------------------------------- #
 # the key map
 # --------------------------------------------------------------------------- #
+def test_shift_c_says_why_when_sam_is_unavailable(window):
+    _rank1, _alts = _arm_with_alternates(window)
+    before = window._prompt_box
+    window.set_sam_unavailable("no checkpoint")
+
+    window.act_cycle_prompt_box()
+
+    assert window.prompt_rank() == 1
+    assert window._prompt_box == before
+    assert "no checkpoint" in window.status_message()
+
+
+def test_shift_c_from_the_keyboard_ends_the_flash_and_then_cycles(window):
+    """``handle_key`` ends a flash before any non-hold action, ``Shift+C`` too.
+
+    The slot's own refusal covers a programmatic call; through the keyboard the
+    annotator never sees it, because the press that would have been refused is
+    also the press that puts their own frame back on the canvas.
+    """
+    _rank1, alts = _arm_with_alternates(window)
+    window.act_cycle_prompt_box()
+    window.act_flash_compare(True)
+    if not window.is_flashing():
+        pytest.skip("the scene has no neighbour frame to flash")
+    assert window.prompt_rank() == 1, "the flash did not put the box back"
+
+    assert window.handle_key(_key("Shift+C")) is True
+
+    assert not window.is_flashing()
+    assert window.prompt_rank() == 2
+    assert window._prompt_box == tuple(float(v) for v in alts[0].box)
+
+
+
 def test_shift_c_is_in_the_actions_table_and_c_still_cycles_masks():
     names = {a.name: a for a in A.ACTIONS}
     assert names["cycle_candidate"].keys == ("C",)
