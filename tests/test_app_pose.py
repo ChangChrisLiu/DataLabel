@@ -117,6 +117,8 @@ def test_the_dialog_is_told_how_many_shapes_the_boundary_cuts(window: MainWindow
     window.act_split_pose()
 
     assert expected > 0 and asked[0]["straddles"] == expected
+    # a hand-typed break has no measured movement, so the box starts off
+    assert asked[0]["default"] is False
     carried = [k for k in window.db.keyframes(DESKTOP, VIEW) if k.source == "carried"]
     assert len(carried) == expected
     assert all(k.anchor_step == CUT - 1 and k.pose_segment == 1 for k in carried)

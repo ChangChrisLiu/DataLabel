@@ -220,10 +220,11 @@ class PoseMixin:
             return
         straddles = self.db.straddling_keyframes(int(key.desktop), str(key.view),
                                                  int(key.step))
-        wanted = self.ask_pose_split(
-            key, len(straddles),
-            carry if carry is not None else len(straddles) == 0,
-            note=(proposal or {}).get("note") or "")
+        # A break somebody typed by hand carries no measured movement, so the
+        # checkbox starts off: they are cutting here because the shapes do not
+        # fit any more, which is what "redraw in the new pose" means.
+        wanted = self.ask_pose_split(key, len(straddles), bool(carry),
+                                     note=(proposal or {}).get("note") or "")
         if wanted is None:
             return
         with self.db.transaction():
