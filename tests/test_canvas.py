@@ -1490,6 +1490,26 @@ def test_the_roi_tool_resizes_moves_and_redraws(qapp):
     assert boxes[-1] == (2.0, 2.0, 12.0, 14.0)
 
 
+def test_a_click_outside_the_rectangle_does_not_shrink_it_to_a_sliver(qapp):
+    """A drag too small to be a rectangle puts the draft back on screen."""
+    canvas = _blank_canvas()
+    canvas.set_zoom(1.0)
+    tool = RoiBoxTool(canvas, None)
+    tool.set_rect((20.0, 40.0, 120.0, 140.0))
+    boxes: list[object] = []
+    previews: list[object] = []
+    tool.sigBox.connect(boxes.append)
+    tool.sigPreview.connect(previews.append)
+
+    tool.on_press(2.0, 2.0, None)
+    tool.on_move(3.0, 3.0, None)           # one image pixel: not a rectangle
+    tool.on_release(3.0, 3.0, None)
+
+    assert boxes == [], "a click stored a sliver"
+    assert previews[-1] == (20.0, 40.0, 120.0, 140.0), "the draft was not put back"
+    assert tool.rect == (20.0, 40.0, 120.0, 140.0)
+
+
 def test_the_roi_tool_cursor_says_where_the_handles_are(qapp):
     canvas = _blank_canvas()
     canvas.set_zoom(1.0)

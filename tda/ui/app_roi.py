@@ -356,8 +356,14 @@ class RoiMixin:
 
     @S.guard
     def on_roi_preview(self, box: object) -> None:
-        """Mid-drag: draw what the rectangle would be, store nothing."""
+        """Mid-drag: draw what the rectangle would be, store nothing.
+
+        ``None`` is the tool taking a gesture back -- a click, or a drag too
+        small to be a rectangle -- and the draft on screen goes back to the one
+        the window holds.
+        """
         if box is None:
+            self._show_roi_rect()
             return
         self.canvas.set_roi(tuple(float(v) for v in box), editing=True)
 

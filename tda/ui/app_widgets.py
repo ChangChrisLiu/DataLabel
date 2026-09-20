@@ -163,7 +163,18 @@ class RoiBoxTool(BoxDragTool):
         if mode is None:
             return
         if mode == "draw":
+            before, self._before = self._before, None
+            box = self._norm(x, y) if self._start is not None else None
             super().on_release(x, y, ev)
+            if box is None or (box[2] - box[0] < MIN_BOX_PX
+                               or box[3] - box[1] < MIN_BOX_PX):
+                # A click, or a drag too small to be a rectangle: ``sigBox``
+                # was not emitted, so the window still holds the old draft and
+                # the canvas has to be put back to it rather than left showing
+                # the sliver the preview drew on the way.
+                self.rect = before
+                self.sigPreview.emit(before)
+                return
             self.rect = self.box
             return
         moved = self._moved(x, y, mode)
