@@ -25,10 +25,17 @@ from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 
-__all__ = ["FLASH_UNNAMED", "KeysMixin"]
+__all__ = ["FLASH_UNNAMED", "KEY_SWALLOWED", "KeysMixin"]
 
 #: ``_flashing`` when a neighbour is on screen but its step number is unknown.
 FLASH_UNNAMED = -1
+
+#: Shown when a key that *is* a shortcut went into a text field instead.  A
+#: shortcut that silently does nothing is a shortcut the annotator presses
+#: again, harder, and then works for ten minutes with the wrong tool armed
+#: (task U1, report 1, ruling R1).
+KEY_SWALLOWED = ("快捷键没生效：焦点在输入框里，先点一下画布 / that key went into "
+                 "a text field, not the canvas -- click the canvas first")
 
 
 class KeysMixin:
@@ -68,7 +75,14 @@ class KeysMixin:
         if not self._shortcut_context_ok():
             return False
         focus = self._focus_widget()
-        if A.blocks_shortcuts(focus) or A.navigates_a_list(focus, event.key()):
+        if A.blocks_shortcuts(focus):
+            if (event.type() == QEvent.Type.KeyPress
+                    and not event.isAutoRepeat()
+                    and A.action_for(event.key(), event.modifiers(),
+                                     self.mode) is not None):
+                self.report(KEY_SWALLOWED)
+            return False
+        if A.navigates_a_list(focus, event.key()):
             return False
         action = A.action_for(event.key(), event.modifiers(), self.mode)
         if action is None:

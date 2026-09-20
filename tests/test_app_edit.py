@@ -312,6 +312,140 @@ def test_shift_r_re_edits_the_roi_and_escape_keeps_the_old_one(qapp, tmp_path):
         close_window(win)
 
 
+# --------------------------------------------------------------------------- #
+# the ROI explains itself and never disappears silently (task U1, report 2)
+# --------------------------------------------------------------------------- #
+# "ROI 这个不是很明显，让我很迷惑" -- the annotator did not know what the
+# rectangle was, that it was waiting for an answer, or what it was for; and
+# starting an edit made it vanish with nothing stored and nothing said.
+def _roi_bar_text(win: MainWindow) -> str:
+    return win.roi_bar.label.text() if win.roi_bar.isVisibleTo(win) else ""
+
+
+def _shown(win: MainWindow, name: str) -> bool:
+    return win._roi_buttons[name].isVisibleTo(win.roi_bar)
+
+
+def test_the_proposal_bar_says_what_the_rectangle_is_for_and_what_to_do(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        assert win.roi_editing is True
+        text = _roi_bar_text(win)
+        assert "机箱范围" in text and "ROI" in text
+        assert "差异图" in text and "SAM" in text, "what it is for"
+        assert "Enter" in text and "Esc" in text and "Shift+R" in text
+        assert _shown(win, "save") and _shown(win, "skip")
+        assert not _shown(win, "none")
+        assert win.roi_label.text().startswith("ROI 未确认")
+    finally:
+        close_window(win)
+
+
+def test_starting_an_edit_leaves_a_reminder_instead_of_silence(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        card = [r for r in win.session.task_card() if r.get("instance")]
+        win.on_request_edit(str(card[0]["instance"]))     # the silent dismissal
+
+        assert win.roi_editing is False
+        assert win.roi() is None
+        assert win.roi_unanswered() is True
+        text = _roi_bar_text(win)
+        assert "ROI 未确认" in text and "整张图" in text
+        assert _shown(win, "accept") and _shown(win, "redraw") and _shown(win, "none")
+        assert not _shown(win, "save")
+        assert win.roi_label.text().startswith("ROI 未确认")
+    finally:
+        close_window(win)
+
+
+def test_the_reminder_survives_a_frame_change_inside_the_segment(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win.act_clear_edit()                   # Esc: skipped
+        assert win.roi_unanswered() is True
+        win.act_step(-1)
+        QApplication.processEvents()
+        assert win.roi_editing is False, "it must not pop up on every frame"
+        assert win.roi_unanswered() is True, "...and it must not go quiet either"
+        assert "ROI 未确认" in _roi_bar_text(win)
+    finally:
+        close_window(win)
+
+
+def test_confirming_the_proposal_stores_it_as_it_stands(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        offered = tuple(win.roi_draft)
+        win.act_tool("brush")                  # the proposal leaves the screen
+        assert win.roi_editing is False and win.roi() is None
+
+        win.act_accept_roi_proposal()          # 确认建议框
+        assert tuple(win.roi()) == offered
+        assert win.roi_unanswered() is False
+        assert _roi_bar_text(win) == ""
+        assert win.roi_label.text() == "ROI ✓"
+    finally:
+        close_window(win)
+
+
+def test_no_roi_is_an_answer_and_is_remembered_for_the_segment(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        key = win.roi_key()
+        win.act_no_roi()                       # 不用 ROI
+        assert win.roi_editing is False
+        assert win.roi() is None
+        assert win.roi_unanswered() is False
+        assert key in win._roi_dismissed
+        assert _roi_bar_text(win) == ""
+        assert win.roi_label.text().startswith("无 ROI")
+
+        win.act_step(-1)
+        QApplication.processEvents()
+        assert win.roi_editing is False and _roi_bar_text(win) == ""
+    finally:
+        close_window(win)
+
+
+def test_a_stored_roi_never_asks_and_is_drawn_thin(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win.act_commit()
+        stored = tuple(win.roi())
+        assert win.roi_unanswered() is False
+        assert _roi_bar_text(win) == ""
+        assert win.canvas.roi_rect() == tuple(float(v) for v in stored)
+        assert win.roi_label.text() == "ROI ✓"
+    finally:
+        close_window(win)
+
+
+def test_dragging_a_handle_resizes_the_proposal_rather_than_replacing_it(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        x0, y0, x1, y1 = (float(v) for v in win.roi_draft)
+        assert win.active_tool is win.roi_tool
+        assert win.roi_tool.rect == (x0, y0, x1, y1)
+
+        win.roi_tool.on_press(x1, y1, None)          # the se handle
+        win.roi_tool.on_move(x1 + 3, y1 + 3, None)
+        win.roi_tool.on_release(x1 + 3, y1 + 3, None)
+        QApplication.processEvents()
+
+        grown = tuple(win.roi_draft)
+        assert grown[:2] == (int(x0), int(y0)), "the far corner moved too"
+        assert grown[2] >= int(x1) and grown[3] >= int(y1)
+    finally:
+        close_window(win)
+
+
 def test_fit_roi_zooms_to_the_stored_rectangle(window):
     window.act_commit()                       # store the proposed ROI
     window.canvas.set_zoom(1.0)

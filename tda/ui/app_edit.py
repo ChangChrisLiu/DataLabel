@@ -29,7 +29,7 @@ from tda.ui import app_compat as compat
 from tda.ui import app_priors
 from tda.ui import app_support as S
 from tda.ui import session_api as api
-from tda.ui.app_widgets import Bar, BoxDragTool
+from tda.ui.app_widgets import Bar, BoxDragTool, RoiBoxTool
 from tda.ui.canvas.tools import BrushTool, EraserTool, OccluderTool
 
 __all__ = ["BLOCK_HINT", "BoxDragTool", "EditMixin", "DESPECKLE_MIN_PX",
@@ -63,6 +63,11 @@ SIDECAR_BROKEN = ("崩溃保护已失效：{why} —— 请尽快提交，崩溃
                   "(the crash sidecar cannot be written)")
 
 
+def _px(mask) -> int:
+    """How many pixels a boolean layer holds; 0.26 ms at 12 MP, against 4.9."""
+    return 0 if mask is None else int(np.count_nonzero(mask))
+
+
 def _is_right(ev: Any) -> bool:
     """Was this press the right button?  Stubs may not answer at all."""
     button = getattr(ev, "button", None)
@@ -80,11 +85,12 @@ class EditMixin:
         self.brush = BrushTool(self.canvas, None)
         self.eraser = EraserTool(self.canvas, None)
         self.occluder = OccluderTool(self.canvas, None)
-        self.roi_tool = BoxDragTool(self.canvas, None)
+        self.roi_tool = RoiBoxTool(self.canvas, None)
         self.bench_tool = BoxDragTool(self.canvas, None)
         for tool in (self.brush, self.eraser, self.occluder):
             tool.sigStroke.connect(self.on_stroke)
         self.roi_tool.sigBox.connect(self.on_roi_box)
+        self.roi_tool.sigPreview.connect(self.on_roi_preview)
         self.bench_tool.sigBox.connect(self.on_bench_box)
         # Connected before any tool is attached, so the window sees a press
         # first and can adopt an instance for it (or mark it as doomed).
@@ -126,6 +132,17 @@ class EditMixin:
         #: unbounded box, silently.  A re-cut always moves a range, so the key
         #: cannot survive one.
         self._roi_dismissed: set[tuple] = set()
+        #: The segment whose ROI question nobody has answered yet, or ``None``.
+        #: Dismissing the *rectangle* (``Esc``, picking a tool, starting an
+        #: edit) stops it popping up on every frame -- that is what
+        #: :attr:`_roi_dismissed` is for -- but it does not answer the
+        #: question, and the annotator's first trial ended with the rectangle
+        #: gone, no ROI stored, and nothing on screen saying so. While this is
+        #: set the ROI bar keeps a one-line reminder up (ruling U-ROI-3).
+        self._roi_pending: Optional[tuple] = None
+        #: The last rectangle offered or dragged for :attr:`_roi_pending`, kept
+        #: across a dismissal so that "确认建议框" has something to store.
+        self._roi_proposal: Optional[tuple] = None
         self._pending_scope: Optional[str] = None
         self._restore_offer: Optional[dict] = None
         #: The instance an ``add_bench_box`` card item armed the box tool for.
@@ -149,9 +166,27 @@ class EditMixin:
         self.restore_bar = Bar(self)
         self.restore_bar.add_button("恢复 Restore", self.restore_pending)
         self.restore_bar.add_button("丢弃 Discard", self.discard_pending)
+        # The ROI bar carries both halves of the question -- the rectangle
+        # while it is up, and the compact reminder afterwards -- because they
+        # are one conversation and two bars would be two things to dismiss.
+        # Non-modal like its neighbours: ``Enter`` and ``Esc`` belong to the
+        # rectangle itself through the layered ownership chain in
+        # ``act_commit``/``act_clear_edit``, never to a button's focus.
+        self.roi_bar = Bar(self)
+        self._roi_buttons = {
+            "save": self.roi_bar.add_button("保存 Enter", self.act_commit),
+            "skip": self.roi_bar.add_button("跳过 Esc", self.act_clear_edit),
+            "accept": self.roi_bar.add_button("确认建议框 Use it",
+                                              self.act_accept_roi_proposal),
+            "redraw": self.roi_bar.add_button("重画 Shift+R", self.act_edit_roi),
+            "none": self.roi_bar.add_button("不用 ROI No ROI", self.act_no_roi),
+        }
+        for button in self._roi_buttons.values():
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._central_layout.addWidget(self.warn_bar)
         self._central_layout.addWidget(self.scope_bar)
         self._central_layout.addWidget(self.restore_bar)
+        self._central_layout.addWidget(self.roi_bar)
 
     @S.guard
     def _on_zoom_changed(self, _factor: float) -> None:
@@ -232,6 +267,7 @@ class EditMixin:
                     self.cancel_roi_edit()
             elif self.roi_key() not in self._roi_dismissed and not self.roi_editing:
                 self.start_roi_edit()
+        self.on_frame_changed_roi()
         self._offer_restore(key)
 
     def roi_key(self) -> Optional[tuple]:
@@ -265,6 +301,8 @@ class EditMixin:
         """
         self._roi_dismissed.clear()
         self._roi_awaiting = False
+        self._roi_pending = None
+        self._roi_proposal = None
         self.roi_proposer.cancel()
 
     def _sync_editing_layer(self, repaint: bool = True) -> None:
@@ -290,9 +328,16 @@ class EditMixin:
             return
         instance = getattr(self.session, "editing_instance", None)
         mask = self.session.editing_mask() if instance else None
+        was_px = _px(self.overlay.editing)
         if instance and mask is not None and tuple(mask.shape) == self.overlay.hw:
+            # Somebody outside the tools replaced the layer -- a commit, Esc, an
+            # undo, a restored sidecar.  Whatever it was, the annotator has to
+            # be able to find it in the log next to the strokes it replaced.
+            self.note_layer_size("layer replaced", instance, was_px, _px(mask))
             self.overlay.set_editing(instance, mask)
         else:
+            if was_px:
+                self.note_layer_size("layer cleared", instance, was_px, 0)
             self.overlay.clear_editing()
         if repaint:
             self.canvas.refresh()
@@ -361,6 +406,10 @@ class EditMixin:
         """
         self._paint_blocked = False
         self._blocked_layer = None
+        # A click on the canvas is the annotator saying "I am working here":
+        # the next letter key has to be a shortcut, not something a panel that
+        # still holds the focus swallows (ruling R1).
+        self.canvas.setFocus(Qt.FocusReason.MouseFocusReason)
         if self.is_flashing():
             # The tools are detached while flashing, so nothing is going to
             # paint; this is only here to say why the click did nothing.  Held,
@@ -425,9 +474,11 @@ class EditMixin:
         # so a ghost offered for the previous instance would still be on screen.
         self.forget_draft_ghost()
         self.bench_instance = str(instance)
+        self.note_tool_switch("bench_box", via="task card")
         self._tool_name = "bench_box"
         self.set_sam_instance(None)
         self._attach_tool()
+        self.focus_canvas()
         self.update_status()
         self.report(f"{instance}: 拖一个台面框（R）/ drag the staging-area box for it")
 
@@ -486,6 +537,9 @@ class EditMixin:
         self._attach_tool()
         self.arm_prompt_box_for(instance)
         self._offer_restore(self.session.current(), instance)
+        # The panel was activated with a double-click, so it has the keyboard;
+        # give it straight back, or the next ``B`` is a list keystroke.
+        self.focus_canvas()
         self.report(f"editing {instance}")
 
     @S.guard
@@ -501,10 +555,43 @@ class EditMixin:
             self._revert_blocked_stroke()
             return
         self._invalidate_area_warning()
-        compat.push_stroke(self.session, instance,
-                           getattr(tool, "stroke_before", None), self.overlay.editing)
+        before = getattr(tool, "stroke_before", None)
+        self.note_layer_change("stroke", instance, before, self.overlay.editing)
+        compat.push_stroke(self.session, instance, before, self.overlay.editing)
         self.queue_sidecar(self.session.current(), instance, self.overlay.editing)
         self.update_status()
+
+    def note_layer_change(self, why: str, instance: Optional[str],
+                          before, after) -> None:
+        """One INFO line per change of the editing layer (ruling R3).
+
+        The trial's log held four SAM prompts and nothing else, so there was no
+        way to tell a brush stroke from a box drag afterwards -- which is
+        exactly the question the annotator's report turned on.  One line, never
+        a pixel dump: the tool, the instance, what went in and out, and the
+        layer's size before and after.
+
+        Counted with :func:`numpy.count_nonzero` and **one** temporary rather
+        than the obvious ``(after & ~before).sum()``: at 12 MP that spelling is
+        10.6 ms against 3, and this runs inside B7's window-gesture budget.
+        """
+        after_px = _px(after)
+        if before is None:
+            added, removed, was = after_px, 0, 0
+        else:
+            both = _px(np.asarray(before, dtype=bool)
+                       & np.asarray(after, dtype=bool))
+            was = _px(before)
+            added, removed = after_px - both, was - both
+        self.logger.info("%s tool=%s instance=%s +%d/-%d px layer %d -> %d",
+                         why, self._tool_name, instance, added, removed,
+                         was, after_px)
+
+    def note_layer_size(self, why: str, instance: Optional[str],
+                        was_px: int, now_px: int) -> None:
+        """The same line for a replacement, where the diff is not worth 12 MP."""
+        self.logger.info("%s tool=%s instance=%s layer %d -> %d px",
+                         why, self._tool_name, instance, int(was_px), int(now_px))
 
     def _invalidate_area_warning(self) -> None:
         """Take back a size warning whose mask has just changed underneath it.

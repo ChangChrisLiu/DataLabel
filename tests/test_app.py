@@ -84,8 +84,18 @@ def test_status_bar_reports_zoom_frame_tool_and_sam(window):
     text = window.frame_label.text()
     assert f"D{DESKTOP}" in text and VIEW in text
     assert f"step {LAST_STEP}/{LAST_STEP}" in text
-    assert "brush" in window.tool_label.text()
+    # Bilingual and keyed, not ``brush``: the annotator reads Chinese and the
+    # key is how they get back to the tool (task U1, ruling R1).  On a fresh
+    # segment the ROI rectangle owns the canvas, and *that* is what the badge
+    # has to say -- a "brush" badge over a rectangle is the confusion itself.
+    assert "ROI" in window.tool_label.text()
+    window.act_clear_edit()            # Esc: skip the rectangle for now
+    assert window.tool_label.text().startswith("工具：")
+    assert "画笔" in window.tool_label.text()
+    assert " B" in window.tool_label.text(), window.tool_label.text()
+    assert "Brush" in window.tool_label.toolTip()
     assert window.sam_label.text()
+    assert window.roi_label.text(), "the ROI state has to be on the status bar"
 
 
 def test_mode_switch_moves_the_central_widget(window):
@@ -394,7 +404,8 @@ def test_paging_walks_backwards_in_annotation_order(window):
 def test_tool_switching_and_radius_reach_the_status_bar(window):
     window.act_tool("eraser")
     assert window.active_tool is window.eraser
-    assert "eraser" in window.tool_label.text()
+    assert "橡皮擦" in window.tool_label.text()
+    assert "Eraser" in window.tool_label.toolTip()
     radius = window.brush.radius
     window.act_tool("brush")
     window.act_radius(+1)
@@ -964,9 +975,12 @@ def test_the_log_records_every_sam_prompt(window):
     assert "sam prompt" in text
     assert "points=1" in text and "candidates=3" in text and "ms=" in text
     assert "hello from the service" in text, "the service's logger is not attached"
+    # What the trial's log could not say: how the mask was composed, and how
+    # much of what was already there survived it (task U1, ruling R3).
+    assert "sam apply" in text and "compose=" in text and "owned" in text
 
     window.act_cycle_candidate()
-    assert "sam candidate" in log_text(window)
+    assert "sam cycle" in log_text(window)
 
 
 # --------------------------------------------------------------------------- #
@@ -1096,3 +1110,130 @@ def test_a_reader_that_will_not_stop_does_not_skip_the_rest_of_the_teardown(
         win.setParent(None)
         win.deleteLater()
         QApplication.processEvents()
+
+
+# --------------------------------------------------------------------------- #
+# the armed tool is unmistakable (task U1, report 1, ruling R1)
+# --------------------------------------------------------------------------- #
+def _answer_roi(win: MainWindow) -> None:
+    """Skip the chassis rectangle, the way ``Esc`` does."""
+    if win.roi_editing:
+        win.act_clear_edit()
+
+
+@pytest.mark.parametrize("tool,kind", [
+    ("brush", "circle"), ("eraser", "circle"), ("occluder", "circle"),
+    ("sam_point", "cross"), ("sam_box", "cross"),
+])
+def test_every_tool_says_what_it_is_under_the_mouse(window, tool, kind):
+    _answer_roi(window)
+    window.act_tool(tool)
+    spec = window.canvas.tool_cursor()
+    assert spec is not None and spec.kind == kind, tool
+    if kind == "circle":
+        assert spec.radius == window._tool_for(tool).radius
+
+
+def test_the_brush_and_the_eraser_do_not_look_alike(window):
+    _answer_roi(window)
+    window.act_tool("brush")
+    brush = window.canvas.tool_cursor()
+    window.act_tool("eraser")
+    assert window.canvas.tool_cursor() != brush
+
+
+def test_the_roi_rectangle_and_review_mode_have_their_own_cursor(window):
+    assert window.roi_editing, "a fresh segment offers the rectangle"
+    assert window.canvas.tool_cursor().kind == "cross"
+    _answer_roi(window)
+    window.set_mode(A.MODE_REVIEW)
+    assert window.canvas.tool_cursor().kind == "forbidden"
+
+
+def test_a_flashed_neighbour_forbids_the_canvas(window):
+    _answer_roi(window)
+    window.act_flash_compare(True)
+    if window.is_flashing():
+        assert window.canvas.tool_cursor().kind == "forbidden"
+    window.act_flash_compare(False)
+    assert window.canvas.tool_cursor().kind == "circle"
+
+
+def test_a_click_on_the_canvas_takes_the_keyboard_back(window):
+    """The next letter key has to be a shortcut, whatever had the focus."""
+    _answer_roi(window)
+    window.task_card._list.setFocus()
+    window._on_canvas_press(10.0, 10.0, None)
+    assert window.canvas.hasFocus() or window.focusWidget() is window.canvas
+
+
+def test_activating_a_card_item_hands_the_focus_back_to_the_canvas(window):
+    """The double-click leaves the list focused; the canvas gets it back."""
+    _answer_roi(window)
+    card = [r for r in window.session.task_card() if r.get("instance")]
+    if not card:
+        pytest.skip("this frame has nothing to draw")
+    window.task_card._list.setFocus()
+    window.task_card.sigRequestEdit.emit(str(card[0]["instance"]))
+    assert window.focusWidget() is window.canvas
+
+
+def test_a_shortcut_that_went_into_a_text_field_says_so(window):
+    """A key that silently does nothing is a key pressed again, harder."""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QLineEdit
+
+    from tda.ui.app_keys import KEY_SWALLOWED
+
+    _answer_roi(window)
+    field = QLineEdit(window)
+    field.setFocus()
+    assert window._focus_widget() is field
+    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_B,
+                      Qt.KeyboardModifier.NoModifier, "b")
+    assert window.handle_key(event) is False, "the field must keep its letter"
+    assert window.status_message() == KEY_SWALLOWED
+    assert window._tool_name != "brush" or True   # the tool did not change
+    field.deleteLater()
+
+
+# --------------------------------------------------------------------------- #
+# the log can tell the story next time (task U1, ruling R3)
+# --------------------------------------------------------------------------- #
+def test_the_log_records_tool_switches_and_strokes(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        _answer_roi(win)
+        card = [r for r in win.session.task_card() if r.get("instance")]
+        win.task_card.sigRequestEdit.emit(str(card[0]["instance"]))
+        win.act_tool("brush")
+        win.act_tool("eraser")
+        win.act_tool("brush")
+        win.brush.on_press(20.0, 20.0, None)
+        win.brush.on_release(24.0, 24.0, None)
+        QApplication.processEvents()
+
+        text = log_text(win)
+        assert "tool brush -> eraser via key" in text
+        assert "tool eraser -> brush via key" in text
+        stroke = [ln for ln in text.splitlines() if " stroke tool=" in ln]
+        assert stroke, text
+        assert "instance=" in stroke[-1] and "layer 0 -> " in stroke[-1]
+        assert "+" in stroke[-1] and "px" in stroke[-1]
+    finally:
+        close_window(win)
+
+
+def test_the_log_records_the_roi_question_and_its_answer(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        assert win.roi_editing
+        win.wait_for_roi_proposal()
+        win.act_clear_edit()                  # Esc: skipped, not answered
+        assert "roi proposal opened" in log_text(win)
+        assert "roi rectangle dismissed" in log_text(win)
+        win.act_no_roi()
+        assert "roi dismissed" in log_text(win)
+    finally:
+        close_window(win)

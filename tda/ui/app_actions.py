@@ -53,6 +53,7 @@ __all__ = [
     "combos_of",
     "navigates_a_list",
     "shortcut_markdown",
+    "tool_key",
 ]
 
 MODE_STEPS = "steps"
@@ -299,6 +300,19 @@ def _candidates(key, modifiers) -> list[int]:
         if 0x21 <= code <= 0x3F and not (0x30 <= code <= 0x39):
             out.append(code | (mods & ~_SHIFT))
     return out
+
+
+def tool_key(name: str) -> str:
+    """The key that arms tool ``name``, or ``""`` for one with no binding.
+
+    The status bar shows the key next to the tool it arms, and it reads it from
+    here rather than from a second table: :data:`ACTIONS` is the only key map,
+    and a tool whose key moved must not keep the old one on screen.
+    """
+    for action in ACTIONS:
+        if action.name == f"tool_{name}" and action.keys:
+            return action.keys[0]
+    return ""
 
 
 def action_for(key, modifiers, mode: str = MODE_ANNOTATE) -> Optional[Action]:

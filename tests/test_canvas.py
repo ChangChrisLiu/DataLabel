@@ -31,8 +31,9 @@ from tda.ui.canvas.overlay import (
     LabelOverlay,
     palette_color,
 )
+from tda.ui.app_widgets import RoiBoxTool
 from tda.ui.canvas.tools import BrushTool, EraserTool, OccluderTool, Tool
-from tda.ui.canvas.view import ImageCanvas
+from tda.ui.canvas.view import CURSOR_MAX_PX, ImageCanvas, ToolCursor
 from tda.ui.commands import KINDS, Op, UndoStack, edit_editing_mask_op
 
 
@@ -1379,3 +1380,142 @@ def test_the_prompt_point_is_drawn_without_touching_hit_testing(qapp):
     assert seen == without
     canvas.set_prompt_point(None)
     assert canvas.prompt_point() is None
+
+
+# ---------------------------------------------------------------------------
+# the armed tool is visible under the mouse (task U1, report 1, ruling R1)
+# ---------------------------------------------------------------------------
+def _blank_canvas() -> ImageCanvas:
+    canvas = ImageCanvas()
+    canvas.resize(300, 300)
+    canvas.set_image(np.zeros((200, 200, 3), dtype=np.uint8))
+    return canvas
+
+
+def test_a_circle_cursor_is_the_size_of_the_stroke_and_follows_the_zoom(qapp):
+    canvas = _blank_canvas()
+    canvas.set_zoom(1.0)
+    canvas.set_tool_cursor(ToolCursor("circle", EDIT_RGB, radius=8))
+    assert canvas.cursor_diameter() == 17, "2r + 1 image px at 100 %"
+
+    canvas.set_zoom(4.0)
+    assert canvas.cursor_diameter() == 68, "the ring has to follow the wheel"
+    canvas.set_tool_cursor(ToolCursor("circle", EDIT_RGB, radius=2))
+    assert canvas.cursor_diameter() == 20, "... and the bracket keys"
+
+
+def test_an_unusable_circle_falls_back_to_a_crosshair(qapp):
+    canvas = _blank_canvas()
+    canvas.set_zoom(1.0)
+    canvas.set_tool_cursor(ToolCursor("circle", EDIT_RGB, radius=400))
+    assert canvas.cursor_diameter() > CURSOR_MAX_PX
+    assert canvas.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
+
+
+def test_the_eraser_cursor_is_not_the_brush_cursor(qapp):
+    brush = ToolCursor("circle", EDIT_RGB, radius=8)
+    eraser = ToolCursor("circle", (245, 245, 245), radius=8, dashed=True)
+    assert brush != eraser, "colour and dash are what tell them apart"
+
+
+def test_the_tool_cursor_survives_a_middle_drag_pan(qapp):
+    from PySide6.QtTest import QTest
+
+    canvas = _blank_canvas()
+    canvas.show()
+    QApplication.processEvents()
+    canvas.set_tool_cursor(ToolCursor("cross"))
+    vp = canvas.viewport()
+    QTest.mousePress(vp, Qt.MouseButton.MiddleButton,
+                     Qt.KeyboardModifier.NoModifier, QPoint(50, 50))
+    QTest.mouseRelease(vp, Qt.MouseButton.MiddleButton,
+                       Qt.KeyboardModifier.NoModifier, QPoint(60, 60))
+    assert vp.cursor().shape() == Qt.CursorShape.CrossCursor, (
+        "the pan put the arrow back and the armed tool became invisible"
+    )
+    canvas.close()
+
+
+# ---------------------------------------------------------------------------
+# the chassis rectangle (task U1, report 2, ruling U-ROI-2)
+# ---------------------------------------------------------------------------
+def test_the_roi_rectangle_offers_eight_handles_in_image_coordinates(qapp):
+    canvas = _blank_canvas()
+    canvas.set_roi((20, 40, 120, 140), editing=True)
+    handles = canvas.roi_handle_points()
+    assert set(handles) == {"nw", "n", "ne", "w", "e", "sw", "s", "se"}
+    assert handles["nw"] == (20.0, 40.0)
+    assert handles["se"] == (120.0, 140.0)
+    assert handles["n"] == (70.0, 40.0)
+    assert handles["e"] == (120.0, 90.0)
+
+
+def test_a_stored_roi_is_drawn_and_follows_the_overlays_key(qapp):
+    canvas = _blank_canvas()
+    canvas.set_roi((20, 40, 120, 140), editing=False)
+    assert canvas.roi_rect() == (20.0, 40.0, 120.0, 140.0)
+    assert canvas.roi_outline_visible is True
+    canvas.roi_outline_visible = False
+    canvas.viewport().update()          # must not raise with the outline hidden
+    QApplication.processEvents()
+
+
+def test_the_roi_tool_resizes_moves_and_redraws(qapp):
+    """Every gesture ruling U-ROI-2 asks for, on one rectangle."""
+    canvas = _blank_canvas()
+    canvas.set_zoom(1.0)
+    tool = RoiBoxTool(canvas, None)
+    tool.set_rect((20.0, 40.0, 120.0, 140.0))
+    canvas.set_roi(tool.rect, editing=True)
+    boxes: list[object] = []
+    tool.sigBox.connect(boxes.append)
+
+    assert tool.hit(20.0, 40.0) == "nw"
+    assert tool.hit(120.0, 90.0) == "e"
+    assert tool.hit(70.0, 90.0) == "inside"
+    assert tool.hit(5.0, 5.0) is None
+
+    tool.on_press(120.0, 140.0, None)      # the se corner
+    tool.on_move(150.0, 170.0, None)
+    tool.on_release(150.0, 170.0, None)
+    assert boxes[-1] == (20.0, 40.0, 150.0, 170.0)
+
+    tool.on_press(70.0, 90.0, None)        # inside: move the whole rectangle
+    tool.on_release(80.0, 100.0, None)
+    assert boxes[-1] == (30.0, 50.0, 160.0, 180.0)
+
+    tool.on_press(2.0, 2.0, None)          # empty canvas: draw a new one
+    tool.on_move(12.0, 14.0, None)
+    tool.on_release(12.0, 14.0, None)
+    assert boxes[-1] == (2.0, 2.0, 12.0, 14.0)
+
+
+def test_the_roi_tool_cursor_says_where_the_handles_are(qapp):
+    canvas = _blank_canvas()
+    canvas.set_zoom(1.0)
+    tool = RoiBoxTool(canvas, None)
+    tool.set_rect((20.0, 40.0, 120.0, 140.0))
+    assert tool.cursor_for(20.0, 40.0) == Qt.CursorShape.SizeFDiagCursor
+    assert tool.cursor_for(120.0, 40.0) == Qt.CursorShape.SizeBDiagCursor
+    assert tool.cursor_for(70.0, 40.0) == Qt.CursorShape.SizeVerCursor
+    assert tool.cursor_for(70.0, 90.0) == Qt.CursorShape.SizeAllCursor
+    assert tool.cursor_for(2.0, 2.0) == Qt.CursorShape.CrossCursor
+
+
+def test_a_resize_never_leaves_the_frame_or_an_inside_out_rectangle(qapp):
+    canvas = _blank_canvas()
+    canvas.set_zoom(1.0)
+    tool = RoiBoxTool(canvas, None)
+    tool.set_rect((20.0, 40.0, 120.0, 140.0))
+    boxes: list[object] = []
+    tool.sigBox.connect(boxes.append)
+
+    tool.on_press(20.0, 40.0, None)        # drag nw far past se
+    tool.on_release(400.0, 400.0, None)
+    x0, y0, x1, y1 = boxes[-1]
+    assert x0 < x1 and y0 < y1, "a resize turned the rectangle inside out"
+
+    tool.set_rect((20.0, 40.0, 120.0, 140.0))
+    tool.on_press(70.0, 90.0, None)        # move it off the top-left corner
+    tool.on_release(-500.0, -500.0, None)
+    assert boxes[-1] == (0.0, 0.0, 100.0, 100.0)

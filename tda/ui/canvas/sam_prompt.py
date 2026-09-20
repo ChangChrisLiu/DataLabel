@@ -158,14 +158,16 @@ class CandidatesMixin:
         self.stroke_before = self.overlay.editing.copy()
         instance = self._target_instance() or FALLBACK_INSTANCE
         owned = self._candidate_base
+        # ``count_nonzero`` throughout and one temporary: ``.sum()`` on a 12 MP
+        # boolean accumulates in int64 and costs 4.9 ms a call.
         log.info(
             "sam %s instance=%s candidate=%d/%d compose=%s layer %d -> %d px "
             "owned %d kept %d",
             why, instance, self._candidate_index + 1, len(renders),
             "union" if self._candidate_union else "replace-in-crop",
-            int(self.stroke_before.sum()), int(layer.sum()),
-            0 if owned is None else int(owned.sum()),
-            0 if owned is None else int((owned & layer).sum()),
+            int(np.count_nonzero(self.stroke_before)), int(np.count_nonzero(layer)),
+            0 if owned is None else int(np.count_nonzero(owned)),
+            0 if owned is None else int(np.count_nonzero(owned & layer)),
         )
         self.overlay.set_editing(instance, layer)
         if self.canvas is not None:
