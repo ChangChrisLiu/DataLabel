@@ -46,10 +46,11 @@ stored run lengths must not move by one byte
 (``tests/test_compiler_golden.py``):
 
 * a window is rounded **outwards** and may be larger than the shape; it may
-  never be smaller. A warped part is padded by :data:`WARP_SLACK` because
-  nearest-neighbour resampling can land a pixel just outside the transformed
-  box, and a part rasterised from a bare rectangle is padded because
-  ``fillPoly`` rounds its corners.
+  never be smaller. A warped part is padded by :func:`warp_slack`, which grows
+  with the transform's scale because nearest-neighbour resampling spreads one
+  source pixel over a ``scale x scale`` block of the output; a part rasterised
+  from a bare rectangle is padded by the same, because ``fillPoly`` rounds its
+  corners.
 * an **empty** part is still a layer. It takes part in the z-order and
   therefore in the hash, exactly as it did when it was a canvas of zeros.
 * the canvases are allocated in **Fortran order**, which is what
@@ -101,6 +102,7 @@ __all__ = [
     "CompiledInstance",
     "above",
     "compile_frame",
+    "warp_slack",
     "derive_visibility",
     "placements_for",
     "select_keyframe",
@@ -117,10 +119,38 @@ _MISSING = "missing"
 #: ``(x0, y0, x1, y1)``, upper bounds exclusive, already clipped to the canvas.
 Window = tuple[int, int, int, int]
 
-#: Pixels a window is grown by when the shape inside it was resampled rather
-#: than read off run lengths: a nearest-neighbour warp, or a rectangle
-#: rasterised by ``fillPoly``, can set a pixel just outside the exact box.
+#: The floor of :func:`warp_slack`: what a shape that was *rasterised* rather
+#: than read off run lengths can stray by. ``fillPoly`` rounds the corners it
+#: is given, so a rectangle can reach half a pixel past its exact box in each
+#: direction; two is that with room to spare.
 WARP_SLACK = 2
+
+#: How much of a source pixel's own width a nearest-neighbour warp can spread
+#: it over, as a fraction of the transform's scale.
+#:
+#: ``cv2.warpAffine`` without ``WARP_INVERSE_MAP`` sets destination pixel ``p``
+#: from source ``round(M^-1 p)``, so ``p`` is set exactly when ``M^-1 p`` lands
+#: within half a pixel of the source shape -- i.e. when ``p`` is inside the
+#: transformed shape grown by half a *source* pixel, which is ``scale / 2``
+#: destination pixels, and up to ``scale / sqrt(2)`` once the rotation is
+#: squared off into an axis-aligned box. 0.75 is above that for every angle.
+WARP_SPREAD = 0.75
+
+
+def warp_slack(transform: Similarity) -> int:
+    """How far past the transformed box a warped shape can reach, in pixels.
+
+    A window may be larger than the shape and may never be smaller, so this is
+    an upper bound and is deliberately loose: it is :data:`WARP_SLACK` (the
+    rasterising and rounding term, which does not depend on the transform) plus
+    :data:`WARP_SPREAD` of the scale (the resampling term, which does -- at
+    ``scale = 12`` a source pixel covers a twelve-pixel block of the output,
+    and a fixed two would have cut the shape off).
+
+    ``tests/test_compiler_window.py`` checks the bound by brute force against
+    the mask the warp actually produces, over 720 transforms.
+    """
+    return WARP_SLACK + int(np.ceil(WARP_SPREAD * abs(float(transform.scale))))
 
 #: The transform that leaves a mask where it is -- what an occluder RLE and a
 #: frame override are already in, so their windows are their own run lengths'.
@@ -328,9 +358,10 @@ def _rle_window(rle: dict, transform: Similarity, hw: tuple[int, int]) -> Window
     if transform.is_identity():
         return _clip_window(box, hw)
     warped = _transform_box(box, transform)
+    slack = warp_slack(transform)
     return _clip_window(
-        (warped[0] - WARP_SLACK, warped[1] - WARP_SLACK,
-         warped[2] + WARP_SLACK, warped[3] + WARP_SLACK), hw
+        (warped[0] - slack, warped[1] - slack,
+         warped[2] + slack, warped[3] + slack), hw
     )
 
 
@@ -346,9 +377,10 @@ def _part_window(
         return _rle_window(part.rle, transform, hw)
     if part.box is not None:
         box = _transform_box(part.box, transform)
+        slack = warp_slack(transform)
         return _clip_window(
-            (box[0] - WARP_SLACK, box[1] - WARP_SLACK,
-             box[2] + WARP_SLACK, box[3] + WARP_SLACK), hw
+            (box[0] - slack, box[1] - slack,
+             box[2] + slack, box[3] + slack), hw
         )
     return None
 

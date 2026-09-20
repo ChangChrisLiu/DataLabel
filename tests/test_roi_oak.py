@@ -192,3 +192,78 @@ def test_a_real_oak_frame_gets_a_chassis_sized_proposal(desktop, camera, step):
     assert box != full_frame(width, height), "no proposal on a frame that has one"
     frac = (box[2] - box[0]) * (box[3] - box[1]) / float(width * height)
     assert OAK_MIN_AREA_FRAC <= frac <= OAK_MAX_AREA_FRAC
+
+
+# --------------------------------------------------------------------------- #
+# the segment-wide proposal
+# --------------------------------------------------------------------------- #
+def test_the_union_of_three_frames_holds_what_any_of_them_clipped():
+    """Inside a pose segment the machine does not move, so a box can only be
+    too small -- and the late frames are where a single one clips."""
+    from tda.core.cache import suggest_roi_over
+
+    whole = bench()                                    # the full machine
+    top = bench(chassis=(0.28, 0.22, 0.60, 0.44))      # its upper half only
+    bottom = bench(chassis=(0.28, 0.42, 0.60, 0.64))   # its lower half only
+
+    union = suggest_roi_over([top, bottom], "oak1")
+    for one in (top, bottom):
+        assert suggest_roi(one, "oak1") != full_frame(HW[1], HW[0])
+    cx0, cy0, cx1, cy1 = _box(CHASSIS)
+    assert union[0] <= cx0 and union[1] <= cy0 and union[2] >= cx1 and union[3] >= cy1
+    assert suggest_roi_over([whole], "oak1") != full_frame(HW[1], HW[0])
+
+
+def test_a_frame_that_finds_nothing_is_skipped_not_counted_against_it():
+    from tda.core.cache import suggest_roi_over
+
+    blank = np.full((*HW, 3), 240, np.uint8)
+    good = bench()
+    assert suggest_roi(blank, "oak1") == full_frame(HW[1], HW[0])
+    assert suggest_roi_over([blank, good, blank], "oak1") == suggest_roi_over([good], "oak1")
+    assert suggest_roi_over([blank, blank], "oak1") == full_frame(HW[1], HW[0])
+
+
+def test_a_union_that_is_not_chassis_shaped_is_refused_as_a_whole(monkeypatch):
+    """Two plausible boxes at opposite corners do not make a plausible union.
+
+    The referee is asked about the union, not only about each measurement: a
+    frame where an arm reached over the bench can give a box that passes on its
+    own and drags the union across the whole picture.
+    """
+    from tda.core import cache as cache_mod
+
+    img = bench()
+    corners = iter([(10, 10, 210, 210), (800, 560, 1000, 750)])
+    monkeypatch.setattr(cache_mod, "measure_roi", lambda i, v: next(corners))
+    assert cache_mod.suggest_roi_over([img, img], "oak1") == full_frame(HW[1], HW[0])
+
+    near = iter([(300, 200, 560, 420), (320, 230, 600, 460)])
+    monkeypatch.setattr(cache_mod, "measure_roi", lambda i, v: next(near))
+    union = cache_mod.suggest_roi_over([img, img], "oak1")
+    assert union != full_frame(HW[1], HW[0])
+    assert union[0] <= 300 and union[1] <= 200 and union[2] >= 600 and union[3] >= 460
+
+
+def test_an_oak_box_is_padded_after_the_gate_and_a_scanner_one_is_not():
+    from tda.core.cache import OAK_ROI_PAD, suggest_roi_over
+
+    img = bench()
+    tight = suggest_roi(img, "oak1")
+    padded = suggest_roi_over([img], "oak1")
+    assert padded != tight
+    assert padded[0] <= tight[0] and padded[1] <= tight[1]
+    assert padded[2] >= tight[2] and padded[3] >= tight[3]
+    grew = (padded[2] - padded[0]) / float(tight[2] - tight[0])
+    assert 1.0 < grew <= 1 + 2 * OAK_ROI_PAD + 0.02
+    assert padded[0] >= 0 and padded[1] >= 0
+    assert padded[2] <= HW[1] and padded[3] <= HW[0]
+
+
+def test_a_view_with_no_detector_costs_no_colour_conversion():
+    """A RealSense frame falls through; it must not be converted on the way."""
+    from tda.core.cache import measure_roi
+
+    grey = np.full(HW, 120, np.uint8)
+    assert measure_roi(grey, "rs") is None
+    assert suggest_roi(grey, "rs") == full_frame(HW[1], HW[0])

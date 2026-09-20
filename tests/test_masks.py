@@ -516,3 +516,33 @@ def test_the_decode_memo_stays_inside_its_byte_budget(monkeypatch):
     assert stats["bytes"] <= 4096 + 900, stats
     M.clear_decode_cache()
     assert M.decode_cache_stats() == {"entries": 0, "bytes": 0}
+
+
+def test_a_window_that_does_not_hold_the_mask_is_refused_under_the_check():
+    """The check the test suite runs with: a wrong window must not pass quietly."""
+    mask = np.zeros((20, 20), bool)
+    mask[2:6, 2:6] = True
+    mask[15, 15] = True
+
+    assert M.CHECK_ENCODE_WINDOW is True, "tests/conftest.py should have set this"
+    with pytest.raises(ValueError, match="pixels outside it"):
+        M.encode_rle(mask, (2, 2, 6, 6))
+    assert M.encode_rle(mask, M.bbox(mask)) == M.encode_rle(mask)
+
+
+def test_the_check_can_be_switched_off(monkeypatch):
+    """Off, the same call is the fast path and simply truncates -- as documented."""
+    monkeypatch.setattr(M, "CHECK_ENCODE_WINDOW", False)
+    mask = np.zeros((20, 20), bool)
+    mask[2:6, 2:6] = True
+    mask[15, 15] = True
+    inside = np.zeros((20, 20), bool)
+    inside[2:6, 2:6] = True
+
+    assert M.encode_rle(mask, (2, 2, 6, 6)) == M.encode_rle(inside)
+
+
+def test_encode_rle_boxed_is_encode_rle():
+    for mask, _window in _cases():
+        assert M.encode_rle_boxed(mask) == M.encode_rle(mask)
+    assert M.encode_rle_boxed(np.zeros((8, 9), bool)) == M.encode_rle(np.zeros((8, 9), bool))

@@ -5494,5 +5494,207 @@
    "empty_visible:i04",
    "missing_shape:i03"
   ]
+ },
+ "oak-3040x4032": {
+  "input_hash": "df2c9be1d2f63b1dab64ecc668d00bf5584b5e2b",
+  "instances": {
+   "board": {
+    "amodal": "293f776d1aab98faebe0401e2f5187fc4b86b6a0",
+    "box": [
+     1512.0,
+     1140.0,
+     2520.0,
+     1900.0
+    ],
+    "keyframe_id": 902,
+    "occlusion_ratio": 0.750003344906,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "463a88adcf60da6847a40dc4d9e5b88d73b55e8b"
+   },
+   "bracket": {
+    "amodal": "bef48f625793fb1dcf487a00d7acd385cc642372",
+    "box": [
+     1715.0,
+     505.0,
+     2252.0,
+     2606.0
+    ],
+    "keyframe_id": 903,
+    "occlusion_ratio": 0.114181043663,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "9d5b92c032f0bf547fffd695ddf9f9864eff026b"
+   },
+   "cover": {
+    "amodal": "96b9b2c7d073101a5c55f58c0c31b5be15040714",
+    "box": [
+     0.0,
+     0.0,
+     3523.0,
+     2725.0
+    ],
+    "keyframe_id": 901,
+    "occlusion_ratio": 0.465530323226,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "fd720d1861d8281e57303d3abbec2fa5856f375e"
+   },
+   "gone": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "screw": {
+    "amodal": null,
+    "box": [
+     13.857676078478946,
+     4.238184060319195,
+     62.80801239975467,
+     53.18852038159492
+    ],
+    "keyframe_id": 904,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "cover",
+     "a"
+    ],
+    [
+     "cover",
+     "b"
+    ],
+    [
+     "board",
+     "main"
+    ],
+    [
+     "bracket",
+     "main"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "cover",
+    "board",
+    "bracket"
+   ]
+  },
+  "problems": [
+   "missing_shape:gone",
+   "zorder_missing:bracket/main"
+  ]
+ },
+ "scanner-1600x1600": {
+  "input_hash": "66324a24d548843442ab8e47a2df63196e11c076",
+  "instances": {
+   "board": {
+    "amodal": "f7ca50915498375f917ef198f9a0410e1c4d753f",
+    "box": [
+     600.0,
+     600.0,
+     1000.0,
+     1000.0
+    ],
+    "keyframe_id": 902,
+    "occlusion_ratio": 0.75,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "6e9c4ec4d9e3066832511e4bd376e3b0c917fc45"
+   },
+   "bracket": {
+    "amodal": "3a7b96813230c33578f944e5323590cac1729939",
+    "box": [
+     676.0,
+     259.0,
+     894.0,
+     1364.0
+    ],
+    "keyframe_id": 903,
+    "occlusion_ratio": 0.117905586998,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "50fc3a3844e4992330168bd1011b7552b529ea0f"
+   },
+   "cover": {
+    "amodal": "8590d8896072c2a9b804185631095c8e2084b5fc",
+    "box": [
+     0.0,
+     0.0,
+     1399.0,
+     1423.0
+    ],
+    "keyframe_id": 901,
+    "occlusion_ratio": 0.465719625161,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "8b42540bf08c8f4f75c8ed4ca8f3cbf31ad240a3"
+   },
+   "gone": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "screw": {
+    "amodal": null,
+    "box": [
+     13.857676078478946,
+     4.238184060319195,
+     62.80801239975467,
+     53.18852038159492
+    ],
+    "keyframe_id": 904,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "cover",
+     "a"
+    ],
+    [
+     "cover",
+     "b"
+    ],
+    [
+     "board",
+     "main"
+    ],
+    [
+     "bracket",
+     "main"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "cover",
+    "board",
+    "bracket"
+   ]
+  },
+  "problems": [
+   "missing_shape:gone",
+   "zorder_missing:bracket/main"
+  ]
  }
 }

@@ -197,7 +197,7 @@ def commit_edit(db: Db, truth: TruthService, key: FrameKey, instance: str,
     # means transposing a 12 MP canvas -- 40 ms of every commit on an OAK frame.
     # Its bounding box is measured here rather than trusted (0.5 ms) and the
     # encode then only touches what the box holds.
-    parts = [ShapePart(MAIN, masks.encode_rle(edited, masks.bbox(edited)))]
+    parts = [ShapePart(MAIN, masks.encode_rle_boxed(edited))]
     return _commit_shape(db, truth, key, instance, parts, GEOM_MASK, scope, direction,
                          cache, annotator, pair=pair, extra=extra)
 
@@ -486,7 +486,7 @@ def _commit_frame_override(db: Db, truth: TruthService, key: FrameKey, instance:
     common = {"desktop": key.desktop, "view": key.view, "step": key.step,
               "instance": instance, "steps": [key.step]}
     payload = _with_extra(common, extra) | {
-        "exists": True, "visible_rle": masks.encode_rle(visible),
+        "exists": True, "visible_rle": masks.encode_rle_boxed(visible),
         "visibility": None if previous is None else previous.visibility}
     inverse = common | {"exists": previous is not None,
                         "visible_rle": None if previous is None else previous.visible_rle,
@@ -610,7 +610,7 @@ def commit_occluder(db: Db, truth: TruthService, key: FrameKey, mask: np.ndarray
     previous = next((o for o in db.occluders(key) if o.occluder_type == occluder_type), None)
     common = {"desktop": key.desktop, "view": key.view, "step": key.step,
               "occluder_type": occluder_type, "steps": [key.step]}
-    payload = common | {"exists": True, "rle": masks.encode_rle(layer)}
+    payload = common | {"exists": True, "rle": masks.encode_rle_boxed(layer)}
     inverse = common | {"exists": previous is not None,
                         "rle": None if previous is None else previous.rle}
     with db.transaction():

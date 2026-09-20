@@ -68,8 +68,9 @@ def edit_editing_mask_op(
     The inverse is the same payload with ``rle_before``/``rle_after`` swapped,
     so a single "set the mask to ``rle_after``" handler serves both directions.
     """
-    rle_before = _masks.encode_rle(before)
-    rle_after = _masks.encode_rle(after)
+    # two full-canvas encodes per recorded stroke, on the GUI thread
+    rle_before = _masks.encode_rle_boxed(before)
+    rle_after = _masks.encode_rle_boxed(after)
     return Op(
         kind="edit_editing_mask",
         payload={"instance": instance, "rle_before": rle_before, "rle_after": rle_after},

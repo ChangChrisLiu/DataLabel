@@ -22,7 +22,10 @@ cover everything a window-bounded compiler could get wrong: shapes that hang
 over the canvas edge, shapes far outside the pose segment's ROI, multi-part
 shapes, bench boxes, frame-level occluders, frame overrides (pixels and
 labels), pairwise overrides and cycles, layers missing from the z-order,
-non-identity transforms, missing keyframes and wrong-size RLEs.
+non-identity transforms, missing keyframes and wrong-size RLEs.  They are all
+under 96 px on a side, so :func:`big_scenes` adds the two canvases the
+annotator really works on -- 1600x1600 and 4032x3040 -- where every windowing
+decision was made and where an off-by-one costs a real annotation.
 
 Regenerate the fixture **only** when the compiler's semantics are meant to
 change (and then say so in the commit)::
@@ -213,6 +216,82 @@ def scenes() -> Iterator[tuple[str, dict]]:
         }
 
 
+#: The two canvases the annotator actually works on, as one scene each.
+#:
+#: Every generated scene above is at most 96 px on a side, which keeps the
+#: fixture quick -- and leaves the big-canvas path unpinned, where every
+#: windowed decision was made and where an off-by-one costs a real annotation.
+#: These two are built by hand rather than drawn from the seeded stream, so
+#: adding them left the sixty random scenes' answers exactly where they were.
+BIG_SIZES = {"scanner-1600x1600": (1600, 1600), "oak-3040x4032": (3040, 4032)}
+
+
+def big_scenes():
+    """``(name, spec)`` for a full-size scanner frame and a full-size OAK one."""
+    for name, hw in BIG_SIZES.items():
+        height, width = hw
+        key = FrameKey(1, 4, "scan")
+        wide, tall = width // 8, height // 8
+        chassis = (wide, tall, width - wide, height - tall)
+        # a multi-part instance, one part of which hangs off the canvas
+        cover = [ShapeKeyframe(
+            id=901, instance="cover", desktop=1, view="scan", pose_segment=1,
+            anchor_step=6, placement=CHASSIS, geom_type="mask", version=2,
+            parts=[
+                ShapePart("a", masks.encode_rle(_rect(chassis, hw)), chassis),
+                ShapePart("b", masks.encode_rle(
+                    _rect((-wide, -tall, wide * 2, tall * 2), hw)),
+                    (-wide, -tall, wide * 2, tall * 2)),
+            ],
+        )]
+        board = [ShapeKeyframe(
+            id=902, instance="board", desktop=1, view="scan", pose_segment=1,
+            anchor_step=5, placement=CHASSIS, geom_type="mask",
+            parts=[ShapePart("main", masks.encode_rle(
+                _rect((wide * 2, tall * 2, width - wide * 2, height - tall * 2), hw)))],
+        )]
+        # a bare rectangle, rasterised rather than decoded, and warped
+        bracket = [ShapeKeyframe(
+            id=903, instance="bracket", desktop=1, view="scan", pose_segment=1,
+            anchor_step=9, placement=CHASSIS, geom_type="mask",
+            parts=[ShapePart("main", None,
+                             (wide * 3.5, tall * 1.25, wide * 4.5, tall * 6.75))],
+        )]
+        screw = [ShapeKeyframe(
+            id=904, instance="screw", desktop=1, view="scan", pose_segment=1,
+            anchor_step=4, placement=BENCH, geom_type="box",
+            parts=[ShapePart("main", None, (12.0, 9.0, 60.0, 57.0))],
+        )]
+        yield name, {
+            "key": key,
+            "hw": hw,
+            "needs": {"cover": "mask", "board": "mask", "bracket": "mask",
+                      "screw": "box", "gone": "mask"},
+            "keyframes": {"cover": cover, "board": board, "bracket": bracket,
+                          "screw": screw},
+            "zorder": ZOrderRec(1, "scan", 1,
+                                [("board", "main"), ("cover", "a"), ("cover", "b")],
+                                version=3),
+            "overrides": [PairOverride(1, "scan", 1, above="board", below="cover")],
+            "occluders": [OccluderMask(
+                frame=key, occluder_type="hand",
+                rle=masks.encode_rle(
+                    _rect((width // 2, 0, width // 2 + wide, height // 3), hw)),
+            )],
+            "frame_overrides": {"board": FrameOverride(
+                frame=key, instance="board",
+                visible_rle=masks.encode_rle(
+                    _rect((wide * 3, tall * 3, wide * 5, tall * 5), hw)),
+                visibility=None,
+            )},
+            "transform": Similarity(scale=1.0, theta=0.02, tx=3.0, ty=-5.0),
+            "placements": {"cover": CHASSIS, "board": CHASSIS,
+                           "bracket": CHASSIS, "screw": BENCH, "gone": CHASSIS},
+            "pose_segment": 1,
+            "bench_roi": [0, 0, width // 2, height // 2],
+        }
+
+
 def compile_scene(spec: dict) -> CompiledFrame:
     return compile_frame(
         spec["key"], spec["hw"], spec["needs"], spec["keyframes"], spec["zorder"],
@@ -257,8 +336,14 @@ def fingerprint(compiled: CompiledFrame) -> dict:
     }
 
 
+def all_scenes():
+    """The sixty generated scenes, then the two full-size ones."""
+    yield from scenes()
+    yield from big_scenes()
+
+
 def build() -> dict:
-    return {name: fingerprint(compile_scene(spec)) for name, spec in scenes()}
+    return {name: fingerprint(compile_scene(spec)) for name, spec in all_scenes()}
 
 
 # --------------------------------------------------------------------------- #
@@ -279,7 +364,9 @@ def test_the_golden_covers_the_cases_a_window_could_break(golden):
     labels = {inst["visibility"] for fp in golden.values()
               for inst in fp["instances"].values()}
     assert {"visible", "occluded_partial", "occluded_full", "out_of_view"} <= labels
-    assert len(golden) == N_SCENES
+    assert len(golden) == N_SCENES + len(BIG_SIZES)
+    for name in BIG_SIZES:
+        assert name in golden, "the full-size canvases are not pinned"
 
     specs = dict(scenes())
     assert len(specs) == N_SCENES
@@ -315,6 +402,14 @@ def test_compilation_is_byte_identical_to_the_golden(golden, name: str):
     assert fingerprint(compile_scene(spec)) == golden[name]
 
 
+@pytest.mark.parametrize("name", list(BIG_SIZES))
+def test_a_full_size_canvas_is_byte_identical_to_the_golden(golden, name: str):
+    """1600x1600 and 4032x3040: the canvases every window decision was made on."""
+    spec = dict(big_scenes())[name]
+    assert spec["hw"] == BIG_SIZES[name]
+    assert fingerprint(compile_scene(spec)) == golden[name]
+
+
 def test_every_scene_is_reproduced_from_the_seed():
     """Two generations of the scene list give the same scenes, in order."""
     first = [name for name, _ in scenes()]
@@ -329,4 +424,5 @@ if __name__ == "__main__":  # pragma: no cover - the regeneration entry point
     GOLDEN.parent.mkdir(parents=True, exist_ok=True)
     GOLDEN.write_text(json.dumps(build(), indent=1, sort_keys=True) + "\n",
                       encoding="utf-8")
-    print(f"wrote {GOLDEN} ({N_SCENES} scenes)")
+    print(f"wrote {GOLDEN} ({N_SCENES} generated scenes "
+          f"+ {len(BIG_SIZES)} full-size ones)")

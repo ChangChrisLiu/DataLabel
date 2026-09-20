@@ -7,6 +7,7 @@ layer, the session's undo stack -- is exercised rather than simulated.
 from __future__ import annotations
 
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -29,7 +30,7 @@ from app_scene import (
     make_session,
     seed_shapes,
 )
-from tda.core.cache import suggest_roi
+from tda.core.cache import suggest_roi, suggest_roi_over
 from tda.core.model import FrameKey
 from tda.core.truth import StaleConflictError, TruthService
 from tda.ui import app_actions as A
@@ -246,12 +247,14 @@ def test_a_plain_keyframe_suggestion_commits_straight_away(window, monkeypatch):
 # ROI
 # --------------------------------------------------------------------------- #
 def test_first_open_proposes_an_roi_and_enter_stores_it(qapp, tmp_path):
+    """The tool is armed at once; the rectangle arrives from the worker."""
     win = open_window(tmp_path)
     try:
         session = win.session
         key = session.current()
         assert win.roi_editing is True
-        expected = suggest_roi(session.image(), VIEW)
+        assert win.wait_for_roi_proposal() is True
+        expected = win.propose_roi_now()
         assert tuple(win.roi_draft) == tuple(expected)
         win.act_commit()                      # Enter accepts the rectangle
         assert win.roi_editing is False
@@ -261,8 +264,25 @@ def test_first_open_proposes_an_roi_and_enter_stores_it(qapp, tmp_path):
         close_window(win)
 
 
+def test_arming_the_roi_does_not_wait_for_the_measurement(qapp, tmp_path):
+    """Three decodes and three detections may not happen before the first paint."""
+    win = open_window(tmp_path)
+    try:
+        win.act_commit()                      # settle the first proposal
+        started = time.perf_counter()
+        win.act_edit_roi()
+        armed = time.perf_counter() - started
+
+        assert win.roi_editing is True
+        assert armed < 0.10, f"arming the ROI tool blocked for {armed:.3f}s"
+        assert win.wait_for_roi_proposal() is True
+    finally:
+        close_window(win)
+
+
 def test_a_second_open_does_not_ask_for_the_roi_again(qapp, tmp_path):
     win = open_window(tmp_path)
+    win.wait_for_roi_proposal()
     win.act_commit()
     close_window(win)
 
@@ -279,6 +299,7 @@ def test_a_second_open_does_not_ask_for_the_roi_again(qapp, tmp_path):
 def test_shift_r_re_edits_the_roi_and_escape_keeps_the_old_one(qapp, tmp_path):
     win = open_window(tmp_path)
     try:
+        win.wait_for_roi_proposal()
         win.act_commit()
         stored = tuple(win.roi())
         win.act_edit_roi()
@@ -646,37 +667,83 @@ def test_the_roi_is_proposed_from_the_segments_first_frame(qapp, tmp_path, monke
     diff blob then sat on a scan-bed artefact at the right edge and *that*
     became the SAM prompt box on 7 of 13 frames.
     """
-    from tda.ui import app_roi
+    from tda.ui import app_roi_worker
 
     asked: list = []
     win = open_window(tmp_path)
     try:
-        def remember(img, view):
-            asked.append(np.array(img, copy=True))
+        def remember(images, view):
+            asked.append([np.array(img, copy=True) for img in images])
             return (4, 4, 40, 40)
 
-        monkeypatch.setattr(app_roi, "suggest_roi", remember)
+        monkeypatch.setattr(app_roi_worker, "suggest_roi_over", remember)
         win.start_roi_edit()
+        assert win.wait_for_roi_proposal() is True
 
         assert asked, "no proposal was made"
-        first = min(s for s in win.session.steps()
-                    if win.session.image_at(s) is not None)
-        assert np.array_equal(asked[-1], win.session.image_at(first)), (
-            "the proposal was measured on a frame other than the segment's first"
+        measured = asked[-1]
+        steps = [s for s in sorted(win.session.steps())
+                 if win.session.image_at(s) is not None]
+        assert len(measured) == min(3, len(steps)), (
+            "the proposal is the union of the segment's first, middle and last"
         )
-        assert not np.array_equal(asked[-1], win.session.image())   # not the open one
+        # the worker reads the files itself, so it sees BGR where the session
+        # hands out RGB: compare the channel-swapped arrays
+        first = win.session.image_at(steps[0])[:, :, ::-1]
+        assert np.array_equal(measured[0], first), (
+            "the proposal did not start from the segment's first frame"
+        )
+        last = win.session.image_at(steps[-1])[:, :, ::-1]
+        assert np.array_equal(measured[-1], last), (
+            "the proposal did not reach the segment's last frame"
+        )
+        assert tuple(win.roi_draft) == (4, 4, 40, 40)
+    finally:
+        close_window(win)
+
+
+def test_a_dragged_rectangle_is_never_replaced_by_a_late_measurement(qapp, tmp_path):
+    """The worker may land after the annotator has already drawn one."""
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win.act_commit()
+        win.act_edit_roi()
+        win.on_roi_box((7.0, 9.0, 41.0, 43.0))
+        drawn = tuple(win.roi_draft)
+
+        win._on_roi_proposed({"segment": win._roi_segment_key(),
+                              "box": (1, 1, 60, 60), "ms": 1.0})
+
+        assert tuple(win.roi_draft) == drawn
+    finally:
+        close_window(win)
+
+
+def test_a_measurement_for_another_segment_is_dropped(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        here = tuple(win.roi_draft) if win.roi_draft is not None else None
+
+        win._on_roi_proposed({"segment": ("somewhere", "else", 99),
+                              "box": (1, 1, 60, 60), "ms": 1.0})
+
+        assert (tuple(win.roi_draft) if win.roi_draft is not None else None) == here
     finally:
         close_window(win)
 
 
 def test_a_full_frame_proposal_is_not_stored_without_a_drag(qapp, tmp_path, monkeypatch):
     """A full-frame ROI is "I could not find the chassis", not an answer."""
-    from tda.ui import app_roi
+    from tda.ui import app_roi_worker
 
     win = open_window(tmp_path)
     try:
-        monkeypatch.setattr(app_roi, "suggest_roi", lambda img, view: (0, 0, 64, 64))
+        monkeypatch.setattr(app_roi_worker, "suggest_roi_over",
+                            lambda images, view: (0, 0, 64, 64))
         win.start_roi_edit()
+        assert win.wait_for_roi_proposal() is True
         assert "未能自动找到机箱" in win.status_message()
 
         win.act_commit()                       # Enter, with nothing dragged

@@ -56,6 +56,22 @@ def qapp():
 
 
 @pytest.fixture
+def as_shipped(monkeypatch):
+    """Measure what the annotator runs, not what the test suite runs.
+
+    ``tests/conftest.py`` turns :data:`tda.core.masks.CHECK_ENCODE_WINDOW` on
+    for the whole session, which is right -- it guards every windowed encode in
+    the codebase on every run -- and it costs four ``any`` passes over the
+    canvas outside each window. On a 42-instance 12 MP commit that is 289 ms of
+    checking (274 ms -> 563 ms measured), and a budget is a promise about the
+    shipped configuration, where the check is off.
+    """
+    from tda.core import masks as masks_mod
+
+    monkeypatch.setattr(masks_mod, "CHECK_ENCODE_WINDOW", False)
+
+
+@pytest.fixture
 def session(qapp, tmp_path: Path) -> AnnotationSession:
     made = make_session(tmp_path)
     yield made
@@ -323,7 +339,7 @@ def _under(budget: float, what: str, runs: list[float]) -> None:
 
 
 @pytest.mark.slow
-def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path):
+def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path, as_shipped):
     """A chassis-sized commit at 1600x1600 over 40 steps, plus browsing."""
     session = make_session(tmp_path, last_step=40, hw=(1600, 1600))
     session.goto(2)  # almost everything is still in the chassis here
@@ -344,7 +360,7 @@ def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path):
             rect(100, 100, 1500 - attempt, 1500 - attempt, (1600, 1600))
         )
 
-    _, commit_runs = best_of(commit, before_commit, times=BEST_OF_12MP)
+    _, commit_runs = best_of(commit, before_commit)
     assert min(reached) >= 20  # it really does reach that far
 
     def warm(attempt: int) -> None:
@@ -386,7 +402,7 @@ def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path):
 @pytest.mark.slow
 @pytest.mark.parametrize("step", [2, 12])
 def test_confirming_a_frame_is_under_budget_at_full_scanner_resolution(
-    qapp, tmp_path, monkeypatch, step: int
+    qapp, tmp_path, monkeypatch, as_shipped, step: int
 ):
     """Space, in the configuration the annotator actually runs.
 
@@ -431,7 +447,7 @@ def test_confirming_a_frame_is_under_budget_at_full_scanner_resolution(
         session.db.set_frame_flags(FrameKey(DESKTOP, step, VIEW), review_status=None)
         compiles.clear()
 
-    _, confirm_runs = best_of(confirm, before_confirm, times=BEST_OF_12MP)
+    _, confirm_runs = best_of(confirm, before_confirm)
     # The frame Space confirmed was compiled by nobody on this thread: it came
     # from the prefetch and the truth service proved it still current. Stepping
     # back to k-2 afterwards does compile that frame -- arriving anywhere does,
@@ -460,17 +476,20 @@ BUDGET_COMMIT = 0.45
 BUDGET_CONFIRM = 0.6
 BUDGET_FRAME_CHANGE = 0.15
 BUDGET_TIMELINE_JUMP = 0.5
-#: Samples per gesture here, against :data:`BEST_OF` elsewhere. This machine is
-#: shared, and a 12 MP gesture is long enough that being descheduled once
-#: doubles it: a full-suite run with another worker on the box measured 0.56,
-#: 0.58 and 0.59 s for a commit that is 0.30 s on its own. Five samples is the
-#: same guard as three -- a regression makes every one of them slow -- with a
-#: better chance of catching a moment when the machine is this test's.
+#: Samples per gesture **in this test only**, against :data:`BEST_OF` for the
+#: scanner gates above, which are unchanged and must stay that way.
+#:
+#: This machine is shared, and a 12 MP gesture is long enough that being
+#: descheduled once doubles it: a full-suite run with another worker on the box
+#: measured 0.56, 0.58 and 0.59 s for a commit that is 0.30-0.35 s on its own,
+#: and the commit's median sits at about 85 % of its budget. Five samples is
+#: the same guard as three -- a regression makes every one of them slow -- with
+#: a better chance of catching a moment when the machine is this test's.
 BEST_OF_12MP = 5
 
 
 @pytest.mark.slow
-def test_gui_thread_budgets_on_a_12mp_frame_with_forty_instances(qapp, tmp_path):
+def test_gui_thread_budgets_on_a_12mp_frame_with_forty_instances(qapp, tmp_path, as_shipped):
     """Commit, Space, frame change and timeline jump on a 4032x3040 frame.
 
     **In the shipped configuration**: the sweeper is on, so the prefetch of
@@ -502,7 +521,7 @@ def test_gui_thread_budgets_on_a_12mp_frame_with_forty_instances(qapp, tmp_path)
     def commit(attempt: int) -> None:
         session.commit_edit(api.SCOPE_KEYFRAME)
 
-    _, commit_runs = best_of(commit, before_commit)
+    _, commit_runs = best_of(commit, before_commit, times=BEST_OF_12MP)
     assert len(session.db.compiled(FrameKey(DESKTOP, OAK_STEP, VIEW))) >= 40
 
     def before_confirm(attempt: int) -> None:
@@ -516,7 +535,7 @@ def test_gui_thread_budgets_on_a_12mp_frame_with_forty_instances(qapp, tmp_path)
     def confirm(attempt: int) -> None:
         assert session.confirm_frame() is True
 
-    _, confirm_runs = best_of(confirm, before_confirm)
+    _, confirm_runs = best_of(confirm, before_confirm, times=BEST_OF_12MP)
 
     def before_change(attempt: int) -> None:
         session.goto(OAK_STEP + 3)

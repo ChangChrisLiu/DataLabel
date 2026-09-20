@@ -34,8 +34,18 @@ import cv2
 import numpy as np
 
 from tda.core.cache_roi_detect import (  # re-exported: suggest_roi's strategies
+    OAK_MAX_AREA_FRAC,
+    OAK_MAX_ASPECT,
+    OAK_MIN_AREA_FRAC,
+    OAK_MIN_ASPECT,
+    ROI_MAX_AREA_FRAC,
+    ROI_MAX_ASPECT,
+    ROI_MIN_AREA_FRAC,
+    ROI_MIN_ASPECT,
+    box_plausibility,
     oak_chassis_box,
     oak_chassis_candidates,
+    pad_box,
     scan_bed_box,
     scan_bed_candidates,
     scan_chassis_box,
@@ -49,9 +59,24 @@ from tda.core.model import FrameKey
 __all__ = [
     "DbRoiLookup", "build_cache", "build_thumbs", "burst_metrics", "cache_path",
     "cached_image_path", "choose_scan_image", "configured_cache_dir", "full_frame",
-    "oak_chassis_candidates", "scan_bed_candidates", "scan_chassis_candidates",
-    "suggest_roi", "thumb_path",
+    "measure_roi", "oak_chassis_candidates", "roi_bands", "scan_bed_candidates",
+    "scan_chassis_candidates", "suggest_roi", "suggest_roi_over", "thumb_path",
+    "OAK_ROI_PAD", "ROI_SAMPLE_FRAMES",
 ]
+
+#: How many frames of a pose segment its ROI proposal is measured on: the
+#: first, the middle and the last that have an image. Three is what a segment
+#: of any length can give -- the shortest real one is two steps -- and it is the
+#: point where the union stops growing: a fourth frame adds nothing the first,
+#: middle and last have not already seen, because the machine does not move.
+ROI_SAMPLE_FRAMES = 3
+
+#: OAK only: how much an accepted box is grown after the gate has judged it.
+#: The machine leans out over the tape square towards the camera and the
+#: detector may only look inside the square, so the box clips the near rail by
+#: 100-200 px at full size; 12 % of the box covers that on every real frame
+#: measured without reaching the bench's edge.
+OAK_ROI_PAD = 0.12
 
 # --- burst metrics -------------------------------------------------------
 DOWNSCALE = 8  # metrics are computed on a 1/8 copy (1600^2 -> 200^2) for speed
@@ -245,16 +270,98 @@ def suggest_roi(img: np.ndarray, view: str) -> tuple[int, int, int, int]:
     if img is None or getattr(img, "size", 0) == 0:
         raise ValueError("suggest_roi() needs a non-empty image")
     height, width = img.shape[:2]
+    found = measure_roi(img, view)
+    return found if found is not None else full_frame(width, height)
+
+
+def measure_roi(img: np.ndarray, view: str) -> Optional[tuple[int, int, int, int]]:
+    """:func:`suggest_roi` without the fallback: the box, or ``None``.
+
+    The difference matters to :func:`suggest_roi_over`, which has to tell "this
+    frame found nothing" (skip it) from "this frame says the chassis fills the
+    picture" (a box that happens to be the whole frame, which the area gate
+    would reject anyway). A view with no detector at all answers ``None`` here
+    **without** converting the image first: a greyscale RealSense frame used to
+    pay for a colour conversion on the way to a fallback that never looks at it.
+    """
+    if view != "scan" and not str(view).startswith("oak"):
+        return None
     bgr = img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     if view == "scan":
         for found in (scan_chassis_box(bgr), scan_bed_box(bgr)):
             if found is not None:
                 return found[0]
-    elif str(view).startswith("oak"):
-        found = oak_chassis_box(bgr)
+        return None
+    found = oak_chassis_box(bgr)
+    return None if found is None else found[0]
+
+
+def roi_bands(view: str) -> tuple[tuple[float, float], tuple[float, float]]:
+    """``(area, aspect)`` bounds a whole-segment box is judged by, per view."""
+    if str(view).startswith("oak"):
+        return ((OAK_MIN_AREA_FRAC, OAK_MAX_AREA_FRAC),
+                (OAK_MIN_ASPECT, OAK_MAX_ASPECT))
+    return ((ROI_MIN_AREA_FRAC, ROI_MAX_AREA_FRAC),
+            (ROI_MIN_ASPECT, ROI_MAX_ASPECT))
+
+
+def suggest_roi_over(images: Iterable[np.ndarray],
+                     view: str) -> tuple[int, int, int, int]:
+    """The chassis ROI of a whole **pose segment**, from several of its frames.
+
+    Inside a pose segment the machine does not move -- that is what a pose
+    segment *is* (spec 2.5) -- so every frame of it is a measurement of the same
+    rectangle, and the union of those measurements is a better one than any of
+    them. It is strictly better in the direction that matters: a per-frame box
+    can only be too *small*, because segmentation clips where contrast fails,
+    and by the late steps the chassis is nearly empty and its dark floor reads
+    as bench. Three measurements of the first, middle and last frame (the caller
+    picks them, :data:`ROI_SAMPLE_FRAMES`) cover both ends of that.
+
+    Measured on the real scanner frames of twelve desktops: a single reference
+    frame held the whole machine on 8 of 24, the union on 20 of 24, and the two
+    boxes that were plausible-looking and *wrong* -- D61 step 39 at 45 % of the
+    chassis, D29 step 47 cutting its top quarter -- are right.
+
+    Frames that found nothing are skipped, not counted against it; with nothing
+    found at all the answer is the whole frame, i.e. "no proposal", exactly as
+    before. The **union** is then judged by the same area and aspect bounds one
+    frame's box is judged by (:func:`roi_bands`), because a union grown by a
+    frame where the operator's arm was over the bench is not a chassis either.
+
+    On an OAK view the accepted box is finally grown by :data:`OAK_ROI_PAD` of
+    its own size. The camera looks at the bench from the side and the machine
+    leans out over the tape square towards it, and the detector may only look
+    inside the square, so the box reliably clips the near rail; the gate has
+    already judged the tight box, so this cannot let a bad one through.
+    """
+    boxes: list[tuple[int, int, int, int]] = []
+    hw: Optional[tuple[int, int]] = None
+    for img in images:
+        if img is None or getattr(img, "size", 0) == 0:
+            continue
+        hw = (int(img.shape[0]), int(img.shape[1]))
+        found = measure_roi(img, view)
         if found is not None:
-            return found[0]
-    return full_frame(width, height)
+            boxes.append(tuple(int(v) for v in found))  # type: ignore[arg-type]
+    if hw is None:
+        raise ValueError("suggest_roi_over() needs at least one non-empty image")
+    height, width = hw
+    whole = full_frame(width, height)
+    if not boxes:
+        return whole
+
+    union = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+             max(b[2] for b in boxes), max(b[3] for b in boxes))
+    area_band, aspect_band = roi_bands(view)
+    # rectangularity is not a question a union can answer -- there is no one
+    # component behind it -- so the referee is asked only about area and aspect
+    if box_plausibility(union, 1.0, width, height, 0.0,
+                        area_band=area_band, aspect_band=aspect_band) is None:
+        return whole
+    if str(view).startswith("oak"):
+        union = pad_box(union, width, height, OAK_ROI_PAD)
+    return union
 
 
 # ---------------------------------------------------------------------------

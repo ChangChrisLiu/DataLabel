@@ -55,6 +55,7 @@ def window(qapp, tmp_path):
     # accept the one the window offers -- which is what an annotator does on
     # the first frame of a machine.
     if win.roi_editing:
+        win.wait_for_roi_proposal()   # measured off-thread; Enter needs the box
         win.act_commit()
     yield win
     close_window(win)
@@ -80,6 +81,7 @@ def test_the_difference_map_runs_off_the_gui_thread(window):
 
 
 def test_the_difference_map_is_restricted_to_the_roi(window):
+    window.wait_for_roi_proposal()          # the box is measured off-thread
     window.act_commit()                     # accept the proposed ROI
     window.session.goto(LAST_STEP - 1)
     payload = wait_for_assist(window)
@@ -243,6 +245,7 @@ def test_a_failed_inference_reaches_the_status_bar(qapp, tmp_path):
         QApplication.processEvents()
         win.set_mode(A.MODE_ANNOTATE)
         if win.roi_editing:
+            win.wait_for_roi_proposal()
             win.act_commit()
         start_edit(win)
         win.act_tool("sam_point")
