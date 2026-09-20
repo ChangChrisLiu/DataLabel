@@ -495,6 +495,25 @@ def test_leaving_steps_mode_with_unsaved_edits_asks_first(window, monkeypatch):
     assert window.mode == A.MODE_ANNOTATE
 
 
+def test_a_staged_constraint_edge_is_an_unsaved_step_table_edit(window, monkeypatch):
+    """B5: the Relations tab goes through the one gate, not around it."""
+    from PySide6.QtWidgets import QMessageBox
+
+    window.set_mode(A.MODE_STEPS)
+    tab = window.steps_panel.relations_tab
+    tab.target_box.setCurrentText("storage_drive.ssd.01")
+    tab.kind_box.setCurrentText("blocked_by")
+    tab.blocker_box.setCurrentText("psu.01")
+
+    tab.add_edge()
+
+    assert window._steps_dirty
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
+    window.set_mode(A.MODE_ANNOTATE)
+    assert window.mode == A.MODE_STEPS  # refused, like any other unsaved edit
+
+
 def test_a_missing_frame_does_not_replace_the_step_table(qapp, tmp_path):
     """Steps mode is about the log, not about the image: it stays put."""
     win = open_window(tmp_path, missing=(LAST_STEP,))
