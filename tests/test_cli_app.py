@@ -166,13 +166,22 @@ def test_export_coco_honours_only_verified(exportable):
     assert out.exists()
 
 
-def test_export_vlm_writes_a_jsonl(env):
+def test_export_vlm_writes_a_jsonl_and_its_image_manifest(env):
+    from tda.core.export.vlm import manifest_path
+
     out = Path(env["tmp"]) / "vlm.jsonl"
     assert run(env, "export-vlm", "--desktops", str(DESKTOP), "--view", VIEW,
                "--out", str(out)) == EXIT_OK
     assert out.exists()
     for line in out.read_text(encoding="utf-8").splitlines()[:3]:
-        assert json.loads(line)["task"]
+        record = json.loads(line)
+        assert record["prompt"]["task"] and record["label"]["answer"]
+        assert all(i.startswith("img_") for i in record["prompt"]["images"])
+
+    manifest = manifest_path(str(out))
+    assert manifest.exists()
+    header = json.loads(manifest.read_text(encoding="utf-8").splitlines()[0])
+    assert header["type"] == "header" and header["salt"]
 
 
 # --------------------------------------------------------------------------- #

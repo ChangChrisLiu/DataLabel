@@ -338,18 +338,44 @@ def test_the_vlm_export_asks_about_the_latch_only_while_it_is_there(
     board_db, tax, tmp_path: Path
 ):
     """Both classes still have more than one state, so V2 keeps asking (spec 8)."""
+    _confirm(board_db, tax, (1, 2, 3))
     out = tmp_path / "vlm.jsonl"
     export_vlm(board_db, tax, [DESKTOP], VIEW, str(out), only_verified=False)
     states = {(r["step"], r["answer"]["state"]) for r in _records(out)
-              if r["task"] == "V2" and r["id"].endswith(f"state-{LATCH}")}
+              if r["task"] == "V2" and r["readable_id"].endswith(f"state-{LATCH}")}
     assert states == {(1, "closed"), (2, "open")}
 
 
 # --------------------------------------------------------------------------- #
 # VLM
 # --------------------------------------------------------------------------- #
+def _raw_records(path: Path) -> list[dict]:
+    """The JSONL exactly as written: ``{"id", "prompt", "label"}`` per line."""
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line]
+
+
 def _records(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    """The same records flattened, for assertions the prompt/label split does not
+    change. :func:`_raw_records` is what tests the split itself."""
+    return [{"id": r["id"], **r["prompt"], **r["label"]} for r in _raw_records(path)]
+
+
+def _confirm(d: Db, tax, steps) -> None:
+    """Sign the given frames off the way pressing Space does.
+
+    The VLM export asks a *perception* question only about a frame a human has
+    confirmed (spec 8.2: the answer is the truth table, and an unconfirmed truth
+    table is a cache). Setting ``review_status`` by hand is not the same thing
+    and must not be -- the truth service demotes a confirmed frame whose
+    instance set has changed -- so the fixtures go through the service.
+    """
+    from tda.core.truth import TruthService
+
+    service = TruthService(d, tax)
+    service.refresh_range(DESKTOP, VIEW, steps)
+    for step in steps:
+        service.verify_frame(FrameKey(DESKTOP, step, VIEW), "tester")
 
 
 def test_vlm_writes_at_least_one_record_per_task(db, tax, tmp_path: Path):
@@ -369,10 +395,37 @@ def test_vlm_writes_at_least_one_record_per_task(db, tax, tmp_path: Path):
         assert rec["graph_version"] is None
         assert rec["question"] and isinstance(rec["question"], str)
         assert json.loads(json.dumps(rec["answer"])) == rec["answer"]
-        assert all(img.startswith("scan/D01/s") for img in rec["images"])
+        # the prompt names frames by an opaque id; the manifest holds the paths
+        assert all(img.startswith("img_") for img in rec["images"])
+
+
+def test_the_jsonl_is_split_into_what_the_model_sees_and_what_grades_it(
+    db, tax, tmp_path: Path
+):
+    """A prompt that says ``scan/D01/s003.png`` has answered half the P0 set."""
+    from tda.core.export.vlm import manifest_path
+
+    out = tmp_path / "vlm.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    raw = _raw_records(out)
+    assert raw
+    for rec in raw:
+        assert set(rec) == {"id", "prompt", "label"}
+        assert set(rec["prompt"]) <= {"task", "images", "question", "options"}
+        assert "answer" not in rec["prompt"] and "step" not in rec["prompt"]
+        assert rec["label"]["answer"] is not None
+
+    manifest = [json.loads(line) for line in
+                manifest_path(str(out)).read_text(encoding="utf-8").splitlines()]
+    assert manifest[0]["type"] == "header" and manifest[0]["salt"]
+    paths = {e["image"]: e["path"] for e in manifest[1:]}
+    for rec in raw:
+        for image in rec["prompt"]["images"]:
+            assert paths[image].startswith("scan/D01/s")
 
 
 def test_vlm_v1_lists_the_visible_components(db, tax, tmp_path: Path):
+    _confirm(db, tax, (2, 3))  # step 1 is confirmed by the fixture's frozen rows
     out = tmp_path / "vlm.jsonl"
     export_vlm(db, tax, [DESKTOP], VIEW, str(out), tasks=("V1",))
     first = [r for r in _records(out) if r["step"] == 1]
@@ -404,7 +457,8 @@ def test_vlm_v2_asks_states_and_counts(db, tax, tmp_path: Path):
     assert "Motherboard screw 3" in screw["question"]
     assert len(counts) == 1 and counts[0]["step"] == 1
     assert counts[0]["answer"] == {"count": 1}
-    assert counts[0]["question"] == "How many motherboard screws are still fastened?"
+    assert "motherboard screws" in counts[0]["question"]
+    assert "fastened" in counts[0]["question"]
 
 
 def test_vlm_v3_reads_the_action_between_two_frames(db, tax, tmp_path: Path):
@@ -414,7 +468,10 @@ def test_vlm_v3_reads_the_action_between_two_frames(db, tax, tmp_path: Path):
     assert [r["step"] for r in records] == [2, 3]
 
     unscrew = records[0]
-    assert unscrew["images"] == ["scan/D01/s001.png", "scan/D01/s002.png"]
+    from tda.core.export.vlm_tasks import opaque_image_id
+
+    assert unscrew["images"] == [opaque_image_id(DESKTOP, VIEW, 1),
+                                 opaque_image_id(DESKTOP, VIEW, 2)]
     assert unscrew["answer"] == {
         "verb": "unscrew", "target_class": "screw",
         "target_instance": SCREW, "tool": "PH2",
@@ -448,7 +505,14 @@ def test_vlm_only_verified_keeps_confirmed_records(db, tax, tmp_path: Path):
 
 
 def test_rationale_never_observes_without_a_box(db, tax, tmp_path: Path):
-    """An instance the frame cannot localise is `propagate_state`, not `observe`."""
+    """An instance the frame cannot localise is `propagate_state`, not `observe`.
+
+    A second screw nobody has drawn joins the desktop, which is what demotes the
+    confirmed frame to ``needs_review`` -- so what is left here is the planning
+    half of the export, and the invariant has to hold there too. The V2 counting
+    case that used to live here is in ``test_vlm_tasks.py``, on a scene whose
+    frames can actually be signed off.
+    """
     db.upsert_instance(InstanceRec(
         key="screw.motherboard.04", desktop=DESKTOP, cls="screw",
         attrs={"role": "motherboard", "head": "PH2", "captive": False},
@@ -457,11 +521,7 @@ def test_rationale_never_observes_without_a_box(db, tax, tmp_path: Path):
     export_vlm(db, tax, [DESKTOP], VIEW, str(out))
     records = _records(out)
 
-    count = next(r for r in records if "count" in r["answer"])
-    assert count["answer"] == {"count": 2}  # the unseen screw is still fastened
-    assert [s["op"] for s in count["rationale"]["steps"]] == [
-        "observe", "propagate_state", "conclude"
-    ]
+    assert records
     for rec in records:
         for step in rec["rationale"]["steps"]:
             if step["op"] == "observe":

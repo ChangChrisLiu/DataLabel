@@ -89,13 +89,21 @@ def test_a_fully_verified_frame_is_verified(db, tax, tmp_path: Path):
 
 
 def test_one_unverified_row_takes_the_confirmation_off_the_frame(db, tax, tmp_path: Path):
+    """... and with it every perception question about that frame.
+
+    V1 reads the truth table, so an unconfirmed frame has nothing to answer
+    with; V10 reads the step log, so it still speaks -- and says
+    ``verified: false`` while keeping the view's ``gold`` tier, which is the
+    distinction this file exists for.
+    """
     db.upsert_instance(InstanceRec(key="chassis.01", desktop=DESKTOP, cls="chassis"))
     db.put_compiled(FrameKey(DESKTOP, 1, VIEW), "chassis.01", encode_rle(PSU_MASK),
                     0.0, "visible", "in_chassis", "auto", "h9")
     out = tmp_path / "vlm.jsonl"
-    export_vlm(db, tax, [DESKTOP], VIEW, str(out), tasks=("V1",))
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out), tasks=("V1", "V10"))
     first = [r for r in _records(out) if r["step"] == 1]
-    assert first and first[0]["verified"] is False
+    assert first and not [r for r in first if r["task"] == "V1"]
+    assert first[0]["verified"] is False
     assert first[0]["tier"] == "gold"  # the tier is about the view, not the review
 
 
@@ -107,12 +115,12 @@ def test_an_answer_with_no_evidence_rows_follows_its_frame():
     evidence list dropped every such fact out of a verified export, which is the
     opposite of what those exports are for.
     """
-    from tda.core.export.vlm import _verified
+    from tda.core.export.vlm_tasks import row_verified
 
-    assert _verified([], True) is True
-    assert _verified([], False) is False
-    assert _verified([{"status": "verified"}], True) is True
-    assert _verified([{"status": "auto"}], True) is False
+    assert row_verified([], True) is True
+    assert row_verified([], False) is False
+    assert row_verified([{"status": "verified"}], True) is True
+    assert row_verified([{"status": "auto"}], True) is False
 
 
 def test_a_counting_answer_of_zero_is_exported_as_verified(db, tax, tmp_path: Path):

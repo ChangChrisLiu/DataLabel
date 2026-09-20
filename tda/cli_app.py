@@ -158,23 +158,27 @@ def _frame_counts(db, desktops: Sequence[int], view: str) -> tuple[int, int]:
     return verified, max(total - verified, 0)
 
 
-def _nothing_exported(command: str, view: str, out: str, only_verified: bool) -> int:
-    """Warn, remove the empty artefact, and fail.
+def _nothing_exported(command: str, view: str, out: str, only_verified: bool,
+                      also: Sequence[Path] = ()) -> int:
+    """Warn, remove the empty artefact **and its siblings**, and fail.
 
     An export that found nothing used to write the file anyway and exit 0, so a
     day of annotation came back as a COCO with zero images or a zero-byte JSONL
     and nothing at all to say why. The file goes too: an empty artefact left on
-    disk is the one that gets shipped, or diffed against, or trained on.
+    disk is the one that gets shipped, or diffed against, or trained on -- and
+    so do the files written beside it, or the next run finds an image manifest
+    and a summary describing a JSONL nobody wrote.
     """
     subject = ("0 verified frames" if only_verified else "no exportable frames")
     hint = (" (use --no-only-verified to include unverified frames)"
             if only_verified else "")
     print(f"[{command}] WARNING: {subject} for the requested desktops/{view} "
           f"- nothing exported{hint}")
-    try:
-        Path(out).unlink(missing_ok=True)
-    except OSError as exc:  # a locked or read-only file: say so, do not crash
-        print(f"[{command}] could not remove the empty {out}: {exc}")
+    for path in [Path(out), *also]:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:  # a locked or read-only file: say so, do not crash
+            print(f"[{command}] could not remove the empty {path}: {exc}")
     return EXIT_ERROR
 
 
@@ -494,7 +498,7 @@ def _add_refresh_flags(p) -> None:
 
 
 def cmd_export_vlm(args: argparse.Namespace) -> int:
-    """Write the V1/V2/V3 question set of one view as JSONL."""
+    """Write the P0 question set of spec 8.2 for one view as JSONL."""
     from tda.core.export.vlm import TASKS, export_vlm
 
     with session(args, lock=True) as (paths, db):
@@ -507,6 +511,11 @@ def cmd_export_vlm(args: argparse.Namespace) -> int:
         if targets is None:
             return EXIT_ERROR
         tasks = [t.strip() for t in str(args.tasks).split(",") if t.strip()] or list(TASKS)
+        unknown = [t for t in tasks if t not in TASKS]
+        if unknown:
+            print(f"[export-vlm] not a task: {', '.join(unknown)}; "
+                  f"the P0 set is {','.join(TASKS)}")
+            return EXIT_ERROR
         worst = EXIT_OK
         for view in views:
             out = targets[view]
@@ -519,23 +528,95 @@ def cmd_export_vlm(args: argparse.Namespace) -> int:
                 allow_conflicts=bool(args.allow_conflicts), tasks=tasks,
                 only_verified=bool(args.only_verified), truth=truth,
             )
+            _report_vlm(stats, view)
             if not _count(stats, "records"):
                 worst = max(worst, _nothing_exported("export-vlm", view, out,
-                                                     bool(args.only_verified)))
+                                                     bool(args.only_verified),
+                                                     siblings_of_vlm(str(out))))
                 continue
-            print(f"[export-vlm] {_count(stats, 'records')} records "
-                  f"({stats.get('by_task', {})}) -> {out}")
+            # the total goes last and stays short: it is the line a script reads
+            print(f"[export-vlm] {_count(stats, 'records')} records -> {out}")
         return worst
 
 
+def siblings_of_vlm(out: str) -> Sequence[Path]:
+    """The manifest and the summary written beside one VLM JSONL."""
+    from tda.core.export.vlm import siblings
+
+    return siblings(out)
+
+
+def _report_vlm(stats: dict, view: str) -> None:
+    """The per-task counts and everything the export declined to answer.
+
+    Three silences, and a release run has to see all three. ``illegal_steps``:
+    the logged action there breaks a hard constraint, so the graph and the log
+    contradict each other and no affordance answer may be published as ground
+    truth (the 18 lines of ``reports/constraints_report.md``).
+    ``excluded_desktops``: no graph at all, so every answer would be "nothing is
+    blocked". ``v10_excluded``: the log names a target nobody resolved, and V10
+    is scored exhaustively, so an incomplete history is a wrong answer.
+    """
+    by_task = stats.get("by_task") or {}
+    if by_task:
+        print(f"[export-vlm] {view}: "
+              + " ".join(f"{task}={n}" for task, n in sorted(by_task.items())))
+        source = stats.get("by_source") or {}
+        if source:
+            print(f"[export-vlm] {view}: "
+                  + " ".join(f"{k}={v}" for k, v in sorted(source.items())))
+    illegal = stats.get("illegal_steps") or {}
+    if illegal:
+        listed = ", ".join(f"D{d}:{sorted(steps)}" for d, steps in sorted(illegal.items()))
+        print(f"[export-vlm] {len(illegal)} desktop(s) have steps whose logged "
+              f"action the graph forbids; V4/V5/V6/V16 say nothing there: {listed}")
+    excluded = stats.get("excluded_desktops") or {}
+    if excluded:
+        listed = ", ".join(f"D{d}:{why}" for d, why in sorted(excluded.items()))
+        print(f"[export-vlm] {len(excluded)} desktop(s) answer no affordance or "
+              f"planning question at all: {listed}")
+    no_v10 = stats.get("v10_excluded") or {}
+    if no_v10:
+        listed = ", ".join(f"D{d}:{len(t)}" for d, t in sorted(no_v10.items()))
+        print(f"[export-vlm] {len(no_v10)} desktop(s) have logged actions whose "
+              f"target is unresolved, so V10 is not asked of them: {listed}")
+    _report_shortcuts(stats, view)
+
+
+def _report_shortcuts(stats: dict, view: str) -> None:
+    """How much of this file a model could answer without looking at an image.
+
+    Printed, not buried: a generated benchmark is always at risk of being
+    solvable from its own wording, and the only defence is to measure it every
+    time and put the number where a release run sees it. Each classifier is
+    fitted to the file it scores, so these are upper bounds no text-only model
+    can beat.
+    """
+    shortcuts = stats.get("shortcuts") or {}
+    for task in sorted(shortcuts):
+        row = shortcuts[task]
+        print(f"[export-vlm] {view}: {task} text-only upper bound — "
+              f"majority {row['majority']:.1%}, verb {row['verb']:.1%}, "
+              f"class {row['class']:.1%}, verb+class {row['verb_class']:.1%}, "
+              f"template {row['template']:.1%} ({row['records']} records)")
+    option = stats.get("v6_option_shortcut") or {}
+    if option.get("records"):
+        print(f"[export-vlm] {view}: V6 option-verb shortcut "
+              f"{option['shortcut']:.1%} against {option['random']:.1%} random "
+              f"({option['records']} records with options)")
+
+
 def _add_export_vlm(sub) -> None:
+    from tda.core.export.vlm_tasks import TASKS
+
     p = sub.add_parser("export-vlm", help="compiled truth -> one VLM JSONL per view")
     p.add_argument("--desktops", default=None, help="e.g. 13 or 1-20")
     _add_view_flags(p)
     p.add_argument("--out", default=None,
                    help="one output file; only with a single view (without it each "
                         "view is written to <cache_dir>/vlm_<view>.jsonl)")
-    p.add_argument("--tasks", default="V1,V2,V3")
+    p.add_argument("--tasks", default=",".join(TASKS),
+                   help=f"comma-separated task ids; the P0 set is {','.join(TASKS)}")
     p.add_argument("--only-verified", dest="only_verified", action="store_true",
                    default=False, help="ask only about confirmed rows")
     p.add_argument("--no-only-verified", dest="only_verified", action="store_false")
