@@ -12,8 +12,11 @@ from typing import Optional
 
 import numpy as np
 
+from tda.core import masks as _masks
 from tda.core.compiler import CompiledFrame
 from tda.ui import session_api as api
+
+Box = tuple[int, int, int, int]
 
 __all__ = ["SCOPE_SPLIT_PREFIX", "SCOPE_ZORDER_ABOVE", "SCOPE_ZORDER_BELOW",
            "ZORDER_HINT_FRAC", "split_zorder_scope", "splits_the_shape",
@@ -69,28 +72,66 @@ def suggest_scope(compiled: CompiledFrame, instance: str, before: np.ndarray,
     ``zorder:below:<B>``, because "change the layering" alone does not say which
     way round.  A hint is only given when at least
     :data:`ZORDER_HINT_FRAC` of the changed pixels fall inside ``B``.
+
+    **Where it looks.**  The answer is about the pixels that changed, so the
+    box those pixels live in is the only part of the canvas that can carry it,
+    and each instance's own window is the only part *of that box* the instance
+    can be in.  The comparison runs inside the two, which is the same answer
+    for a great deal less reading: at 4032x3040 with forty instances the
+    whole-canvas version was 1.09 s of a 1.9 s ``Enter`` -- eighty-four 12 MP
+    ``&`` passes to explain a brush stroke.
     """
     before = np.asarray(before, dtype=bool)
     edited = np.asarray(edited, dtype=bool)
-    added, erased = edited & ~before, before & ~edited
+    window = _masks.bbox(before ^ edited)
+    if window is None:      # nothing changed: not a statement about anything
+        return api.SCOPE_KEYFRAME
+    here, there = _crop(before, window), _crop(edited, window)
+    added, erased = there & ~here, here & ~there
 
-    covering = _partner(compiled, instance, added, above=True)
+    covering = _partner(compiled, instance, added, window, above=True)
     if covering is not None:
         return f"zorder:above:{covering}"
-    covered = _partner(compiled, instance, erased, above=False)
+    covered = _partner(compiled, instance, erased, window, above=False)
     if covered is not None:
         return f"zorder:below:{covered}"
     return api.SCOPE_KEYFRAME
 
 
+def _crop(mask: np.ndarray, box: Box) -> np.ndarray:
+    """``mask`` inside ``box`` -- a view, so nothing is copied."""
+    x0, y0, x1, y1 = box
+    return mask[y0:y1, x0:x1]
+
+
+def _intersect(a: Optional[Box], b: Optional[Box]) -> Optional[Box]:
+    """The box both cover, or ``None`` when they do not meet.
+
+    ``None`` on the way *in* means "no bound known", which is not the same as
+    "empty": a caller that cannot say where its pixels are must be compared
+    everywhere the other one allows.
+    """
+    if a is None:
+        return b
+    if b is None:
+        return a
+    box = (max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3]))
+    return None if box[2] <= box[0] or box[3] <= box[1] else box
+
+
 def _partner(compiled: CompiledFrame, instance: str, changed: np.ndarray,
-             above: bool) -> Optional[str]:
+             window: Box, above: bool) -> Optional[str]:
     """The instance the changed pixels are a layering statement about, if any.
 
     ``above=True`` looks for an instance painting *over* ``instance`` whose
     visible pixels the edit reached into; ``above=False`` for one painting
     *under* it, compared on the amodal shapes, since what lies under is by
     definition not visible.
+
+    ``changed`` is the changed pixels **cropped to** ``window``; each instance
+    is then read only where its own window and ``window`` overlap.  An instance
+    with no window is read across the whole of ``window``, so a compiled frame
+    that cannot say where an instance is still gets the same answer.
     """
     total = int(changed.sum())
     if total == 0:
@@ -102,7 +143,12 @@ def _partner(compiled: CompiledFrame, instance: str, changed: np.ndarray,
         region = inst.visible if above else inst.amodal
         if region is None:
             continue
-        overlap = int(np.count_nonzero(changed & region))
+        box = _intersect(window, inst.window if above else inst.amodal_window)
+        if box is None:
+            continue
+        local = (box[0] - window[0], box[1] - window[1],
+                 box[2] - window[0], box[3] - window[1])
+        overlap = int(np.count_nonzero(_crop(changed, local) & _crop(region, box)))
         if overlap > best_overlap:
             best, best_overlap = other, overlap
     return best if best_overlap >= ZORDER_HINT_FRAC * total else None

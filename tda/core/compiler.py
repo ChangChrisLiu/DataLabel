@@ -188,6 +188,12 @@ class CompiledInstance:
     #: encode or repaint this instance without walking the whole canvas
     #: (:func:`tda.core.masks.encode_rle`'s ``window``).
     window: Optional[Window] = None
+    #: The same promise for ``amodal``. A separate field because a frame
+    #: override replaces the *visible* mask with its own patch, and that
+    #: patch's window says nothing about where the amodal shape is: the two
+    #: coincide only when nothing overrode the frame. ``None`` whenever there
+    #: is no amodal mask, or nothing is known about where it is.
+    amodal_window: Optional[Window] = None
 
 
 @dataclass
@@ -845,6 +851,7 @@ def compile_frame(
             placement=placement,
             keyframe_id=kf_id,
             window=None if visible is None else visible_window,
+            amodal_window=window,
         )
 
     return CompiledFrame(
