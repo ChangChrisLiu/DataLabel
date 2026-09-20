@@ -340,9 +340,13 @@ def test_v10_reports_the_history_the_progress_and_the_remainder(scene, tmp_path:
     assert first["answer"]["done"] == [] and first["answer"]["progress_bin"] == "0-25"
     assert last["answer"]["remaining_actions"] == 0
     assert last["answer"]["progress_bin"] == "75-100"
-    assert [a["verb"] for a in last["answer"]["done"]] == [
-        "unscrew", "disconnect", "remove", "open", "remove"
-    ]
+    # a set, sorted, because spec 8.2 grades V10 with set F1 -- a chassis
+    # reoriented seven times is one thing that happened
+    assert [(a["verb"], a["target"]) for a in last["answer"]["done"]] == sorted([
+        ("unscrew", S.SCREW), ("disconnect", S.PLUG), ("remove", S.PSU),
+        ("open", S.LATCH), ("remove", S.RAM),
+    ])
+    assert last["answer_check"]["done_actions"] == 5
 
 
 def test_v12_takes_its_no_change_from_dupli_and_leaves_failed_alone(
@@ -492,6 +496,37 @@ def test_the_export_refuses_a_view_with_a_standing_conflict(scene, tmp_path: Pat
     assert summary["open_conflicts"] == 1
     at_one = [r for r in _read(tmp_path / "v.jsonl") if r["step"] == 1]
     assert at_one and not [r for r in at_one if r["verified"]]
+
+
+def test_a_conflict_in_another_view_does_not_refuse_this_one(scene, tmp_path: Path):
+    """The refusal belongs to the view being published, not to its neighbours."""
+    db, tax = scene
+    from tda.core.masks import encode_rle
+
+    db.add_conflict(_frame_key(4, S.OTHER), S.RAM,
+                    encode_rle(S.rect(S.RECTS[S.RAM])),
+                    encode_rle(S.rect(S.RECTS[S.PSU])), 400)
+    records = _run(db, tax, tmp_path / "v.jsonl")
+    assert records
+    # ... but the disputed frame answers no cross-view question
+    cross = [r for r in _of(records, "V15")
+             if r["answer_check"]["derive"] == "cross_view"]
+    assert (4, S.RAM) not in {(r["step"], r["answer_check"]["instance"])
+                              for r in cross}
+    assert (7, S.LATCH) in {(r["step"], r["answer_check"]["instance"]) for r in cross}
+
+
+def test_a_step_flagged_dupli_counts_even_when_its_type_does_not_say_so(
+    scene, tmp_path: Path
+):
+    db, tax = scene
+    steps = db.steps(S.DESKTOP)
+    for rec in steps:
+        if rec.step == 3:
+            rec.step_type, rec.dupli = "normal", True
+    db.replace_steps(S.DESKTOP, steps, db.actions(S.DESKTOP))
+    records = {r["step"]: r for r in _of(_run(db, tax, tmp_path / "v.jsonl"), "V12")}
+    assert records[3]["answer"] == {"changed": False, "events": []}
 
 
 def test_an_answer_check_no_checker_can_execute_is_refused(scene, tmp_path: Path):

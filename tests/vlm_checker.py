@@ -407,21 +407,24 @@ class Checker:
                 _fail(record, f"option {pair} is mislabelled")
 
     # V10
+    def _named(self, step: int) -> list:
+        return [a for a in self.successful_actions(step)
+                if _cls_of(self.instances, a.target) is not None]
+
     def _check_history(self, record: dict, spec: dict) -> None:
         step = int(record["step"])
-        done = {(a.verb, a.target) for s in range(1, step + 1)
-                for a in self.successful_actions(s)
-                if _cls_of(self.instances, a.target) is not None}
+        log = [s for s in sorted(self.steps) if self.exportable(s)]
+        happened = [a for s in log if s <= step for a in self._named(s)]
+        done = {(a.verb, a.target) for a in happened}
         got = {(a["verb"], a["target"]) for a in record["answer"]["done"]}
         if got != done:
             _fail(record, f"history differs: missing {sorted(done - got)}, "
                           f"extra {sorted(got - done)}")
-        total = sum(1 for s in self.steps if self.exportable(s)
-                    for _ in self.successful_actions(s))
-        remaining = total - len(done)
+        total = sum(len(self._named(s)) for s in log)
+        remaining = total - len(happened)
         if record["answer"]["remaining_actions"] != remaining:
             _fail(record, f"remaining {record['answer']['remaining_actions']} != {remaining}")
-        share = 0.0 if not total else len(done) / total
+        share = 0.0 if not total else len(happened) / total
         want = spec["bins"][min(int(share * 4), 3)]
         if record["answer"]["progress_bin"] != want:
             _fail(record, f"bin {record['answer']['progress_bin']} != {want}")

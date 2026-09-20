@@ -253,8 +253,38 @@ class TaskCtx:
     illegal: dict[int, list[str]] = field(default_factory=dict)
     #: how many hard negatives / positives one frame may contribute per task.
     budget: int = 2
+    _legal: dict[tuple[int, bool], list] = field(default_factory=dict, repr=False)
+    _blocked: dict[int, list] = field(default_factory=dict, repr=False)
+    _by_target: Optional[dict[str, list[Edge]]] = field(default=None, repr=False)
 
     # -- shorthand ---------------------------------------------------------- #
+    @property
+    def log_steps(self) -> list[int]:
+        """The desktop's own annotatable steps, frame or no frame.
+
+        Not the same list as :attr:`steps`, which is the frames *this view* has.
+        A scanner frame may be missing (spec 4.2, 缺帧处理) and the action still
+        happened, so "what is the next step" and "how much is left" are counted
+        on the log; only the questions that need a picture are counted on frames.
+        """
+        return sorted(s for s in self.ctx.steps if self.ctx.exportable(s))
+
+    @property
+    def by_target(self) -> dict[str, list[Edge]]:
+        """``target -> its active edges``, built once per desktop.
+
+        :func:`~tda.core.graph.applicable_preconditions` scans the whole edge
+        list, which is nothing for one call and 76 million comparisons for a
+        66-desktop export: every frame asks for the legal set and the blocked
+        set, and every candidate action asks for its own preconditions.
+        """
+        if self._by_target is None:
+            index: dict[str, list[Edge]] = {}
+            for edge in active_edges(self.edges):
+                index.setdefault(edge.target, []).append(edge)
+            self._by_target = index
+        return self._by_target
+
     @property
     def tax(self) -> Taxonomy:
         return self.ctx.tax
@@ -280,7 +310,7 @@ class TaskCtx:
 
     def next_action_step(self, step: int) -> Optional[int]:
         """The next step after ``step`` that carries a named successful action."""
-        for candidate in self.steps:
+        for candidate in self.log_steps:
             if candidate > step and self.named_actions(candidate):
                 return candidate
         return None
@@ -299,13 +329,35 @@ class TaskCtx:
         )
 
     def legal_here(self, step: int) -> list[tuple[str, str]]:
-        """The required-only legal-action set at the state after ``step``."""
-        return legal_actions(self.ctx.instances, self.edges, self.state(step),
-                             self.tax, strict=False)
+        """The required-only legal-action set at the state after ``step``.
+
+        Required-only, not strict, because that is the standard the log itself
+        is judged by (:func:`~tda.core.graph.validate_sequence`): a recommended
+        edge is a preference, and a "legal actions" set that disagrees with the
+        legality check would be two answers to one question. The strict set
+        rides along in ``answer_check.strict_actions`` for the two-group metric
+        spec 8.2 asks for.
+        """
+        return self._legal_set(step, False)
 
     def legal_strict(self, step: int) -> list[tuple[str, str]]:
-        return legal_actions(self.ctx.instances, self.edges, self.state(step),
-                             self.tax, strict=True)
+        return self._legal_set(step, True)
+
+    def _legal_set(self, step: int, strict: bool) -> list[tuple[str, str]]:
+        hit = self._legal.get((step, strict))
+        if hit is None:
+            hit = legal_actions(self.ctx.instances, self.edges, self.state(step),
+                                self.tax, strict=strict)
+            self._legal[(step, strict)] = hit
+        return hit
+
+    def blocked(self, step: int) -> list[tuple[str, str, list[Edge]]]:
+        """``(verb, target, unmet edges)`` for everything the graph forbids now."""
+        hit = self._blocked.get(step)
+        if hit is None:
+            hit = blocked_actions(self, step)
+            self._blocked[step] = hit
+        return hit
 
 
 def target_class(ctx: DesktopCtx, target: str) -> Optional[str]:
@@ -327,22 +379,21 @@ def blocked_actions(tc: TaskCtx, step: int) -> list[tuple[str, str, list[Edge]]]
     precondition is not satisfied, so the answer is no and the graph says why.
     """
     state = tc.state(step)
-    active = active_edges(tc.edges)
     out: list[tuple[str, str, list[Edge]]] = []
     for key, rec in sorted(tc.ctx.instances.items()):
         inst = state.get(key)
-        if inst is None or inst.state == "removed":
-            continue
+        if inst is None or inst.state == "removed" or key not in tc.by_target:
+            continue  # nothing points at it: nothing can be blocking it
         for verb in tc.tax.verbs:
             if not verb_applies(tc.tax, rec.cls, rec.attrs, verb, inst.state):
                 continue
-            bad = unmet(applicable_preconditions(active, (verb, key)), state, "required")
+            bad = unmet_for(tc, verb, key, state)
             if bad:
                 out.append((verb, key, bad))
-    for key, current in sorted(cable_nodes(active, state).items()):
+    for key, current in sorted(cable_nodes(active_edges(tc.edges), state).items()):
         if not verb_applies(tc.tax, CABLE_CLASS, {}, "release", current):
             continue
-        bad = unmet(applicable_preconditions(active, ("release", key)), state, "required")
+        bad = unmet_for(tc, "release", key, state)
         if bad:
             out.append(("release", key, bad))
     return out
@@ -350,7 +401,7 @@ def blocked_actions(tc: TaskCtx, step: int) -> list[tuple[str, str, list[Edge]]]
 
 def unmet_for(tc: TaskCtx, verb: str, target: str, state: FrameState) -> list[Edge]:
     """Which required preconditions of ``(verb, target)`` are not satisfied."""
-    return unmet(applicable_preconditions(active_edges(tc.edges), (verb, target)),
+    return unmet(applicable_preconditions(tc.by_target.get(target, []), (verb, target)),
                  state, "required")
 
 
@@ -720,7 +771,7 @@ def gen_v4(tc: TaskCtx, step: int) -> Iterator[dict]:
         return
     state = tc.state(step)
     seed = tc.seed(step, "V4")
-    blocked = [(v, t, bad) for v, t, bad in blocked_actions(tc, step)
+    blocked = [(v, t, bad) for v, t, bad in tc.blocked(step)
                if t in tc.ctx.instances]
     legal = [(v, t) for v, t in tc.legal_here(step) if t in tc.ctx.instances]
 
@@ -824,7 +875,7 @@ def gen_v6(tc: TaskCtx, step: int) -> Iterator[dict]:
                           lambda it: f"{it[0]}|{it[1]}")[:V6_DISTRACTORS]
     options = [{"verb": action.verb, "target": action.target, "legal": True}]
     options += [{"verb": v, "target": t, "legal": True} for v, t in others]
-    blocked = stable_order([(v, t) for v, t, _ in blocked_actions(tc, step)],
+    blocked = stable_order([(v, t) for v, t, _ in tc.blocked(step)],
                            seed + "|neg", lambda it: f"{it[0]}|{it[1]}")[:1]
     options += [{"verb": v, "target": t, "legal": False} for v, t in blocked]
     options = stable_order(options, seed + "|order",
@@ -933,10 +984,18 @@ def gen_v10(tc: TaskCtx, step: int) -> Iterator[dict]:
     frame = tc.frame(step)
     if frame is None:
         return
-    done = [a for s in tc.steps if s <= step for a in tc.named_actions(s)]
-    total = sum(len(tc.named_actions(s)) for s in tc.steps)
+    # counted on the *log*, not on this view's frames: a missing scanner frame
+    # (spec 4.2) does not mean the action never happened, and "how much is
+    # left" must be the same number in all four views
+    done = [a for s in tc.log_steps if s <= step for a in tc.named_actions(s)]
+    total = sum(len(tc.named_actions(s)) for s in tc.log_steps)
     if not total:
         return
+    # `done` is a *set* (spec 8.2's metric for V10 is set F1), so a chassis
+    # reoriented seven times is one thing that has happened -- while the
+    # remainder and the progress bin count the log's actions, because "how many
+    # steps are left" is not a question about distinct pairs
+    pairs = sorted({(a.verb, a.target) for a in done})
     share = len(done) / total
     bin_name = PROGRESS_BINS[min(int(share * len(PROGRESS_BINS)), len(PROGRESS_BINS) - 1)]
     state = tc.state(step)
@@ -948,10 +1007,10 @@ def gen_v10(tc: TaskCtx, step: int) -> Iterator[dict]:
              for a in done[-tc.budget:]]
     yield record(
         tc, "V10", rec_id, step, [frame.image], question, index,
-        {"done": [{"verb": a.verb, "target": a.target} for a in done],
+        {"done": [{"verb": verb, "target": target} for verb, target in pairs],
          "remaining_actions": total - len(done), "progress_bin": bin_name},
         {"type": "history", "bins": list(PROGRESS_BINS), "total_actions": total,
-         "metric": "set_f1+bin_accuracy"},
+         "done_actions": len(done), "metric": "set_f1+bin_accuracy"},
         evidence({a.target: frame.pointable[a.target][1] for a in done
                   if a.target in frame.pointable}, tc),
         R.rationale(chain), frame.verified,
@@ -984,7 +1043,8 @@ def gen_v12(tc: TaskCtx, step: int) -> Iterator[dict]:
     if not (frame.verified and before.verified):
         return
     kind = tc.ctx.step_type(step)
-    if kind == StepType.DUPLI.value:
+    rec = tc.ctx.steps.get(step)
+    if kind == StepType.DUPLI.value or (rec is not None and rec.dupli):
         changed, events = False, []
     elif kind in NO_CHANGE_STEP_TYPES or kind == StepType.FAILED.value:
         return
@@ -994,6 +1054,8 @@ def gen_v12(tc: TaskCtx, step: int) -> Iterator[dict]:
                   for key in sorted(old.keys() & new.keys())
                   if old[key].state != new[key].state]
         if not events:
+            # a `reorient` or an `auxiliary` step: the picture changed a great
+            # deal and the machine did not, which is neither answer
             return
         changed = True
     rec_id = f"V12-{frame_id(tc.desktop, tc.view, step)}"
@@ -1274,7 +1336,7 @@ def gen_v16(tc: TaskCtx, step: int) -> Iterator[dict]:
     if frame is None:
         return
     plan: list[tuple[str, str]] = []
-    for candidate in tc.steps:
+    for candidate in tc.log_steps:
         if candidate <= step:
             continue
         if candidate in tc.illegal:

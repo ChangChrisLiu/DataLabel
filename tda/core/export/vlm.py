@@ -142,13 +142,21 @@ def _read_view(db: Db, ctx: DesktopCtx, desktop: int, view: str,
 
 
 def _other_views(db: Db, ctx: DesktopCtx, desktop: int, view: str,
-                 only_verified: bool, service: TruthService,
-                 allow_conflicts: bool) -> dict[str, dict[int, FrameData]]:
+                 only_verified: bool, service: TruthService
+                 ) -> dict[str, dict[int, FrameData]]:
     """The *later* views' frames, for V15 only.
 
     A cross-view record belongs to exactly one file, so it is written by the
     view that comes first in :data:`~tda.core.model.VIEWS`: exporting all four
     views therefore yields each unordered pair once, not twice.
+
+    An open conflict in one of those views does **not** refuse this export. The
+    refusal belongs to the view being published -- a disagreement about a
+    RealSense frame is not a reason to withhold the scanner's questions -- so
+    the conflicted frames are simply marked unverified here, and V15, which only
+    speaks about confirmed frames, passes over them. It reads the other views,
+    so it refreshes them too: a cross-view answer off a stale cache would be a
+    cross-view answer about an edit nobody made.
     """
     out: dict[str, dict[int, FrameData]] = {}
     for other in VIEWS:
@@ -157,7 +165,7 @@ def _other_views(db: Db, ctx: DesktopCtx, desktop: int, view: str,
         if not db.frames_for(desktop, other):
             continue
         service.ensure_fresh(desktop, other, only_verified)
-        disputed = conflicted_steps(service, desktop, other, allow_conflicts)
+        disputed = conflicted_steps(service, desktop, other, allow_conflicts=True)
         frames, _ = _read_view(db, ctx, desktop, other, disputed, only_verified)
         if frames:
             out[other] = frames
@@ -225,8 +233,8 @@ def export_vlm(
             ctx=ctx, view=view, tier=tier, graph_version=graph_version_of(db, desktop),
             meta=db.get_desktop(desktop) or {}, edges=edges, frames=frames,
             steps=order, illegal=bad_steps,
-            others=(_other_views(db, ctx, desktop, view, only_verified, service,
-                                 allow_conflicts) if needs_others else {}),
+            others=(_other_views(db, ctx, desktop, view, only_verified, service)
+                    if needs_others else {}),
         )
         for step in order:
             for task in wanted:
