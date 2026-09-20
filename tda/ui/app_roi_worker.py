@@ -104,6 +104,22 @@ class RoiProposer(QObject):
             self._pending = (token, segment, str(view), wanted)
             self._lock.notify()
 
+    def cancel(self) -> None:
+        """Abandon the answer in flight: nobody is waiting for it any more.
+
+        Bumping the token is what does the work -- a measurement already on the
+        worker cannot be stopped, and does not need to be, because
+        :meth:`_deliver` drops a payload whose token has moved on. Without this
+        an answer requested before an ``Enter`` stayed valid: it was still about
+        the same segment, nothing had been dragged since, and the next
+        ``Shift+R`` armed the tool just in time for it to land and overwrite the
+        rectangle the annotator had just stored.
+        """
+        with self._lock:
+            self._token += 1
+            self._pending = None
+            self._lock.notify_all()
+
     def queued(self) -> int:
         """How many measurements are waiting: the mailbox holds at most one."""
         with self._lock:

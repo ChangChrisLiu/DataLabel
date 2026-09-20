@@ -103,6 +103,13 @@ class ToolsMixin:
     # --------------------------------------------------------- display slots
     @S.guard
     def act_toggle_overlays(self) -> None:
+        """``A``: all overlays off -- and with them anything waiting for a key.
+
+        A draft ghost that is merely *invisible* still owns ``Enter``, so the
+        next press would adopt pixels nobody can see.  Hiding the layers ends
+        that offer instead.
+        """
+        self.forget_draft_ghost()
         if self.overlay is not None:
             self.overlay.visible = not self.overlay.visible
             self.canvas.refresh()

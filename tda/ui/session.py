@@ -254,6 +254,19 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
         """Logical steps of the open desktop/view, ascending."""
         return list(self._steps)
 
+    def available_steps(self) -> list[int]:
+        """The subset of :meth:`steps` this view can be annotated on, ascending.
+
+        A step whose frame row is flagged ``missing``, or whose type the step
+        table calls ``ignore``, stays in :meth:`steps` -- the state machine and
+        the shape anchors run through it (spec 4.2 缺帧处理) -- but has no
+        canvas. Anything that wants *pixels* wants this list instead: the
+        navigation already uses it, and a caller that reached for ``steps()``
+        got a step it could not read (the chassis ROI was measured on two
+        frames instead of three whenever a segment's last step was missing).
+        """
+        return list(self._available)
+
     def current(self) -> FrameKey:
         """The frame being annotated."""
         if self.desktop is None or self._step is None:

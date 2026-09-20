@@ -1,4 +1,4 @@
--- TDA SQLite schema (schema_version = 3).
+-- TDA SQLite schema (schema_version = 4).
 -- One table per entity of design spec section 3.1. Every JSON column is TEXT
 -- holding json.dumps(..., ensure_ascii=False); RLE dicts are stored as JSON.
 -- All statements are IF NOT EXISTS so that Db.__init__ stays idempotent -- which
@@ -113,6 +113,27 @@ CREATE TABLE IF NOT EXISTS pose_segment (
     -- straight down at the board, so on most views this stays NULL for ever
     bench_roi_json  TEXT,
     PRIMARY KEY (desktop, view, seg)
+);
+
+-- Per-view pose breaks (spec 2.5, v1.5): the steps where THIS view's camera was
+-- knocked or the chassis moved in front of it, on top of the `reorient` steps
+-- the four views share. `step` is the step the NEW segment starts at.
+--
+-- A row is a proposal until a human accepts it: the camera audit imports its
+-- findings as `proposed` and nothing is re-cut until somebody has flashed the
+-- two frames against each other and said yes. Keeping rejected rows is the
+-- point of the third status -- a re-run of the import must not propose again
+-- what was already looked at and declined.
+CREATE TABLE IF NOT EXISTS pose_break (
+    desktop      INTEGER NOT NULL REFERENCES desktop(id) ON DELETE CASCADE,
+    view         TEXT    NOT NULL,
+    step         INTEGER NOT NULL,          -- the new segment STARTS at this step
+    status       TEXT    NOT NULL DEFAULT 'accepted',  -- proposed | accepted | rejected
+    kind         TEXT,                      -- camera | chassis | manual
+    magnitude_px REAL,
+    source       TEXT    NOT NULL,          -- 'manual:<annotator>' | 'audit:<file>'
+    note         TEXT,
+    PRIMARY KEY (desktop, view, step)
 );
 
 CREATE TABLE IF NOT EXISTS frame_transform (

@@ -445,7 +445,9 @@ def test_a_new_cut_drops_the_geometry_of_a_segment_whose_reference_moved(tmp_db_
         assert (second["start_step"], second["end_step"], second["ref_step"]) == (4, 10, 10)
         issues = (db.get_desktop(5) or {}).get("pose_issues") or []
         assert any("reference step from 10 to 3" in text for text in issues)
-        assert any("corners/homography/ROI were dropped" in text for text in issues)
+        # only the two that are drawn against the reference frame: the ROI is a
+        # window in the view's own image and a re-cut keeps it (task B1)
+        assert any("corners/homography were dropped" in text for text in issues)
 
         # running it again changes nothing and does not repeat the issue
         assert split_pose_segments(db, 5)["scan"] == 2
@@ -483,6 +485,169 @@ def test_split_pose_segments_is_idempotent(env):
             "SELECT COUNT(*) AS n FROM pose_segment WHERE desktop=77 AND view='scan'"
         ).fetchone()["n"]
         assert n == 2
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------------- #
+# per-view pose breaks (task B1 step 4)
+# --------------------------------------------------------------------------- #
+def _cut_oak1(db: Db, step: int = 20) -> None:
+    """An accepted break of one view, plus a shape and a layer order to move."""
+    from tda.core.model import ShapeKeyframe, ShapePart, ZOrderRec
+
+    db.add_pose_break(13, "oak1", step, status="accepted", kind="camera",
+                      magnitude_px=190.45, source="audit:events.csv")
+    db.add_keyframe(ShapeKeyframe(
+        id=None, instance="psu.01", desktop=13, view="oak1", pose_segment=1,
+        anchor_step=30, placement="in_chassis", geom_type="mask",
+        parts=[ShapePart("main", {"size": [64, 64], "counts": "0 8 4088"})]))
+    db.set_zorder(ZOrderRec(13, "oak1", 1, [("psu.01", "main")]))
+
+
+def _ranges(db: Db, desktop: int, view: str) -> list[tuple]:
+    return [(r["seg"], r["start_step"], r["end_step"])
+            for r in db.pose_segments(desktop, view)]
+
+
+def test_a_break_cuts_its_own_view_and_no_other(env):
+    assert run(env, "load-index") == EXIT_OK
+    assert run(env, "import-logs") == EXIT_OK
+    db = open_db(env)
+    try:
+        _cut_oak1(db)
+        from tda.pipeline import split_pose_segments
+
+        counts = split_pose_segments(db, 13)
+        assert counts["oak1"] == 2 and counts["scan"] == 1
+        assert _ranges(db, 13, "oak1") == [(1, 1, 19), (2, 20, env["n_steps_13"])]
+        assert _ranges(db, 13, "scan") == [(1, 1, env["n_steps_13"])]
+        assert db.keyframes(13, "oak1")[0].pose_segment == 2
+        assert db.zorder(13, "oak1", 2).order == [("psu.01", "main")]
+    finally:
+        db.close()
+
+
+def test_a_manual_break_survives_load_index_and_import_logs_force(env):
+    """Review focus 2: the pipeline re-derives the cuts, it does not forget them."""
+    assert run(env, "load-index") == EXIT_OK
+    assert run(env, "import-logs") == EXIT_OK
+    db = open_db(env)
+    try:
+        _cut_oak1(db)
+        from tda.pipeline import split_pose_segments
+
+        split_pose_segments(db, 13)
+        before = (_ranges(db, 13, "oak1"),
+                  [(k.instance, k.anchor_step, k.pose_segment) for k in db.keyframes(13, "oak1")],
+                  db.zorder(13, "oak1", 2).order)
+    finally:
+        db.close()
+
+    assert run(env, "load-index") == EXIT_OK
+    assert run(env, "import-logs", "--force") == EXIT_OK
+
+    db = open_db(env)
+    try:
+        assert db.pose_breaks(13, "oak1", status="accepted")[0]["step"] == 20
+        assert (_ranges(db, 13, "oak1"),
+                [(k.instance, k.anchor_step, k.pose_segment) for k in db.keyframes(13, "oak1")],
+                db.zorder(13, "oak1", 2).order) == before
+    finally:
+        db.close()
+
+
+def test_a_reorient_and_a_manual_break_at_the_same_step_are_one_boundary(env):
+    """D77's sheet flips the chassis at step 3; a human marks the same step."""
+    assert run(env, "load-index") == EXIT_OK
+    assert run(env, "import-logs") == EXIT_OK
+    db = open_db(env)
+    try:
+        from tda.pipeline import split_pose_segments
+
+        cut = _ranges(db, 77, "scan")
+        db.add_pose_break(77, "scan", 3, status="accepted", kind="manual",
+                          source="manual:anna")
+        assert split_pose_segments(db, 77)["scan"] == len(cut)
+        assert _ranges(db, 77, "scan") == cut          # no empty segment appeared
+        assert all(start <= end for _seg, start, end in cut)
+    finally:
+        db.close()
+
+
+def test_a_discarded_layer_order_does_not_abort_the_whole_import(env):
+    """Round 1, I-1: `_recut_issues` rendered a list of layer keys as a dict.
+
+    Fed the shape ``apply_recut`` really produces for a discarded z-order, the
+    audit line used to raise ``TypeError`` -- inside ``split_pose_segments``,
+    inside the desktop's own transaction, so a whole ``load-index`` or
+    ``import-logs`` rolled back over one merged layer order.
+    """
+    from tda.pipeline import _recut_issues
+
+    lines = _recut_issues("scan", {
+        "ref_moves": [],
+        "discarded": [{"table": "zorder", "pose_segment": 2, "into": 1,
+                       "changed_pairs": [[["psu.01", "main"], ["screw.psu.01", "main"]]]}],
+        "uncarried": [{"id": 4, "instance": "psu.01", "anchor_step": 18}],
+        "ranges": [(1, 1, 42)],
+    })
+
+    assert any("1 pair(s) changed places" in line for line in lines)
+    assert any("psu.01 @ 18" in line for line in lines)
+
+
+def test_a_step_that_stops_being_a_reorient_merges_back_without_crashing(env):
+    """The end-to-end shape of I-1: cut at a reorient, correct the log, merge.
+
+    D77's sheet flips the chassis at step 3.  The cut copies the layer order
+    into both halves; correcting the step type merges them again, which is
+    exactly the path that used to abort the run.
+    """
+    from tda.core.model import ZOrderRec
+    from tda.pipeline import split_pose_segments
+
+    assert run(env, "load-index") == EXIT_OK
+    assert run(env, "import-logs") == EXIT_OK
+    db = open_db(env)
+    try:
+        assert len(_ranges(db, 77, "scan")) == 2
+        # the annotator re-ordered the two layers in the earlier half
+        db.set_zorder(ZOrderRec(77, "scan", 1, [("psu.01", "main"), ("fan.01", "main")]))
+        db.set_zorder(ZOrderRec(77, "scan", 2, [("fan.01", "main"), ("psu.01", "main")]))
+        steps = [s for s in db.steps(77)]
+        for step in steps:
+            if step.step_type == StepType.REORIENT.value:
+                step.step_type = StepType.NORMAL.value
+        db.replace_steps(77, steps, db.actions(77))
+        db.upsert_desktop(77, {"pose_issues": []})
+
+        counts = split_pose_segments(db, 77)      # used to raise TypeError
+
+        assert counts["scan"] == 1
+        assert len(_ranges(db, 77, "scan")) == 1
+        # nothing fell out of the order, and what changed places is reported
+        assert db.zorder(77, "scan", 1).order == [("fan.01", "main"), ("psu.01", "main")]
+        issues = (db.get_desktop(77) or {}).get("pose_issues") or []
+        assert any("changed places" in line for line in issues)
+    finally:
+        db.close()
+
+
+def test_a_proposed_or_rejected_break_cuts_nothing(env):
+    assert run(env, "load-index") == EXIT_OK
+    assert run(env, "import-logs") == EXIT_OK
+    db = open_db(env)
+    try:
+        from tda.pipeline import split_pose_segments
+
+        db.add_pose_break(13, "oak1", 20, status="proposed", kind="camera",
+                          source="audit:events.csv")
+        assert split_pose_segments(db, 13)["oak1"] == 1
+        db.set_pose_break_status(13, "oak1", 20, "rejected")
+        assert split_pose_segments(db, 13)["oak1"] == 1
+        db.set_pose_break_status(13, "oak1", 20, "accepted")
+        assert split_pose_segments(db, 13)["oak1"] == 2
     finally:
         db.close()
 

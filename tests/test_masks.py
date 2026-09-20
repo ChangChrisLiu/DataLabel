@@ -71,6 +71,53 @@ def test_decode_rle_accepts_bytes_counts():
     assert np.array_equal(M.decode_rle(as_bytes), mask)
 
 
+def test_rle_iou_matches_the_decoded_answer():
+    a = _square((64, 64), 10, 10, 30)
+    b = _shift(a, 5, 5)
+    assert M.rle_iou(M.encode_rle(a), M.encode_rle(a)) == pytest.approx(1.0)
+    assert M.rle_iou(M.encode_rle(a), M.encode_rle(b)) == pytest.approx(_iou(a, b))
+
+
+def test_rle_bbox_matches_the_decoded_answer():
+    mask = _square((64, 64), 10, 12, 30)
+    assert M.rle_bbox(M.encode_rle(mask)) == M.bbox(mask)
+    assert M.rle_bbox(M.encode_rle(np.zeros((8, 8), dtype=bool))) is None
+    assert M.rle_bbox(None) is None
+
+
+def test_rle_contains_answers_without_decoding():
+    """The point test a candidate ranking needs, straight off the run lengths."""
+    mask = _square((64, 64), 10, 12, 30)          # y 10..40, x 12..42
+    rle = M.encode_rle(mask)
+    assert M.rle_contains(rle, 20, 20) is True
+    assert bool(mask[20, 20]) is True
+    assert M.rle_contains(rle, 0, 0) is False
+    assert M.rle_contains(rle, 41, 39) == bool(mask[39, 41])
+    # outside the frame, or no mask at all, is never "inside"
+    assert M.rle_contains(rle, -1, 5) is False
+    assert M.rle_contains(rle, 64, 5) is False
+    assert M.rle_contains(None, 5, 5) is False
+
+
+def test_rle_overlap_counts_the_shared_pixels_without_decoding():
+    a = _square((64, 64), 10, 10, 30)
+    b = _shift(a, 5, 5)
+    assert M.rle_overlap(M.encode_rle(a), M.encode_rle(b)) == int((a & b).sum())
+    assert M.rle_overlap(M.encode_rle(a), M.encode_rle(a)) == int(a.sum())
+    assert M.rle_overlap(M.encode_rle(a), None) == 0
+    assert M.rle_overlap(M.encode_rle(a),
+                         M.encode_rle(_square((32, 32), 2, 2, 8))) == 0
+
+
+def test_rle_iou_of_a_missing_empty_or_differently_sized_mask_is_zero():
+    """Two sizes are two frames, so they overlap in nothing (never an error)."""
+    a = M.encode_rle(_square((64, 64), 10, 10, 30))
+    assert M.rle_iou(a, None) == 0.0
+    assert M.rle_iou(None, a) == 0.0
+    assert M.rle_iou(a, M.encode_rle(np.zeros((64, 64), dtype=bool))) == 0.0
+    assert M.rle_iou(a, M.encode_rle(_square((32, 32), 2, 2, 10))) == 0.0
+
+
 # --------------------------------------------------------------------------
 # bbox / min_side / area
 # --------------------------------------------------------------------------

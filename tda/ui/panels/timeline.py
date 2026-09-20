@@ -34,11 +34,18 @@ from PySide6.QtWidgets import (
 from tda.ui import session_api as api
 from tda.ui.panels import session_is_open
 
-__all__ = ["TimelinePanel", "STATUS_COLORS", "status_brush"]
+__all__ = ["BREAK_COLOR", "BREAK_ROLE", "TimelinePanel", "STATUS_COLORS", "status_brush"]
 
 #: Item data roles.
 STEP_ROLE = int(Qt.ItemDataRole.UserRole)
 STATUS_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+#: ``True`` on the row a pose segment **starts** at (spec 2.5): the shapes do
+#: not carry across it, so where the boundary sits is worth seeing while
+#: scrolling rather than only in the split dialog.
+BREAK_ROLE = int(Qt.ItemDataRole.UserRole) + 2
+
+#: Colour of that boundary mark.
+BREAK_COLOR = QColor(120, 170, 235)
 
 #: Status colours (spec 4.5).  ``needs_review`` shares the conflict red: both
 #: mean "a human must look at this frame again".
@@ -64,7 +71,10 @@ def status_brush(status: str) -> QBrush:
 
 
 class _StatusBarDelegate(QStyledItemDelegate):
-    """Paints the status bar down the left edge of each row."""
+    """Paints the status bar down the left edge of each row, and the break marks."""
+
+    #: Height of the line drawn across a row that starts a pose segment.
+    BREAK_HEIGHT = 2
 
     def __init__(self, width: int, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -72,16 +82,21 @@ class _StatusBarDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index) -> None:  # noqa: D102 - Qt override
         super().paint(painter, option, index)
-        status = index.data(STATUS_ROLE)
-        if not status:
-            return
         rect = option.rect
+        status = index.data(STATUS_ROLE)
         painter.save()
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.fillRect(
-            rect.left() + 1, rect.top() + 2, self._width, rect.height() - 4,
-            status_brush(str(status)),
-        )
+        if status:
+            painter.fillRect(
+                rect.left() + 1, rect.top() + 2, self._width, rect.height() - 4,
+                status_brush(str(status)),
+            )
+        if index.data(BREAK_ROLE):
+            # across the whole row, at the edge the new segment begins at: the
+            # rows are in annotation order, so "before this step" is the top
+            painter.fillRect(rect.left(), rect.top(), rect.width(),
+                             self.BREAK_HEIGHT,
+                             QBrush(BREAK_COLOR, Qt.BrushStyle.SolidPattern))
         painter.restore()
 
 
@@ -114,6 +129,8 @@ class TimelinePanel(QWidget):
         self._placeholder_pm: Optional[QPixmap] = None
         self._descending = True
         self._syncing = False
+        #: Steps this view starts a pose segment at (spec 2.5), drawn as a mark.
+        self._breaks: set[int] = set()
 
         self.order_toggle = QCheckBox("Oldest ↑")
         self.order_toggle.setToolTip(
@@ -181,6 +198,7 @@ class TimelinePanel(QWidget):
                 item = QListWidgetItem(f"Step {step}")
                 item.setData(STEP_ROLE, step)
                 item.setData(STATUS_ROLE, self._status(step))
+                item.setData(BREAK_ROLE, step in self._breaks)
                 item.setSizeHint(
                     QSize(self.THUMB_SIZE * 2, self.THUMB_SIZE + 2 * self.BAR_WIDTH)
                 )
@@ -228,6 +246,26 @@ class TimelinePanel(QWidget):
         the canvas is not showing.  The window calls this on a refusal.
         """
         self._select_current()
+
+    def set_break_steps(self, steps) -> None:
+        """The steps of the current view that start a pose segment.
+
+        The window hands these in on every frame change, because a re-cut can
+        add or remove one without the step list changing at all.  Repainting is
+        enough -- the rows themselves do not move.
+        """
+        wanted = {int(s) for s in steps or ()}
+        if wanted == self._breaks:
+            return
+        self._breaks = wanted
+        for row in range(self._list.count()):
+            item = self._list.item(row)
+            item.setData(BREAK_ROLE, int(item.data(STEP_ROLE)) in wanted)
+        self._list.viewport().update()
+
+    def break_steps(self) -> list[int]:
+        """The steps currently marked as a segment start, ascending."""
+        return sorted(self._breaks)
 
     def step_brush(self, step: int) -> QBrush:
         """The brush the status bar of ``step`` is painted with."""

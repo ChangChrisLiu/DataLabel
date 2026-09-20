@@ -61,19 +61,30 @@ class Op:
 
 
 def edit_editing_mask_op(
-    instance: str, before: np.ndarray, after: np.ndarray
+    instance: str, before: np.ndarray, after: np.ndarray,
+    adopted: Optional[dict] = None,
 ) -> Op:
     """Build an ``edit_editing_mask`` op from the two mask states.
 
     The inverse is the same payload with ``rle_before``/``rle_after`` swapped,
     so a single "set the mask to ``rle_after``" handler serves both directions.
+
+    ``adopted`` marks the stroke as "these pixels came from that Label Studio
+    draft" (:mod:`tda.ui.app_adopt`). It rides on the **forward** payload only,
+    because that is what makes the history the record: a commit asks the stack
+    which adoptions are applied-and-not-undone right now, instead of trusting a
+    flag somebody set when the ghost was accepted and nobody cleared when it was
+    undone.
     """
     # two full-canvas encodes per recorded stroke, on the GUI thread
     rle_before = _masks.encode_rle_boxed(before)
     rle_after = _masks.encode_rle_boxed(after)
+    payload = {"instance": instance, "rle_before": rle_before, "rle_after": rle_after}
+    if adopted:
+        payload["adopted"] = dict(adopted)
     return Op(
         kind="edit_editing_mask",
-        payload={"instance": instance, "rle_before": rle_before, "rle_after": rle_after},
+        payload=payload,
         inverse={"instance": instance, "rle_before": rle_after, "rle_after": rle_before},
     )
 

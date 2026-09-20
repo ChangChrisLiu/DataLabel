@@ -96,6 +96,10 @@ class RoiMixin:
         image = self.session.image()
         if image is None:
             return
+        # The rectangle is about to take ``Enter`` and ``Esc``; a draft ghost
+        # holding them at the same time would leave two things on screen
+        # claiming the same two keys.
+        self.forget_draft_ghost()
         stored = self.roi()
         self._roi_dragged = False
         self._roi_wanted = self._roi_segment_key()
@@ -117,10 +121,18 @@ class RoiMixin:
         self.roi_proposer.request(self._roi_wanted, self.session.view,
                                   self._roi_sample_paths())
 
-    def _roi_segment_key(self) -> tuple:
-        """What a pending proposal is *about*, so a stale one can be dropped."""
-        key = self.session.current()
-        return (int(key.desktop), str(key.view), self._pose_segment(key))
+    def _roi_segment_key(self) -> Optional[tuple]:
+        """What a pending proposal is *about*, so a stale one can be dropped.
+
+        The same five-tuple a dismissal is remembered by
+        (:meth:`~tda.ui.app_edit.EditMixin.roi_key`): desktop, view, segment
+        number **and the segment's step range**. The range is what makes it
+        self-invalidating -- a pose re-cut renumbers segments and moves their
+        ranges, so a measurement taken for "segment 2 of D13 oak1" before the
+        cut is not an answer about the segment 2 that exists after it, and an
+        identity that stopped at the number would have drawn it anyway.
+        """
+        return self.roi_key()
 
     def _roi_sample_steps(self) -> list[int]:
         """The segment's first, middle and last annotatable steps.
@@ -138,8 +150,7 @@ class RoiMixin:
         # `missing` is in `steps()` (the state machine runs through it) but has
         # no image, and sampling one silently leaves the union a frame short --
         # on the real D61 the scanner's last step is exactly that
-        steps = sorted(int(s) for s in getattr(self.session, "_available", None)
-                       or self.session.steps())
+        steps = sorted(int(s) for s in self.session.available_steps())
         start, end = row.get("start_step"), row.get("end_step")
         if start is not None:
             steps = [s for s in steps if s >= int(start)]
@@ -285,6 +296,11 @@ class RoiMixin:
             self.report(NO_CHASSIS_FOUND)
             return
         hw = None if self.overlay is None else self.overlay.hw
+        # There is a rectangle now, and it is the annotator's. A measurement
+        # still in flight is about the same segment and nothing has been dragged
+        # since, so every guard in _on_roi_proposed would let it through the
+        # next time the tool is armed.
+        self.roi_proposer.cancel()
         accepted = tuple(self.db.set_pose_segment_roi(
             int(key.desktop), str(key.view), int(segment), list(self.roi_draft),
             annotator=self.annotator, hw=hw,
@@ -299,11 +315,22 @@ class RoiMixin:
         self.report(f"ROI stored: {accepted}")
 
     def cancel_roi_edit(self) -> None:
-        """Leave ROI editing without storing anything."""
+        """Leave ROI editing without storing anything -- and remember that.
+
+        Every way the proposal leaves the screen without a rectangle ends here:
+        ``Esc``, picking another tool, starting an instance edit, arming a bench
+        box.  All of them are the annotator saying "not now", so the segment is
+        recorded as dismissed and the next frame of it does not ask again.  The
+        memory carries the segment's step range, so the next *re-cut* does ask.
+        """
         if not self.roi_editing:
             return
         self.roi_editing = False
         self.roi_draft = self.roi()
+        self.roi_proposer.cancel()   # nobody is waiting for it any more
+        dismissed = self.roi_key()
+        if dismissed is not None:
+            self._roi_dismissed.add(dismissed)
         self.canvas.set_rubber_band(None)
         self._attach_tool()
 
@@ -453,7 +480,8 @@ class RoiMixin:
             self.restore_bar.hide()
             return
         self._restore_offer = {"instance": found["instance"], "mask": found["mask"],
-                               "key": found["key"]}
+                               "key": found["key"],
+                               "adopted": list(found.get("adopted") or [])}
         self.restore_bar.show_text(
             f"上次未提交的编辑（{found['instance']}）可以恢复 / "
             f"an uncommitted edit of {found['instance']} was found"
@@ -485,6 +513,10 @@ class RoiMixin:
             return
         self.set_sam_instance(offer["instance"])
         self.set_editing_mask(offer["mask"])
+        # The layer is back; so is what it was built from, or the commit that
+        # follows would file somebody's adopted draft as hand-drawn work.
+        self.note_restored_adoptions(offer["key"], offer["instance"],
+                                     offer.get("adopted"))
         self._attach_tool()
         self.report(f"restored the uncommitted edit of {offer['instance']}")
 

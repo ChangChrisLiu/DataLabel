@@ -155,6 +155,9 @@ class KeysMixin:
             return
         if self._flashing is not None or not compat.is_open(self.session):
             return
+        # Whatever was being offered was offered about *this* frame; the canvas
+        # is about to show another one.
+        self.forget_draft_ghost()
         image = compat.flash_image(self.session, other=other)
         if image is None:
             return

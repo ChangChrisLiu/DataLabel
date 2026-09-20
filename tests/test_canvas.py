@@ -25,6 +25,7 @@ from PySide6.QtWidgets import QApplication
 from tda.core import masks as M
 from tda.ui.canvas.overlay import (
     EDIT_RGB,
+    GHOST_RGB,
     OCCLUDER_RGB,
     PALETTE_64,
     LabelOverlay,
@@ -275,6 +276,60 @@ def test_qimage_rebuilds_only_the_dirty_rect(two_masks):
     assert tuple(_argb(img, 40, 30)[1:]) == EDIT_RGB
     # the untouched part of the buffer still carries the instance colours
     assert tuple(_argb(img, 6, 6)[1:]) == palette_color("inst-a")
+
+
+def test_a_ghost_repaints_only_what_it_covers(two_masks):
+    """A draft preview must not cost a whole-frame composite per keypress."""
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order)
+    ov.qimage()
+
+    ghost = np.zeros((40, 50), dtype=bool)
+    ghost[10:14, 20:26] = True
+    ov.set_ghost(ghost, (20, 10, 26, 14))
+    img = ov.qimage()
+
+    assert ov.ghost_rect == (20, 10, 26, 14)
+    assert ov.last_rebuild_rect == _grow((20, 10, 26, 14), (40, 50))
+    assert tuple(_argb(img, 22, 12)[1:]) == GHOST_RGB
+    # walking to the next candidate repaints both regions and nothing else
+    other = np.zeros((40, 50), dtype=bool)
+    other[30:34, 4:8] = True
+    ov.set_ghost(other, (4, 30, 8, 34))
+    ov.qimage()
+    assert ov.last_rebuild_rect == _grow((4, 10, 26, 34), (40, 50))
+    # ... and dismissing it repaints only where it was
+    ov.clear_ghost()
+    ov.qimage()
+    assert ov.last_rebuild_rect == _grow((4, 30, 8, 34), (40, 50))
+    assert ov.has_ghost is False
+
+
+def test_a_ghost_without_a_rect_still_repaints_everything(two_masks):
+    """The safe fallback: a caller that cannot say marks the whole buffer."""
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order)
+    ov.qimage()
+    ghost = np.zeros((40, 50), dtype=bool)
+    ghost[10:14, 20:26] = True
+    ov.set_ghost(ghost)
+    ov.qimage()
+    assert ov.last_rebuild_rect == (0, 0, 50, 40)
+
+
+def test_the_editing_layer_is_drawn_over_the_ghost(two_masks):
+    """The annotator's own pixels are never hidden by a proposal."""
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order)
+    both = np.zeros((40, 50), dtype=bool)
+    both[10:14, 20:26] = True
+    ov.set_ghost(both, (20, 10, 26, 14))
+    ov.set_editing("inst-c", both)
+    img = ov.qimage()
+    assert tuple(_argb(img, 22, 12)[1:]) == EDIT_RGB
 
 
 def test_partial_repaint_matches_a_full_repaint_after_an_erase(two_masks):

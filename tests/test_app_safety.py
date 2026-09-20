@@ -143,6 +143,10 @@ WAYS_OUT = {
     # the *pixels* and Enter committed them, while the bar said "Enter 确认"
     # about a rectangle.
     "edit_roi": lambda w: w.act_edit_roi(),
+    # Ctrl+Shift+B re-keys the pose segment the layer is being drawn in and
+    # re-opens the session on this frame: a move like any other, and it has no
+    # gate of its own.
+    "split_pose": lambda w: w.act_split_pose(),
 }
 
 

@@ -112,10 +112,20 @@ class EditMixin:
 
         self.roi_editing = False
         self.roi_draft: Optional[tuple] = None
-        #: ``(desktop, view, segment)`` already proposed in this run.  Asking
-        #: again on every frame of a segment would steal the tool -- and with
-        #: it the pending SAM prompt -- from an annotator who declined once.
-        self._roi_asked: set[tuple] = set()
+        #: Segments whose ROI proposal the annotator has **dismissed** -- keyed
+        #: by ``(desktop, view, seg, start_step, end_step)``.  Asking again on
+        #: every frame of a segment would steal the tool, and with it the
+        #: pending SAM prompt, from somebody who declined once.
+        #:
+        #: The step range is in the key on purpose: this used to record every
+        #: segment it *asked* about, so a pose re-cut that left the earlier
+        #: piece without an ROI -- which is exactly what a large camera move is
+        #: supposed to do (task B1) -- was never asked about, because that piece
+        #: usually keeps segment number 1 and 1 had "already been asked".  Those
+        #: frames then diffed over the whole image and prompted SAM with an
+        #: unbounded box, silently.  A re-cut always moves a range, so the key
+        #: cannot survive one.
+        self._roi_dismissed: set[tuple] = set()
         self._pending_scope: Optional[str] = None
         self._restore_offer: Optional[dict] = None
         #: The instance an ``add_bench_box`` card item armed the box tool for.
@@ -202,20 +212,59 @@ class EditMixin:
 
     # ------------------------------------------------------------ frame hook
     def on_frame_changed_edit(self, key) -> None:
-        """What the editing half has to do when the frame changes."""
+        """What the editing half has to do when the frame changes.
+
+        The ROI question is asked from the *stored* state, never from a memory
+        of having asked: a segment with no rectangle gets the proposal unless
+        this annotator has dismissed it for that segment (see
+        :attr:`_roi_dismissed`).
+        """
         self._pending_scope = None
         self.scope_bar.hide()
         self.disarm_bench()
+        # A draft ghost is about one instance on one frame.  ``_sync_editing_layer``
+        # covers the frames that repaint; this covers the ones that do not,
+        # including a view with no image at this step.
+        self.forget_draft_ghost()
         if self.session.image() is not None:
-            segment = (int(key.desktop), str(key.view), self._pose_segment(key))
             if self.roi() is not None:
-                self._roi_asked.add(segment)
                 if self.roi_editing:
                     self.cancel_roi_edit()
-            elif segment not in self._roi_asked and not self.roi_editing:
-                self._roi_asked.add(segment)
+            elif self.roi_key() not in self._roi_dismissed and not self.roi_editing:
                 self.start_roi_edit()
         self._offer_restore(key)
+
+    def roi_key(self) -> Optional[tuple]:
+        """What a dismissed ROI proposal is remembered by, or ``None``.
+
+        ``(desktop, view, seg, start_step, end_step)``: the range is what makes
+        the memory self-invalidating.  A pose re-cut only ever writes when a
+        range or a number moves (:meth:`tda.core.db.Db.apply_recut`), so a
+        segment that has just lost its ROI to one cannot be mistaken for the
+        segment somebody declined ten minutes ago.
+        """
+        if not compat.is_open(self.session):
+            return None
+        key = self.session.current()
+        row = self.db.pose_segment_for(key) or {}
+        return (int(key.desktop), str(key.view), row.get("seg"),
+                row.get("start_step"), row.get("end_step"))
+
+    def reset_roi_proposals(self) -> None:
+        """Forget every dismissal: the segments themselves have just changed.
+
+        Called by whatever re-opens the session on the same frame after a
+        structural edit -- a pose re-cut, an S1 Apply -- so the annotator is
+        asked about the pieces that came out of it.
+
+        A measurement in flight is abandoned with them. It was taken for a
+        segment whose range has just moved, so it is an answer about something
+        that no longer exists; the five-tuple in
+        :meth:`~tda.ui.app_roi.RoiMixin._roi_segment_key` would reject it
+        anyway, and cancelling says so at the moment it becomes true.
+        """
+        self._roi_dismissed.clear()
+        self.roi_proposer.cancel()
 
     def _sync_editing_layer(self, repaint: bool = True) -> None:
         """Keep the overlay's edit layer in step with the session's.
@@ -224,9 +273,18 @@ class EditMixin:
         tool -- a commit, ``Esc``, an undo, a restored sidecar all end here --
         so it is where the half-built prompt is dropped.  Keeping the points
         made the next click refine a layer their result no longer had anything
-        to do with.
+        to do with.  A draft ghost, and the note saying the layer came from a
+        draft, describe the same vanished layer and go with them.
+
+        The **area warning** goes too, and this is the place that catches the
+        one an undo or a redo would otherwise leave standing: it is an offer
+        about a specific mask ("press Enter again and I will write these 2,116
+        pixels"), and ``Ctrl+Z`` back to a hundred of them made the next Enter
+        commit a hundred pixels while logging an override of two thousand.
         """
         self.reset_sam_prompt()
+        self.forget_draft_ghost()
+        self._invalidate_area_warning()
         if self.overlay is None:
             return
         instance = getattr(self.session, "editing_instance", None)
@@ -362,6 +420,9 @@ class EditMixin:
         ``commit_box`` directly.
         """
         self.cancel_roi_edit()
+        # This branch of ``on_request_edit`` never reaches _sync_editing_layer,
+        # so a ghost offered for the previous instance would still be on screen.
+        self.forget_draft_ghost()
         self.bench_instance = str(instance)
         self._tool_name = "bench_box"
         self.set_sam_instance(None)
@@ -438,10 +499,26 @@ class EditMixin:
         if self._paint_blocked or instance is None or self.overlay is None:
             self._revert_blocked_stroke()
             return
+        self._invalidate_area_warning()
         compat.push_stroke(self.session, instance,
                            getattr(tool, "stroke_before", None), self.overlay.editing)
         self.queue_sidecar(self.session.current(), instance, self.overlay.editing)
         self.update_status()
+
+    def _invalidate_area_warning(self) -> None:
+        """Take back a size warning whose mask has just changed underneath it.
+
+        The warning is an offer -- "press Enter again and I will write this
+        1.5 Mpx screw" -- and the second Enter logs *the facts of the mask it
+        was raised on*.  Painting in between made those facts describe a mask
+        nobody was warned about, and the override rode on a commit the
+        annotator never confirmed.  So any change of the layer ends the
+        conversation and the next Enter asks again.
+        """
+        if self._pending_warning is None:
+            return
+        self._pending_warning = None
+        self.warn_bar.hide()
 
     def _revert_blocked_stroke(self) -> None:
         """Undo a stroke that had no instance to belong to."""
@@ -498,7 +575,10 @@ class EditMixin:
             return
         key, instance, mask = pending
         try:
-            self.sidecar.save(key, instance, mask)
+            # The adopted drafts go with the pixels: a crash takes the undo
+            # history, which is where the provenance otherwise lives.
+            self.sidecar.save(key, instance, mask,
+                              adopted=self.pending_adoptions(key, instance))
         except Exception as exc:  # noqa: BLE001 - reported, never raised at a stroke
             self._sidecar_broken = SIDECAR_BROKEN.format(why=exc)
             self.logger.error("sidecar write failed: %s", exc)
@@ -540,13 +620,21 @@ class EditMixin:
             self.sidecar.clear(key, instance)
             self._sidecar_written.discard(self._sidecar_id(key, instance))
 
-    def set_editing_mask(self, mask: np.ndarray, undoable: bool = False) -> None:
-        """Replace the editing layer everywhere it is held at once."""
+    def set_editing_mask(self, mask: np.ndarray, undoable: bool = False,
+                         adopted: Optional[dict] = None) -> None:
+        """Replace the editing layer everywhere it is held at once.
+
+        ``adopted`` marks the change as an adopted Label Studio draft, which
+        travels on the undo entry and into the crash sidecar.
+        """
         instance = getattr(self.session, "editing_instance", None)
         before = None if self.overlay is None else self.overlay.editing.copy()
         mask = np.asarray(mask, dtype=bool)
+        # The pixels the area warning was computed on are gone, so the answer
+        # to it is gone with them (see ``_invalidate_area_warning``).
+        self._invalidate_area_warning()
         if undoable and instance is not None:
-            compat.push_stroke(self.session, instance, before, mask)
+            compat.push_stroke(self.session, instance, before, mask, adopted)
             self.queue_sidecar(self.session.current(), instance, mask)
         else:
             self.session.set_editing_mask(mask)
