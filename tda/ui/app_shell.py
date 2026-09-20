@@ -72,6 +72,9 @@ RIGHT_FRACTION = 0.20
 #: A restored layout that leaves the canvas less than this is not one anybody
 #: chose: it is a dock that grew once and was saved.
 MIN_CANVAS_FRACTION = 0.5
+#: How long that warning stays put against an ordinary status line. The
+#: ROI measurement answers within about half a second of the window opening.
+LAYOUT_RESET_HOLD_MS = 4000
 
 
 def _read_last_frame(settings, annotator: str) -> dict:
@@ -310,8 +313,13 @@ class ShellMixin:
                                          - self.right_dock.width())
         if canvas < MIN_CANVAS_FRACTION * width:
             self.apply_default_layout()
+            # Held: the chassis ROI is measured on a worker started while the
+            # window was being built, and its answer -- "drag the chassis box"
+            # -- used to arrive a few hundred milliseconds later and take this
+            # off the screen. Somebody whose layout was just thrown away has to
+            # be told why.
             self.report("the saved dock layout left the canvas too small; "
-                        "it was reset")
+                        "it was reset", hold_ms=LAYOUT_RESET_HOLD_MS)
 
     def apply_default_layout(self) -> None:
         """Timeline ~11 %, the right docks ~20 %, the canvas the rest."""
