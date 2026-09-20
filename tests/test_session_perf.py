@@ -347,16 +347,27 @@ def _under(budget: float, what: str, runs: list[float]) -> None:
     )
 
 
+#: How far over its budget the **median** may sit. The budget itself is what the
+#: code costs when the machine is this test's (:func:`_under`, best of N); the
+#: median is measured while other work shares the machine -- a review agent
+#: exporting 66 desktops put the 12 MP timeline jump at 0.549 s against 0.50 s
+#: with nothing wrong in the code (0.41 s idle). 30 % keeps the guard's point --
+#: a regression of the typical case still fails it -- without making the whole
+#: suite flaky under load.
+MEDIAN_SLACK = 1.3
+
+
 def _median_under(budget: float, what: str, runs: list[float]) -> None:
-    """Assert the **median** of ``runs`` is inside ``budget``.
+    """Assert the **median** of ``runs`` is inside ``budget`` x :data:`MEDIAN_SLACK`.
 
     The guard the best-of cannot give: a regression that leaves one run fast
     and the rest slow passes :func:`_under` and fails here.
     """
     middle = statistics.median(runs)
-    assert middle <= budget, (
-        f"{what} took {middle:.3f}s at the median of {len(runs)}, over the "
-        f"{budget:.2f}s budget; all runs: "
+    limit = budget * MEDIAN_SLACK
+    assert middle <= limit, (
+        f"{what} took {middle:.3f}s at the median of {len(runs)}, over "
+        f"{limit:.2f}s ({budget:.2f}s budget x {MEDIAN_SLACK}); all runs: "
         + ", ".join(f"{r:.3f}s" for r in runs)
     )
 

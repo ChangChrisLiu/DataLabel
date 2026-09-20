@@ -276,16 +276,20 @@ class RelationsTab(QWidget):
                 f"动作死锁 / DEADLOCK, which spec 7.4 forbids and Apply refuses: {named}")
             return
         self.cycles_label.setStyleSheet("")
+        notes: list[str] = []
+        # a dead end is a modelling gap, not a wrong edge: nothing is refused,
+        # but it must not be silent -- one Add-edge click can write one
+        notes.extend(end.label() for end in self.data.relations.dead_ends())
+        # a preference is not a law either (spec 7.1), and an order that cannot
+        # be honoured is still worth saying
         soft = self.data.relations.soft_conflicts()
-        if not soft:
-            self.cycles_label.setText("Deadlocks: none (spec 7.4 satisfied)")
-            return
-        # a preference is not a law (spec 7.1): nothing is refused, but an order
-        # that cannot be honoured is worth saying
-        named = "; ".join(deadlock.label() for deadlock in soft)
+        if soft:
+            notes.append(
+                "这些建议顺序互相矛盾，规划时已忽略 / these recommended edges contradict "
+                "each other and are ignored when planning: "
+                + "; ".join(deadlock.label() for deadlock in soft))
         self.cycles_label.setText(
-            f"这些建议顺序互相矛盾，规划时已忽略 / these recommended edges contradict "
-            f"each other and are ignored when planning: {named}")
+            "; ".join(notes) if notes else "Deadlocks: none (spec 7.4 satisfied)")
 
     # -- commands ----------------------------------------------------------- #
     def add_edge(self) -> None:
@@ -356,12 +360,13 @@ class RelationsTab(QWidget):
         self.sigChanged.emit()
 
     def show_edge(self, target: str, kind: str, blocker: str) -> None:
-        """Select one edge's row and bring it into view."""
+        """Select one edge's row and bring it into the middle of the view."""
         row = self.model.row_of(target, kind, blocker)
         if row < 0:
             return
         self.view.selectRow(row)
-        self.view.scrollTo(self.model.index(row, 0))
+        self.view.scrollTo(self.model.index(row, 0),
+                           QAbstractItemView.PositionAtCenter)
 
     # -- context menu ------------------------------------------------------- #
     def edge_menu(self, view_row: int) -> QMenu:

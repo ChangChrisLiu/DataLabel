@@ -419,6 +419,12 @@ class StepTablePanel(QWidget):
                 # double-clicking jumps to the edge a human can actually change
                 item.setData(EDGE_ROLE, [edge.target, edge.type, edge.blocker])
             self.issues.addItem(item)
+        for end in self.data.relations.dead_ends():
+            # not a refusal: an edge nothing can clear may want a missing part
+            # created rather than the edge changed -- but it is never silent
+            item = QListWidgetItem(end.label())
+            item.setData(EDGE_ROLE, [end.edge.target, end.edge.type, end.edge.blocker])
+            self.issues.addItem(item)
         self.issues.addItems(self.data.issues)
         self.issues.addItems(f"state event: {m}" for m in self.data.messages)
 
