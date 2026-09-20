@@ -25,14 +25,19 @@ from __future__ import annotations
 from typing import Any, Iterable, Optional, Sequence
 
 from tda.core import dbrows as R
+from tda.core.model import StepType
 from tda.core.pose_breaks import (
     ACCEPTED,
     CARRIED,
     STATUSES,
     RecutPlan,
+    boundaries,
     recut_plan,
     straddling,
 )
+
+#: The step type that breaks the pose in **every** view at once (spec 2.5).
+REORIENT_STEP = StepType.REORIENT.value
 
 __all__ = ["POSE_GEOMETRY_COLUMNS", "RECUT_OP", "PoseSegmentMixin", "clean_roi"]
 
@@ -415,6 +420,38 @@ class PoseSegmentMixin:
             if removed:
                 self.queue_rechecks_for_view(desktop, view)
         return removed
+
+    def view_boundaries(self, desktop: int, view: str) -> tuple[list[int], int]:
+        """``(boundaries, n_steps)`` of one view: reorient steps ∪ its own breaks.
+
+        The one place that answers "where should this view be cut?", so the
+        pipeline, the command line and the window cannot each answer it
+        differently. ``n_steps`` is the view's own last segmented step, which is
+        what ``load-index`` keeps up to date.
+        """
+        segments = self.pose_segments(desktop, view)
+        ends = [s["end_step"] for s in segments if s["end_step"] is not None]
+        if not ends:
+            return [], 0
+        n_steps = max(int(e) for e in ends)
+        reorients = [s.step for s in self.steps(desktop)
+                     if s.step_type == REORIENT_STEP]
+        accepted = [b["step"] for b in
+                    self.pose_breaks(desktop, view, status=ACCEPTED)]
+        return boundaries(n_steps, reorients, accepted), n_steps
+
+    def recut_view(self, desktop: int, view: str, *, carry_at: Iterable[int] = (),
+                   annotator: str = "system", note: str = "") -> dict:
+        """Re-derive one view's boundaries and apply them; the re-cut summary.
+
+        What every caller that has just changed a break's status wants: the
+        boundary list is re-derived from the step table and the stored breaks,
+        never patched, so accepting and rejecting are the same operation with a
+        different set of rows behind them.
+        """
+        bounds, n_steps = self.view_boundaries(desktop, view)
+        return self.apply_recut(desktop, view, bounds, n_steps, carry_at=carry_at,
+                                annotator=annotator, note=note)
 
     # --------------------------------------------------------------- the re-cut
     def apply_recut(self, desktop: int, view: str, new_bounds: Iterable[int],

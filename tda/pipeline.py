@@ -23,12 +23,12 @@ import os
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from tda.core import db_pose, pose_breaks
+from tda.core import db_pose
 from tda.core.db import Db
 from tda.core.db_backup import DEFAULT_KEEP
 from tda.core.db_status import VIEW_COUNTERS
 from tda.core.index import DesktopIndex, load_index
-from tda.core.model import VIEWS, StepType
+from tda.core.model import VIEWS
 from tda.core.truth_inputs import TRUTH_AUX_KEYS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +42,8 @@ DRIVE_SUBDIR = "drive"
 ALL_DESKTOPS = range(1, 67)
 #: How many pose issues one desktop's meta keeps (newest last).
 POSE_ISSUE_LIMIT = 50
+#: ``op_log.annotator`` of a re-cut the pipeline ran, rather than a human.
+SPLIT_ANNOTATOR = "cli:split-pose-segments"
 
 #: ``print`` by default; tests and the GUI pass their own sink.
 Log = Callable[[str], None]
@@ -356,22 +358,12 @@ def split_pose_segments(db: Db, desktop: int) -> dict[str, int]:
 
     Returns ``{view: number of segments}`` for the views that have any.
     """
-    reorients = [
-        s.step for s in db.steps(desktop) if s.step_type == StepType.REORIENT.value
-    ]
-    breaks = db.pose_breaks(desktop, status=pose_breaks.ACCEPTED)
     out: dict[str, int] = {}
     issues: list[str] = []
     for view in VIEWS:
-        segments = db.pose_segments(desktop, view)
-        ends = [s["end_step"] for s in segments if s["end_step"] is not None]
-        if not ends:
-            continue
-        n_steps = max(ends)
-        bounds = pose_breaks.boundaries(
-            n_steps, reorients, [b["step"] for b in breaks if b["view"] == view])
-        result = db.apply_recut(desktop, view, bounds, n_steps,
-                                annotator="cli:split-pose-segments")
+        result = db.recut_view(desktop, view, annotator=SPLIT_ANNOTATOR)
+        if not result["ranges"]:
+            continue            # a view nothing photographed has nothing to cut
         issues += _recut_issues(view, result)
         out[view] = len(result["ranges"])
     if issues:
