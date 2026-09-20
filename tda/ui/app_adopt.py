@@ -428,7 +428,9 @@ class AdoptMixin:
         pending = self.pending_adoptions(key, instance)
         if not pending or mask is None:
             return []
-        written = _masks.encode_rle(np.asarray(mask, dtype=bool))
+        # Boxed: this is a 12 MP editing layer on the GUI thread, inside
+        # ``Enter``, and a part covers a few per cent of it (task B3, Minor 5).
+        written = _masks.encode_rle_boxed(np.asarray(mask, dtype=bool))
         out: dict[tuple, dict] = {}
         for note in pending:
             rle = ls_adopt.draft_rle(self.db, int(key.desktop), str(key.view),
