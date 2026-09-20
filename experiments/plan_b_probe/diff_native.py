@@ -51,7 +51,7 @@ import csv
 import statistics
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -99,29 +99,55 @@ class Native:
     pad: float = 2.0
     #: Absolute floor for that growth, in native pixels.
     min_pad: int = 32
+    #: Hard cap on the window's long side, in native pixels. The whole claim of
+    #: this experiment is that a *local* pass is cheap -- "a few hundred
+    #: thousand pixels, not 12 MP" -- and a generous ``pad`` around a big seed
+    #: on a 4032 px frame reaches the whole frame, which would be the expensive
+    #: thing the ROI-wide pass already avoids.
+    max_side: int = 800
     #: Noise floor at native resolution. 80 (the production default) is a
     #: 9x9 patch; a 19 px screw is ~280 px, so this is not the binding limit.
     min_area: int = 40
     blur: int = 5
     shift_px: int = 1
+    #: Use the class's area prior at all. It has to be **rescaled** when it is:
+    #: ``propose_parts`` divides a candidate's area by the area of the region it
+    #: was given, and here that region is the padded window, not the ROI the
+    #: bands in ``configs/area_priors.yaml`` are fractions of -- a factor of 10
+    #: to 1000. Feeding the raw band in would not be a weak cue, it would be an
+    #: actively wrong one.
+    prior: bool = True
 
     @property
     def tag(self) -> str:
         return (f"{self.source}_pad{self.pad:g}_min{self.min_area}"
-                f"_blur{self.blur}")
+                f"_blur{self.blur}_shift{self.shift_px}"
+                f"_prior{int(self.prior)}")
 
 
 def _window(seed: Box, cfg: Native, hw: tuple[int, int]) -> Box:
-    """The padded native-resolution window around a seed box, clipped."""
+    """The padded native-resolution window around a seed box, capped and clipped.
+
+    The cap is applied around the seed's **centre**, so a box that is already
+    wider than :attr:`Native.max_side` keeps its middle rather than its left
+    edge -- the part, if the seed found one at all, is nearer the middle.
+    """
     h, w = int(hw[0]), int(hw[1])
     x0, y0, x1, y1 = (int(v) for v in seed)
     grow = max(int(round(cfg.pad * max(x1 - x0, y1 - y0))), int(cfg.min_pad))
-    return (max(0, x0 - grow), max(0, y0 - grow),
-            min(w, x1 + grow), min(h, y1 + grow))
+    box = [x0 - grow, y0 - grow, x1 + grow, y1 + grow]
+    for axis, limit in ((0, w), (1, h)):
+        low, high = box[axis], box[axis + 2]
+        if high - low > int(cfg.max_side):
+            mid = 0.5 * (low + high)
+            low = int(round(mid - 0.5 * cfg.max_side))
+            high = low + int(cfg.max_side)
+        box[axis], box[axis + 2] = max(0, low), min(limit, high)
+    return (box[0], box[1], box[2], box[3])
 
 
 def native_proposals(prev_rgb: np.ndarray, cur_rgb: np.ndarray, seed: Box,
-                     cfg: Native, *, expect_area=None,
+                     cfg: Native, *, expect_area=None, roi_area: float = 0.0,
                      max_proposals: int = 3) -> tuple[list[E.Proposal], Box, float]:
     """Re-diff one window at native resolution and rank what is in it.
 
@@ -129,6 +155,9 @@ def native_proposals(prev_rgb: np.ndarray, cur_rgb: np.ndarray, seed: Box,
     full-frame coordinates. The window is cropped out of both frames *before*
     the dE map is computed, so the cost is the window's own pixels -- a few
     hundred thousand at most -- and not the 12 MP the ROI-wide pass touches.
+
+    ``expect_area`` is a band of ROI fractions and is converted to a band of
+    *window* fractions with ``roi_area``; see :attr:`Native.prior`.
     """
     t0 = time.perf_counter()
     win = _window(seed, cfg, prev_rgb.shape[:2])
@@ -139,8 +168,14 @@ def native_proposals(prev_rgb: np.ndarray, cur_rgb: np.ndarray, seed: Box,
     sub_cur = np.ascontiguousarray(cur_rgb[wy0:wy1, wx0:wx1])
     delta = diff_delta_e(sub_prev, sub_cur, roi=None, blur=cfg.blur,
                          shift_px=cfg.shift_px, max_side=None)
+    band = None
+    if cfg.prior and expect_area is not None and roi_area > 0.0:
+        window_area = float((wx1 - wx0) * (wy1 - wy0))
+        if window_area > 0.0:
+            scale = roi_area / window_area
+            band = (float(expect_area[0]) * scale, float(expect_area[1]) * scale)
     parts = propose_parts(sub_prev, sub_cur, None, delta_e=delta,
-                          expect_area=expect_area, min_area=cfg.min_area,
+                          expect_area=band, min_area=cfg.min_area,
                           max_proposals=max_proposals)
     out = [E.Proposal(box=(int(p.box[0]) + wx0, int(p.box[1]) + wy0,
                            int(p.box[2]) + wx0, int(p.box[3]) + wy0),
@@ -189,7 +224,8 @@ def run(args) -> list[dict]:
     TMP.mkdir(parents=True, exist_ok=True)
 
     cfg = Native(source=args.source, pad=args.pad, min_pad=args.min_pad,
-                 min_area=args.min_area, blur=args.blur)
+                 min_area=args.min_area, blur=args.blur,
+                 shift_px=args.shift_px, prior=args.prior)
     desktops = [int(d) for d in str(args.desktops).split(",") if d]
     shapes = common.load_geometry()
     by_frame = common.index_shapes(shapes)
@@ -248,7 +284,8 @@ def run(args) -> list[dict]:
                     native, window, native_s = [], None, 0.0
                 else:
                     native, window, native_s = native_proposals(
-                        prev_img, cur_img, seed, cfg, expect_area=expect)
+                        prev_img, cur_img, seed, cfg, expect_area=expect,
+                        roi_area=roi_area)
 
                 crop = rect = scale = gt_crop = None
                 if sam is not None:
@@ -385,11 +422,16 @@ def write_outputs(rows: list[dict], views: list[str], out: Path, tag: str,
 # --------------------------------------------------------------------------- #
 # tuning grid (D24 only, no SAM)
 # --------------------------------------------------------------------------- #
+#: 16 configs, not 48. ``min_area`` 40 vs 120 moved nothing in a first pass and
+#: ``shift_px=3`` costs 49 shifted Lab comparisons per window (against 9 at 1),
+#: which is most of an hour of tuning for a knob whose whole job is to say
+#: whether the two 12 MP frames are registered to a pixel or to three.
 GRID = [
-    Native(source=s, pad=p, min_area=m)
+    Native(source=s, pad=p, shift_px=x, prior=pr)
     for s in ("split", "blob")
-    for p in (1.0, 2.0, 4.0)
-    for m in (40, 120)
+    for p in (1.0, 3.0)
+    for x in (1, 2)
+    for pr in (True, False)
 ]
 
 
@@ -398,34 +440,267 @@ def grid(args) -> int:
 
     Deliberately blind to SAM: the held-out gate is a SAM number, and a knob
     chosen by looking at it would not be held out at all.
+
+    Every config shares one pass over the events. The wide dE map, the frame
+    decode and the two reference methods cost ~0.3 s per event and do not
+    depend on any knob; the native pass costs ~0.02 s and is the only thing
+    swept, so re-running the whole harness per config would have spent 95 % of
+    the time recomputing identical numbers.
     """
-    lines = ["| source | pad | min_area | <40 point-in | <40 box IoU | "
-             "40-100 point-in | 40-100 box IoU | >=100 box IoU |",
-             "|---|---|---|---|---|---|---|---|"]
-    for cfg in GRID:
-        rows = run(replace(args, source=cfg.source, pad=cfg.pad,
-                           min_area=cfg.min_area, sam=False, sam_local=False))
-        nat = [r for r in rows if r["method"] == "native"]
+    from tda.ui.app_priors import load_priors
 
-        def band(low, high):
-            sel = [r for r in nat if low <= float(r["part_size_px"]) < high]
-            if not sel:
-                return "-", "-"
-            hits = sum(int(r.get("p0_point_in") or 0) for r in sel)
-            return (f"{100 * hits / len(sel):.1f} %",
-                    f"{_median(r.get('p0_box_iou') for r in sel):.3f}")
+    common.DB_URI = args.db_uri
+    common.TMP = TMP
+    TMP.mkdir(parents=True, exist_ok=True)
+    desktops = [int(d) for d in str(args.desktops).split(",") if d]
+    shapes = common.load_geometry()
+    by_frame = common.index_shapes(shapes)
+    priors = load_priors()
+    con = common.connect()
+    classes = {r["cls"] for r in con.execute("SELECT DISTINCT cls FROM instance")}
 
-        small, small_iou = band(0.0, 40.0)
-        mid, mid_iou = band(40.0, 100.0)
-        _big, big_iou = band(100.0, 1e9)
-        lines.append(f"| {cfg.source} | {cfg.pad:g} | {cfg.min_area} | {small} | "
-                     f"{small_iou} | {mid} | {mid_iou} | {big_iou} |")
+    #: cfg -> list of (part width, point-in, box IoU) ; plus the two references
+    scores: dict[str, list[tuple[float, int, float]]] = {}
+
+    def note(name: str, width: float, props) -> None:
+        hit = int(bool(props) and _point_in(props[0].point, gt))
+        iou = E.box_iou(props[0].box, gt_box) if props else 0.0
+        scores.setdefault(name, []).append((width, hit, iou))
+
+    for desktop in desktops:
+        for view in [v for v in args.views.split(",") if v]:
+            if not any(s.desktop == desktop and s.view == view for s in shapes):
+                continue
+            roi = E.roi_of(shapes, desktop, view)
+            roi_area = float((roi[2] - roi[0]) * (roi[3] - roi[1]))
+            h, w = common.NATIVE_HW[view]
+            wide_min_area = max(30, int(round(80 * (h * w) / (1600 * 1600))))
+            events, _ = E.resolve_events(con, shapes, by_frame, classes,
+                                         desktop, view)
+            if args.limit:
+                events = events[: args.limit]
+            print(f"D{desktop} {view}: {len(events)} events", flush=True)
+            cache: dict[int, Optional[np.ndarray]] = {}
+
+            def frame(step: int) -> Optional[np.ndarray]:
+                if step not in cache:
+                    if len(cache) > 3:
+                        cache.clear()
+                    path = common.frame_path(con, desktop, view, step)
+                    cache[step] = None if path is None else common.read_rgb(path)
+                return cache[step]
+
+            for ev in events:
+                prev_img, cur_img = frame(ev.step - 1), frame(ev.step)
+                if prev_img is None or cur_img is None:
+                    continue
+                gt = common.frame_masks(con, desktop, view, ev.step - 1
+                                        ).get(ev.shape.instance)
+                if gt is None or not gt.any():
+                    continue
+                gt_box = tuple(int(v) for v in ev.shape.box)
+                width = float(ev.shape.size)
+                expect = E.priors_for(ev.cls, priors)
+
+                delta = diff_delta_e(prev_img, cur_img, roi=roi, max_side=E.MAX_SIDE)
+                base = E.baseline_proposals(delta, wide_min_area)
+                split = E.split_proposals(prev_img, cur_img, roi, delta=delta,
+                                          min_area=wide_min_area,
+                                          expect_area=expect)
+                note("baseline", width, base)
+                note("split", width, split)
+                seeds = {"split": (tuple(int(v) for v in split[0].box)
+                                   if split else None),
+                         "blob": (tuple(int(v) for v in base[0].box)
+                                  if base else None)}
+                for cfg in GRID:
+                    seed = seeds[cfg.source]
+                    props = ([] if seed is None else
+                             native_proposals(prev_img, cur_img, seed, cfg,
+                                              expect_area=expect,
+                                              roi_area=roi_area)[0])
+                    note(cfg.tag, width, props)
+            cache.clear()
+    con.close()
+
+    def band(name: str, low: float, high: float) -> tuple[str, str]:
+        sel = [s for s in scores.get(name, []) if low <= s[0] < high]
+        if not sel:
+            return "-", "-"
+        return (f"{100 * sum(s[1] for s in sel) / len(sel):.1f} %",
+                f"{statistics.median(s[2] for s in sel):.3f}")
+
+    lines = ["| config | <40 point-in | <40 box IoU | 40-100 point-in | "
+             "40-100 box IoU | >=100 point-in | >=100 box IoU |",
+             "|---|---|---|---|---|---|---|"]
+    for name in ["baseline", "split"] + [c.tag for c in GRID]:
+        cells = [c for low, high in ((0.0, 40.0), (40.0, 100.0), (100.0, 1e9))
+                 for c in band(name, low, high)]
+        lines.append("| " + " | ".join([name] + cells) + " |")
         print(lines[-1], flush=True)
+    counts = {name: len(v) for name, v in scores.items()}
     OUT.mkdir(parents=True, exist_ok=True)
-    text = ("# diff_native tuning grid (desktops "
-            f"{args.desktops}, no SAM)\n\n" + "\n".join(lines) + "\n")
+    text = (f"# diff_native tuning grid (desktops {args.desktops}, no SAM)\n\n"
+            f"{counts.get('baseline', 0)} events. `baseline` and `split` are the "
+            f"B2 methods on the same events, for reference; every other row is "
+            f"the native second pass with those knobs. A method that proposes "
+            f"nothing scores 0 here rather than being dropped from the median.\n\n"
+            + "\n".join(lines) + "\n")
     (OUT / "table_grid.md").write_text(text, encoding="utf-8")
     print("\n" + text)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# overlays -- nothing here is believed until the pictures have been opened
+# --------------------------------------------------------------------------- #
+MAGENTA = (255, 80, 220)
+
+
+def _overlay_panel(image, window, gt_mask, rank1, alts, native, native_win,
+                   scale_to=620):
+    """One panel: a window of ``image`` with every rank drawn on it."""
+    from experiments.plan_b_probe import diff_overlays as O
+
+    x0, y0, x1, y1 = window
+    out = np.ascontiguousarray(image[y0:y1, x0:x1]).copy()
+    if gt_mask is not None:
+        sub = gt_mask[y0:y1, x0:x1].astype(np.uint8)
+        contours, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(out, contours, -1, O.GREEN, 3, cv2.LINE_AA)
+    shift = np.array([x0, y0, x0, y0])
+    if native_win is not None:
+        O._draw_box(out, np.asarray(native_win) - shift, O.WHITE, 1)
+    for rank, p in enumerate(native[:3]):
+        O._draw_box(out, np.asarray(p.box) - shift, MAGENTA, 3 if rank == 0 else 1)
+    if native:
+        O._draw_point(out, (native[0].point[0] - x0, native[0].point[1] - y0),
+                      MAGENTA, cv2.MARKER_DIAMOND, 30, 3)
+    for rank, p in enumerate(alts[:3]):
+        O._draw_box(out, np.asarray(p.box) - shift, O.CYAN, 3 if rank == 0 else 1)
+    if alts:
+        O._draw_point(out, (alts[0].point[0] - x0, alts[0].point[1] - y0),
+                      O.CYAN, cv2.MARKER_TILTED_CROSS, 34, 3)
+    if rank1 is not None:
+        O._draw_box(out, np.asarray(rank1.box) - shift, O.ORANGE, 2)
+        O._draw_point(out, (rank1.point[0] - x0, rank1.point[1] - y0), O.ORANGE)
+    h, w = out.shape[:2]
+    if max(h, w) > scale_to:
+        s = scale_to / float(max(h, w))
+        out = cv2.resize(out, (max(1, int(w * s)), max(1, int(h * s))),
+                         interpolation=cv2.INTER_AREA)
+    return out
+
+
+def overlays(args) -> int:
+    """One sheet per event: rank 1 orange, the ``Shift+C`` alternates cyan, the
+    native-resolution proposals magenta inside their white window, ground truth
+    green. Sorted into ``alt_fixes`` / ``native_fixes`` / ``rank1_ok`` /
+    ``all_miss`` so the interesting ones can be found without opening 200.
+    """
+    from experiments.plan_b_probe import diff_overlays as O
+    from tda.ui.app_diff import alternate_parts
+    from tda.ui.app_priors import load_priors
+
+    common.DB_URI = args.db_uri
+    common.TMP = TMP
+    cfg = Native(source=args.source, pad=args.pad, min_pad=args.min_pad,
+                 min_area=args.min_area, blur=args.blur,
+                 shift_px=args.shift_px, prior=args.prior)
+    shapes = common.load_geometry()
+    by_frame = common.index_shapes(shapes)
+    priors = load_priors()
+    con = common.connect()
+    classes = {r["cls"] for r in con.execute("SELECT DISTINCT cls FROM instance")}
+    out_root = Path(args.out) / "overlays"
+    written: dict[str, int] = {}
+
+    for desktop in [int(d) for d in str(args.desktops).split(",") if d]:
+        for view in [v for v in args.views.split(",") if v]:
+            if not any(s.desktop == desktop and s.view == view for s in shapes):
+                continue
+            roi = E.roi_of(shapes, desktop, view)
+            roi_area = float((roi[2] - roi[0]) * (roi[3] - roi[1]))
+            h, w = common.NATIVE_HW[view]
+            wide_min_area = max(30, int(round(80 * (h * w) / (1600 * 1600))))
+            events, _ = E.resolve_events(con, shapes, by_frame, classes,
+                                         desktop, view)
+            cache: dict[int, Optional[np.ndarray]] = {}
+
+            def frame(step: int) -> Optional[np.ndarray]:
+                if step not in cache:
+                    if len(cache) > 3:
+                        cache.clear()
+                    path = common.frame_path(con, desktop, view, step)
+                    cache[step] = None if path is None else common.read_rgb(path)
+                return cache[step]
+
+            for ev in events:
+                prev_img, cur_img = frame(ev.step - 1), frame(ev.step)
+                if prev_img is None or cur_img is None:
+                    continue
+                gt = common.frame_masks(con, desktop, view, ev.step - 1
+                                        ).get(ev.shape.instance)
+                if gt is None or not gt.any():
+                    continue
+                expect = E.priors_for(ev.cls, priors)
+                delta = diff_delta_e(prev_img, cur_img, roi=roi, max_side=E.MAX_SIDE)
+                base = E.baseline_proposals(delta, wide_min_area)
+                split = E.split_proposals(prev_img, cur_img, roi, delta=delta,
+                                          min_area=wide_min_area,
+                                          expect_area=expect)
+                rank1 = base[0] if base else None
+                armed = None if rank1 is None else tuple(float(v) for v in rank1.box)
+                alts = alternate_parts(
+                    [p for p in split if not E.covers_most(p.box, roi)], armed)
+                seed = seed_box(cfg, split, delta, wide_min_area)
+                native, window = ([], None) if seed is None else \
+                    native_proposals(prev_img, cur_img, seed, cfg,
+                                     expect_area=expect, roi_area=roi_area)[:2]
+
+                def hit(props) -> bool:
+                    return bool(props) and _point_in(props[0].point, gt)
+
+                r1_ok = rank1 is not None and _point_in(rank1.point, gt)
+                alt_ok = any(_point_in(p.point, gt) for p in alts)
+                nat_ok = hit(native)
+                kind = ("rank1_ok" if r1_ok else
+                        "alt_fixes" if alt_ok else
+                        "native_fixes" if nat_ok else "all_miss")
+                key = f"{kind}/{ev.group}"
+                if written.get(key, 0) >= args.per_class:
+                    continue
+                written[key] = written.get(key, 0) + 1
+
+                gb = ev.shape.box
+                pad = max(80, int(1.1 * max(gb[2] - gb[0], gb[3] - gb[1])))
+                zoom = (max(0, gb[0] - pad), max(0, gb[1] - pad),
+                        min(prev_img.shape[1], gb[2] + pad),
+                        min(prev_img.shape[0], gb[3] + pad))
+                caption = (f"D{ev.desktop} {ev.view} s{ev.step} {ev.cls} "
+                           f"[{ev.group}] {ev.shape.label} {ev.shape.size:.0f}px  "
+                           f"rank1={'HIT' if r1_ok else 'miss'} "
+                           f"alts={len(alts)}{'/HIT' if alt_ok else ''} "
+                           f"native={len(native)}{'/HIT' if nat_ok else ''}")
+                sheet = O._sheet(caption, [
+                    _overlay_panel(prev_img, roi, gt, rank1, alts, native,
+                                   window, 620),
+                    _overlay_panel(prev_img, zoom, gt, rank1, alts, native,
+                                   window, 430),
+                    _overlay_panel(cur_img, zoom, None, rank1, alts, native,
+                                   window, 430),
+                ])
+                path = (out_root / kind /
+                        f"{ev.group}_d{ev.desktop}_{ev.view}_s{ev.step}_"
+                        f"{ev.cls}.jpg")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(path), cv2.cvtColor(sheet, cv2.COLOR_RGB2BGR),
+                            [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+                print("wrote", path, flush=True)
+            cache.clear()
+    con.close()
+    print({k: v for k, v in sorted(written.items())})
     return 0
 
 
@@ -448,6 +723,7 @@ def cost(args) -> int:
     shapes = common.load_geometry()
     con = common.connect()
     real = app_diff.split_proposals
+    controller = app_diff.AssistController()
     lines = ["| view | pairs | blobs only (median s) | with alternates (median s) "
              "| added (median s) | proposals |", "|---|---|---|---|---|---|"]
     for view in [v for v in args.views.split(",") if v]:
@@ -464,7 +740,6 @@ def cost(args) -> int:
             prev_img, cur_img = common.read_rgb(prev_path), common.read_rgb(cur_path)
             if prev_img is None or cur_img is None:
                 continue
-            controller = app_diff.AssistController()
             try:
                 app_diff.split_proposals = lambda *a, **k: []
                 t0 = time.perf_counter()
@@ -477,7 +752,6 @@ def cost(args) -> int:
                 counts.append(len(payload["proposals"]))
             finally:
                 app_diff.split_proposals = real
-                controller.shutdown()
         if not without:
             continue
         a, b = statistics.median(without), statistics.median(with_alt)
@@ -485,6 +759,7 @@ def cost(args) -> int:
                      f"{b - a:.3f} | {statistics.median(counts):.1f} |")
         print(lines[-1], flush=True)
     con.close()
+    controller.shutdown()
     OUT.mkdir(parents=True, exist_ok=True)
     text = ("# Added cost of the Shift+C alternates on the diff worker\n\n"
             "D13, real frames, `AssistController.compute` end to end "
@@ -506,6 +781,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--min-pad", dest="min_pad", type=int, default=32)
     ap.add_argument("--min-area", dest="min_area", type=int, default=40)
     ap.add_argument("--blur", type=int, default=5)
+    ap.add_argument("--no-prior", dest="prior", action="store_false",
+                    help="rank the native candidates without the class's "
+                         "area band (which is rescaled to the window when on)")
+    ap.add_argument("--shift-px", dest="shift_px", type=int, default=1,
+                    help="misregistration tolerated by the local dE map, in "
+                         "NATIVE pixels (1 at 1600 px is 2.5 on a 12 MP frame)")
     ap.add_argument("--sam", action="store_true")
     ap.add_argument("--sam-local", dest="sam_local", action="store_true",
                     help="also prompt SAM on a native-resolution local crop")
@@ -514,6 +795,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--cost", action="store_true",
                     help="time the production comparison with/without alternates")
     ap.add_argument("--cost-pairs", dest="cost_pairs", type=int, default=12)
+    ap.add_argument("--overlays", action="store_true",
+                    help="draw one sheet per event instead of measuring")
+    ap.add_argument("--per-class", dest="per_class", type=int, default=3)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--out", default=str(OUT))
     ap.add_argument("--tag", default="")
@@ -523,12 +807,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     args.db_uri = db if db.startswith("file:") else f"file:{db}?mode=ro"
     if args.cost:
         return cost(args)
+    if args.overlays:
+        return overlays(args)
     if args.grid:
         return grid(args)
 
     rows = run(args)
     cfg = Native(source=args.source, pad=args.pad, min_pad=args.min_pad,
-                 min_area=args.min_area, blur=args.blur)
+                 min_area=args.min_area, blur=args.blur,
+                 shift_px=args.shift_px, prior=args.prior)
     tag = args.tag or f"d{args.desktops.replace(',', '_')}_{cfg.tag}"
     header = (f"Desktops {args.desktops}, views {args.views}, "
               f"config `{cfg}`. Ground truth, ROI, event resolution and the SAM "
