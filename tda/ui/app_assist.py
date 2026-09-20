@@ -204,11 +204,34 @@ class AssistMixin:
             # into the ``Space`` that followed. What the annotation changes is
             # which blobs are *explained*, and that is a re-split of blobs
             # already in hand.
-            self.re_explain()
+            #
+            # Everything :meth:`_on_blobs` does when a comparison lands has to
+            # be done here too, and for the same reason: the lines above have
+            # just cleared the prompt box, both SAM tools' copies and the
+            # rubber band, and on this path nothing is coming back to put them
+            # there again. Without it every SAM click *after a commit* went out
+            # point-only -- the configuration that returned the whole chassis
+            # on 7 of 13 real frames -- and ``Shift+A`` lost the difference box
+            # it falls back to.
+            self._settle_assist()
             return
         self.assist_result = None
         self.heat_item.setVisible(False)
         self.request_assist()
+
+    def _settle_assist(self) -> None:
+        """Re-split this frame's blobs and show what they mean.
+
+        The two things a comparison's arrival is good for once the blobs
+        themselves are known: the heat map under ``D``, and the box prompt the
+        task card's open item is armed with.  Shared by :meth:`_on_blobs`, for
+        a comparison that has just landed, and by the frame hook, for one that
+        landed earlier and is still the answer.
+        """
+        payload = self.re_explain()
+        if self.heat_visible and payload is not None:
+            self._paint_heat()
+        self._arm_from_card()
 
     def _assist_subject(self) -> Optional[tuple]:
         """What a comparison would be *about*: the frame, its neighbour, the ROI.
@@ -313,9 +336,7 @@ class AssistMixin:
         if self.assist_result.get("key") != self.session.current():
             self.assist_result = None
             return
-        if self.heat_visible:
-            self._paint_heat()
-        self._arm_from_card()
+        self._settle_assist()
 
     def re_explain(self) -> Optional[dict]:
         """Re-split the blobs of this frame against what it holds *now*.

@@ -32,6 +32,7 @@ from app_scene import (
 )
 from tda.core.model import FrameKey
 from tda.ui import app_actions as A
+from tda.ui import session_api as api
 from tda.ui.app import MainWindow
 from tda.ui.app_assist import AssistController
 from tda.ui.app_diff import _pixels_of
@@ -146,6 +147,110 @@ def test_a_commit_does_not_compare_the_same_two_frames_again(window):
     window.session.clear_edit()
     window.session.goto(LAST_STEP - 3)
     assert len(asked) == 1, "a real frame change did not start a comparison"
+
+
+def _blob(box, area: int = 40, score: float = 10.0):
+    """One hand-made difference blob at a known box."""
+    from tda.core.diffmap import DiffBlob
+
+    return DiffBlob(box=tuple(int(v) for v in box), area=int(area), score=float(score))
+
+
+def _card_wants_a_shape(window) -> bool:
+    """Is the task card's current item one that a prompt box is armed for?"""
+    rows = window.session.task_card()
+    index = window.task_card.current_index()
+    return (0 <= index < len(rows)
+            and rows[index].get("kind") == api.KIND_ADD_SHAPE)
+
+
+def _stand_on_a_card_item(window) -> None:
+    """Put the window on a frame whose card asks for a shape to be drawn."""
+    for step in range(LAST_STEP - 1, 1, -1):
+        window.session.goto(step)
+        wait_for_assist(window)
+        if _card_wants_a_shape(window):
+            return
+    pytest.skip("no frame of the scene asks for a shape to be drawn")
+
+
+def _re_announce(window) -> None:
+    """What a commit does to the window: the session re-announces the frame."""
+    window.on_frame_changed_assist(window.session.current())
+
+
+def test_a_commit_re_arms_the_prompt_box_of_the_blob_it_did_not_explain(window):
+    """The next SAM click after a commit must still carry the difference box.
+
+    A re-announced frame clears the prompt box, both SAM tools' copies and the
+    rubber band before it decides whether to compare again -- so the branch
+    that decides *not* to has to put them back, or every click after a commit
+    goes out point-only, which is the configuration that returned the whole
+    chassis on 7 of 13 real frames.
+    """
+    _stand_on_a_card_item(window)
+    roi = window.roi()
+    assert roi is not None, "the fixture did not accept the proposed ROI"
+    x0, y0, x1, y1 = roi
+    drawn = _blob((x0 + 2, y0 + 2, x0 + 8, y0 + 8))
+    wanted = _blob((x1 - 12, y1 - 12, x1 - 4, y1 - 4), area=30, score=9.0)
+
+    window.assist_result = {"key": window.session.current(),
+                            "blobs": [drawn, wanted], "delta": None,
+                            "roi": roi, "expected": [],
+                            "explained": [], "unexplained": [drawn, wanted]}
+    window._assist_asked = window._assist_subject()
+    # what the commit just added to the frame explains the first blob
+    window.expected_now = lambda: [drawn.box]
+
+    _re_announce(window)
+
+    assert [b.box for b in window.assist_result["unexplained"]] == [wanted.box]
+    box = tuple(float(v) for v in wanted.box)
+    assert window._prompt_box == box
+    assert window.sam_point.prompt_box == box
+    assert window.sam_box.prompt_box == box
+    assert window.canvas._rubber_band == box
+
+
+def test_a_commit_that_explains_every_blob_arms_nothing(window):
+    _stand_on_a_card_item(window)
+    roi = window.roi()
+    drawn = _blob((roi[0] + 2, roi[1] + 2, roi[0] + 8, roi[1] + 8))
+    window.assist_result = {"key": window.session.current(), "blobs": [drawn],
+                            "delta": None, "roi": roi, "expected": [],
+                            "explained": [], "unexplained": [drawn]}
+    window._assist_asked = window._assist_subject()
+    window.expected_now = lambda: [drawn.box]
+
+    _re_announce(window)
+
+    assert window.assist_result["unexplained"] == []
+    assert window._prompt_box is None
+    assert window.sam_point.prompt_box is None
+    assert window.canvas._rubber_band is None
+
+
+def test_the_heat_map_survives_a_commit_while_d_is_on(window):
+    """``D`` is a display choice about the frame, not about the last edit.
+
+    Main repainted it when the comparison it started came back; the branch that
+    starts none has to repaint it itself, or the map on screen is whatever was
+    drawn before and nothing says so.
+    """
+    _stand_on_a_card_item(window)
+    window.act_toggle_heat()
+    assert window.heat_visible is True
+    assert window.heat_item.isVisible() is True
+    window._assist_asked = window._assist_subject()
+    painted: list = []
+    real = window._paint_heat
+    window._paint_heat = lambda: (painted.append(1), real())[1]
+
+    _re_announce(window)
+
+    assert painted, "the heat map was not repainted"
+    assert window.heat_item.isVisible() is True
 
 
 def test_a_new_roi_starts_a_new_comparison(window):
