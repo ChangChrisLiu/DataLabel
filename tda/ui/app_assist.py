@@ -22,6 +22,7 @@ from tda.ui import session_api as api
 from tda.ui.app_diff import (
     AssistController,
     Box,
+    alternate_parts,
     best_unexplained,
     blob_boxes,
     expected_boxes,
@@ -30,7 +31,7 @@ from tda.ui.app_diff import (
 )
 from tda.ui.app_roi_worker import RoiProposer
 
-__all__ = ["ASSIST_CONFIRM_WAIT", "AssistMixin"]
+__all__ = ["ASSIST_CONFIRM_WAIT", "NO_ALTERNATE", "AssistMixin"]
 
 class _SamLoader(QObject):
     """Carries the outcome of the background SAM load onto the GUI thread."""
@@ -42,8 +43,27 @@ class _SamLoader(QObject):
 ASSIST_CONFIRM_WAIT = 1.0
 
 #: A diff box bigger than this share of the ROI is not used as a prompt box:
-#: it says "everything changed", which narrows nothing for SAM.
+#: it says "everything changed", which narrows nothing for SAM.  The rule holds
+#: at every rank: ``Shift+C`` may not reach a box the difference map itself
+#: would have refused to arm.
 MAX_PROMPT_BOX_FRAC = 0.6
+
+#: Why ``Shift+C`` did nothing, in the four cases where something else owns the
+#: canvas or the keys.  A key that silently does nothing is a key the annotator
+#: presses again harder.
+NO_ALTERNATE = ("差异图没有别的候选框 / no other box prompt from the "
+                "difference map")
+ALT_WRONG_MODE = "只有标注模式有提示框 / only Annotate mode has a prompt box"
+ALT_FLASHING = "松开 Tab 再换提示框 / release Tab first: another frame is on screen"
+ALT_ROI_EDITING = ("ROI 框正开着，先 Enter 或 Esc / the ROI rectangle owns the "
+                   "keys right now")
+ALT_GHOST = ("草稿幽灵正开着，先 Enter 或 Esc / the draft ghost owns the keys "
+             "right now")
+#: Appended when ``Shift+C`` drops a prompt that had already put pixels on
+#: screen.  The pixels stay -- see :meth:`AssistMixin._drop_prompt_for_new_box`
+#: -- and a mask the annotator did not ask to keep must not be kept silently.
+APPLIED_MASK_STAYS = ("；已贴上的掩码留着，Ctrl+Z 撤销 / the mask already "
+                      "applied stays: Ctrl+Z removes it")
 
 
 def _covers_most(box, roi, limit: float = MAX_PROMPT_BOX_FRAC) -> bool:
@@ -98,6 +118,14 @@ class AssistMixin:
         #: ``SamToolBase.detach()`` clears the tool's own copy: switching to the
         #: brush and back must not silently downgrade point+box to point-only.
         self._prompt_box: Optional[tuple[float, float, float, float]] = None
+        #: Rank 1: the box :meth:`begin_add_shape` armed by itself, remembered
+        #: separately from :attr:`_prompt_box` so that every reset can put it
+        #: back after ``Shift+C`` has walked away from it.
+        self._rank_one: Optional[tuple[float, float, float, float]] = None
+        #: 0 = rank 1 = exactly today's behaviour; 1..3 index
+        #: :meth:`prompt_alternates`.  It is *only* ever non-zero because the
+        #: annotator pressed ``Shift+C``.
+        self._prompt_rank = 0
 
         self.heat_visible = False
         self.heat_item = QGraphicsPixmapItem()
@@ -136,10 +164,14 @@ class AssistMixin:
         so far were about the *previous* part, and sending them with the next
         click made every mask after the first commit a union of the two.
         """
+        changed = any(tool.instance != instance
+                      for tool in (self.sam_point, self.sam_box))
         for tool in (self.sam_point, self.sam_box):
             if tool.instance != instance:
                 tool.reset_prompt()
             tool.instance = instance
+        if changed:
+            self.reset_prompt_rank()
 
     def reset_sam_prompt(self) -> None:
         """Forget the points, the box drag and the candidates of both SAM tools.
@@ -151,10 +183,97 @@ class AssistMixin:
         """
         for tool in (self.sam_point, self.sam_box):
             tool.reset_prompt()
+        self.reset_prompt_rank()
 
     def clear_prompt_box(self) -> None:
-        """Forget the box prompt; the next frame's diff map proposes its own."""
+        """Forget the box prompt; the next frame's diff map proposes its own.
+
+        Including the *alternates* the annotator may have been walking: the
+        difference map that produced them is about the pair of frames being
+        left, and rank 1 of the next frame is the next frame's own blob.
+        """
         self._prompt_box = None
+        self._rank_one = None
+        self._prompt_rank = 0
+        self.canvas.set_prompt_point(None)
+
+    def reset_prompt_rank(self) -> None:
+        """Put the armed box back to rank 1 -- the difference map's own offer.
+
+        Hooked into the window-level funnels that already reset the prompt --
+        :meth:`reset_sam_prompt` (a commit, ``Esc``, an undo),
+        :meth:`set_sam_instance`, the pause ``Tab`` applies,
+        :meth:`~tda.ui.app_roi.RoiMixin.start_roi_edit`,
+        :meth:`~tda.ui.app_roi.RoiMixin.restore_pending`,
+        :meth:`~tda.ui.app.MainWindow.set_mode` and
+        :meth:`clear_prompt_box` (a frame or view change) -- rather than into
+        the dozen actions that call them.  The rule is
+        :meth:`tda.ui.canvas.sam_tools.SamToolBase.reset_prompt`'s and it is
+        the same rule: a prompt describes **one part on one frame**, and an
+        alternate prompt is a prompt.
+
+        Putting rank 1's box back is itself a box change, so it goes through
+        :meth:`_drop_prompt_for_new_box` as well.  Most of the funnels above
+        reset the tools on their own -- but ``set_mode`` into Steps detaches
+        nothing, and without this an answer to the alternate would have landed
+        on the way back into Annotate.
+
+        At rank 1 this returns without touching anything, which is what makes
+        an annotator who never presses ``Shift+C`` see byte-identical
+        behaviour: the whole feature is unreachable from here.
+        """
+        if self._prompt_rank == 0:
+            return
+        self._prompt_rank = 0
+        self._drop_prompt_for_new_box()
+        self._arm_prompt_box(self._rank_one)
+
+    def _drop_prompt_for_new_box(self) -> str:
+        """Invalidate the prompt because a **different** box is about to be armed.
+
+        :meth:`~tda.ui.canvas.sam_tools.SamToolBase.set_prompt_box` touches
+        neither the request token nor the candidates, so changing the armed box
+        is the one thing that changes a prompt without going through
+        :meth:`~tda.ui.canvas.sam_tools.SamToolBase.reset_prompt`.  Without
+        this the answer to the *previous* box still matched the identity check
+        and was painted into the editing layer while the new box and its
+        crosshair were on screen, and ``C`` afterwards walked the old box's
+        three masks.
+
+        Deliberately **not** inside :meth:`_arm_prompt_box`: that is also the
+        path :meth:`begin_add_shape` arms rank 1 with, and rank 1 has to stay
+        byte-identical to what the difference map did before ``Shift+C``
+        existed.
+
+        The **editing layer is not touched**, which is exactly what
+        ``reset_prompt`` does after ``Esc`` or an instance change: a mask that
+        already landed stays as ordinary uncommitted pixels and ``Ctrl+Z``
+        takes it off.  Rolling it back here is the option that loses work --
+        the annotator may have brushed on top of it already, and one undoable
+        step cannot tell the mask from the mask plus their strokes, which is
+        the same reason ``cycle_candidate`` drops the candidates rather than
+        the edit.  Returns the note the status line owes them when there was
+        such a mask, and ``""`` when there was not.
+        """
+        applied = self._candidate_tool() is not None
+        for tool in (self.sam_point, self.sam_box):
+            tool.reset_prompt()
+        return APPLIED_MASK_STAYS if applied else ""
+
+    def _arm_prompt_box(self, box: Optional[tuple],
+                        point: Optional[tuple] = None) -> None:
+        """Put one box -- and optionally the pixel to click inside it -- on both tools.
+
+        Both, always: ``S`` and ``X`` share the armed box, and arming only the
+        tool that happens to be active is how switching to the other one
+        silently downgraded the prompt to point-only.
+        """
+        self._prompt_box = box
+        for tool in (self.sam_point, self.sam_box):
+            tool.set_prompt_box(box)
+        if not self.roi_editing:
+            self.canvas.set_rubber_band(box)
+        self.canvas.set_prompt_point(point)
 
     def rearm_sam(self) -> None:
         """Give a freshly attached SAM tool its frame token and prompt box back.
@@ -443,13 +562,104 @@ class AssistMixin:
             self.report(f"差异覆盖了 ROI 的整块，不作为框提示 / the changed region "
                         f"covers most of the ROI: point-only ({blob.area} px)")
             return
-        self._prompt_box = box
-        for tool in (self.sam_point, self.sam_box):
-            tool.set_prompt_box(box)
-        if not self.roi_editing:
-            self.canvas.set_rubber_band(box)
+        # This is rank 1 by definition: the difference map arming its own blob.
+        # Whatever ``Shift+C`` was walking belonged to the previous offer.
+        self._rank_one = box
+        self._prompt_rank = 0
+        self._arm_prompt_box(box)
         self.report(f"prompt box from the difference map: "
                     f"{tuple(int(v) for v in blob.box)} ({blob.area} px)")
+
+    # ------------------------------------------------- alternate box prompts
+    def prompt_rank(self) -> int:
+        """Which box prompt is armed, 1-based; 1 is the difference map's own."""
+        return self._prompt_rank + 1
+
+    def prompt_alternates(self) -> list:
+        """The split proposals ``Shift+C`` offers behind the armed box.
+
+        Empty unless a comparison **of the open frame** is on hand: a payload
+        whose key has been superseded is an answer about a frame that is no
+        longer on screen, and arming a box out of it would put the previous
+        pair's geometry on this one.  The 60 %-of-the-ROI rule is applied here
+        as well as inside the splitter, because it belongs to the prompt rather
+        than to the proposal: "everything changed" is not an alternative to
+        anything.
+        """
+        payload = self.assist_result
+        if not compat.is_open(self.session) or not payload:
+            return []
+        if payload.get("key") != self.session.current():
+            return []
+        roi = self.roi()
+        if roi is None:
+            return []
+        inside = [part for part in (payload.get("proposals") or [])
+                  if not _covers_most(tuple(float(v) for v in part.box), roi)]
+        return alternate_parts(inside, self._rank_one)
+
+    def _alternate_refusal(self) -> str:
+        """Why ``Shift+C`` can do nothing right now, or ``""``.
+
+        The same shape as ``Shift+A``'s refusal list and for the same reason:
+        each of these already owns the canvas or the two keys that would settle
+        what is on it, and a second owner is how a rectangle gets stored by a
+        press meant for something else.
+        """
+        if self.mode != "annotate":
+            return ALT_WRONG_MODE
+        if self.is_flashing():
+            return ALT_FLASHING
+        if self.roi_editing:
+            return ALT_ROI_EDITING
+        if self.showing_draft_ghost():
+            return ALT_GHOST
+        if not self.sam_available:
+            # The box prompt exists to be sent to SAM.  ``act_cycle_candidate``
+            # says the reason rather than going quiet, and so does this.
+            return f"SAM 用不了：{self.sam_reason} / SAM unavailable: {self.sam_reason}"
+        return ""
+
+    @S.guard
+    def act_cycle_prompt_box(self) -> None:
+        """``Shift+C``: the next box prompt, from the split difference map.
+
+        ``C`` cycles SAM's three answers to one prompt; this cycles the
+        *prompt*.  Rank 1 is the blob the difference map armed by itself and is
+        never replaced -- on 201 real removal events the split proposal was a
+        large win on parts above 100 px (median SAM IoU 0.320 -> 0.762) and a
+        bad loss on nine large parts it over-split, the CPU cooler landing on
+        the fan hub (0.870 -> 0.131).  Behind a key the annotator presses when
+        the default box is visibly wrong, that trade is all upside.
+        """
+        refusal = self._alternate_refusal()
+        if refusal:
+            self.report(refusal)
+            return
+        alternates = self.prompt_alternates()
+        if not alternates:
+            self.report(NO_ALTERNATE)
+            return
+        # A new box is a new prompt: whatever is in flight for the old one must
+        # not land, and its candidates are not this box's answers.
+        note = self._drop_prompt_for_new_box()
+        total = len(alternates) + 1
+        self._prompt_rank = (self._prompt_rank + 1) % total
+        if self._prompt_rank == 0:
+            self._arm_prompt_box(self._rank_one)
+            self.report(f"提示框 1/{total}：差异图原本给的那块 / "
+                        f"prompt box 1/{total}: the difference map's own{note}")
+            return
+        part = alternates[self._prompt_rank - 1]
+        box = tuple(float(v) for v in part.box)
+        self._arm_prompt_box(box, part.point)
+        self.logger.info("prompt box %d/%d box=%s point=%s area=%d",
+                         self._prompt_rank + 1, total,
+                         tuple(int(v) for v in part.box), part.point, part.area)
+        self.report(f"提示框 {self._prompt_rank + 1}/{total}："
+                    f"{tuple(int(v) for v in part.box)}（{part.area} 像素，"
+                    f"在十字处点一下）/ prompt box {self._prompt_rank + 1}/{total} "
+                    f"from the split difference map{note}")
 
     def unexplained_boxes(self) -> list[Box]:
         """Boxes of the changes nothing on this frame accounts for."""

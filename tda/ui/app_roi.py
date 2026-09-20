@@ -102,6 +102,10 @@ class RoiMixin:
         # holding them at the same time would leave two things on screen
         # claiming the same two keys.
         self.forget_draft_ghost()
+        # And the ROI is what the difference map was computed inside, so an
+        # alternate box prompt walked to with ``Shift+C`` is an offer about the
+        # rectangle that is being replaced.
+        self.reset_prompt_rank()
         stored = self.roi()
         self._roi_dragged = False
         self._roi_awaiting = stored is None
@@ -530,6 +534,11 @@ class RoiMixin:
             self.report_error(f"refused: {refused}")
             return
         self.set_sam_instance(offer["instance"])
+        # The layer is about to be replaced from outside the tool, which is
+        # what ``_sync_editing_layer`` handles on every other such path -- and
+        # ``set_sam_instance`` above does nothing at all when the restored
+        # instance is the one already being edited, which is the common case.
+        self.reset_sam_prompt()
         self.set_editing_mask(offer["mask"])
         # The layer is back; so is what it was built from, or the commit that
         # follows would file somebody's adopted draft as hand-drawn work.

@@ -281,6 +281,10 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         self.mode = mode
         self.disarm_bench()
         self.forget_draft_ghost()   # the canvas it was offered on is going away
+        # ... and so is the frame a ``Shift+C`` alternate was an offer about.
+        # Review arms no tool at all and Steps shows a table; coming back to
+        # Annotate has to come back to the difference map's own box.
+        self.reset_prompt_rank()
         if mode == A.MODE_STEPS:
             self.stack.setCurrentWidget(self.steps_panel)
         else:

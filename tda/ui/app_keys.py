@@ -201,6 +201,13 @@ class KeysMixin:
 
     def _pause_tools(self, paused: bool) -> None:
         """Make every tool inert, or arm the chosen one again."""
+        if paused:
+            # The canvas is about to show another frame.  Whatever ``Shift+C``
+            # was walking is an offer about the frame being annotated, and the
+            # annotator is now looking at the other one; the armed box goes
+            # back to the difference map's own, which is what ``rearm_sam``
+            # will put back when ``Tab`` is released.
+            self.reset_prompt_rank()
         for tool in (self.sam_point, self.sam_box):
             tool.paused = bool(paused)
         if paused:
