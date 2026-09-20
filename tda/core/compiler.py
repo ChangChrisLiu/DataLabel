@@ -152,6 +152,12 @@ class CompiledInstance:
     visibility: str
     placement: str
     keyframe_id: Optional[int]
+    #: ``(x0, y0, x1, y1)`` outside which ``visible`` is known to be empty, or
+    #: ``None`` when nothing is known. It is not geometry -- ``box`` is the
+    #: tight bounding box and this may be looser -- it is what lets a caller
+    #: encode or repaint this instance without walking the whole canvas
+    #: (:func:`tda.core.masks.encode_rle`'s ``window``).
+    window: Optional[Window] = None
 
 
 @dataclass
@@ -367,9 +373,20 @@ def _part_mask(
     if part.rle is not None:
         if _wrong_size(part.rle, hw):
             return None
-        mask = masks.decode_rle(part.rle)
-        if not transform.is_identity():
-            mask = np.asfortranarray(masks.warp_mask(mask, transform, hw))
+        if transform.is_identity():
+            # shared and read-only: the same forty keyframes are decoded on
+            # every commit, every Space and every step, and at 12 MP that was
+            # 0.4 s of each of those gestures
+            cropped, box = masks.decode_rle_shared(part.rle)
+            if window is not None and tuple(window) == tuple(box):
+                return cropped
+            mask = np.zeros(hw, dtype=bool, order="F")
+            if not _empty_window(box):
+                _view(mask, box)[...] = cropped
+        else:
+            mask = np.asfortranarray(
+                masks.warp_mask(masks.decode_rle(part.rle), transform, hw)
+            )
         if window is None:
             return mask
         return np.asfortranarray(_view(mask, window))
@@ -691,13 +708,13 @@ def compile_frame(
         if _wrong_size(occ.rle, canvas):
             problems.append(f"shape_size_mismatch:occluder/{occ.occluder_type}")
             continue
-        here = _rle_window(occ.rle, IDENTITY, canvas)
+        # occluder RLEs are already in frame coordinates (see the docstring),
+        # so the window is the run lengths' own box
+        cropped, here = masks.decode_rle_shared(occ.rle)
         if occluded is None:
             occluded = np.zeros(canvas, dtype=bool, order="F")
         if not _empty_window(here):
-            # occluder RLEs are already in frame coordinates (see the docstring),
-            # so the window is the run lengths' own box
-            _view(occluded, here)[...] |= _view(masks.decode_rle(occ.rle), here)
+            _view(occluded, here)[...] |= cropped
         occluded_window = _union_window(occluded_window, here)
     if occluded is not None and occluded_window is not None:
         for inst, visible in visibles.items():
@@ -743,6 +760,7 @@ def compile_frame(
                 visibility=label,
                 placement=placement,
                 keyframe_id=kf_id,
+                window=None if visible is None else patch_window,
             )
             continue
 
@@ -767,6 +785,7 @@ def compile_frame(
                 visibility=label,
                 placement=placement,
                 keyframe_id=kf_id,
+                window=None if visible is None else patch_window,
             )
             continue
 
@@ -793,6 +812,7 @@ def compile_frame(
             visibility=label,
             placement=placement,
             keyframe_id=kf_id,
+            window=None if visible is None else visible_window,
         )
 
     return CompiledFrame(

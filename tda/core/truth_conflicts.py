@@ -116,8 +116,12 @@ def row_values(compiled_inst: CompiledInstance) -> RowValues:
         box: Optional[list] = [float(v) for v in compiled_inst.box]
     else:
         geom_type = GEOM_MASK
+        # the window the compiler already measured: the encode then builds the
+        # run lengths in a warm scratch canvas instead of faulting in a fresh
+        # 12 MP one per instance (:func:`tda.core.masks.encode_rle`)
         visible_rle = (
-            None if compiled_inst.visible is None else masks.encode_rle(compiled_inst.visible)
+            None if compiled_inst.visible is None
+            else masks.encode_rle(compiled_inst.visible, compiled_inst.window)
         )
         box = None
     return RowValues(
