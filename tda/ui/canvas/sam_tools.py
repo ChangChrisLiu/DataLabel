@@ -497,11 +497,15 @@ class SamToolBase(CandidatesMixin, Tool):
         # Whether the crop's contents may be thrown away: only once the prompt
         # holds a negative point (see :meth:`_submit`).
         self._candidate_union = not bool(subtractive)
-        # A subtractive prompt replaces inside the crop, so there is nothing to
-        # protect the erased pixels *from*; a lifted one was asked to put them
-        # back.  Snapshotted like the base, so a stroke made afterwards cannot
-        # change what this prompt's candidates render to.
-        erased = None if (subtractive or lifts) else self.erased_mask()
+        # **Both** compositions reduce the result by the erased set: a
+        # subtractive prompt replaces inside the crop, and SAM's refined mask
+        # can contain a pixel the annotator rubbed out earlier.  It usually
+        # will not -- it was shown the mask without it -- and "usually" is
+        # exactly what the report was about (round 2b).  The one exception is
+        # a positive point of this prompt landing inside the set: they clicked
+        # there, so they want it back.  Snapshotted like the base, so a stroke
+        # made afterwards cannot change what these candidates render to.
+        erased = None if lifts else self.erased_mask()
         self._candidate_erased = None if erased is None else erased.copy()
         self._apply_candidate()
 

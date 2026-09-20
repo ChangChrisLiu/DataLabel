@@ -1355,23 +1355,87 @@ def test_a_positive_point_inside_the_erased_set_asks_for_them_back(zoomed):
     assert (ov.editing & erased).any(), "the click did not lift the protection"
 
 
-def test_a_negative_prompt_ignores_the_erased_set(zoomed):
-    """It replaces inside the crop; there is nothing to protect pixels from."""
-    canvas, ov = zoomed
+def _erasing_rig(canvas, ov, maker=None):
+    """A layer with a prior mask and an erased block inside the result's area."""
     prior = np.zeros((60, 80), dtype=bool)
     prior[20:40, 20:40] = True
     ov.set_editing("inst-x", prior)
     erased = np.zeros((60, 80), dtype=bool)
-    erased[16:18, 22:24] = True
-    queue = StubQueue(_blob_result)
+    erased[16:20, 22:30] = True      # inside _blob_result's rows 15..30
+    queue = StubQueue(maker or _blob_result)
     tool = _point_tool(canvas, ov, queue, refine=True)
     tool.erased_provider = lambda: erased
+    return tool, queue, erased
+
+
+def test_a_negative_prompt_still_honours_the_erased_set(zoomed):
+    """Round 2b: "usually SAM will not put it back" is not a guarantee.
+
+    The prompt replaces inside the crop, so without this an earlier erasure
+    comes back whenever the refined mask happens to cover it -- and "happens
+    to" is exactly what the annotator's report was about.
+    """
+    canvas, ov = zoomed
+    tool, queue, erased = _erasing_rig(canvas, ov)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    # one positive point well away from the erased block, one negative point
+    tool.on_press(35.0, 35.0, _press(35.0, 35.0))
+    assert _spin(lambda: bool(strokes))
+    tool.on_press(25.0, 25.0, _negative(25.0, 25.0))
+    assert _spin(lambda: len(strokes) > 1)
+
+    assert queue.last.mask_input is not None, "the prior mask was not sent"
+    assert any(int(label) == 0 for *_xy, label in queue.last.points)
+    assert ov.editing[16, 21], "the rest of the result did not land"
+    assert not (ov.editing & erased).any(), "the erased block came back"
+
+
+def test_a_positive_point_inside_erased_lifts_it_for_a_negative_prompt_too(zoomed):
+    canvas, ov = zoomed
+    tool, queue, erased = _erasing_rig(canvas, ov)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(25.0, 17.0, _press(25.0, 17.0))      # inside the erased block
+    assert _spin(lambda: bool(strokes))
+    tool.on_press(35.0, 35.0, _negative(35.0, 35.0))
+    assert _spin(lambda: len(strokes) > 1)
+
+    assert any(int(label) == 0 for *_xy, label in queue.last.points)
+    assert (ov.editing & erased).any(), "the click did not lift the protection"
+
+
+def test_a_negative_prompt_has_nothing_to_cycle(zoomed):
+    """It carries a prior mask, so SAM answers once: ``C`` is inert."""
+    canvas, ov = zoomed
+    tool, queue, _erased = _erasing_rig(canvas, ov)
     strokes: list[object] = []
     tool.sigStroke.connect(strokes.append)
 
     tool.on_press(25.0, 25.0, _negative(25.0, 25.0))
     assert _spin(lambda: bool(strokes))
-    assert ov.editing[16, 22], "a negative prompt's own answer was suppressed"
+
+    assert queue.last.multimask is False
+    assert tool.candidate_count == 1
+    layer = ov.editing.copy()
+    assert tool.cycle_candidate() == 0
+    assert np.array_equal(ov.editing, layer), "C moved a single-candidate result"
+    assert len(strokes) == 1, "a pointless swap made an undo step"
+
+
+def test_a_negative_prompt_reports_the_erased_pixels_kept_out(zoomed):
+    canvas, ov = zoomed
+    tool, _queue, erased = _erasing_rig(canvas, ov)
+    hints: list[str] = []
+    tool.sigHint.connect(hints.append)
+
+    tool.on_press(25.0, 25.0, _negative(25.0, 25.0))
+    assert _spin(lambda: bool(hints))
+
+    assert f"保留擦除 {int(erased.sum())} px" in hints[-1], hints
+    assert "含负点" in hints[-1], "the negative-point clause was dropped"
 
 
 def test_the_status_line_reports_the_erased_pixels_kept_out(zoomed):

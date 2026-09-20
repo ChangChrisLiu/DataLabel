@@ -144,10 +144,10 @@ class CandidatesMixin:
     def _render(self, index: int) -> Optional[np.ndarray]:
         """The full-frame editing layer candidate ``index`` would produce.
 
-        ``owned ∪ candidate``, except inside the crop of a prompt that carried
-        the prior mask as ``mask_input``: there SAM was shown the pixels and its
-        answer replaces them, which is what keeps a negative point able to
-        remove something.
+        ``owned ∪ (candidate − erased)``, except inside the crop of a prompt
+        that holds a negative point: there the answer replaces what was in the
+        crop, which is what keeps a right click able to remove something. The
+        erased set is subtracted either way.
         """
         if self.overlay is None or not self._fits(self._candidate_rect):
             return None
@@ -166,12 +166,15 @@ class CandidatesMixin:
                 interpolation=cv2.INTER_NEAREST,
             ).astype(bool)
         full = base.copy() if base is not None else np.zeros(self.overlay.hw, dtype=bool)
+        # The erased set reduces the result **before** either composition, so a
+        # refined mask that happens to contain a pixel the annotator rubbed out
+        # cannot put it back either (round 2b).
+        erased = self._candidate_erased
+        if erased is not None:
+            window = erased[y0:y1, x0:x1]
+            self._kept_out_of[index] = int(np.count_nonzero(mask & window))
+            mask = mask & ~window
         if self._candidate_union:
-            erased = self._candidate_erased
-            if erased is not None:
-                window = erased[y0:y1, x0:x1]
-                self._kept_out_of[index] = int(np.count_nonzero(mask & window))
-                mask = mask & ~window
             full[y0:y1, x0:x1] |= mask
         else:
             full[y0:y1, x0:x1] = mask
