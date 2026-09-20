@@ -33,7 +33,9 @@ from typing import Any, Callable, Iterable, Optional
 import cv2
 import numpy as np
 
-from tda.core.cache_roi_detect import (  # re-exported: suggest_roi's two strategies
+from tda.core.cache_roi_detect import (  # re-exported: suggest_roi's strategies
+    oak_chassis_box,
+    oak_chassis_candidates,
     scan_bed_box,
     scan_bed_candidates,
     scan_chassis_box,
@@ -47,7 +49,8 @@ from tda.core.model import FrameKey
 __all__ = [
     "DbRoiLookup", "build_cache", "build_thumbs", "burst_metrics", "cache_path",
     "cached_image_path", "choose_scan_image", "configured_cache_dir", "full_frame",
-    "scan_bed_candidates", "scan_chassis_candidates", "suggest_roi", "thumb_path",
+    "oak_chassis_candidates", "scan_bed_candidates", "scan_chassis_candidates",
+    "suggest_roi", "thumb_path",
 ]
 
 # --- burst metrics -------------------------------------------------------
@@ -223,7 +226,14 @@ def suggest_roi(img: np.ndarray, view: str) -> tuple[int, int, int, int]:
     benefit.  The bed stage is the answer for a light or silver machine, where
     the dark one measures something that is not a chassis at all.
 
-    Any other view, and a scanner frame where neither strategy convinces, gets
+    An **OAK** frame is measured by :func:`tda.core.cache_roi_detect.oak_chassis_box`
+    instead: the same bench seen from the side, where the tape square covers a
+    third of the picture rather than framing it and the rest is floor, operator
+    and robot rig.  It is one stage, not two -- "what on the board is not the
+    board" finds a black Dell and a bare silver G4 alike -- and it is measured
+    on a downscale.
+
+    Any other view, and a frame where no strategy convinces, gets
     the **whole frame**: not a crop at all.  It used to be the central 70 % box,
     on the theory that some crop beats none -- and on all four tape-less real
     desktops that were looked at (D46, D47, D63, D66) it cut the machine in half,
@@ -235,11 +245,15 @@ def suggest_roi(img: np.ndarray, view: str) -> tuple[int, int, int, int]:
     if img is None or getattr(img, "size", 0) == 0:
         raise ValueError("suggest_roi() needs a non-empty image")
     height, width = img.shape[:2]
+    bgr = img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     if view == "scan":
-        bgr = img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         for found in (scan_chassis_box(bgr), scan_bed_box(bgr)):
             if found is not None:
                 return found[0]
+    elif str(view).startswith("oak"):
+        found = oak_chassis_box(bgr)
+        if found is not None:
+            return found[0]
     return full_frame(width, height)
 
 
