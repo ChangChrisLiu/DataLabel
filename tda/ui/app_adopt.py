@@ -67,6 +67,9 @@ class AdoptMixin:
         #: Candidates of the ghost currently on screen; empty means no ghost.
         self._draft_candidates: list[ls_adopt.DraftCandidate] = []
         self._draft_index = 0
+        #: Draft keys this view's op log already records as adopted, read when
+        #: the candidates are; only the status line uses them.
+        self._draft_used: set[str] = set()
         #: What an adopted draft adds to the next commit's op-log ``extra``.
         self._adopted_facts: Optional[dict] = None
 
@@ -145,7 +148,30 @@ class AdoptMixin:
             return
         self._draft_candidates = found
         self._draft_index = 0
+        self._draft_used = self.adopted_draft_keys()
         self._show_draft()
+
+    def adopted_draft_keys(self, limit: int = 200) -> set[str]:
+        """Draft keys this view's op log already records as adopted.
+
+        Said, not refused.  The same draft is legitimately taken twice -- an
+        undo and a second try, a split that re-traces the same shape from this
+        step on -- so stopping the annotator would be wrong.  What this rules
+        out is the *quiet* duplicate: two instances of one view taking their
+        pixels from one old polygon with nothing on screen saying so.
+        """
+        used: set[str] = set()
+        try:
+            rows = self.db.ops(int(self.session.desktop), str(self.session.view),
+                               limit=int(limit))
+        except Exception:  # noqa: BLE001 - a note, never a reason to fail Shift+A
+            return used
+        for row in rows:
+            payload = row.get("payload")
+            key = payload.get("adopted_from") if isinstance(payload, dict) else None
+            if key:
+                used.add(str(key))
+        return used
 
     def _adopt_reference(self) -> Optional[np.ndarray]:
         """What the candidates are ranked against: the layer, or the proposal.
@@ -184,10 +210,12 @@ class AdoptMixin:
             return
         self.overlay.set_ghost(candidate.mask)
         self.canvas.refresh()
+        seen = "（本视图已采纳过 / already adopted here）" \
+            if candidate.key in self._draft_used else ""
         self.report(
             f"草稿 {self._draft_index + 1}/{len(self._draft_candidates)}："
             f"{candidate.key} @ step {candidate.step} "
-            f"(IoU {candidate.iou_with_editing:.2f}) —— Enter 采纳 / Esc 取消  "
+            f"(IoU {candidate.iou_with_editing:.2f}){seen} —— Enter 采纳 / Esc 取消  "
             f"(Shift+A for the next one)"
         )
 

@@ -18,7 +18,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -36,7 +35,7 @@ from app_scene import (
 )
 from tda.core import masks
 from tda.core.db import Db
-from tda.core.model import FrameKey, InstanceRec, ShapeKeyframe, ShapePart
+from tda.core.model import InstanceRec, ShapeKeyframe, ShapePart
 from tda.ui import app_actions as A
 from tda.ui import app_adopt as adopt
 from tda.ui.app import MainWindow
@@ -354,6 +353,21 @@ def test_an_area_override_and_an_adoption_ride_on_the_same_commit(window):
     payload = last_op(window)
     assert payload["adopted_from"] == draft
     assert payload["area_warning_overridden"] is True
+
+
+def test_a_draft_taken_once_is_offered_again_but_marked(window):
+    """Not a refusal: an undo and a second try is the same draft twice."""
+    draft = seed_cooler_draft(window)
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.act_commit()             # the ghost
+    window.act_commit()             # the edit
+    assert window.adopted_draft_keys() == {draft}
+
+    window.on_request_edit(COOLER)
+    window.act_adopt_draft()
+    assert window.showing_draft_ghost()
+    assert "already adopted here" in window.status_message()
 
 
 def test_a_commit_after_a_discarded_ghost_claims_nothing(window):
