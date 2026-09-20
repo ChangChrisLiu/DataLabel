@@ -391,6 +391,212 @@ def test_set_editing_rejects_a_wrong_shape():
         ov.set_editing("x", np.zeros((10, 10), dtype=bool))
 
 
+# ---------------------------------------------------------------------------
+# what a repaint is allowed to cost (task B7)
+# ---------------------------------------------------------------------------
+def _windows(masks_: dict) -> dict:
+    from tda.core import masks as M
+
+    return {key: M.bbox(mask) for key, mask in masks_.items()}
+
+
+def test_set_instances_with_the_same_arrays_repaints_nothing(two_masks):
+    """A commit refreshes the overlay twice; the second time must be free.
+
+    ``_commit`` repaints the layers, and the session's own re-announcement of
+    the frame repaints them again from the *same* compiled frame -- the same
+    numpy arrays, in the same order.  At 12 MP with forty instances that second
+    pass was a 112 ms label map and a 95 ms composite for a picture that could
+    not have changed.
+    """
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+
+    ov.set_instances(dict(masks_), list(order), windows=_windows(masks_))
+    ov.qimage()
+    assert ov.last_rebuild_rect is None
+    assert ov.id2key == {1: "inst-a", 2: "inst-b"}
+
+
+def test_hiding_one_instance_repaints_only_where_it_was(two_masks):
+    """``H`` takes one layer off; the other thirty-nine do not move."""
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+
+    kept = {"inst-a": masks_["inst-a"]}
+    ov.set_instances(kept, ["inst-a"], windows=_windows(masks_))
+    ov.qimage()
+    assert ov.last_rebuild_rect == _grow((15, 10, 35, 25), (40, 50))
+    assert ov.id2key == {1: "inst-a"}
+
+
+def test_a_changed_layer_repaints_both_of_its_boxes(two_masks):
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+
+    moved = np.zeros((40, 50), dtype=bool)
+    moved[30:36, 40:46] = True
+    changed = {"inst-a": masks_["inst-a"], "inst-b": moved}
+    ov.set_instances(changed, order, windows=_windows(changed))
+    ov.qimage()
+    assert ov.last_rebuild_rect == _grow((15, 10, 46, 36), (40, 50))
+
+
+def test_a_reordered_stack_repaints_everything(two_masks):
+    """Who is on top is not a local question; the safe answer is the frame."""
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+    ov.set_instances(masks_, list(reversed(order)), windows=_windows(masks_))
+    ov.qimage()
+    assert ov.last_rebuild_rect == (0, 0, 50, 40)
+
+
+def test_a_layer_change_without_a_window_repaints_everything(two_masks):
+    """No window, no promise: the whole buffer is the only safe answer."""
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+    moved = {"inst-a": masks_["inst-a"], "inst-b": masks_["inst-b"].copy()}
+    ov.set_instances(moved, order)          # nothing said about where they are
+    ov.qimage()
+    assert ov.last_rebuild_rect == (0, 0, 50, 40)
+
+
+def test_a_partial_layer_repaint_matches_a_full_one(two_masks):
+    """Every localised layer change, checked against the frame it stands for."""
+    masks_, order = two_masks
+    scenes = [
+        ({"inst-a": masks_["inst-a"]}, ["inst-a"]),                 # hide b
+        (masks_, order),                                             # show it again
+        ({"inst-b": masks_["inst-b"]}, ["inst-b"]),                 # hide a
+        (masks_, order),
+        (masks_, list(reversed(order))),                             # swap the stack
+        (masks_, order),
+    ]
+    ov = LabelOverlay((40, 50))
+    ref = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+    for layers, stack in scenes:
+        ov.set_instances(layers, stack, windows=_windows(layers))
+        here = _pixels(ov.qimage())
+        ref.set_instances(layers, stack, windows=_windows(layers))
+        ref.force_full_rebuild()
+        assert int(np.count_nonzero(here != _pixels(ref.qimage()))) == 0
+
+
+def test_clearing_the_editing_layer_repaints_only_where_it_was(two_masks):
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    edit = np.zeros((40, 50), dtype=bool)
+    edit[8:12, 8:14] = True
+    ov.set_editing("inst-c", edit)
+    ov.qimage()
+
+    ov.clear_editing()
+    ov.qimage()
+    assert ov.last_rebuild_rect == _grow((8, 8, 14, 12), (40, 50))
+    assert not ov.editing.any()
+
+
+def test_replacing_the_editing_layer_repaints_both_of_its_boxes(two_masks):
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    first = np.zeros((40, 50), dtype=bool)
+    first[8:12, 8:14] = True
+    ov.set_editing("inst-c", first)
+    ov.qimage()
+
+    second = np.zeros((40, 50), dtype=bool)
+    second[30:34, 40:46] = True
+    ov.set_editing("inst-c", second)
+    ov.qimage()
+    assert ov.last_rebuild_rect == _grow((8, 8, 46, 34), (40, 50))
+    assert ov.editing[32, 42] and not ov.editing[10, 10]
+
+
+def test_clearing_an_editing_layer_that_was_never_set_repaints_nothing(two_masks):
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+    ov.clear_editing()
+    ov.qimage()
+    assert ov.last_rebuild_rect is None
+
+
+def test_a_clipped_qimage_leaves_the_rest_stale_and_finishes_it_later(two_masks):
+    """The composite is paid for where the annotator is looking, when they look.
+
+    A 12 MP ARGB buffer is 48 MB; at 59 % zoom the viewport holds a sixth of
+    it.  ``clip`` is the canvas saying which part it is about to draw -- the
+    rest stays on the stale list, so panning to it composites it then, and the
+    buffer that results has to be the one a whole-frame composite would leave.
+    """
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ref = LabelOverlay((40, 50))
+    for target in (ov, ref):
+        target.set_instances(masks_, order, windows=_windows(masks_))
+
+    ov.qimage(clip=(0, 0, 25, 40))
+    assert ov.last_rebuild_rect == (0, 0, 25, 40)
+    left = _pixels(ov.qimage(clip=(0, 0, 25, 40)))
+    assert ov.last_rebuild_rect is None, "the clipped region was rebuilt twice"
+
+    full = _pixels(ref.qimage())
+    assert int(np.count_nonzero(left[:, :25] != full[:, :25])) == 0
+
+    ov.qimage(clip=(25, 0, 50, 40))
+    assert ov.last_rebuild_rect == (25, 0, 50, 40)
+    assert int(np.count_nonzero(_pixels(ov.qimage()) != full)) == 0
+    assert ov.last_rebuild_rect is None, "nothing was left stale"
+
+
+def test_a_clipped_repaint_of_a_stroke_matches_the_whole_frame(two_masks):
+    """Strokes, ghosts and occluders through the clipped path, pixel for pixel."""
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ref = LabelOverlay((40, 50))
+    for target in (ov, ref):
+        target.set_instances(masks_, order, windows=_windows(masks_))
+        target.paint((24, 20), 5, True)
+        ghost = np.zeros((40, 50), dtype=bool)
+        ghost[2:8, 30:40] = True
+        target.set_ghost(ghost, (30, 2, 40, 8))
+        target.paint_occluder((44, 34), 4, True, "hand")
+
+    for clip in ((0, 0, 17, 40), (17, 0, 34, 40), (34, 0, 50, 40),
+                 (0, 0, 50, 20), (0, 20, 50, 40)):
+        ov.qimage(clip=clip)
+    ref.force_full_rebuild()
+    assert int(np.count_nonzero(_pixels(ov.qimage()) != _pixels(ref.qimage()))) == 0
+
+
+def test_a_clip_outside_the_stale_region_rebuilds_nothing(two_masks):
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+    rect = ov.paint((5, 5), 2, True)
+    assert rect is not None
+    ov.qimage(clip=(40, 30, 50, 40))
+    assert ov.last_rebuild_rect is None
+    ov.qimage(clip=(0, 0, 12, 12))
+    assert ov.last_rebuild_rect == _grow(rect, (40, 50))
+
+
 def test_overlay_uses_no_python_pixel_loops():
     """A 1 MP overlay must render fast enough to be numpy-only."""
     ov = LabelOverlay((1000, 1000))

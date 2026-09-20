@@ -673,7 +673,11 @@ def paste(dst: np.ndarray, src: np.ndarray, xy: tuple[int, int]) -> None:
 
 
 def labelmap_from_masks(
-    masks: dict[str, np.ndarray], order: list[str], hw: HW
+    masks: dict[str, np.ndarray],
+    order: list[str],
+    hw: HW,
+    windows: Optional[dict[str, Optional[Box]]] = None,
+    out: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, dict[int, str]]:
     """Paint ``masks`` bottom-to-top into a uint16 label map.
 
@@ -682,14 +686,29 @@ def labelmap_from_masks(
     larger id.  0 is the background.  Keys of ``order`` without a mask, and
     masks without a place in ``order``, are ignored.
 
-    Each instance is painted **inside its own bounding box**, which is measured
-    here rather than taken on trust.  A boolean-mask assignment walks every
-    element of the canvas it is given, so at 12 MP a Fortran-ordered instance
-    mask -- which is what the compiler now produces, because that is what the
-    run lengths are stored in -- cost 24 ms, and forty of them a second of the
-    GUI thread on every frame change.  Measuring the box costs 0.5 ms and the
-    assignment inside it 0.07 ms.  An empty mask is skipped, but it still takes
-    its id: the ids are the paint order and a caller reads ``id2key`` by them.
+    Each instance is painted **inside a window it is known to be empty
+    outside**.  A boolean-mask assignment walks every element of the canvas it
+    is given, so at 12 MP a Fortran-ordered instance mask -- which is what the
+    compiler now produces, because that is what the run lengths are stored in
+    -- cost 24 ms, and forty of them a second of the GUI thread on every frame
+    change.  Where the window comes from is the caller's business:
+
+    * ``windows[key]`` when given -- :attr:`CompiledInstance.window
+      <tda.core.compiler.CompiledInstance.window>` is exactly this promise and
+      the compiler has already paid for it.  It may be *looser* than the tight
+      box; that only paints over more background, never a different map.  A key
+      whose entry is ``None`` (or absent) is measured instead.
+    * otherwise :func:`bbox`, which is 0.5 ms per instance at 12 MP against
+      0.07 ms for the assignment inside it -- forty of those measurements were
+      140 ms of every 12 MP frame change, which is why the caller is now asked.
+
+    An empty mask is skipped, but it still takes its id: the ids are the paint
+    order and a caller reads ``id2key`` by them.
+
+    ``out`` is a ``(H, W)`` uint16 canvas to paint into.  It is zeroed first,
+    so the result is the same array a fresh allocation would have produced; it
+    exists so that a caller repainting one frame after another does not ask the
+    allocator for a new 24 MB canvas each time.
     """
     h, w = int(hw[0]), int(hw[1])
     painted = [key for key in order if key in masks]
@@ -698,7 +717,16 @@ def labelmap_from_masks(
             f"{len(painted)} instances exceed the uint16 label map capacity "
             f"({np.iinfo(np.uint16).max})"
         )
-    labelmap = np.zeros((h, w), dtype=np.uint16)
+    if out is None:
+        labelmap = np.zeros((h, w), dtype=np.uint16)
+    else:
+        if out.shape != (h, w) or out.dtype != np.uint16:
+            raise ValueError(
+                f"label map canvas is {out.shape!r} {out.dtype}, expected "
+                f"{(h, w)!r} uint16"
+            )
+        labelmap = out
+        labelmap[...] = 0
     id2key: dict[int, str] = {}
     for idx, key in enumerate(painted, start=1):
         m = _as_bool(masks[key])
@@ -707,9 +735,19 @@ def labelmap_from_masks(
                 f"mask {key!r} has shape {m.shape!r}, expected {(h, w)!r}"
             )
         id2key[idx] = key
-        window = bbox(m)
+        window = (windows or {}).get(key)
+        window = bbox(m) if window is None else _clip_box(window, (h, w))
         if window is None:
             continue
         x0, y0, x1, y1 = window
         labelmap[y0:y1, x0:x1][m[y0:y1, x0:x1]] = idx
     return labelmap, id2key
+
+
+def _clip_box(box: Box, hw: HW) -> Optional[Box]:
+    """``box`` clipped to the canvas, or ``None`` when nothing is left of it."""
+    h, w = int(hw[0]), int(hw[1])
+    x0, y0, x1, y1 = (int(v) for v in box)
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(w, x1), min(h, y1)
+    return None if x1 <= x0 or y1 <= y0 else (x0, y0, x1, y1)
