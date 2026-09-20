@@ -238,6 +238,92 @@ def build(db: Db, *, views=VIEWS, verified_steps=STEPS, skip_actions=(),
     return tax
 
 
+# --------------------------------------------------------------------------- #
+# a corpus shaped like the real database
+# --------------------------------------------------------------------------- #
+#: How many of each operated class a wide desktop carries. The small scene above
+#: has one screw and one connector, which is fine for "is this rule obeyed?" and
+#: useless for "can the wording answer the question?": with one instance of a
+#: class there is never a second one in another state to ask about. These are
+#: the proportions of a real teardown -- six board screws, four plugs, three
+#: sticks of RAM and their clips.
+WIDE = {"screw": 6, "connector": 4, "ram": 3}
+WIDE_DESKTOPS = (21, 22, 23, 24)
+
+
+def _wide_log() -> tuple[list[StepRec], list[ActionRec], int]:
+    """An interleaved teardown, so each verb comes round again and again.
+
+    Interleaved on purpose: the *second* time a verb is used, an instance it was
+    already used on is in the other state, which is what a matched negative
+    needs. A log that did all six screws first would give V4 nothing to pair its
+    first five positives with.
+    """
+    order: list[tuple[str, str]] = []
+    for i in range(1, WIDE["ram"] + 1):
+        order.append(("unscrew", f"screw.motherboard.{i:02d}"))
+        order.append(("disconnect", f"connector.{i:02d}"))
+        order.append(("open", f"ram_latch.{i:02d}"))
+        order.append(("remove", f"ram_module.{i:02d}"))
+    order.append(("unscrew", "screw.motherboard.04"))
+    order.append(("disconnect", "connector.04"))
+    order.append(("unscrew", "screw.motherboard.05"))
+    order.append(("unscrew", "screw.motherboard.06"))
+    order.append(("remove", "motherboard.01"))
+    steps = [StepRec(0, 1, "initial", "initial state")]
+    actions: list[ActionRec] = []
+    for k, (verb, target) in enumerate(order, start=2):
+        steps.append(StepRec(0, k, "normal", f"{verb} {target}"))
+        actions.append(ActionRec(0, k, 0, target, verb, tool="hand"))
+    return steps, actions, len(order) + 1
+
+
+def build_wide(db: Db, desktops=WIDE_DESKTOPS) -> Taxonomy:
+    """Several desktops with enough parts for a shortcut to be measurable.
+
+    Planning only: no frame is confirmed, which is the state the real database
+    is in, so what comes out is V3/V4/V5/V6/V10/V16 -- exactly the tasks the
+    text-only shortcut is measured on.
+    """
+    tax = load_taxonomy()
+    steps, actions, n_steps = _wide_log()
+    for desktop in desktops:
+        db.upsert_desktop(desktop, {"brand": "HP", "model_family": "Wide",
+                                    "chassis_type": "sff"})
+        db.upsert_instance(InstanceRec(key=CHASSIS, desktop=desktop, cls="chassis"))
+        db.upsert_instance(InstanceRec(key=BOARD, desktop=desktop, cls="motherboard"))
+        for i in range(1, WIDE["screw"] + 1):
+            db.upsert_instance(InstanceRec(
+                key=f"screw.motherboard.{i:02d}", desktop=desktop, cls="screw",
+                attrs={"role": "motherboard", "head": "PH2", "captive": False},
+                fastens=BOARD))
+        for i in range(1, WIDE["connector"] + 1):
+            db.upsert_instance(InstanceRec(
+                key=f"connector.{i:02d}", desktop=desktop, cls="connector",
+                attrs={"kind": "front_panel"}, socket_host=BOARD))
+        for i in range(1, WIDE["ram"] + 1):
+            db.upsert_instance(InstanceRec(key=f"ram_module.{i:02d}",
+                                           desktop=desktop, cls="ram_module",
+                                           mounted_on=BOARD))
+            db.upsert_instance(InstanceRec(
+                key=f"ram_latch.{i:02d}", desktop=desktop, cls="ram_latch",
+                attrs={"of": f"ram_module.{i:02d}"}, parent=BOARD, attached=True))
+        db.replace_steps(
+            desktop,
+            [StepRec(desktop, s.step, s.step_type, s.raw_name) for s in steps],
+            [ActionRec(desktop, a.step, a.idx, a.target, a.verb, tool=a.tool)
+             for a in actions],
+        )
+        for step in range(1, n_steps + 1):
+            db.upsert_frame(FrameKey(desktop, step, VIEW),
+                            f"F:/{VIEW}/{desktop:03d}/{step:03d}/P_0.png",
+                            {"hw": [HW[0], HW[1]]}, "2025-06-01T09:00:00",
+                            flags={"review_status": "unlabeled"})
+        db.set_pose_segment(desktop, VIEW, 1, 1, n_steps, 1, None, None)
+        edges_to_db(db, desktop, propose_edges(db.instances(desktop), tax))
+    return tax
+
+
 def set_status(db: Db, rel_type: str, target: str, blocker: str, status: str) -> None:
     """Decide an existing edge the way the Relations tab does (B5)."""
     with db.conn:

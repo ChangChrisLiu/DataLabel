@@ -100,6 +100,7 @@ from tda.core.export.vlm_tasks import (
     slim_row,
     unresolved_action_targets,
 )
+from tda.core.export.vlm_shortcuts import option_verb_shortcut, shortcut_report
 from tda.core.graph import constraint_edges, edges_from_db
 from tda.core.model import FrameKey
 from tda.core.taxonomy import Taxonomy
@@ -116,6 +117,8 @@ __all__ = [
     "instance_label",
     "manifest_path",
     "row_verified",
+    "siblings",
+    "summary_path",
 ]
 
 
@@ -149,6 +152,22 @@ def manifest_path(out_jsonl: str) -> Path:
     """
     out = Path(out_jsonl)
     return out.with_name(out.stem + ".images_manifest.jsonl")
+
+
+def summary_path(out_jsonl: str) -> Path:
+    """Where the counts, the exclusions and the shortcut table go."""
+    out = Path(out_jsonl)
+    return out.with_name(out.stem + ".summary.json")
+
+
+def siblings(out_jsonl: str) -> list[Path]:
+    """Every file an export writes beside its JSONL.
+
+    An export that found nothing removes the JSONL (an empty artefact is the one
+    that gets shipped) and these have to go with it, or the next run reads a
+    manifest and a summary that describe a file nobody wrote.
+    """
+    return [manifest_path(out_jsonl), summary_path(out_jsonl)]
 
 
 # --------------------------------------------------------------------------- #
@@ -333,17 +352,42 @@ def export_vlm(
     _write_manifest(manifest, {k: v for k, v in images.items() if k in used})
 
     by_task: dict[str, int] = {}
+    truth_sources: dict[str, int] = {}
+    corruptions: dict[str, int] = {}
+    option_kinds: dict[str, int] = {}
     for rec in records:
         task = rec["prompt"]["task"]
         by_task[task] = by_task.get(task, 0) + 1
+        label = rec["label"]
+        source = label.get("truth_source")
+        if source:
+            truth_sources[source] = truth_sources.get(source, 0) + 1
+        family = label["answer_check"].get("corruption")
+        if family:
+            corruptions[family] = corruptions.get(family, 0) + 1
+        if task == "V6":
+            kind = label["answer_check"].get("options_kind")
+            option_kinds[kind] = option_kinds.get(kind, 0) + 1
     by_source = {
         "perception": sum(n for t, n in by_task.items() if t in PERCEPTION_TASKS),
         "planning": sum(n for t, n in by_task.items() if t in PLANNING_TASKS),
     }
-    return {
+    summary = {
         "path": str(out), "manifest": str(manifest), "records": len(records),
         "images": len(used), "by_task": by_task, "by_source": by_source,
+        "by_truth_source": truth_sources, "v16_corruptions": corruptions,
+        "v6_options": option_kinds,
         "desktops": [int(d) for d in desktops], "view": view,
         "open_conflicts": open_conflicts, "illegal_steps": illegal,
         "excluded_desktops": excluded, "v10_excluded": v10_excluded,
+        # how much of this file can be answered without looking at an image
+        "shortcuts": shortcut_report(records),
+        "v6_option_shortcut": option_verb_shortcut(records),
     }
+    written = summary_path(out_jsonl)
+    written.write_text(json.dumps({k: v for k, v in summary.items()
+                                   if k not in ("path", "manifest")},
+                                  ensure_ascii=False, indent=1, sort_keys=True)
+                       + "\n", encoding="utf-8")
+    summary["summary"] = str(written)
+    return summary

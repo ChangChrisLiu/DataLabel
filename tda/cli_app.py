@@ -158,23 +158,27 @@ def _frame_counts(db, desktops: Sequence[int], view: str) -> tuple[int, int]:
     return verified, max(total - verified, 0)
 
 
-def _nothing_exported(command: str, view: str, out: str, only_verified: bool) -> int:
-    """Warn, remove the empty artefact, and fail.
+def _nothing_exported(command: str, view: str, out: str, only_verified: bool,
+                      also: Sequence[Path] = ()) -> int:
+    """Warn, remove the empty artefact **and its siblings**, and fail.
 
     An export that found nothing used to write the file anyway and exit 0, so a
     day of annotation came back as a COCO with zero images or a zero-byte JSONL
     and nothing at all to say why. The file goes too: an empty artefact left on
-    disk is the one that gets shipped, or diffed against, or trained on.
+    disk is the one that gets shipped, or diffed against, or trained on -- and
+    so do the files written beside it, or the next run finds an image manifest
+    and a summary describing a JSONL nobody wrote.
     """
     subject = ("0 verified frames" if only_verified else "no exportable frames")
     hint = (" (use --no-only-verified to include unverified frames)"
             if only_verified else "")
     print(f"[{command}] WARNING: {subject} for the requested desktops/{view} "
           f"- nothing exported{hint}")
-    try:
-        Path(out).unlink(missing_ok=True)
-    except OSError as exc:  # a locked or read-only file: say so, do not crash
-        print(f"[{command}] could not remove the empty {out}: {exc}")
+    for path in [Path(out), *also]:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:  # a locked or read-only file: say so, do not crash
+            print(f"[{command}] could not remove the empty {path}: {exc}")
     return EXIT_ERROR
 
 
@@ -527,11 +531,19 @@ def cmd_export_vlm(args: argparse.Namespace) -> int:
             _report_vlm(stats, view)
             if not _count(stats, "records"):
                 worst = max(worst, _nothing_exported("export-vlm", view, out,
-                                                     bool(args.only_verified)))
+                                                     bool(args.only_verified),
+                                                     siblings_of_vlm(str(out))))
                 continue
             # the total goes last and stays short: it is the line a script reads
             print(f"[export-vlm] {_count(stats, 'records')} records -> {out}")
         return worst
+
+
+def siblings_of_vlm(out: str) -> Sequence[Path]:
+    """The manifest and the summary written beside one VLM JSONL."""
+    from tda.core.export.vlm import siblings
+
+    return siblings(out)
 
 
 def _report_vlm(stats: dict, view: str) -> None:
@@ -568,6 +580,30 @@ def _report_vlm(stats: dict, view: str) -> None:
         listed = ", ".join(f"D{d}:{len(t)}" for d, t in sorted(no_v10.items()))
         print(f"[export-vlm] {len(no_v10)} desktop(s) have logged actions whose "
               f"target is unresolved, so V10 is not asked of them: {listed}")
+    _report_shortcuts(stats, view)
+
+
+def _report_shortcuts(stats: dict, view: str) -> None:
+    """How much of this file a model could answer without looking at an image.
+
+    Printed, not buried: a generated benchmark is always at risk of being
+    solvable from its own wording, and the only defence is to measure it every
+    time and put the number where a release run sees it. Each classifier is
+    fitted to the file it scores, so these are upper bounds no text-only model
+    can beat.
+    """
+    shortcuts = stats.get("shortcuts") or {}
+    for task in sorted(shortcuts):
+        row = shortcuts[task]
+        print(f"[export-vlm] {view}: {task} text-only upper bound — "
+              f"majority {row['majority']:.1%}, verb {row['verb']:.1%}, "
+              f"class {row['class']:.1%}, verb+class {row['verb_class']:.1%}, "
+              f"template {row['template']:.1%} ({row['records']} records)")
+    option = stats.get("v6_option_shortcut") or {}
+    if option.get("records"):
+        print(f"[export-vlm] {view}: V6 option-verb shortcut "
+              f"{option['shortcut']:.1%} against {option['random']:.1%} random "
+              f"({option['records']} records with options)")
 
 
 def _add_export_vlm(sub) -> None:

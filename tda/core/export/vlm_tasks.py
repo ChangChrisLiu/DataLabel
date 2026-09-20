@@ -13,10 +13,21 @@ follow, and every affordance and planning task here is built on them:
 
 * what the graph **forbids** is certainly impossible -- a required precondition
   is a physical fact, and an unmet one cannot be worked around;
+* what the **state** forbids is certainly impossible too, and for a different
+  reason: an already-unplugged connector cannot be disconnected and a part that
+  has left the machine cannot be removed. No edge is involved, and the answer is
+  in the picture rather than in the graph;
 * what the graph **permits** is only an **upper bound** -- it is the set of
   actions no *recorded* constraint rules out, not the set of actions that work;
 * what the log **demonstrates** -- a successful action recorded at that state --
   is certainly possible.
+
+The third one is there because the first two were not enough. Built from graph
+negatives alone, V4 was 83 % solvable from the question text: the verbs barely
+overlapped (`disconnect` was positive 987 times and negative never, because no
+edge gates a connector), so "which verb is it?" answered the question without
+looking at the image. A state negative is drawn to match its positive's verb and
+class, which is what makes the two indistinguishable on paper.
 
 So V4's positives are demonstrated actions and never merely permitted ones;
 V5 answers with a bounded set (what must be in, what must not be in, and the
@@ -73,7 +84,8 @@ from tda.core.model import (
     InstanceRec,
     StepType,
 )
-from tda.core.states import FrameState, InstState
+from tda.core.model import is_provisional
+from tda.core.states import FrameState, InstState, gone_with_parent
 from tda.core.taxonomy import Taxonomy
 
 __all__ = [
@@ -130,8 +142,12 @@ CHECK_TYPES = frozenset({
 })
 
 #: Where a V4 label's certainty comes from (the governing principle, above).
-TRUTH_SOURCES = ("demonstrated", "graph_blocked", "failed_attempt")
-DEMONSTRATED, GRAPH_BLOCKED, FAILED_ATTEMPT = TRUTH_SOURCES
+TRUTH_SOURCES = ("demonstrated", "graph_blocked", "state_inapplicable",
+                 "failed_attempt")
+DEMONSTRATED, GRAPH_BLOCKED, STATE_INAPPLICABLE, FAILED_ATTEMPT = TRUTH_SOURCES
+
+#: The three corruptions V16 builds a certainly-wrong plan with.
+CORRUPTIONS = ("swap", "move", "substitute")
 
 #: V10's progress bins, quarters of the desktop's own action count.
 PROGRESS_BINS = ("0-25", "25-50", "50-75", "75-100")
@@ -315,6 +331,32 @@ def pointable_rows(ctx: DesktopCtx, rows: dict[str, dict],
     return out
 
 
+@dataclass(frozen=True)
+class Candidate:
+    """One action that is **certainly not possible** right now, and why.
+
+    ``graph_blocked`` carries the unmet edges; ``state_inapplicable`` carries a
+    reason read off the state -- the plug is already out, the part is already
+    gone. Both are certainties; only the second needs the picture to settle.
+    """
+
+    verb: str
+    target: str
+    kind: str
+    edges: tuple = ()
+    reason: Optional[str] = None
+
+
+def inapplicable_reason(state: FrameState, key: str) -> str:
+    """Why this instance cannot be acted on: it is elsewhere, or already there."""
+    inst = state.get(key)
+    if inst is None:
+        return "not_present"
+    if inst.state == REMOVED or gone_with_parent(state, key):
+        return "not_present"
+    return f"already_{inst.state}"
+
+
 @dataclass
 class TaskCtx:
     """One desktop in one view, with everything the twelve generators read."""
@@ -337,8 +379,11 @@ class TaskCtx:
     budget: int = 2
     _legal: dict[tuple[int, bool], list] = field(default_factory=dict, repr=False)
     _blocked: dict[int, list] = field(default_factory=dict, repr=False)
+    _inapplicable: dict[int, list] = field(default_factory=dict, repr=False)
     _by_target: Optional[dict[str, list[Edge]]] = field(default=None, repr=False)
     _v12: Optional[set[int]] = field(default=None, repr=False)
+    _first_app: Optional[dict] = field(default=None, repr=False)
+    _verbs: Optional[frozenset] = field(default=None, repr=False)
 
     # -- shorthand ---------------------------------------------------------- #
     @property
@@ -472,6 +517,94 @@ class TaskCtx:
         return hit
 
     @property
+    def first_applicable(self) -> dict[tuple[str, str], int]:
+        """``(verb, instance) -> the earliest step the verb could be performed``.
+
+        What makes "can you disconnect this connector?" a fair question at step
+        40 is that it *was* a fair question at step 12: the plug was in, and the
+        model has to see that it is not any more. An action that was never
+        applicable at any point -- ``open`` on a PSU, ``unscrew`` on a cable --
+        is not a question about this machine at all.
+        """
+        if self._first_app is None:
+            out: dict[tuple[str, str], int] = {}
+            for j in [0, *self.log_steps]:
+                state = self.state(j)
+                for key, rec in self.ctx.instances.items():
+                    inst = state.get(key)
+                    if inst is None:
+                        continue
+                    for verb in self.tax.verbs:
+                        if (verb, key) in out:
+                            continue
+                        if verb_applies(self.tax, rec.cls, rec.attrs, verb,
+                                        inst.state):
+                            out[(verb, key)] = j
+            self._first_app = out
+        return self._first_app
+
+    def askable(self, key: str) -> bool:
+        """Is this instance one a question may be asked about at all?
+
+        Real, not a Label Studio draft, and not an identity
+        :mod:`tda.core.implied` invented because the log referenced a class
+        nobody operated -- an implied motherboard has no history of its own, so
+        "is it still there?" is a question about the inference, not the machine.
+        """
+        rec = self.ctx.instances.get(key)
+        return (rec is not None and not is_provisional(key)
+                and not is_implied(rec))
+
+    def inapplicable(self, step: int) -> list[Candidate]:
+        """Actions the *state* rules out right now (cached per frame)."""
+        hit = self._inapplicable.get(step)
+        if hit is None:
+            hit = inapplicable_in(self, self.state(step), step)
+            self._inapplicable[step] = hit
+        return hit
+
+    def certainly_wrong(self, step: int) -> list[Candidate]:
+        """Everything that certainly cannot be done at ``step``, both kinds."""
+        return [*(Candidate(v, t, GRAPH_BLOCKED, tuple(e))
+                  for v, t, e in self.blocked(step) if self.askable(t)),
+                *self.inapplicable(step)]
+
+    def matched(self, candidates: Sequence[Candidate], verb: str,
+                cls: Optional[str], seed: str) -> list[Candidate]:
+        """``candidates`` ordered so the closest match to ``(verb, cls)`` is first.
+
+        Same verb and same class beats same verb, which beats same class, which
+        beats anything -- and inside a tier a graph-blocked action beats a
+        state-inapplicable one, because the graph's "no" needs no picture to be
+        certain. The tail is a seeded permutation, so the choice is stable and
+        is not always the first instance in the table.
+        """
+        used = self.demonstrated_verbs
+
+        def rank(c: Candidate) -> tuple:
+            same_verb = c.verb == verb
+            same_cls = self.ctx.cls_of(c.target) == cls
+            tier = (0 if same_verb and same_cls else
+                    1 if same_verb else 2 if same_cls else 3)
+            # when the verb cannot be matched, at least prefer one this teardown
+            # actually uses: a verb that is only ever a negative -- `displace`,
+            # which no sheet records -- is a giveaway of its own
+            spoken = 0 if c.verb in used else 1
+            kind = 0 if c.kind == GRAPH_BLOCKED else 1
+            return (tier, spoken, kind,
+                    zlib.crc32(f"{seed}|{c.verb}|{c.target}".encode("utf-8")),
+                    c.verb, c.target)
+        return sorted(candidates, key=rank)
+
+    @property
+    def demonstrated_verbs(self) -> frozenset[str]:
+        """The verbs this desktop's log actually uses."""
+        if self._verbs is None:
+            self._verbs = frozenset(a.verb for s in self.log_steps
+                                    for a in self.named_actions(s))
+        return self._verbs
+
+    @property
     def v12_steps(self) -> set[int]:
         """The steps V12 may ask about, balanced across this desktop.
 
@@ -543,6 +676,49 @@ def blocked_actions(tc: TaskCtx, step: int) -> list[tuple[str, str, list[Edge]]]
         bad = unmet_for(tc, "release", key, state)
         if bad:
             out.append(("release", key, bad))
+    return out
+
+
+def blocked_in(tc: TaskCtx, state: FrameState) -> list[Candidate]:
+    """:func:`blocked_actions`, asked of an arbitrary state (a plan's mid-point)."""
+    out: list[Candidate] = []
+    for key, rec in sorted(tc.ctx.instances.items()):
+        inst = state.get(key)
+        if inst is None or inst.state == REMOVED or key not in tc.by_target:
+            continue
+        for verb in tc.tax.verbs:
+            if not verb_applies(tc.tax, rec.cls, rec.attrs, verb, inst.state):
+                continue
+            bad = unmet_for(tc, verb, key, state)
+            if bad:
+                out.append(Candidate(verb, key, GRAPH_BLOCKED, tuple(bad)))
+    return out
+
+
+def inapplicable_in(tc: TaskCtx, state: FrameState, step: int) -> list[Candidate]:
+    """Actions the state rules out: the verb no longer starts from where it is.
+
+    Only verbs that belong to the class (spec 6.3) and that **were** applicable
+    to this very instance at some earlier step: the question is "has this
+    already happened?", which is answerable from the picture, and not "does this
+    verb exist?", which is answerable from the vocabulary.
+    """
+    first = tc.first_applicable
+    out: list[Candidate] = []
+    for key, rec in sorted(tc.ctx.instances.items()):
+        if not tc.askable(key):
+            continue
+        inst = state.get(key)
+        if inst is None:
+            continue
+        reason = inapplicable_reason(state, key)
+        for verb in tc.tax.verbs:
+            if verb_applies(tc.tax, rec.cls, rec.attrs, verb, inst.state):
+                continue
+            began = first.get((verb, key))
+            if began is None or began >= step:
+                continue
+            out.append(Candidate(verb, key, STATE_INAPPLICABLE, (), reason))
     return out
 
 
@@ -781,6 +957,33 @@ def observed(instance: str, value: Any, tc: TaskCtx,
     return R.observe(instance, value, tc.view, box, row.get("visibility"), step=step)
 
 
+def question_label(tc: TaskCtx, instance: str,
+                   frame: Optional[FrameData] = None) -> str:
+    """How a question names an instance, without giving another one away.
+
+    "Motherboard screw 3" says this machine has at least three of them, and on a
+    frame where V2 asks "how many motherboard screws are still fastened?" that
+    is part of the other answer. Where an unambiguous relational phrase exists
+    it is used instead (V8's rule, extended to V4, V6 and V16).
+
+    Where one does not, the ordinal stays: V4, V6 and V16 are *about* that one
+    action, and dropping the question would cost the only affordance label on
+    that part to protect a much weaker inference than V8's -- the ordinal bounds
+    how many screws exist, while the count asks how many are still in. Today the
+    two never meet on the same frame anyway: V2 needs a verified frame and none
+    is.
+    """
+    if frame is None:
+        return tc.label(instance)
+    rec = tc.ctx.instances.get(instance)
+    if rec is None or rec.cls != "screw":
+        return tc.label(instance)
+    if str(rec.attrs.get("role") or "other") not in set(counted_roles(tc, frame)):
+        return tc.label(instance)
+    relational = _referring(tc, instance, avoid_ordinal=True)
+    return relational[0] if relational else tc.label(instance)
+
+
 def state_is_askable(tax: Taxonomy, cls: str) -> bool:
     """Is "what state is it in?" a real question for this class?
 
@@ -882,7 +1085,8 @@ def _v2_states(tc: TaskCtx, frame: FrameData) -> Iterator[dict]:
             template.format(label=tc.label(instance)), index,
             {"state": inst.state},
             {"type": "exact", "derive": "instance_state", "instance": instance,
-             "fields": ["state"], "allowed": sorted(tc.tax.states_of(cls))},
+             "class": cls, "fields": ["state"],
+             "allowed": sorted(tc.tax.states_of(cls))},
             evidence({instance: box}, tc, {instance: {"visibility": row.get("visibility")}}),
             R.rationale([R.observe(instance, inst.state, tc.view, box,
                                    row.get("visibility"))]),
@@ -999,13 +1203,13 @@ V4_FAILED_QUESTIONS = (
 
 def _v4_record(tc: TaskCtx, frame: FrameData, verb: str, target: str,
                bad: Sequence[Edge], templates: Sequence[str],
-               truth_source: str) -> dict:
+               truth_source: str, reason: Optional[str] = None) -> dict:
     state = tc.state(frame.step)
     blockers = sorted({e.blocker for e in bad})
     rec_id = (f"V4-{frame_id(tc.desktop, tc.view, frame.step)}"
               f"-{truth_source}-{verb}-{target}")
     index, template = pick(templates, rec_id)
-    label = tc.label(target)
+    label = question_label(tc, target, frame)
     chain: list[dict] = [observed(target, state[target].state, tc, frame.pointable)]
     for edge in sorted(bad, key=lambda e: (e.type, e.blocker)):
         current = state[edge.blocker].state if edge.blocker in state else None
@@ -1015,22 +1219,31 @@ def _v4_record(tc: TaskCtx, frame: FrameData, verb: str, target: str,
         chain.append(R.check_precondition(edge.blocker,
                                           REQUIRED_STATES.get(edge.type, frozenset()),
                                           current, False))
+    if truth_source == STATE_INAPPLICABLE:
+        chain.append(R.check_precondition(target, ["a state the verb starts from"],
+                                          state[target].state, False))
+    feasible = truth_source == DEMONSTRATED
+    # one field, one meaning: why this answer is what it is. An edge said no, or
+    # the state did, or nothing did and the operator went on to do it.
+    reason = None if feasible else (reason or ("violates_edge" if bad else None))
     bboxes = {k: frame.pointable[k][1]
               for k in [target, *blockers] if k in frame.pointable}
     return record(
         tc, "V4", rec_id, frame.step, [frame],
         template.format(phrase=verb_phrase(verb, label),
                         gerund=verb_gerund(verb, label)), index,
-        {"feasible": not bad, "blockers": blockers},
+        {"feasible": feasible, "blockers": blockers, "reason": reason},
         {"type": "feasibility", "verb": verb, "target": target,
+         "target_class": tc.ctx.cls_of(target),
          "state_after": frame.step, "truth_source": truth_source,
+         "metric": "per_verb_accuracy_macro", "secondary_metric": "accuracy",
          "edges": [{"type": e.type, "target": e.target, "blocker": e.blocker,
                     "necessity": e.necessity, "mode": e.mode,
                     "required": sorted(REQUIRED_STATES.get(e.type, frozenset()))}
                    for e in sorted(bad, key=lambda e: (e.type, e.blocker))]},
         evidence(bboxes, tc), R.rationale(chain),
         row_verified([frame.pointable[k][0] for k in bboxes], frame.verified),
-        negative=None if not bad else truth_source,
+        negative=None if feasible else truth_source,
         truth_source=truth_source,
     )
 
@@ -1063,12 +1276,14 @@ def gen_v4(tc: TaskCtx, step: int) -> Iterator[dict]:
     yield _v4_record(tc, frame, action.verb, action.target, (), V4_QUESTIONS,
                      DEMONSTRATED)
 
-    # one certain "no" for each certain "yes", drawn by a seed of this frame
-    seed = tc.seed(step, "V4")
-    blocked = [(v, t, bad) for v, t, bad in tc.blocked(step) if t in tc.ctx.instances]
-    for verb, target, bad in stable_order(blocked, seed,
-                                          lambda it: f"{it[0]}|{it[1]}")[:1]:
-        yield _v4_record(tc, frame, verb, target, bad, V4_QUESTIONS, GRAPH_BLOCKED)
+    # one certain "no" for each certain "yes", matched to the positive's verb
+    # and class so the pair cannot be told apart without looking at the picture
+    matched = tc.matched(tc.certainly_wrong(step), action.verb,
+                         target_class(tc.ctx, action.target), tc.seed(step, "V4"))
+    for candidate in matched[:1]:
+        yield _v4_record(tc, frame, candidate.verb, candidate.target,
+                         candidate.edges, V4_QUESTIONS, candidate.kind,
+                         candidate.reason)
 
     # the attempt the operator actually made and could not finish
     for attempt in tc.failed_actions(step + 1):
@@ -1082,7 +1297,7 @@ def gen_v4(tc: TaskCtx, step: int) -> Iterator[dict]:
         if not bad:
             continue  # the graph cannot explain it: not a ground truth yet
         yield _v4_record(tc, frame, attempt.verb, attempt.target, bad,
-                         V4_FAILED_QUESTIONS, FAILED_ATTEMPT)
+                         V4_FAILED_QUESTIONS, FAILED_ATTEMPT, "violates_edge")
 
 
 # --------------------------------------------------------------------------- #
@@ -1153,9 +1368,9 @@ V6_QUESTIONS = (
     "Name the single action to carry out next on this machine.",
 )
 #: How many graph-permitted "unknown" distractors ride along, and how many
-#: certainly-blocked ones the options list needs before it is offered at all.
+#: certainly-wrong ones the options list needs before it is offered at all.
 V6_UNKNOWN_OPTIONS = 2
-V6_BLOCKED_OPTIONS = 2
+V6_WRONG_OPTIONS = 2
 
 
 def gen_v6(tc: TaskCtx, step: int) -> Iterator[dict]:
@@ -1184,23 +1399,29 @@ def gen_v6(tc: TaskCtx, step: int) -> Iterator[dict]:
 
     seed = tc.seed(step, "V6")
     blocked = [(v, t) for v, t, _ in tc.blocked(step)]
-    chosen_blocked = stable_order(blocked, seed + "|blocked",
-                                  lambda it: f"{it[0]}|{it[1]}")[:V6_BLOCKED_OPTIONS]
-    unknown = stable_order(sorted(permitted - {(action.verb, action.target)}),
-                           seed + "|unknown",
-                           lambda it: f"{it[0]}|{it[1]}")[:V6_UNKNOWN_OPTIONS]
-    # a frame late in a teardown has nothing left that is certainly blocked, and
-    # a multiple choice whose wrong answers are only *unknown* is not one -- so
-    # the question is asked open-ended instead of being dropped, and says so
+    # the wrong options match the demonstrated verb wherever they can: "pick the
+    # option whose verb is never blocked" scored 45 % against 20 % random while
+    # the only certainly-wrong options were graph-blocked ones, and no edge
+    # gates a connector or a latch
+    wrong = tc.matched(tc.certainly_wrong(step), action.verb, None,
+                       seed + "|wrong")[:V6_WRONG_OPTIONS]
+    # the distractors match the demonstrated verb too, or "which option has the
+    # verb that is usually right?" answers the question without the picture
+    unknown = tc.matched([Candidate(v, t, "permitted_unknown")
+                          for v, t in sorted(permitted
+                                             - {(action.verb, action.target)})],
+                         action.verb, None, seed + "|unknown")[:V6_UNKNOWN_OPTIONS]
+    # a frame with only one certainly-wrong action left is no multiple choice --
+    # so the question is asked open-ended instead of being dropped, and says so
     options: Optional[list[dict]] = None
-    if len(chosen_blocked) >= V6_BLOCKED_OPTIONS:
+    if len(wrong) >= V6_WRONG_OPTIONS:
         listed = [{"verb": action.verb, "target": action.target, "kind": DEMONSTRATED}]
-        listed += [{"verb": v, "target": t, "kind": GRAPH_BLOCKED}
-                   for v, t in chosen_blocked]
-        listed += [{"verb": v, "target": t, "kind": "permitted_unknown"}
-                   for v, t in unknown]
+        listed += [{"verb": c.verb, "target": c.target, "kind": c.kind}
+                   for c in wrong]
+        listed += [{"verb": c.verb, "target": c.target, "kind": "permitted_unknown"}
+                   for c in unknown]
         for option in listed:
-            option["target_label"] = tc.label(option["target"])
+            option["target_label"] = question_label(tc, option["target"], frame)
         options = stable_order(listed, seed + "|order",
                                lambda o: f"{o['verb']}|{o['target']}")
 
@@ -1220,6 +1441,9 @@ def gen_v6(tc: TaskCtx, step: int) -> Iterator[dict]:
          "reference_step": nxt, "fields": fields,
          "metric": "match_rate+blocked_rate",
          "options_kind": "listed" if options is not None else "open",
+         # `blocked_rate` is the share of answers the graph certainly forbids;
+         # on a frame where it forbids nothing the rate is undefined, not zero
+         "blocked_rate_defined": bool(blocked),
          "blocked_actions": _actions_json(blocked),
          "permitted_upper_bound": _actions_json(sorted(permitted))},
         evidence({action.target: frame.pointable[action.target][1]}
@@ -1628,7 +1852,7 @@ V16_PLAN_LEN = 5
 
 
 def _simulate(tc: TaskCtx, step: int, plan: Sequence[tuple[str, str]]
-              ) -> tuple[Optional[int], list[Edge]]:
+              ) -> tuple[Optional[int], list[Edge], Optional[str]]:
     """Replay ``plan`` from the state after ``step``; ``(first bad index, edge)``.
 
     Through :func:`unmet_for`, so this asks the constraint graph exactly the
@@ -1646,48 +1870,98 @@ def _simulate(tc: TaskCtx, step: int, plan: Sequence[tuple[str, str]]
         cls = rec.cls if rec is not None else (
             CABLE_CLASS if target.startswith(CABLE_PREFIX) else None)
         if cls is None:
-            return index, []
+            return index, [], "not_present"
         attrs = rec.attrs if rec is not None else {}
         bad = unmet_for(tc, verb, target, sim)
         if bad:
             # every edge this step breaks, not the first one the list happened
             # to hold: "which constraint stopped it" has no single answer when
             # a part is both screwed down and still plugged in
-            return index, sorted(bad, key=lambda e: (e.type, e.target, e.blocker))
+            return (index, sorted(bad, key=lambda e: (e.type, e.target, e.blocker)),
+                    "violates_edge")
         current = (sim[target].state if target in sim
                    else tc.tax.default_state(cls))
         if not verb_applies(tc.tax, cls, attrs, verb, current):
-            return index, []
+            return index, [], inapplicable_reason(sim, target)
         _apply_effect(tc.tax, tc.ctx.instances, sim, target, verb)
-    return None, []
+    return None, [], None
 
 
-def _corruptions(plan: Sequence[tuple[str, str]],
-                 seed: str) -> list[tuple[str, list[tuple[str, str]]]]:
-    """Every rearrangement of ``plan`` worth trying, in a seeded order.
+def _state_before(tc: TaskCtx, step: int, plan: Sequence[tuple[str, str]],
+                  index: int) -> FrameState:
+    """The simulated state a plan reaches just before its ``index``-th action."""
+    sim = _copy_state(tc.state(step))
+    for verb, target in plan[:index]:
+        _apply_effect(tc.tax, tc.ctx.instances, sim, target, verb)
+    return sim
 
-    Adjacent swaps put the first error at ``i``; moving an action two or three
-    places earlier puts it at the position it lands on, which is how
-    ``first_error_index`` reaches 0 from the back of a four-step plan instead of
-    only ever being 0 or 1.
+
+def _corruptions(plan: Sequence[tuple[str, str]], seed: str) -> list[tuple[str, str]]:
+    """Every corruption of ``plan`` worth trying, as ``(family, tag)`` descriptors.
+
+    Three families. Adjacent **swaps** put the first error at ``i``; **moves**
+    put it where the moved action lands. Neither can ever break the *last* step
+    of a valid plan -- disassembly only clears preconditions, so an action
+    pushed later is never more blocked -- which is why the third family exists:
+    a **substitute** replaces one step with an action that is certainly wrong at
+    exactly that point, so the error can land anywhere, the last index included.
+
+    The descriptors are materialised one at a time (a substitute has to look at
+    the simulated state), in a seeded order, so the three families are mixed.
     """
-    out: list[tuple[str, list[tuple[str, str]]]] = []
+    out: list[tuple[str, str]] = []
     for i in range(len(plan) - 1):
-        swapped = list(plan)
-        swapped[i], swapped[i + 1] = swapped[i + 1], swapped[i]
-        out.append((f"swap{i}", swapped))
+        out.append(("swap", f"swap{i}"))
     for j in range(len(plan)):
         for i in range(len(plan)):
             if abs(i - j) < 2:
                 continue  # that is the adjacent swap, already listed
-            moved = list(plan)
-            moved.insert(i, moved.pop(j))
-            out.append((f"move{j}to{i}", moved))
-    return stable_order(out, seed, lambda it: it[0])
+            out.append(("move", f"move{j}to{i}"))
+    for i in range(len(plan)):
+        out.append(("substitute", f"substitute{i}"))
+    return stable_order(out, seed, lambda it: it[1])
+
+
+def _rearranged(plan: Sequence[tuple[str, str]], tag: str) -> list[tuple[str, str]]:
+    """Apply a ``swap``/``move`` tag to a plan."""
+    out = list(plan)
+    if tag.startswith("swap"):
+        i = int(tag[len("swap"):])
+        out[i], out[i + 1] = out[i + 1], out[i]
+        return out
+    j, i = (int(part) for part in tag[len("move"):].split("to"))
+    out.insert(i, out.pop(j))
+    return out
+
+
+def _substituted(tc: TaskCtx, step: int, plan: Sequence[tuple[str, str]],
+                 index: int, seed: str
+                 ) -> Optional[list[tuple[str, str]]]:
+    """Replace ``plan[index]`` with an action that cannot be done at that point.
+
+    Same verb wherever one is available, so the corrupted plan still reads like
+    a plan and the difference is a fact about the machine rather than about the
+    wording.
+    """
+    state = _state_before(tc, step, plan, index)
+    verb, target = plan[index]
+    candidates = [c for c in [*blocked_in(tc, state),
+                              *inapplicable_in(tc, state, step)]
+                  if (c.verb, c.target) not in set(plan)]
+    ordered = tc.matched(candidates, verb, tc.ctx.cls_of(target),
+                         f"{seed}|substitute{index}")
+    if not ordered:
+        return None
+    chosen = ordered[0]
+    out = list(plan)
+    out[index] = (chosen.verb, chosen.target)
+    return out
 
 
 def _plan_record(tc: TaskCtx, frame: FrameData, plan: Sequence[tuple[str, str]],
-                 first_bad: Optional[int], edges: Sequence[Edge], tag: str) -> dict:
+                 first_bad: Optional[int], edges: Sequence[Edge], tag: str,
+                 family: Optional[str] = None,
+                 reason: Optional[str] = None) -> dict:
     step = frame.step
     rec_id = f"V16-{frame_id(tc.desktop, tc.view, step)}-{tag}"
     index, question = pick(V16_QUESTIONS, rec_id)
@@ -1706,21 +1980,28 @@ def _plan_record(tc: TaskCtx, frame: FrameData, plan: Sequence[tuple[str, str]],
         chain.extend(observed(t, state[t].state if t in state else None,
                               tc, frame.pointable) for _, t in plan[:tc.budget])
     labels = [e.label() for e in edges]
+    source = (DEMONSTRATED if first_bad is None
+              else GRAPH_BLOCKED if edges else STATE_INAPPLICABLE)
+    check = {"type": "plan", "plan": listed, "metric": "accuracy+localisation",
+             "truth_source": source}
+    if family is not None:
+        check["corruption"] = family
+        check["corruption_tag"] = tag
     return record(
         tc, "V16", rec_id, step, [frame],
-        question + "\n" + "\n".join(f"{i + 1}. {verb_phrase(v, tc.label(t))}"
-                                    for i, (v, t) in enumerate(plan)),
+        question + "\n" + "\n".join(
+            f"{i + 1}. {verb_phrase(v, question_label(tc, t, frame))}"
+            for i, (v, t) in enumerate(plan)),
         index,
         {"valid": first_bad is None, "first_error_index": first_bad,
          "violated_edge": labels[0] if labels else None,
-         "violated_edges": labels},
-        {"type": "plan", "plan": listed, "metric": "accuracy+localisation",
-         "truth_source": DEMONSTRATED if first_bad is None else GRAPH_BLOCKED},
+         "violated_edges": labels, "reason": reason},
+        check,
         evidence({t: frame.pointable[t][1] for _, t in plan if t in frame.pointable},
                  tc, plan_length=len(listed)),
         R.rationale(chain), frame.verified,
-        negative=None if first_bad is None else tag,
-        truth_source=DEMONSTRATED if first_bad is None else GRAPH_BLOCKED,
+        negative=None if first_bad is None else family,
+        truth_source=source,
     )
 
 
@@ -1757,25 +2038,34 @@ def gen_v16(tc: TaskCtx, step: int) -> Iterator[dict]:
     plan = plan[:V16_PLAN_LEN]
     if len(plan) < 2:
         return
-    first_bad, _ = _simulate(tc, step, plan)
+    first_bad, _, _ = _simulate(tc, step, plan)
     if first_bad is not None:
         return  # the logged suffix does not replay cleanly: say nothing
 
+    seed = tc.seed(step, "V16")
     corruption = None
-    for tag, corrupted in _corruptions(plan, tc.seed(step, "V16")):
-        bad_at, broken = _simulate(tc, step, corrupted)
-        if bad_at is None or not broken:
-            continue  # violates nothing: a different plan, not a wrong one
-        corruption = (tag, corrupted, bad_at, broken)
+    for family, tag in _corruptions(plan, seed):
+        if family == "substitute":
+            corrupted = _substituted(tc, step, plan, int(tag[len("substitute"):]),
+                                     seed)
+            if corrupted is None:
+                continue
+        else:
+            corrupted = _rearranged(plan, tag)
+        bad_at, broken, reason = _simulate(tc, step, corrupted)
+        if bad_at is None:
+            continue
+        if family != "substitute" and not broken:
+            # a rearrangement that violates nothing is a different plan of
+            # unknown validity, not a wrong one (spec 8.2 principle 6)
+            continue
+        corruption = (family, tag, corrupted, bad_at, broken, reason)
         break
     if corruption is None:
-        # no rearrangement of this suffix is certainly wrong -- four screws of
-        # one group commute -- so publishing the true plan alone would make
-        # "yes" the right answer to every V16 question on this desktop
-        return
+        return  # nothing about this suffix is certainly wrong: say nothing
     yield _plan_record(tc, frame, plan, None, (), "true")
-    tag, corrupted, bad_at, broken = corruption
-    yield _plan_record(tc, frame, corrupted, bad_at, broken, tag)
+    family, tag, corrupted, bad_at, broken, reason = corruption
+    yield _plan_record(tc, frame, corrupted, bad_at, broken, tag, family, reason)
 
 
 #: ``task id -> generator``. The order is the order records are written.

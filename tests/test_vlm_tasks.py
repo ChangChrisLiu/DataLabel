@@ -17,6 +17,7 @@ from tda.core.db import Db
 from tda.core.export.vlm import TASKS, export_vlm, manifest_path
 from tda.core.export.vlm_reasoning import OPS, TERMINALS
 from tda.core.export.vlm_tasks import PERCEPTION_TASKS, PLANNING_TASKS
+from tda.core.export.vlm_tasks import V16_PLAN_LEN as S_PLAN_LEN
 from vlm_checker import CheckFailure, Checker, scan_prompt_leaks
 
 
@@ -333,9 +334,86 @@ def test_v4_says_yes_only_to_what_the_log_demonstrated(scene, tmp_path: Path):
         shown = checker.demonstrated(record["step"])
         assert (shown[1].verb, shown[1].target) == (
             record["answer_check"]["verb"], record["answer_check"]["target"])
-    assert {r["truth_source"] for r in no} <= {"graph_blocked", "failed_attempt"}
+    assert {r["truth_source"] for r in no} <= {
+        "graph_blocked", "state_inapplicable", "failed_attempt"}
     # ... and the two classes are balanced, so the majority baseline is ~50 %
     assert abs(len(yes) - len(no)) <= 2
+
+
+def test_v4_negatives_match_their_positive_and_cannot_be_read_off_the_verb(
+    scene, tmp_path: Path
+):
+    """The shortcut the review found: `disconnect` was a yes 987 times, never a no.
+
+    A negative is drawn to match its positive's verb and class where one exists,
+    so the pair differs in the picture and not in the wording.
+    """
+    db, tax = scene
+    records = _of(_run(db, tax, tmp_path / "v.jsonl"), "V4")
+    by_step: dict[int, list[dict]] = {}
+    for record in records:
+        by_step.setdefault(record["step"], []).append(record)
+
+    checker = Checker(db, tax, S.DESKTOP)
+    for step, group in by_step.items():
+        yes = [r for r in group if r["answer"]["feasible"]]
+        no = [r for r in group if not r["answer"]["feasible"]
+              and r["truth_source"] != "failed_attempt"]
+        assert len(yes) == 1 and len(no) <= 1, step
+        if not no:
+            assert not checker.certainly_wrong(step), step
+            continue
+        want_verb = yes[0]["answer_check"]["verb"]
+        want_cls = yes[0]["answer_check"]["target_class"]
+        available = checker.certainly_wrong(step)
+        chosen = (no[0]["answer_check"]["verb"], no[0]["answer_check"]["target"])
+        assert chosen in available, (step, chosen)
+
+        def tier(pair):
+            verb, target = pair
+            rec = db.instances(S.DESKTOP)[target]
+            same_verb, same_cls = verb == want_verb, rec.cls == want_cls
+            return (0 if same_verb and same_cls else 1 if same_verb
+                    else 2 if same_cls else 3)
+
+        # whatever was drawn is as close a match as this frame allowed
+        assert tier(chosen) == min(tier(p) for p in available), (step, chosen)
+
+
+def test_a_state_negative_names_the_state_and_no_blocker(scene, tmp_path: Path):
+    """"Can you unscrew the PSU screw?" once it is out: no edge is involved."""
+    db, tax = scene
+    records = _of(_run(db, tax, tmp_path / "v.jsonl"), "V4")
+    state = [r for r in records if r["truth_source"] == "state_inapplicable"]
+    assert state
+    for record in state:
+        assert record["answer"]["feasible"] is False
+        assert record["answer"]["blockers"] == []
+        assert (record["answer"]["reason"] == "not_present"
+                or record["answer"]["reason"].startswith("already_"))
+        assert record["answer_check"]["edges"] == []
+        ops = [s["op"] for s in record["rationale"]["steps"]]
+        assert "check_precondition" in ops
+    # every one of them is about something that really has already happened:
+    # the verb could be performed on that instance at an earlier step
+    checker = Checker(db, tax, S.DESKTOP)
+    for record in state:
+        pair = (record["answer_check"]["verb"], record["answer_check"]["target"])
+        assert pair in checker.certainly_wrong(record["step"])
+        assert checker.certainly_wrong(record["step"])[pair] == "state_inapplicable"
+
+
+def test_a_never_applicable_action_is_never_a_state_negative(scene, tmp_path: Path):
+    """"Can you open the PSU?" is a question about the vocabulary, not the machine."""
+    db, tax = scene
+    for record in _of(_run(db, tax, tmp_path / "v.jsonl"), "V4"):
+        if record["truth_source"] != "state_inapplicable":
+            continue
+        verb = record["answer_check"]["verb"]
+        target = record["answer_check"]["target"]
+        rec = db.instances(S.DESKTOP)[target]
+        assert tax.apply_verb(rec.cls, rec.attrs, verb) is not None
+        assert not rec.attrs.get("implied")
 
 
 def test_v5_is_a_bounded_set_and_never_claims_the_upper_bound_is_the_truth(
@@ -392,7 +470,7 @@ def test_v6_grades_on_the_demonstrated_action_and_the_blocked_rate(
         with_options += 1
         kinds = [o["kind"] for o in options]
         assert kinds.count("demonstrated") == 1
-        assert kinds.count("graph_blocked") >= 2
+        assert kinds.count("graph_blocked") + kinds.count("state_inapplicable") >= 2
         # the prompt lists them without saying which is which
         shown_options = entry["prompt"]["options"]
         assert len(shown_options) == len(options)
@@ -418,10 +496,20 @@ def test_v16_valid_plans_are_logged_suffixes_and_errors_can_land_anywhere(
                   if s > record["step"] for a in checker.named(s)]
         assert logged[:len(wanted)] == wanted
     for record in invalid:
-        assert record["answer"]["violated_edge"]
-        assert record["truth_source"] == "graph_blocked"
+        family = record["answer_check"]["corruption"]
+        assert family in ("swap", "move", "substitute")
+        if family == "substitute":
+            # a substitute may fail on the state alone: the action put in its
+            # place is one that cannot be performed at that point
+            assert record["answer"]["reason"]
+            assert record["truth_source"] in ("graph_blocked", "state_inapplicable")
+        else:
+            assert record["answer"]["violated_edge"]
+            assert record["truth_source"] == "graph_blocked"
     indices = {r["answer"]["first_error_index"] for r in invalid}
-    assert indices and indices <= {0, 1, 2, 3}
+    assert indices and indices <= set(range(S_PLAN_LEN))
+    # a substitute can break the last step, which no rearrangement ever can
+    assert any(r["answer_check"]["corruption"] == "substitute" for r in invalid)
 
 
 def test_v16_never_calls_a_harmless_reordering_an_error(scene, tmp_path: Path):
@@ -432,8 +520,9 @@ def test_v16_never_calls_a_harmless_reordering_an_error(scene, tmp_path: Path):
         if record["prompt"]["task"] != "V16":
             continue
         checker.check(record)  # re-derives validity from the graph, not from us
-        if not record["label"]["answer"]["valid"]:
-            assert record["label"]["answer"]["violated_edge"] is not None
+        answer, check = record["label"]["answer"], record["label"]["answer_check"]
+        if not answer["valid"] and check["corruption"] != "substitute":
+            assert answer["violated_edge"] is not None
 
 
 def test_v4_explains_the_failed_attempt_with_the_edge_that_caused_it(
@@ -445,7 +534,8 @@ def test_v4_explains_the_failed_attempt_with_the_edge_that_caused_it(
     assert len(failed) == 1
     record = failed[0]
     assert record["step"] == 5           # the frame before the attempt at step 6
-    assert record["answer"] == {"feasible": False, "blockers": [S.LATCH]}
+    assert record["answer"] == {"feasible": False, "blockers": [S.LATCH],
+                                "reason": "violates_edge"}
     assert [e["type"] for e in record["answer_check"]["edges"]] == ["locked_by"]
     ops = [s["op"] for s in record["rationale"]["steps"]]
     assert ops.count("recall_relation") == 1 and ops.count("check_precondition") == 1
@@ -820,6 +910,12 @@ def test_a_different_moment_negative_really_is_a_different_state(
     ("V15", "best_view", lambda a: a.__setitem__("best_view", "rs")),
     ("V4", "feasible", lambda a: a.__setitem__("feasible", not a["feasible"])),
     ("V4", "blockers", lambda a: a.__setitem__("blockers", ["psu.01"])),
+    ("V4", "reason", lambda a: a.__setitem__(
+        "reason", "already_installed" if a["reason"] != "already_installed"
+        else "not_present")),
+    ("V16", "reason", lambda a: a.__setitem__(
+        "reason", "not_present" if a["reason"] != "not_present"
+        else "violates_edge")),
     ("V5", "must_include", lambda a: a.__setitem__("must_include", [])),
     ("V5", "must_not_include", lambda a: a["must_not_include"].pop()),
     ("V6", "target", lambda a: a.__setitem__("target", "chassis.01")),
@@ -929,6 +1025,108 @@ def test_a_conflict_in_another_view_does_not_refuse_this_one(scene, tmp_path: Pa
     assert (4, S.RAM) not in {(r["step"], r["answer_check"]["instance"])
                               for r in cross}
     assert (7, S.LATCH) in {(r["step"], r["answer_check"]["instance"]) for r in cross}
+
+
+def test_the_summary_file_reports_the_counts_and_the_shortcuts(
+    scene, tmp_path: Path
+):
+    from tda.core.export.vlm import summary_path
+
+    db, tax = scene
+    out = tmp_path / "v.jsonl"
+    stats = _export(db, tax, out)
+    written = json.loads(summary_path(str(out)).read_text(encoding="utf-8"))
+
+    assert written["records"] == stats["records"]
+    assert written["by_task"] == stats["by_task"]
+    assert written["excluded_desktops"] == {}
+    assert set(written["by_truth_source"]) <= {
+        "demonstrated", "graph_blocked", "state_inapplicable", "failed_attempt"}
+    assert set(written["v16_corruptions"]) <= {"swap", "move", "substitute"}
+    assert set(written["v6_options"]) <= {"listed", "open"}
+    for task, row in written["shortcuts"].items():
+        assert set(row) == {"records", "labels", "majority", "verb", "class",
+                            "verb_class", "template"}
+        for key in ("majority", "verb", "class", "verb_class", "template"):
+            assert 0.0 <= row[key] <= 1.0
+            # every classifier is fitted to the file, so none can do worse
+            # than always answering the commonest label
+            assert row[key] >= row["majority"] - 1e-9, (task, key)
+
+
+def test_the_question_text_alone_does_not_answer_v4(tmp_path: Path):
+    """The review's Critical: V4 was 83 % solvable from the verb and the class.
+
+    Measured on a corpus shaped like the real database -- four desktops of six
+    board screws, four plugs and three sticks of RAM, interleaved, no frame
+    confirmed. The small scene of the other tests has one screw and one plug,
+    so a verb-conditioned classifier fits it perfectly and the number means
+    nothing.
+    """
+    db = Db(str(tmp_path / "wide.sqlite"))
+    tax = S.build_wide(db)
+    stats = export_vlm(db, tax, list(S.WIDE_DESKTOPS), S.VIEW,
+                       str(tmp_path / "wide.jsonl"), only_verified=False)
+    row = stats["shortcuts"]["V4"]
+    assert row["records"] >= 100
+    for key in ("majority", "verb", "class", "verb_class", "template"):
+        assert row[key] <= 0.65, (key, row[key], row["labels"])
+
+    records = _read(tmp_path / "wide.jsonl")
+    assert not scan_prompt_leaks(records)
+    for desktop in S.WIDE_DESKTOPS:
+        mine = [r for r in records if r["label"]["desktop"] == desktop]
+        assert Checker(db, tax, desktop).check_all(mine) == len(mine)
+    db.close()
+
+
+def test_the_v6_option_shortcut_is_reported(tmp_path: Path):
+    """"Pick the option whose verb is never blocked" scored 45 % against 20 %."""
+    db = Db(str(tmp_path / "wide.sqlite"))
+    tax = S.build_wide(db)
+    stats = export_vlm(db, tax, list(S.WIDE_DESKTOPS), S.VIEW,
+                       str(tmp_path / "wide.jsonl"), only_verified=False)
+    option = stats["v6_option_shortcut"]
+    assert option["records"] > 0
+    assert 0.0 <= option["shortcut"] <= 1.0
+    assert option["shortcut"] >= option["random"] - 1e-9
+    assert set(option["by_verb"]) <= set(tax.verbs)
+    db.close()
+
+
+def test_an_empty_export_takes_its_manifest_and_summary_with_it(
+    scene, tmp_path: Path, capsys
+):
+    """An artefact describing a file nobody wrote is the one that gets shipped."""
+    from tda.cli import EXIT_ERROR
+    from tda.core.export.vlm import manifest_path, summary_path
+    from tda.cli_app import _nothing_exported, siblings_of_vlm
+
+    out = tmp_path / "v.jsonl"
+    db, tax = scene
+    _export(db, tax, out)
+    assert out.exists() and manifest_path(str(out)).exists()
+    assert summary_path(str(out)).exists()
+
+    code = _nothing_exported("export-vlm", S.VIEW, str(out), False,
+                             siblings_of_vlm(str(out)))
+    assert code == EXIT_ERROR
+    assert not out.exists()
+    assert not manifest_path(str(out)).exists()
+    assert not summary_path(str(out)).exists()
+
+
+def test_a_planted_instance_key_is_caught_even_when_it_is_a_strangers(
+    scene, tmp_path: Path
+):
+    """M1: a raw key in a prompt is a leak whether or not it is this answer's."""
+    db, tax = scene
+    records = _run(db, tax, tmp_path / "v.jsonl")
+    victim = next(r for r in records
+                  if S.LATCH not in json.dumps(r["label"]["answer"]))
+    victim["prompt"]["question"] += f" (compare with {S.LATCH})"
+    problems = scan_prompt_leaks([victim])
+    assert problems and "instance key" in problems[0]
 
 
 def test_an_answer_check_no_checker_can_execute_is_refused(scene, tmp_path: Path):

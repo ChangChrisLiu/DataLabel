@@ -320,6 +320,36 @@ class Checker:
         return {(v, t) for v, t in self._candidates(frame)
                 if self.unmet(v, t, frame)}
 
+    def inapplicable(self, step: int) -> set[tuple[str, str]]:
+        """What the *state* rules out: the verb cannot start from where it is.
+
+        Only verbs that belong to the class and that were applicable to this
+        very instance at some earlier step -- "has this already happened?" is a
+        question about the picture, "does this verb exist?" is not.
+        """
+        frame = self.state_at(step)
+        earlier = [self.state_at(j) for j in [0, *self.log_steps()] if j < step]
+        out: set[tuple[str, str]] = set()
+        for key, rec in self.instances.items():
+            if bool(rec.attrs.get("implied")) or key.startswith(LS_PREFIX):
+                continue
+            if key not in frame:
+                continue
+            for verb in self.tax.verbs:
+                if self._verb_effect(key, verb) is None:
+                    continue
+                if self.applies(key, verb, frame):
+                    continue
+                if any(self.applies(key, verb, state) for state in earlier):
+                    out.add((verb, key))
+        return out
+
+    def certainly_wrong(self, step: int) -> dict[tuple[str, str], str]:
+        """``(verb, target) -> kind`` for everything that cannot be done now."""
+        out = {pair: "state_inapplicable" for pair in self.inapplicable(step)}
+        out.update({pair: "graph_blocked" for pair in self.blocked(step)})
+        return out
+
     def successful_actions(self, step: int) -> list:
         return [a for a in self.actions
                 if a.step == step and a.result == "success"
@@ -493,6 +523,13 @@ class Checker:
         frame = self.state_at(step)
         verb, target = spec["verb"], spec["target"]
         answer = self._answer(record)
+        source = spec.get("truth_source")
+        if source == "state_inapplicable":
+            # the verb cannot start from where the target is, so no edge is
+            # being asked about -- whether one would *also* have blocked it is
+            # beside the point and, on a desktop with a log gap, is noise
+            self._check_inapplicable(record, spec, frame, step, verb, target)
+            return
         if not self.applies(target, verb, frame):
             _fail(record, f"{verb} {target} does not apply in this state at all")
         bad = self.unmet(verb, target, frame)
@@ -500,7 +537,9 @@ class Checker:
         if sorted(answer.get("blockers") or []) != blockers:
             _fail(record, f"blockers {answer.get('blockers')} != {blockers}")
 
-        source = spec.get("truth_source")
+        want_reason = None if source == "demonstrated" else "violates_edge"
+        if answer.get("reason") != want_reason:
+            _fail(record, f"reason {answer.get('reason')!r} != {want_reason!r}")
         if source == "demonstrated":
             # a "yes" is only ever the action the log went on to perform
             shown = self.demonstrated(step)
@@ -523,6 +562,55 @@ class Checker:
                     _fail(record, "no failed attempt at the next step says this")
         else:
             _fail(record, f"unknown truth_source {source!r}")
+
+    def _check_inapplicable(self, record: dict, spec: dict, frame: dict,
+                            step: int, verb: str, target: str) -> None:
+        """The third certainty: the state, not the graph, rules this action out.
+
+        Three things have to hold, and the middle one is what makes it a
+        *question*: the verb cannot be performed now, it could be performed at
+        some earlier step on this very instance, and the reason is the one the
+        state gives.
+        """
+        answer = self._answer(record)
+        if answer["feasible"] is not False:
+            _fail(record, "an inapplicable action must not be feasible")
+        if answer.get("blockers"):
+            _fail(record, "a state negative names no blocker")
+        rec = self.instances.get(target)
+        # `implied` is the flag `tda.core.implied` writes on an identity nobody
+        # operated; transcribed, like everything else in this file
+        if rec is None or bool(rec.attrs.get("implied")):
+            _fail(record, f"{target} is not an instance a question may name")
+        if self._verb_effect(target, verb) is None:
+            _fail(record, f"{verb} does not belong to {target}'s class at all")
+        if self.applies(target, verb, frame):
+            _fail(record, f"{verb} {target} applies in this state after all")
+        earlier = [j for j in [0, *self.log_steps()] if j < step
+                   and self.applies(target, verb, self.state_at(j))]
+        if not earlier:
+            _fail(record, f"{verb} {target} was never possible, so it is no question")
+        want = self._inapplicable_reason(frame, target)
+        if answer.get("reason") != want:
+            _fail(record, f"reason {answer.get('reason')!r} != {want!r}")
+
+    def _verb_effect(self, target: str, verb: str):
+        effect = self._effect(target, verb)
+        return None if effect is None or effect[0] != "state" else effect[1]
+
+    def _inapplicable_reason(self, frame: dict, key: str) -> str:
+        """``not_present`` when it has gone, else ``already_<state>``."""
+        slot = frame.get(key)
+        if slot is None:
+            return "not_present"
+        if slot["state"] == REMOVED:
+            return "not_present"
+        parent = frame.get(slot.get("left_with") or "")
+        if slot.get("left_with") and (parent is None
+                                      or parent["state"] == REMOVED
+                                      or parent["placement"] != IN_CHASSIS):
+            return "not_present"
+        return f"already_{slot['state']}"
 
     # V5
     def _check_bounded_set(self, record: dict, spec: dict) -> None:
@@ -579,6 +667,7 @@ class Checker:
         if options is None:
             return
         kinds: dict[str, int] = {}
+        frame = self.state_at(step)
         for option in options:
             pair = (option["verb"], option["target"])
             kind = option["kind"]
@@ -587,13 +676,16 @@ class Checker:
                 _fail(record, f"option {pair} is not the demonstrated one")
             if kind == "graph_blocked" and pair not in blocked:
                 _fail(record, f"option {pair} is not blocked")
+            if kind == "state_inapplicable" and self.applies(pair[1], pair[0], frame):
+                _fail(record, f"option {pair} applies after all")
             if kind == "permitted_unknown" and (pair not in permitted
                                                 or pair == (action.verb, action.target)):
                 _fail(record, f"option {pair} is not a permitted distractor")
         if kinds.get("demonstrated") != 1:
             _fail(record, "an options list needs exactly one demonstrated action")
-        if kinds.get("graph_blocked", 0) < 2:
-            _fail(record, "an options list needs at least two blocked actions")
+        wrong = kinds.get("graph_blocked", 0) + kinds.get("state_inapplicable", 0)
+        if wrong < 2:
+            _fail(record, "an options list needs at least two certainly-wrong actions")
         shown_options = record["prompt"].get("options") or []
         if len(shown_options) != len(options):
             _fail(record, "the prompt and the label list different options")
@@ -632,7 +724,7 @@ class Checker:
         label = record["label"]
         answer = self._answer(record)
         frame = {k: dict(v) for k, v in self.state_at(int(label["step"])).items()}
-        first_bad, violated = None, []
+        first_bad, violated, reason = None, [], None
         for i, item in enumerate(spec["plan"]):
             verb, target = item["verb"], item["target"]
             bad = self.unmet(verb, target, frame)
@@ -641,6 +733,8 @@ class Checker:
                 # every edge the step breaks: which one "stopped" it has no
                 # single answer when a part is both screwed down and plugged in
                 violated = sorted(_edge_label(e) for e in bad)
+                reason = ("violates_edge" if bad
+                          else self._inapplicable_reason(frame, target))
                 break
             self._apply(frame, target, verb)
         valid = first_bad is None
@@ -657,13 +751,24 @@ class Checker:
                 _fail(record, "a valid plan that the log never carried out")
             if answer.get("violated_edges"):
                 _fail(record, "a valid plan that names a violated edge")
+            if answer.get("reason") is not None:
+                _fail(record, "a valid plan that gives a reason for failing")
             return
         if sorted(answer.get("violated_edges") or []) != violated:
             _fail(record, f"violated edges {answer.get('violated_edges')} != {violated}")
-        if not violated:
-            _fail(record, "an invalid plan that violates no edge")
-        if answer.get("violated_edge") != violated[0]:
+        if answer.get("reason") != reason:
+            _fail(record, f"reason {answer.get('reason')!r} != {reason!r}")
+        if violated and answer.get("violated_edge") != violated[0]:
             _fail(record, "violated_edge is not the first of violated_edges")
+        if not violated and answer.get("violated_edge") is not None:
+            _fail(record, "an edge named where the state, not the graph, said no")
+        family = spec.get("corruption")
+        if family not in ("swap", "move", "substitute"):
+            _fail(record, f"unknown corruption {family!r}")
+        if family != "substitute" and not violated:
+            # a rearrangement that violates nothing is a different plan of
+            # unknown validity; only a substitute may fail on the state alone
+            _fail(record, "a rearrangement called wrong without a violated edge")
 
     def _apply(self, frame: dict[str, dict], target: str, verb: str) -> None:
         effect = self._effect(target, verb)
@@ -736,9 +841,10 @@ def scan_prompt_leaks(records: Iterable[dict]) -> list[str]:
                 if word in text:
                     problems.append(f"{named}: prompt uses the label word {word!r}")
             for hit in INSTANCE_KEY.findall(text):
-                if hit in answer:
-                    problems.append(f"{named}: prompt names {hit!r}, which is in "
-                                    f"its own answer")
+                # unconditionally: an ordinal in a key bounds how many of that
+                # class exist, which answers a V2 count on the same frame, and
+                # a key names a part in a vocabulary no picture teaches
+                problems.append(f"{named}: prompt names the instance key {hit!r}")
     return problems
 
 
