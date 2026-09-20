@@ -32,6 +32,7 @@ __all__ = [
     "layer_changed",
     "open_conflicts",
     "overlay_layers",
+    "peek_image_at",
     "preview",
     "push_stroke",
     "removed_rows",
@@ -57,8 +58,15 @@ def _has(session: Any, name: str) -> bool:
 # --------------------------------------------------------------------------- #
 # the overlay
 # --------------------------------------------------------------------------- #
-def overlay_layers(session: Any) -> tuple[dict[str, np.ndarray], list[str]]:
-    """``(masks, bottom-up order)`` of the visible instances of the open frame.
+def overlay_layers(
+    session: Any,
+) -> tuple[dict[str, np.ndarray], list[str], dict[str, Optional[tuple]]]:
+    """``(masks, bottom-up order, windows)`` of the open frame's visible instances.
+
+    The third element is ``{instance: box it is empty outside}``, which is what
+    lets the overlay repaint one layer instead of the frame.  A session that
+    predates it simply answers with two, and an empty window map means "measure
+    them yourself" -- the same picture, more slowly.
 
     Fallback: ``instance_rows()`` is already the layer order (top first) and
     carries the ``hidden`` flag, and ``compiled()`` holds the masks, so the
@@ -66,11 +74,13 @@ def overlay_layers(session: Any) -> tuple[dict[str, np.ndarray], list[str]]:
     """
     if _has(session, "overlay_layers"):
         found = session.overlay_layers()
-        return dict(found[0]), list(found[1])
+        windows = dict(found[2]) if len(found) > 2 else {}
+        return dict(found[0]), list(found[1]), windows
     _note("overlay_layers", "built from instance_rows() + compiled()")
     compiled = session.compiled()
     masks: dict[str, np.ndarray] = {}
     order: list[str] = []
+    windows = {}
     for row in reversed(session.instance_rows()):  # bottom-up painting order
         key = str(row.get("key", ""))
         if row.get("hidden") or not key:
@@ -79,8 +89,23 @@ def overlay_layers(session: Any) -> tuple[dict[str, np.ndarray], list[str]]:
         if inst is None or inst.visible is None:
             continue
         masks[key] = np.asarray(inst.visible, dtype=bool)
+        windows[key] = inst.window
         order.append(key)
-    return masks, order
+    return masks, order, windows
+
+
+def peek_image_at(session: Any, step: int) -> Optional[np.ndarray]:
+    """One step's image if the session already has it decoded, else ``None``.
+
+    Fallback for a session that cannot answer "without reading anything": it
+    is asked for the image outright, which is what the caller was doing before
+    the question could be put at all.
+    """
+    if _has(session, "peek_image_at"):
+        return session.peek_image_at(int(step))
+    _note("peek_image_at", "falls back to image_at(), which may decode")
+    getter = getattr(session, "image_at", None)
+    return getter(int(step)) if callable(getter) else None
 
 
 # --------------------------------------------------------------------------- #

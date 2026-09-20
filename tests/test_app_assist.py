@@ -32,8 +32,10 @@ from app_scene import (
 )
 from tda.core.model import FrameKey
 from tda.ui import app_actions as A
+from tda.ui import session_api as api
 from tda.ui.app import MainWindow
 from tda.ui.app_assist import AssistController
+from tda.ui.app_diff import _pixels_of
 
 
 @pytest.fixture(scope="session")
@@ -108,6 +110,270 @@ def test_the_comparison_is_against_the_task_card_neighbour(window):
     neighbour = compat.task_neighbour(window.session)
     assert neighbour == LAST_STEP - 1          # the frame the annotator came from
     assert payload["key"].step == LAST_STEP - 2
+
+
+def test_a_commit_does_not_compare_the_same_two_frames_again(window):
+    """Drawing changes what is *explained*, never what the difference is.
+
+    A commit makes the session re-announce the frame, which used to throw the
+    comparison away and start it over -- a 12 MP difference map, on two frames
+    that had not changed, whose only effect was to make the ``Space`` that
+    followed wait 130 ms for it.  The blobs are re-split instead.
+    """
+    from app_scene import cell
+
+    window.session.goto(LAST_STEP - 2)
+    before = wait_for_assist(window)
+    asked: list = []
+    real = window.assist.request
+    window.assist.request = lambda *a, **k: (asked.append(a[0]), real(*a, **k))[1]
+
+    instance = str(window.session.task_card()[0]["instance"])
+    window.on_request_edit(instance)
+    window.set_editing_mask(cell(3), undoable=True)
+    window.act_commit()
+    if window.scope_bar.isVisible() or window.warn_bar.isVisible():
+        window.act_commit()
+    QApplication.processEvents()
+
+    assert window.session.editing_instance is None, "the commit was refused"
+    assert asked == [], f"the commit asked for {len(asked)} more comparison(s)"
+    assert window.assist_result is not None, "the commit threw the comparison away"
+    assert window.assist_result["key"] == before["key"]
+    assert window.assist_result["blobs"] == before["blobs"]
+
+    # ... and stepping to another frame does start a new one
+    window.act_clear_edit()
+    window.session.clear_edit()
+    window.session.goto(LAST_STEP - 3)
+    assert len(asked) == 1, "a real frame change did not start a comparison"
+
+
+def _blob(box, area: int = 40, score: float = 10.0):
+    """One hand-made difference blob at a known box."""
+    from tda.core.diffmap import DiffBlob
+
+    return DiffBlob(box=tuple(int(v) for v in box), area=int(area), score=float(score))
+
+
+def _card_wants_a_shape(window) -> bool:
+    """Is the task card's current item one that a prompt box is armed for?"""
+    rows = window.session.task_card()
+    index = window.task_card.current_index()
+    return (0 <= index < len(rows)
+            and rows[index].get("kind") == api.KIND_ADD_SHAPE)
+
+
+def _stand_on_a_card_item(window) -> None:
+    """Put the window on a frame whose card asks for a shape to be drawn."""
+    for step in range(LAST_STEP - 1, 1, -1):
+        window.session.goto(step)
+        wait_for_assist(window)
+        if _card_wants_a_shape(window):
+            return
+    pytest.skip("no frame of the scene asks for a shape to be drawn")
+
+
+def _re_announce(window) -> None:
+    """What a commit does to the window: the session re-announces the frame."""
+    window.on_frame_changed_assist(window.session.current())
+
+
+def test_a_commit_re_arms_the_prompt_box_of_the_blob_it_did_not_explain(window):
+    """The next SAM click after a commit must still carry the difference box.
+
+    A re-announced frame clears the prompt box, both SAM tools' copies and the
+    rubber band before it decides whether to compare again -- so the branch
+    that decides *not* to has to put them back, or every click after a commit
+    goes out point-only, which is the configuration that returned the whole
+    chassis on 7 of 13 real frames.
+    """
+    _stand_on_a_card_item(window)
+    roi = window.roi()
+    assert roi is not None, "the fixture did not accept the proposed ROI"
+    x0, y0, x1, y1 = roi
+    drawn = _blob((x0 + 2, y0 + 2, x0 + 8, y0 + 8))
+    wanted = _blob((x1 - 12, y1 - 12, x1 - 4, y1 - 4), area=30, score=9.0)
+
+    window.assist_result = {"key": window.session.current(),
+                            "blobs": [drawn, wanted], "delta": None,
+                            "roi": roi, "expected": [],
+                            "explained": [], "unexplained": [drawn, wanted]}
+    window._assist_asked = window._assist_subject()
+    # what the commit just added to the frame explains the first blob
+    window.expected_now = lambda: [drawn.box]
+
+    _re_announce(window)
+
+    assert [b.box for b in window.assist_result["unexplained"]] == [wanted.box]
+    box = tuple(float(v) for v in wanted.box)
+    assert window._prompt_box == box
+    assert window.sam_point.prompt_box == box
+    assert window.sam_box.prompt_box == box
+    assert window.canvas._rubber_band == box
+
+
+def test_a_commit_that_explains_every_blob_arms_nothing(window):
+    _stand_on_a_card_item(window)
+    roi = window.roi()
+    drawn = _blob((roi[0] + 2, roi[1] + 2, roi[0] + 8, roi[1] + 8))
+    window.assist_result = {"key": window.session.current(), "blobs": [drawn],
+                            "delta": None, "roi": roi, "expected": [],
+                            "explained": [], "unexplained": [drawn]}
+    window._assist_asked = window._assist_subject()
+    window.expected_now = lambda: [drawn.box]
+
+    _re_announce(window)
+
+    assert window.assist_result["unexplained"] == []
+    assert window._prompt_box is None
+    assert window.sam_point.prompt_box is None
+    assert window.canvas._rubber_band is None
+
+
+def test_the_heat_map_survives_a_commit_while_d_is_on(window):
+    """``D`` is a display choice about the frame, not about the last edit.
+
+    Main repainted it when the comparison it started came back; the branch that
+    starts none has to repaint it itself, or the map on screen is whatever was
+    drawn before and nothing says so.
+    """
+    _stand_on_a_card_item(window)
+    window.act_toggle_heat()
+    assert window.heat_visible is True
+    assert window.heat_item.isVisible() is True
+    window._assist_asked = window._assist_subject()
+    painted: list = []
+    real = window._paint_heat
+    window._paint_heat = lambda: (painted.append(1), real())[1]
+
+    _re_announce(window)
+
+    assert painted, "the heat map was not repainted"
+    assert window.heat_item.isVisible() is True
+
+
+def test_a_comparison_that_came_back_empty_is_tried_again(window):
+    """"Asked and answered" is not the same as "asked".
+
+    The window remembers what it asked about so that a commit does not ask the
+    same question twice.  A comparison that came back with *no answer* -- an
+    unreadable neighbour, a read that raised on the worker -- has not been
+    answered, and on main the next commit or ``F5`` tried it again.
+    """
+    _stand_on_a_card_item(window)
+    step = window.session.current().step
+    asked: list = []
+    real = window.assist.request
+    window.assist.request = lambda *a, **k: (asked.append(a[0]), real(*a, **k))[1]
+
+    window._neighbour_pixels = lambda _n: "does/not/exist.png"
+    window.session.goto(step - 1)
+    assert window.assist.wait(5.0)
+    QApplication.processEvents()
+    assert len(asked) == 1
+    assert window.assist_result is None, "an unreadable neighbour gave an answer"
+
+    # F5 re-announces the same frame: the question is still unanswered
+    del window._neighbour_pixels
+    window.act_refresh_all()
+    QApplication.processEvents()
+    assert len(asked) == 2, "the unanswered comparison was never tried again"
+    assert window.assist.wait(5.0)
+    QApplication.processEvents()
+    assert window.assist_result is not None, "the retry produced no answer"
+
+    # ... and now that it *is* answered, a re-announcement asks nothing more
+    _re_announce(window)
+    assert len(asked) == 2
+
+
+def test_a_comparison_that_failed_on_the_worker_is_tried_again(window):
+    """A raised comparison is an unanswered one, and it says so twice."""
+    _stand_on_a_card_item(window)
+    errors: list = []
+    window.assist.sigFailed.connect(errors.append)
+    window._assist_asked = window._assist_subject()
+    window.assist_result = None
+
+    window.assist.sigFailed.emit("boom")
+    QApplication.processEvents()
+    assert errors == ["boom"]
+    assert window._assist_asked is None, "a failure left the question stamped"
+
+
+def test_a_new_roi_starts_a_new_comparison(window):
+    """The ROI is what the difference map looks *inside*: a new one is a new answer."""
+    window.session.goto(LAST_STEP - 2)
+    wait_for_assist(window)
+    asked: list = []
+    real = window.assist.request
+    window.assist.request = lambda *a, **k: (asked.append(a[3]), real(*a, **k))[1]
+
+    window.start_roi_edit()
+    window.on_roi_box(4.0, 4.0, 40.0, 40.0)
+    window.accept_roi()
+    QApplication.processEvents()
+    assert asked and asked[-1] is not None
+    assert tuple(int(v) for v in asked[-1]) == tuple(int(v) for v in window.roi())
+
+
+def test_the_neighbour_is_read_by_the_worker_when_the_gui_has_not_got_it(window):
+    """A timeline click must not decode 12 MP to hand a worker an array.
+
+    Stepping back, ``k+1`` is the frame just left and is already in the image
+    cache, so the pixels go straight over.  A jump to a frame nobody has
+    visited has no such luck, and decoding its neighbour on the GUI thread was
+    46 ms of a 12 MP timeline click spent on work the worker could do itself.
+    """
+    session = window.session
+    target = LAST_STEP - 4
+    neighbour = target + 1
+
+    session.goto(neighbour)     # ... and then step back, the way annotating goes
+    session.goto(target)
+    assert session.peek_image_at(neighbour) is not None   # walked here: in hand
+    assert isinstance(window._neighbour_pixels(neighbour), np.ndarray)
+
+    session.images.clear()
+    handed = window._neighbour_pixels(neighbour)
+    assert isinstance(handed, str), f"the GUI thread decoded {type(handed)}"
+    assert session.peek_image_at(neighbour) is None, \
+        "asking for the path decoded the image anyway"
+
+    # ... and the answer is the same one the pixels would have produced
+    controller = AssistController()
+    try:
+        image = session.image_at(target)
+        by_path = controller.compute(
+            FrameKey(DESKTOP, target, VIEW),
+            image, _pixels_of(handed), None, [])
+        by_array = controller.compute(
+            FrameKey(DESKTOP, target, VIEW),
+            image, session.image_at(neighbour), None, [])
+    finally:
+        controller.shutdown()
+    assert np.array_equal(by_path["delta"], by_array["delta"])
+    assert [b.box for b in by_path["unexplained"]] == \
+        [b.box for b in by_array["unexplained"]]
+
+
+def test_an_unreadable_neighbour_path_is_no_comparison_rather_than_a_failure(qapp):
+    """The same answer a frame with no neighbour gives: ``None``, not an error."""
+    controller = AssistController()
+    results: list = []
+    controller.sigBlobs.connect(results.append)
+    failures: list = []
+    controller.sigFailed.connect(failures.append)
+    try:
+        image = np.full((32, 32, 3), 30, dtype=np.uint8)
+        controller.request(FrameKey(1, 2, VIEW), image, "does/not/exist.png", None)
+        assert controller.wait(5.0)
+        QApplication.processEvents()
+    finally:
+        controller.shutdown()
+    assert results == [None], f"an unreadable neighbour gave {results!r}"
+    assert failures == []
 
 
 def test_assist_controller_runs_synchronously_when_asked(qapp):

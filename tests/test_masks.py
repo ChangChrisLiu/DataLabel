@@ -467,6 +467,53 @@ def test_labelmap_rejects_more_than_uint16_ids():
         )
 
 
+def test_labelmap_given_the_windows_paints_exactly_what_measuring_them_does():
+    """The compiler already knows where each instance is; the map must agree.
+
+    Measuring the box is two ``any`` reductions over the canvas per instance --
+    at 4032x3040 with forty instances that was 140 ms of every frame change --
+    and the compiler carries the answer in ``CompiledInstance.window``.  A
+    window may be *looser* than the tight box (a multi-part shape unions its
+    parts'), so the painted map has to be identical either way.
+    """
+    hw = (48, 64)
+    order = ["a", "b", "c", "d"]
+    given = {
+        "a": _square(hw, 2, 2, 10),
+        "b": _square(hw, 8, 8, 20),
+        "c": np.zeros(hw, dtype=bool),          # an empty instance keeps its id
+        "d": _square(hw, 30, 40, 14),
+    }
+    tight = {key: M.bbox(mask) for key, mask in given.items()}
+    loose = {
+        "a": (0, 0, 30, 30),                    # looser than the shape
+        "b": tight["b"],
+        "c": None,                              # nothing known about this one
+        "d": (0, 0, hw[1], hw[0]),              # the whole canvas
+    }
+    expected, expected_ids = M.labelmap_from_masks(given, order, hw)
+    for windows in (tight, loose):
+        lm, ids = M.labelmap_from_masks(given, order, hw, windows=windows)
+        assert ids == expected_ids
+        assert np.array_equal(lm, expected)
+
+
+def test_labelmap_windows_are_not_measured(monkeypatch):
+    """With the windows in hand nothing scans the canvas to find the boxes."""
+    hw = (32, 32)
+    order = ["a", "b"]
+    given = {"a": _square(hw, 1, 1, 8), "b": _square(hw, 20, 20, 8)}
+    windows = {key: M.bbox(mask) for key, mask in given.items()}
+
+    def refuse(*_a, **_k):
+        raise AssertionError("labelmap_from_masks measured a box it was given")
+
+    monkeypatch.setattr(M, "bbox", refuse)
+    lm, ids = M.labelmap_from_masks(given, order, hw, windows=windows)
+    assert ids == {1: "a", 2: "b"}
+    assert lm[4, 4] == 1 and lm[24, 24] == 2
+
+
 # --------------------------------------------------------------------------
 # counts of an RLE (one helper, three callers)
 # --------------------------------------------------------------------------

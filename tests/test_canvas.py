@@ -319,6 +319,43 @@ def test_a_ghost_without_a_rect_still_repaints_everything(two_masks):
     assert ov.last_rebuild_rect == (0, 0, 50, 40)
 
 
+def test_replacing_a_ghost_of_unknown_extent_repaints_everything(two_masks):
+    """The one on screen has to be taken off, and nobody said where it is.
+
+    Marking only the *new* rect left the previous proposal painted wherever it
+    happened to be -- 450 px of it, measured -- because "I know where this one
+    goes" says nothing about where the last one went.
+    """
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order)
+    first = np.zeros((40, 50), dtype=bool)
+    first[2:8, 2:20] = True
+    ov.set_ghost(first)                      # no rect: extent unknown
+    ov.qimage()
+
+    second = np.zeros((40, 50), dtype=bool)
+    second[30:34, 40:46] = True
+    ov.set_ghost(second, (40, 30, 46, 34))   # a rect for the new one only
+    ov.qimage()
+    assert ov.last_rebuild_rect == (0, 0, 50, 40)
+    assert tuple(_argb(ov.qimage(), 4, 4)[1:]) != GHOST_RGB, \
+        "the previous proposal is still on screen"
+
+
+def test_a_first_ghost_with_a_rect_repaints_only_that_rect(two_masks):
+    """Nothing was up, so nothing outside the new rect can be stale."""
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order)
+    ov.qimage()
+    ghost = np.zeros((40, 50), dtype=bool)
+    ghost[30:34, 40:46] = True
+    ov.set_ghost(ghost, (40, 30, 46, 34))
+    ov.qimage()
+    assert ov.last_rebuild_rect == _grow((40, 30, 46, 34), (40, 50))
+
+
 def test_the_editing_layer_is_drawn_over_the_ghost(two_masks):
     """The annotator's own pixels are never hidden by a proposal."""
     masks_, order = two_masks
@@ -389,6 +426,212 @@ def test_set_editing_rejects_a_wrong_shape():
     ov = LabelOverlay((40, 50))
     with pytest.raises(ValueError):
         ov.set_editing("x", np.zeros((10, 10), dtype=bool))
+
+
+# ---------------------------------------------------------------------------
+# what a repaint is allowed to cost (task B7)
+# ---------------------------------------------------------------------------
+def _windows(masks_: dict) -> dict:
+    from tda.core import masks as M
+
+    return {key: M.bbox(mask) for key, mask in masks_.items()}
+
+
+def test_set_instances_with_the_same_arrays_repaints_nothing(two_masks):
+    """A commit refreshes the overlay twice; the second time must be free.
+
+    ``_commit`` repaints the layers, and the session's own re-announcement of
+    the frame repaints them again from the *same* compiled frame -- the same
+    numpy arrays, in the same order.  At 12 MP with forty instances that second
+    pass was a 112 ms label map and a 95 ms composite for a picture that could
+    not have changed.
+    """
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+
+    ov.set_instances(dict(masks_), list(order), windows=_windows(masks_))
+    ov.qimage()
+    assert ov.last_rebuild_rect is None
+    assert ov.id2key == {1: "inst-a", 2: "inst-b"}
+
+
+def test_hiding_one_instance_repaints_only_where_it_was(two_masks):
+    """``H`` takes one layer off; the other thirty-nine do not move."""
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+
+    kept = {"inst-a": masks_["inst-a"]}
+    ov.set_instances(kept, ["inst-a"], windows=_windows(masks_))
+    ov.qimage()
+    assert ov.last_rebuild_rect == _grow((15, 10, 35, 25), (40, 50))
+    assert ov.id2key == {1: "inst-a"}
+
+
+def test_a_changed_layer_repaints_both_of_its_boxes(two_masks):
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+
+    moved = np.zeros((40, 50), dtype=bool)
+    moved[30:36, 40:46] = True
+    changed = {"inst-a": masks_["inst-a"], "inst-b": moved}
+    ov.set_instances(changed, order, windows=_windows(changed))
+    ov.qimage()
+    assert ov.last_rebuild_rect == _grow((15, 10, 46, 36), (40, 50))
+
+
+def test_a_reordered_stack_repaints_everything(two_masks):
+    """Who is on top is not a local question; the safe answer is the frame."""
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+    ov.set_instances(masks_, list(reversed(order)), windows=_windows(masks_))
+    ov.qimage()
+    assert ov.last_rebuild_rect == (0, 0, 50, 40)
+
+
+def test_a_layer_change_without_a_window_repaints_everything(two_masks):
+    """No window, no promise: the whole buffer is the only safe answer."""
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+    moved = {"inst-a": masks_["inst-a"], "inst-b": masks_["inst-b"].copy()}
+    ov.set_instances(moved, order)          # nothing said about where they are
+    ov.qimage()
+    assert ov.last_rebuild_rect == (0, 0, 50, 40)
+
+
+def test_a_partial_layer_repaint_matches_a_full_one(two_masks):
+    """Every localised layer change, checked against the frame it stands for."""
+    masks_, order = two_masks
+    scenes = [
+        ({"inst-a": masks_["inst-a"]}, ["inst-a"]),                 # hide b
+        (masks_, order),                                             # show it again
+        ({"inst-b": masks_["inst-b"]}, ["inst-b"]),                 # hide a
+        (masks_, order),
+        (masks_, list(reversed(order))),                             # swap the stack
+        (masks_, order),
+    ]
+    ov = LabelOverlay((40, 50))
+    ref = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+    for layers, stack in scenes:
+        ov.set_instances(layers, stack, windows=_windows(layers))
+        here = _pixels(ov.qimage())
+        ref.set_instances(layers, stack, windows=_windows(layers))
+        ref.force_full_rebuild()
+        assert int(np.count_nonzero(here != _pixels(ref.qimage()))) == 0
+
+
+def test_clearing_the_editing_layer_repaints_only_where_it_was(two_masks):
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    edit = np.zeros((40, 50), dtype=bool)
+    edit[8:12, 8:14] = True
+    ov.set_editing("inst-c", edit)
+    ov.qimage()
+
+    ov.clear_editing()
+    ov.qimage()
+    assert ov.last_rebuild_rect == _grow((8, 8, 14, 12), (40, 50))
+    assert not ov.editing.any()
+
+
+def test_replacing_the_editing_layer_repaints_both_of_its_boxes(two_masks):
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    first = np.zeros((40, 50), dtype=bool)
+    first[8:12, 8:14] = True
+    ov.set_editing("inst-c", first)
+    ov.qimage()
+
+    second = np.zeros((40, 50), dtype=bool)
+    second[30:34, 40:46] = True
+    ov.set_editing("inst-c", second)
+    ov.qimage()
+    assert ov.last_rebuild_rect == _grow((8, 8, 46, 34), (40, 50))
+    assert ov.editing[32, 42] and not ov.editing[10, 10]
+
+
+def test_clearing_an_editing_layer_that_was_never_set_repaints_nothing(two_masks):
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+    ov.clear_editing()
+    ov.qimage()
+    assert ov.last_rebuild_rect is None
+
+
+def test_a_clipped_qimage_leaves_the_rest_stale_and_finishes_it_later(two_masks):
+    """The composite is paid for where the annotator is looking, when they look.
+
+    A 12 MP ARGB buffer is 48 MB; at 59 % zoom the viewport holds a sixth of
+    it.  ``clip`` is the canvas saying which part it is about to draw -- the
+    rest stays on the stale list, so panning to it composites it then, and the
+    buffer that results has to be the one a whole-frame composite would leave.
+    """
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ref = LabelOverlay((40, 50))
+    for target in (ov, ref):
+        target.set_instances(masks_, order, windows=_windows(masks_))
+
+    ov.qimage(clip=(0, 0, 25, 40))
+    assert ov.last_rebuild_rect == (0, 0, 25, 40)
+    left = _pixels(ov.qimage(clip=(0, 0, 25, 40)))
+    assert ov.last_rebuild_rect is None, "the clipped region was rebuilt twice"
+
+    full = _pixels(ref.qimage())
+    assert int(np.count_nonzero(left[:, :25] != full[:, :25])) == 0
+
+    ov.qimage(clip=(25, 0, 50, 40))
+    assert ov.last_rebuild_rect == (25, 0, 50, 40)
+    assert int(np.count_nonzero(_pixels(ov.qimage()) != full)) == 0
+    assert ov.last_rebuild_rect is None, "nothing was left stale"
+
+
+def test_a_clipped_repaint_of_a_stroke_matches_the_whole_frame(two_masks):
+    """Strokes, ghosts and occluders through the clipped path, pixel for pixel."""
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ref = LabelOverlay((40, 50))
+    for target in (ov, ref):
+        target.set_instances(masks_, order, windows=_windows(masks_))
+        target.paint((24, 20), 5, True)
+        ghost = np.zeros((40, 50), dtype=bool)
+        ghost[2:8, 30:40] = True
+        target.set_ghost(ghost, (30, 2, 40, 8))
+        target.paint_occluder((44, 34), 4, True, "hand")
+
+    for clip in ((0, 0, 17, 40), (17, 0, 34, 40), (34, 0, 50, 40),
+                 (0, 0, 50, 20), (0, 20, 50, 40)):
+        ov.qimage(clip=clip)
+    ref.force_full_rebuild()
+    assert int(np.count_nonzero(_pixels(ov.qimage()) != _pixels(ref.qimage()))) == 0
+
+
+def test_a_clip_outside_the_stale_region_rebuilds_nothing(two_masks):
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order, windows=_windows(masks_))
+    ov.qimage()
+    rect = ov.paint((5, 5), 2, True)
+    assert rect is not None
+    ov.qimage(clip=(40, 30, 50, 40))
+    assert ov.last_rebuild_rect is None
+    ov.qimage(clip=(0, 0, 12, 12))
+    assert ov.last_rebuild_rect == _grow(rect, (40, 50))
 
 
 def test_overlay_uses_no_python_pixel_loops():
@@ -859,3 +1102,249 @@ def test_clear_drops_both_branches():
     stack.push(edit_editing_mask_op("a", _mask(), _mask(box=(1, 1, 4, 4))))
     stack.clear()
     assert not stack.can_undo and not stack.can_redo and len(stack) == 0
+
+
+# ---------------------------------------------------------------------------
+# what the annotator sees is what a whole-frame composite would have drawn
+# ---------------------------------------------------------------------------
+def _screen(canvas: ImageCanvas) -> np.ndarray:
+    """The canvas as the annotator sees it, as an HxW uint32 ARGB array.
+
+    The **viewport** is grabbed, not the view: ``QGraphicsView.grab()``
+    renders its child viewport through a path that clips the scene items away,
+    so it produces a picture with no overlay in it at all -- which would make
+    every comparison below pass without proving anything.
+    """
+    from PySide6.QtGui import QImage
+
+    QApplication.processEvents()
+    image = canvas.viewport().grab().toImage().convertToFormat(
+        QImage.Format.Format_ARGB32
+    )
+    w, h = image.width(), image.height()
+    raw = np.frombuffer(bytes(image.constBits()), dtype=np.uint32)
+    return raw.reshape(h, image.bytesPerLine() // 4)[:, :w].copy()
+
+
+def _fidelity_layers() -> tuple[dict, list]:
+    """Four shapes: one on the left border, one in the middle, one in the
+    bottom-right corner, and a 3 px column crossing the whole frame."""
+    hw = (160, 200)
+    layers = {
+        "edge-left": np.zeros(hw, dtype=bool),
+        "middle": np.zeros(hw, dtype=bool),
+        "corner": np.zeros(hw, dtype=bool),
+        "thin": np.zeros(hw, dtype=bool),
+    }
+    layers["edge-left"][20:140, 0:40] = True
+    layers["middle"][40:120, 60:150] = True
+    layers["corner"][130:160, 170:200] = True
+    layers["thin"][0:160, 96:99] = True
+    return layers, ["edge-left", "middle", "corner", "thin"]
+
+
+@pytest.fixture
+def fidelity_scene(qapp):
+    """A 200x160 frame on a 130x100 viewport, plus a factory for fresh overlays.
+
+    The factory matters: an overlay's buffer starts at zero, so a region the
+    lazy path never composites shows *through* -- which is how a comparison can
+    tell "composited on demand" apart from "composited earlier and still
+    right".  Reusing one overlay hides every mistake this file exists to find.
+    """
+    layers, order = _fidelity_layers()
+    canvas = _shown(ImageCanvas(), 130, 100)
+    canvas.set_image(_rgb(160, 200))
+
+    def fresh(shown=None, stack=None) -> LabelOverlay:
+        given = layers if shown is None else shown
+        ov = LabelOverlay((160, 200))
+        ov.set_instances(given, order if stack is None else stack,
+                         windows=_windows(given))
+        return ov
+
+    return canvas, fresh, layers, order
+
+
+def _walk(canvas, fresh, moves, *, whole: bool, dress=None) -> list[np.ndarray]:
+    """Take a *new* overlay through ``moves``, grabbing the screen at each one.
+
+    ``whole=False`` is the shipped path: the overlay is attached (one clipped
+    composite) and from then on only what is about to be drawn is composited.
+    ``whole=True`` composites the entire frame before every grab.  The two
+    lists of screens have to be identical.
+    """
+    canvas.set_overlay(None)
+    # Attached on a close-up, so the one composite the attachment makes covers
+    # a corner of the frame and everything the moves below reach is genuinely
+    # uncomposited.  Attaching while the whole frame is on screen composites
+    # the whole frame, and then there is nothing left for the comparison to
+    # catch.
+    canvas.set_zoom(8.0)
+    canvas.center_on((100.0, 80.0))
+    ov = fresh()
+    if dress is not None:
+        dress(ov)
+    canvas.set_overlay(ov)
+    shots = []
+    for move in moves:
+        move()
+        if whole:
+            ov.force_full_rebuild()
+            ov.qimage(alpha=canvas.overlay_alpha, outline=canvas.overlay_outline)
+        shots.append(_screen(canvas))
+    return shots
+
+
+def _same(canvas, fresh, moves, what: str, dress=None) -> None:
+    lazy = _walk(canvas, fresh, moves, whole=False, dress=dress)
+    whole = _walk(canvas, fresh, moves, whole=True, dress=dress)
+    for index, (here, there) in enumerate(zip(lazy, whole)):
+        wrong = int(np.count_nonzero(here != there))
+        assert wrong == 0, f"{wrong} px differ at {what} step {index}"
+
+
+ZOOMS = (0.37, 0.5, 1.0, 1.0 / 3.0, 2.5, 3.7, 7.25)
+CENTRES = ((0.0, 0.0), (99.0, 80.0), (97.5, 80.5), (199.0, 159.0),
+           (40.0, 20.0), (150.0, 130.0))
+
+
+def test_the_screen_is_the_same_at_every_zoom_and_pan(fidelity_scene):
+    """Fractional zooms, the four borders, and a shape crossing the viewport."""
+    canvas, fresh, _layers, _order = fidelity_scene
+    for zoom in ZOOMS:
+        moves = []
+        for centre in CENTRES:
+            moves.append(lambda z=zoom, c=centre: (canvas.set_zoom(z),
+                                                   canvas.center_on(c)))
+        _same(canvas, fresh, moves, f"zoom {zoom}")
+
+
+def test_the_screen_is_the_same_with_every_display_setting(fidelity_scene):
+    """``Q`` outline, ``,``/``.`` opacity and ``A`` overlays-off, at two zooms."""
+    canvas, fresh, _layers, _order = fidelity_scene
+    try:
+        for zoom, centre in ((1.0 / 3.0, (99.0, 80.0)), (3.7, (60.0, 45.0))):
+            for outline in (True, False):
+                for alpha in (0, 70, 110, 255):
+                    canvas.overlay_outline = outline
+                    canvas.overlay_alpha = alpha
+
+                    def move(z=zoom, c=centre):
+                        canvas.set_zoom(z)
+                        canvas.center_on(c)
+
+                    _same(canvas, fresh, [move],
+                          f"outline={outline} alpha={alpha} zoom={zoom}")
+    finally:
+        canvas.overlay_outline = True
+        canvas.overlay_alpha = 110
+
+
+def test_the_screen_is_the_same_with_the_overlays_switched_off(fidelity_scene):
+    """``A``: the layers go, and what is left has to be the same either way."""
+    canvas, fresh, _layers, _order = fidelity_scene
+
+    def hide(ov):
+        ov.visible = False
+
+    _same(canvas, fresh,
+          [lambda: (canvas.set_zoom(2.5), canvas.center_on((99.0, 80.0)))],
+          "overlays off", dress=hide)
+
+
+def test_the_screen_is_the_same_with_the_edit_layers_up(fidelity_scene):
+    """The editing layer, the draft ghost under it and two occluder types."""
+    canvas, fresh, _layers, _order = fidelity_scene
+
+    def dress(ov):
+        edit = np.zeros((160, 200), dtype=bool)
+        edit[70:110, 80:130] = True        # crosses the viewport border
+        ghost = np.zeros((160, 200), dtype=bool)
+        ghost[60:100, 70:120] = True       # under the editing layer, overlapping
+        ov.set_ghost(ghost, (70, 60, 120, 100))
+        ov.set_editing("being-drawn", edit)
+        ov.paint_occluder((100, 80), 9, True, "hand")
+        ov.paint_occluder((30, 140), 6, True, "cable")
+
+    moves = []
+    for zoom, centre in ((0.37, (99.0, 80.0)), (1.0, (100.0, 80.0)),
+                         (2.5, (95.5, 79.5)), (7.25, (99.0, 80.0))):
+        moves.append(lambda z=zoom, c=centre: (canvas.set_zoom(z),
+                                               canvas.center_on(c)))
+    _same(canvas, fresh, moves, "the edit layers", dress=dress)
+
+
+def test_the_screen_is_the_same_after_hiding_and_showing_instances(fidelity_scene):
+    """``H`` on an instance, then back: each step against the whole composite."""
+    canvas, fresh, layers, order = fidelity_scene
+
+    def hide(name):
+        shown = {k: v for k, v in layers.items() if k != name}
+        stack = [k for k in order if k != name]
+
+        def move():
+            canvas.overlay().set_instances(shown, stack, windows=_windows(shown))
+            canvas.refresh()
+
+        return move
+
+    moves = [lambda: (canvas.set_zoom(2.5), canvas.center_on((99.0, 80.0)))]
+    moves += [hide(name) for name in
+              ("middle", "thin", "edge-left", None, "corner", None)]
+    _same(canvas, fresh, moves, "hiding an instance")
+
+
+def test_panning_one_step_at_a_time_never_shows_a_stale_strip(fidelity_scene):
+    """The strip a pan exposes is composited before it is drawn, every time."""
+    canvas, fresh, _layers, _order = fidelity_scene
+
+    def step():
+        hbar, vbar = canvas.horizontalScrollBar(), canvas.verticalScrollBar()
+        hbar.setValue(hbar.value() + 17)
+        vbar.setValue(vbar.value() + 11)
+
+    moves = [lambda: (canvas.set_zoom(3.0), canvas.center_on((40.0, 40.0)))]
+    moves += [step] * 12
+    _same(canvas, fresh, moves, "a pan")
+
+
+def test_zooming_out_composites_the_frame_that_comes_into_view(fidelity_scene):
+    """``F`` from a close-up: everything the smaller scale reveals is drawn."""
+    canvas, fresh, _layers, _order = fidelity_scene
+    moves = [lambda: (canvas.set_zoom(6.0), canvas.center_on((99.0, 80.0)))]
+    moves += [lambda z=z: canvas.set_zoom(z) for z in (5.0, 3.0, 1.0, 0.5, 0.37)]
+    _same(canvas, fresh, moves, "zooming out")
+
+
+def test_a_stroke_lands_where_the_image_coordinates_say_at_any_zoom(qapp):
+    """Hit testing is untouched: a click is the same pixel it always was."""
+    canvas = _shown(ImageCanvas(), 130, 100)
+    canvas.set_image(_rgb(160, 200))
+    ov = LabelOverlay((160, 200))
+    canvas.set_overlay(ov)
+    brush = BrushTool(canvas, ov, radius=0)
+    brush.attach()
+    checked = 0
+    for zoom, centre in ((1.0, (100.0, 80.0)), (3.7, (60.0, 45.0)),
+                         (0.5, (100.0, 80.0)), (7.25, (120.5, 90.5))):
+        canvas.set_zoom(zoom)
+        canvas.center_on(centre)
+        ov.clear_editing()
+        for pos in (QPointF(11.0, 7.0), QPointF(64.0, 52.0), QPointF(129.0, 99.0)):
+            x, y = canvas.image_pos(pos)
+            expected = (int(round(x)), int(round(y)))
+            if not (0 <= expected[0] < 200 and 0 <= expected[1] < 160):
+                continue
+            before = int(ov.editing.sum())
+            brush.on_press(x, y, _press(pos.x(), pos.y()))
+            brush.on_release(x, y, _press(pos.x(), pos.y()))
+            if int(ov.editing.sum()) == before:
+                continue
+            painted = {tuple(p) for p in np.argwhere(ov.editing)}
+            assert (expected[1], expected[0]) in painted, (
+                f"a click at {pos.toTuple()} (zoom {zoom}) painted "
+                f"{sorted(painted)[:4]}, not {expected}"
+            )
+            checked += 1
+    assert checked >= 8, f"only {checked} clicks were inside the frame"

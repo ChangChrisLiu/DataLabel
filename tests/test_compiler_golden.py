@@ -452,6 +452,33 @@ def test_a_full_size_row_is_written_through_the_real_truth_path(name: str):
     assert checked >= 2, f"only {checked} mask rows on {name}"
 
 
+def test_every_mask_the_compiler_hands_out_is_read_only():
+    """A compiled frame is shared; nobody may edit one in place.
+
+    The canvas overlay, the truth table, the difference map's "what is already
+    explained" and the scope suggestion all read the same arrays, and the
+    overlay goes further and treats *the same array object* as "the same
+    pixels" so that a commit's second repaint costs nothing.  An in-place edit
+    of one of them would leave a picture on screen that disagrees with what is
+    stored -- measured at 100 wrong pixels -- and say nothing.  So it raises,
+    the rule :func:`tda.core.masks.decode_rle_shared` already applies to the
+    shapes it memoises.
+    """
+    checked = 0
+    for name, spec in list(scenes()) + list(big_scenes()):
+        compiled = compile_scene(spec)
+        for instance, inst in sorted(compiled.instances.items()):
+            for what, mask in (("visible", inst.visible), ("amodal", inst.amodal)):
+                if mask is None:
+                    continue
+                assert mask.flags.writeable is False, \
+                    f"{name}: {instance}'s {what} mask was handed out writeable"
+                with pytest.raises(ValueError):
+                    mask[0, 0] = True
+                checked += 1
+    assert checked >= 40, f"only {checked} masks over every scene"
+
+
 if __name__ == "__main__":  # pragma: no cover - the regeneration entry point
     import sys
 

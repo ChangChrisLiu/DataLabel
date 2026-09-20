@@ -10,9 +10,11 @@ row would look like it did nothing.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 
-from tda.core.compiler import CompiledFrame
+from tda.core.compiler import CompiledFrame, Window
 from tda.core.model import InstanceRec, Placement
 from tda.core.states import FrameState
 
@@ -71,22 +73,29 @@ def instance_rows(compiled: CompiledFrame, state: FrameState,
     return rows
 
 
-def overlay_layers(compiled: CompiledFrame,
-                   hidden: set[str]) -> tuple[dict[str, np.ndarray], list[str]]:
-    """Visible masks and paint order for the canvas overlay (spec 10.2).
+def overlay_layers(
+    compiled: CompiledFrame, hidden: set[str]
+) -> tuple[dict[str, np.ndarray], list[str], dict[str, Optional[Window]]]:
+    """Visible masks, paint order and windows for the canvas overlay (spec 10.2).
 
     What :meth:`tda.ui.canvas.overlay.LabelOverlay.set_instances` wants:
-    ``{instance: visible mask}`` and the bottom-up order to paint them in, with
-    the instances the annotator has hidden left out entirely.
+    ``{instance: visible mask}``, the bottom-up order to paint them in, and
+    ``{instance: window}`` -- the box the compiler already knows each mask is
+    empty outside.  The window is not decoration: it is what lets the overlay
+    paint the label map without measuring forty boxes across a 12 MP canvas,
+    and what makes hiding one instance a repaint of one box rather than of the
+    frame.  Instances the annotator has hidden are left out entirely.
     """
     layers: dict[str, np.ndarray] = {}
     order: list[str] = []
+    windows: dict[str, Optional[Window]] = {}
     for instance in painted(compiled):
         if instance in hidden:
             continue
-        visible = compiled.instances[instance].visible
-        if visible is None:
+        inst = compiled.instances[instance]
+        if inst.visible is None:
             continue
-        layers[instance] = visible
+        layers[instance] = inst.visible
+        windows[instance] = inst.window
         order.append(instance)
-    return layers, order
+    return layers, order, windows
