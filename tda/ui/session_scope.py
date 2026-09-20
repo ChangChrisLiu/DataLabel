@@ -83,6 +83,7 @@ def suggest_scope(compiled: CompiledFrame, instance: str, before: np.ndarray,
     """
     before = np.asarray(before, dtype=bool)
     edited = np.asarray(edited, dtype=bool)
+    _refuse_wrong_size(compiled, before, edited)
     window = _masks.bbox(before ^ edited)
     if window is None:      # nothing changed: not a statement about anything
         return api.SCOPE_KEYFRAME
@@ -96,6 +97,38 @@ def suggest_scope(compiled: CompiledFrame, instance: str, before: np.ndarray,
     if covered is not None:
         return f"zorder:below:{covered}"
     return api.SCOPE_KEYFRAME
+
+
+def _canvas_of(compiled: CompiledFrame) -> Optional[tuple]:
+    """The frame's ``(H, W)``, off the first mask it has, or ``None``."""
+    for inst in compiled.instances.values():
+        for mask in (inst.visible, inst.amodal):
+            if mask is not None:
+                return tuple(mask.shape)
+    return None
+
+
+def _refuse_wrong_size(compiled: CompiledFrame, before: np.ndarray,
+                       edited: np.ndarray) -> None:
+    """Raise unless both masks are this frame's canvas.
+
+    The whole-canvas version of this function raised out of numpy the moment
+    it tried to ``&`` the changed pixels with an instance's mask.  Working
+    inside boxes means the slices always line up whatever the masks' real
+    size, so the mistake would be made silently -- against the wrong pixels --
+    instead of reported.
+    """
+    if before.shape != edited.shape:
+        raise ValueError(
+            f"the edit's two states do not match: the shape before is "
+            f"{before.shape!r} and after {edited.shape!r}"
+        )
+    canvas = _canvas_of(compiled)
+    if canvas is not None and tuple(before.shape) != canvas:
+        raise ValueError(
+            f"the edited mask is {tuple(before.shape)!r}, which does not match "
+            f"this frame's canvas {canvas!r}"
+        )
 
 
 def _crop(mask: np.ndarray, box: Box) -> np.ndarray:

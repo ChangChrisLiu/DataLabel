@@ -1051,3 +1051,29 @@ def test_closing_the_window_joins_the_timeline_thumbnail_reader(qapp, tmp_path):
         close_window(win)
     assert win.timeline._reader.running() is False
     assert "tda-thumbs" not in {t.name for t in threading.enumerate() if t.is_alive()}
+
+
+def test_a_reader_that_will_not_stop_does_not_skip_the_rest_of_the_teardown(
+    qapp, tmp_path, monkeypatch
+):
+    """The signal disconnects outrank the thumbnail reader.
+
+    A sweeper still delivering into a window that has let go of its session is
+    an exception out of a Qt slot with nothing left to catch it; a reader that
+    outlives its panel is a idle thread. So the one that can fail goes inside
+    a guard, and the log says it happened.
+    """
+    win = open_window(tmp_path)
+    monkeypatch.setattr(win.timeline, "shutdown",
+                        lambda: (_ for _ in ()).throw(RuntimeError("stuck")))
+    try:
+        win.shutdown()
+        assert win.closed is True
+        # the disconnects ran: the session can announce into nothing now
+        win.session.sigFrameChanged.emit(win.session.current())
+        QApplication.processEvents()
+    finally:
+        win.hide()
+        win.setParent(None)
+        win.deleteLater()
+        QApplication.processEvents()

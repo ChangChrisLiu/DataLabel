@@ -191,6 +191,29 @@ def test_the_windowed_scope_suggestion_answers_exactly_what_a_full_scan_does(two
     assert checked == 2 * len(_scope_scenes())
 
 
+def test_the_scope_suggestion_refuses_a_mask_of_the_wrong_size(two_shapes):
+    """A mask that is not this frame's canvas is a bug, not a quiet answer.
+
+    The whole-canvas version raised out of numpy the moment it tried to ``&``
+    the changed pixels with an instance's mask.  Working inside boxes means
+    the slices always line up, so nothing would have complained -- and an edit
+    of the wrong size would have been explained against the wrong pixels.
+    """
+    from tda.ui import session_scope
+
+    compiled = two_shapes.compiled()
+    small = np.zeros((32, 32), dtype=bool)
+    other = small.copy()
+    other[4:8, 4:8] = True
+    with pytest.raises(ValueError, match="canvas"):       # both the wrong size
+        session_scope.suggest_scope(compiled, COOLER, small, other)
+    with pytest.raises(ValueError, match="two states"):   # ... or two sizes
+        session_scope.suggest_scope(compiled, COOLER, SMALL, other)
+    # the right size still answers
+    assert session_scope.suggest_scope(compiled, COOLER, SMALL, SMALL) \
+        == api.SCOPE_KEYFRAME
+
+
 def test_the_scope_suggestion_reads_only_the_windows_it_has_to(two_shapes, monkeypatch):
     """A small edit must not walk forty full-canvas masks to be explained.
 

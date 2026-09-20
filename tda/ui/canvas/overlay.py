@@ -359,7 +359,11 @@ class LabelOverlay:
         covered.  Without one the whole buffer is marked stale, which on a
         12 MP frame is a 123 ms repaint per keypress.
         """
-        stale = _union(self._ghost_rect, rect) if rect is not None else None
+        # Where the *previous* proposal was matters as much as where this one
+        # goes: one that was put up without a rect can be anywhere, so knowing
+        # this one's box says nothing about taking that one off the screen.
+        unknown = rect is None or (self.has_ghost and self._ghost_rect is None)
+        stale = None if unknown else _union(self._ghost_rect, rect)
         self.ghost = self._coerce(mask, "ghost mask")
         self.has_ghost = True
         self._ghost_rect = None if rect is None else self._clip(rect)

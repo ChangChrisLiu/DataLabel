@@ -319,6 +319,43 @@ def test_a_ghost_without_a_rect_still_repaints_everything(two_masks):
     assert ov.last_rebuild_rect == (0, 0, 50, 40)
 
 
+def test_replacing_a_ghost_of_unknown_extent_repaints_everything(two_masks):
+    """The one on screen has to be taken off, and nobody said where it is.
+
+    Marking only the *new* rect left the previous proposal painted wherever it
+    happened to be -- 450 px of it, measured -- because "I know where this one
+    goes" says nothing about where the last one went.
+    """
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order)
+    first = np.zeros((40, 50), dtype=bool)
+    first[2:8, 2:20] = True
+    ov.set_ghost(first)                      # no rect: extent unknown
+    ov.qimage()
+
+    second = np.zeros((40, 50), dtype=bool)
+    second[30:34, 40:46] = True
+    ov.set_ghost(second, (40, 30, 46, 34))   # a rect for the new one only
+    ov.qimage()
+    assert ov.last_rebuild_rect == (0, 0, 50, 40)
+    assert tuple(_argb(ov.qimage(), 4, 4)[1:]) != GHOST_RGB, \
+        "the previous proposal is still on screen"
+
+
+def test_a_first_ghost_with_a_rect_repaints_only_that_rect(two_masks):
+    """Nothing was up, so nothing outside the new rect can be stale."""
+    masks_, order = two_masks
+    ov = LabelOverlay((40, 50))
+    ov.set_instances(masks_, order)
+    ov.qimage()
+    ghost = np.zeros((40, 50), dtype=bool)
+    ghost[30:34, 40:46] = True
+    ov.set_ghost(ghost, (40, 30, 46, 34))
+    ov.qimage()
+    assert ov.last_rebuild_rect == _grow((40, 30, 46, 34), (40, 50))
+
+
 def test_the_editing_layer_is_drawn_over_the_ghost(two_masks):
     """The annotator's own pixels are never hidden by a proposal."""
     masks_, order = two_masks
