@@ -370,14 +370,16 @@ def run(args) -> list[dict]:
                     crop, rect, scale = sam.crop_for(prev_img, roi)
                     gt_crop = gt_in_crop(gt, rect, crop.shape[:2])
 
+                want = 40 if args.diag else 3
                 for method in methods:
                     t0 = time.perf_counter()
                     if method == "baseline":
-                        props = baseline_proposals(delta, min_area)
+                        props = baseline_proposals(delta, min_area,
+                                                   max_proposals=want)
                     else:
                         props = split_proposals(
                             prev_img, cur_img, roi, delta=delta,
-                            min_area=min_area,
+                            min_area=min_area, max_proposals=want,
                             expect_area=priors_for(ev.cls, priors))
                     propose_s = time.perf_counter() - t0
 
@@ -394,7 +396,6 @@ def run(args) -> list[dict]:
                         "delta_s": round(delta_s, 3),
                         "propose_s": round(propose_s, 3),
                     }
-                    crops = {ev.shape.instance: ev.shape}
                     gt_box = tuple(int(v) for v in ev.shape.box)
                     for rank, p in enumerate(props[:3]):
                         inside = bool(
@@ -408,6 +409,21 @@ def run(args) -> list[dict]:
                         row[f"p{rank}_box"] = json.dumps(list(p.box))
                         row[f"p{rank}_point"] = json.dumps(
                             [round(p.point[0], 1), round(p.point[1], 1)])
+                    if args.diag:
+                        # Does the *candidate set* hold the answer at all, and
+                        # at what rank?  Separates "cannot see the part" from
+                        # "sees it and ranks it third".
+                        ranks = [i for i, p in enumerate(props)
+                                 if 0 <= int(round(p.point[1])) < gt.shape[0]
+                                 and 0 <= int(round(p.point[0])) < gt.shape[1]
+                                 and gt[int(round(p.point[1])),
+                                        int(round(p.point[0]))]]
+                        row["oracle_rank"] = ranks[0] if ranks else -1
+                        ious = [box_iou(p.box, gt_box) for p in props]
+                        row["oracle_box_iou"] = round(max(ious), 4) if ious else 0.0
+                        row["oracle_box_rank"] = (
+                            int(np.argmax(ious)) if ious else -1)
+                        row["n_cands"] = len(props)
                     if props and sam is not None:
                         top = props[0]
                         armed = not covers_most(top.box, roi)
@@ -419,7 +435,6 @@ def run(args) -> list[dict]:
                         row["sam_iou"] = (round(mask_iou(mask, gt_crop), 4)
                                           if mask is not None else "")
                     rows.append(row)
-                del crops
             cache.clear()
     con.close()
     if sam is not None:
@@ -548,6 +563,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--sam", action="store_true", help="also measure SAM IoU")
     ap.add_argument("--limit", type=int, default=0,
                     help="at most this many events per (desktop, view)")
+    ap.add_argument("--diag", action="store_true",
+                    help="also record how deep in the ranking the answer sits")
     ap.add_argument("--out", default=str(OUT))
     ap.add_argument("--tag", default="")
     args = ap.parse_args(argv)
