@@ -208,8 +208,25 @@ class AssistMixin:
         image = self.session.image()
         neighbour = compat.task_neighbour(self.session)
         self.report_neighbour_gap(key, neighbour)
-        previous = None if neighbour is None else self.session.image_at(neighbour)
+        previous = None if neighbour is None else self._neighbour_pixels(neighbour)
         self.assist.request(key, image, previous, self.roi(), self.expected_now())
+
+    def _neighbour_pixels(self, neighbour: int):
+        """The neighbour frame for the comparison: its pixels, or its path.
+
+        Stepping back one frame, ``k+1`` is the frame just left and is already
+        decoded, so the worker gets the array.  A timeline click lands on a
+        frame whose neighbour nobody has opened, and decoding 12 MP of it on
+        the GUI thread -- 46 ms, purely to hand a worker something it could
+        have read itself -- was a tenth of the click.  The path goes instead;
+        :func:`tda.ui.app_diff._pixels_of` reads it on the worker.
+        """
+        held = compat.peek_image_at(self.session, neighbour)
+        if held is not None:
+            return held
+        path = getattr(self.session, "image_path", None)
+        found = path(neighbour) if callable(path) else None
+        return found or self.session.image_at(neighbour)
 
     def report_neighbour_gap(self, key, neighbour: Optional[int]) -> None:
         """Say so when the neighbour is not the adjacent step.

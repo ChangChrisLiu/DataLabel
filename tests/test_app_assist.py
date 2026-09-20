@@ -34,6 +34,7 @@ from tda.core.model import FrameKey
 from tda.ui import app_actions as A
 from tda.ui.app import MainWindow
 from tda.ui.app_assist import AssistController
+from tda.ui.app_diff import _pixels_of
 
 
 @pytest.fixture(scope="session")
@@ -108,6 +109,64 @@ def test_the_comparison_is_against_the_task_card_neighbour(window):
     neighbour = compat.task_neighbour(window.session)
     assert neighbour == LAST_STEP - 1          # the frame the annotator came from
     assert payload["key"].step == LAST_STEP - 2
+
+
+def test_the_neighbour_is_read_by_the_worker_when_the_gui_has_not_got_it(window):
+    """A timeline click must not decode 12 MP to hand a worker an array.
+
+    Stepping back, ``k+1`` is the frame just left and is already in the image
+    cache, so the pixels go straight over.  A jump to a frame nobody has
+    visited has no such luck, and decoding its neighbour on the GUI thread was
+    46 ms of a 12 MP timeline click spent on work the worker could do itself.
+    """
+    session = window.session
+    target = LAST_STEP - 4
+    neighbour = target + 1
+
+    session.goto(neighbour)     # ... and then step back, the way annotating goes
+    session.goto(target)
+    assert session.peek_image_at(neighbour) is not None   # walked here: in hand
+    assert isinstance(window._neighbour_pixels(neighbour), np.ndarray)
+
+    session.images.clear()
+    handed = window._neighbour_pixels(neighbour)
+    assert isinstance(handed, str), f"the GUI thread decoded {type(handed)}"
+    assert session.peek_image_at(neighbour) is None, \
+        "asking for the path decoded the image anyway"
+
+    # ... and the answer is the same one the pixels would have produced
+    controller = AssistController()
+    try:
+        image = session.image_at(target)
+        by_path = controller.compute(
+            FrameKey(DESKTOP, target, VIEW),
+            image, _pixels_of(handed), None, [])
+        by_array = controller.compute(
+            FrameKey(DESKTOP, target, VIEW),
+            image, session.image_at(neighbour), None, [])
+    finally:
+        controller.shutdown()
+    assert np.array_equal(by_path["delta"], by_array["delta"])
+    assert [b.box for b in by_path["unexplained"]] == \
+        [b.box for b in by_array["unexplained"]]
+
+
+def test_an_unreadable_neighbour_path_is_no_comparison_rather_than_a_failure(qapp):
+    """The same answer a frame with no neighbour gives: ``None``, not an error."""
+    controller = AssistController()
+    results: list = []
+    controller.sigBlobs.connect(results.append)
+    failures: list = []
+    controller.sigFailed.connect(failures.append)
+    try:
+        image = np.full((32, 32, 3), 30, dtype=np.uint8)
+        controller.request(FrameKey(1, 2, VIEW), image, "does/not/exist.png", None)
+        assert controller.wait(5.0)
+        QApplication.processEvents()
+    finally:
+        controller.shutdown()
+    assert results == [None], f"an unreadable neighbour gave {results!r}"
+    assert failures == []
 
 
 def test_assist_controller_runs_synchronously_when_asked(qapp):

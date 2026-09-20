@@ -32,6 +32,7 @@ __all__ = [
     "layer_changed",
     "open_conflicts",
     "overlay_layers",
+    "peek_image_at",
     "preview",
     "push_stroke",
     "removed_rows",
@@ -91,6 +92,20 @@ def overlay_layers(
         windows[key] = inst.window
         order.append(key)
     return masks, order, windows
+
+
+def peek_image_at(session: Any, step: int) -> Optional[np.ndarray]:
+    """One step's image if the session already has it decoded, else ``None``.
+
+    Fallback for a session that cannot answer "without reading anything": it
+    is asked for the image outright, which is what the caller was doing before
+    the question could be put at all.
+    """
+    if _has(session, "peek_image_at"):
+        return session.peek_image_at(int(step))
+    _note("peek_image_at", "falls back to image_at(), which may decode")
+    getter = getattr(session, "image_at", None)
+    return getter(int(step)) if callable(getter) else None
 
 
 # --------------------------------------------------------------------------- #

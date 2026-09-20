@@ -38,6 +38,22 @@ __all__ = ["MAX_DIFF_SIDE", "AssistController", "Box", "best_unexplained",
 
 Box = tuple[int, int, int, int]
 
+
+def _pixels_of(previous: Any) -> Optional[np.ndarray]:
+    """The neighbour frame as RGB: given as pixels, or read from a path.
+
+    Reading it here means it is read on the worker.  The array is *not* put
+    into the session's image cache: that cache belongs to the GUI thread, and
+    a comparison is not worth reaching across a thread boundary to save a
+    decode the prefetch is about to make anyway.
+    """
+    if previous is None or isinstance(previous, np.ndarray):
+        return previous
+    import cv2
+
+    bgr = cv2.imread(str(previous), cv2.IMREAD_COLOR)
+    return None if bgr is None else cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
 #: The comparison is downscaled to this long side.  A 12 MP pair costs ~1.4 s
 #: and 300 MB at native resolution and ~90 ms at 1600, and the blobs are only
 #: ever used as a box prompt and as a "look here" marker, so the precision the
@@ -164,9 +180,16 @@ class AssistController(QObject):
         }
 
     def request(self, key: Any, image: Optional[np.ndarray],
-                previous: Optional[np.ndarray], roi: Optional[Box],
+                previous: Optional[Any], roi: Optional[Box],
                 expected: Any = ()) -> None:
-        """Queue a comparison, replacing one that has not started yet."""
+        """Queue a comparison, replacing one that has not started yet.
+
+        ``previous`` is the neighbour frame: either the pixels, when the caller
+        already has them, or **the path to read them from**, which is the point
+        -- on a timeline click to a frame nobody has visited, decoding the
+        neighbour is 46 ms of 12 MP JPEG on the GUI thread, spent so that a
+        worker can be handed an array.  The worker reads it instead.
+        """
         with self._lock:
             if self._stopped:
                 return
@@ -198,7 +221,13 @@ class AssistController(QObject):
                 self._busy = True
             token, key, image, previous, roi, expected = job
             try:
-                payload = self.compute(key, image, previous, roi, expected)
+                pixels = _pixels_of(previous)
+                if pixels is None:
+                    # the neighbour could not be read: there is no comparison
+                    # to show, which is an answer rather than a failure
+                    self._bridge.sigPayload.emit((token, None, None))
+                    continue
+                payload = self.compute(key, image, pixels, roi, expected)
                 self._bridge.sigPayload.emit((token, payload, None))
             except Exception as exc:  # noqa: BLE001 - a worker must never crash Qt
                 self._bridge.sigPayload.emit(

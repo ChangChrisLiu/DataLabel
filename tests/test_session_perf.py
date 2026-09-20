@@ -567,6 +567,203 @@ def test_gui_thread_budgets_on_a_12mp_frame_with_forty_instances(qapp, tmp_path,
     _under(BUDGET_TIMELINE_JUMP, "timeline jump", jump_runs)
 
 
+# --------------------------------------------------------------------------- #
+# the window's half of the same three gestures (plan B task B7)
+# --------------------------------------------------------------------------- #
+#: Spec 4.2 read through plan B, for the whole gesture -- key press to a
+#: repainted canvas and panels that agree with it, not just the session call
+#: underneath.  The measurements above stop at the session; these do not.
+BUDGET_WINDOW_COMMIT = 0.6
+BUDGET_WINDOW_FRAME_CHANGE = 0.12
+BUDGET_WINDOW_TIMELINE_JUMP = 0.5
+BUDGET_WINDOW_REPAINT = 0.05
+#: Where the annotator stands on an OAK frame: the ROI zoomed to fill the
+#: canvas, which on a 4032x3040 frame in this window is about 59 %.
+OAK_ZOOM = 0.59
+
+
+def _seed_thumbs(session) -> int:
+    """Write the offline timeline thumbnails the shipped cache carries.
+
+    ``TimelinePanel`` draws a 96 px picture per row from
+    ``<cache>/thumbs/<view>/D13/s003.jpg``, built by a pass over the cache.
+    Without one it falls back to the frame itself, and decoding a 12 MP frame
+    per row is a cost of that *missing pass*, not of a timeline click -- it is
+    measured and reported separately (task B7), and mixing it in here would
+    make this test about which machine had run the pass.
+    """
+    import cv2
+
+    from tda.ui.session_images import thumb_path
+
+    written = 0
+    for step in session.steps():
+        key = FrameKey(DESKTOP, int(step), VIEW)
+        path = Path(thumb_path(session.truth.cache_dir, key))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(path), np.full((72, 96, 3), 40 + int(step) % 200, np.uint8))
+        written += 1
+    return written
+
+
+def _open_window(session, tmp_path: Path):
+    """A real ``MainWindow`` on this session, laid out like the annotator's."""
+    from PySide6.QtCore import Qt
+
+    from tda.ui.app import MainWindow
+
+    window = MainWindow(session, {
+        "cache_dir": str(tmp_path / "cache"),
+        "db_path": str(tmp_path / "tda.sqlite"),
+        "backup_dir": str(tmp_path / "backups"),
+        "app_dir": str(tmp_path / "state"),
+    }, ANNOTATOR)
+    window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    window.resize(1920, 1200)
+    window.show()
+    QApplication.processEvents()
+    return window
+
+
+def _settle(window) -> None:
+    """Let Qt deliver everything the gesture posted, and really repaint.
+
+    ``processEvents`` alone leaves the canvas with a scheduled update; the
+    budget is about what the annotator waits for, which ends when the pixels
+    are on screen.
+    """
+    QApplication.processEvents()
+    window.canvas.viewport().repaint()
+
+
+@pytest.mark.slow
+def test_window_gesture_budgets_on_a_12mp_frame_with_forty_instances(
+    qapp, tmp_path, as_shipped
+):
+    """Enter, a frame change, a timeline jump and a repaint, through the window.
+
+    The session budgets above measure ``commit_edit`` and ``goto``.  What the
+    annotator waits for is longer than either: ``Enter`` also asks what the
+    edit *meant*, repaints the overlay, re-syncs the editing layer and
+    refreshes the panels, and a frame change repaints a 12 MP canvas.
+    Measured on main before this task, the whole ``Enter`` was 1.8-1.9 s
+    against a 0.5 s ``commit_edit``.
+
+    **In the shipped configuration**: the sweeper is on, the frame is the one
+    with every instance still in the machine, and the canvas stands where the
+    annotator stands -- zoomed into the ROI, not fitted to the whole frame.
+    """
+    session = make_session(tmp_path, last_step=BOARD_STEP, hw=OAK_HW)
+    session.goto(OAK_STEP)
+    drawn = seed_shapes(session, OAK_STEP, grid=7, anchor=BOARD_STEP, refresh=False)
+    assert len(drawn) >= 40, f"the scene has only {len(drawn)} instances"
+    assert _seed_thumbs(session) >= 40
+    session.compiled()
+    window = _open_window(session, tmp_path)
+    try:
+        assert session.sweeper_enabled is True
+
+        def stand() -> None:
+            window.canvas.set_zoom(OAK_ZOOM)
+            window.canvas.center_on((OAK_HW[1] / 2, OAK_HW[0] / 2))
+
+        stand()
+        _settle(window)
+        shown = window.canvas.viewport_image_rect()
+        assert (shown[2] - shown[0]) < OAK_HW[1], \
+            "the canvas is showing the whole frame; that is not where an annotator stands"
+
+        # -- the whole Enter gesture ---------------------------------------
+        def before_commit(attempt: int) -> None:
+            window.act_clear_edit()
+            session.clear_edit()
+            session.goto(OAK_STEP, force=True)
+            _settle(window)
+            window.on_request_edit(CHASSIS)
+            mask = session.editing_mask()
+            painted = (np.zeros(OAK_HW, dtype=bool) if mask is None
+                       else mask.copy())
+            painted[1200:1400, 1500 + attempt:1700 + attempt] ^= True
+            window.set_editing_mask(painted, undoable=True)
+            _settle(window)
+
+        def commit(attempt: int) -> None:
+            window.act_commit()
+            for _ in range(2):
+                if not (window.warn_bar.isVisible() or window.scope_bar.isVisible()):
+                    break
+                window.act_commit()
+            _settle(window)
+
+        _, commit_runs = best_of(commit, before_commit, times=BEST_OF_12MP)
+        assert session.editing_instance is None, "the commit was refused"
+        assert len(session.db.compiled(FrameKey(DESKTOP, OAK_STEP, VIEW))) >= 40
+
+        # -- a frame change -------------------------------------------------
+        window.act_clear_edit()
+        session.clear_edit()
+        _settle(window)
+
+        def before_change(attempt: int) -> None:
+            session.goto(OAK_STEP + 1 + (attempt % 2) * 2, force=True)
+            session.drain_prefetch(timeout=120.0)
+            _settle(window)
+
+        def change(attempt: int) -> None:
+            window.act_step(-1)
+            _settle(window)
+
+        _, change_runs = best_of(change, before_change, times=BEST_OF_12MP)
+
+        # -- a timeline click ------------------------------------------------
+        steps = sorted(session.steps())
+
+        def before_jump(attempt: int) -> None:
+            session.goto(steps[-2], force=True)
+            session.images.clear()
+            session._invalidate()
+            _settle(window)
+
+        def jump(attempt: int) -> None:
+            window.timeline_goto(OAK_STEP + 6 + attempt)
+            _settle(window)
+
+        _, jump_runs = best_of(jump, before_jump, times=BEST_OF_12MP)
+        assert session.current().step == OAK_STEP + 6 + BEST_OF_12MP - 1, \
+            "a jump was refused; that is not a jump time"
+
+        # -- panning, which composites the strip it reveals -------------------
+        session.goto(OAK_STEP, force=True)
+        stand()
+        _settle(window)
+        bar = window.canvas.horizontalScrollBar()
+        pan_runs = []
+        for _attempt in range(4 * BEST_OF_12MP):
+            started = time.perf_counter()
+            bar.setValue(bar.value() + 40)
+            _settle(window)
+            pan_runs.append(time.perf_counter() - started)
+
+        zoom_runs = []
+        for attempt in range(2 * BEST_OF_12MP):
+            started = time.perf_counter()
+            window.canvas.set_zoom(
+                window.canvas.zoom_factor() * (1.25 if attempt % 2 else 0.8)
+            )
+            _settle(window)
+            zoom_runs.append(time.perf_counter() - started)
+    finally:
+        window.shutdown()
+        window.hide()
+        QApplication.processEvents()
+
+    _under(BUDGET_WINDOW_COMMIT, "the whole Enter gesture", commit_runs)
+    _under(BUDGET_WINDOW_FRAME_CHANGE, "frame change (window)", change_runs)
+    _under(BUDGET_WINDOW_TIMELINE_JUMP, "timeline jump (window)", jump_runs)
+    _under(BUDGET_WINDOW_REPAINT, "pan repaint", pan_runs)
+    _under(BUDGET_WINDOW_REPAINT, "zoom repaint", zoom_runs)
+
+
 def _count_compiles_in(monkeypatch) -> list:
     """Record every pixel compilation made on **this** thread from now on.
 
