@@ -206,9 +206,17 @@ class StepTablePanel(QWidget):
             self._show_error(f"could not save D{self.desktop:02d}: {error}")
             return
         self._refresh_issues()
+        # A step that became (or stopped being) a `reorient` moved a pose
+        # boundary in every view, and every shape of those views is anchored to
+        # one. The annotator has to be told on the Apply, not by a renumbered
+        # segment turning up under them later.
+        recut = ""
+        if self.data.recut:
+            cut = ", ".join(f"{view} {n}" for view, n in sorted(self.data.recut.items()))
+            recut = f" Pose segments re-cut: {cut}."
         self.status.setText(
             f"Saved D{self.desktop:02d}: {len(self.data.issues)} open question(s), "
-            f"{len(messages)} state warning(s)."
+            f"{len(messages)} state warning(s).{recut}"
         )
         self.sigSaved.emit(self.desktop)
 

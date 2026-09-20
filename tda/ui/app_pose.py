@@ -37,7 +37,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from tda.core.pose_breaks import ACCEPTED, KIND_MANUAL, PROPOSED, REJECTED
+from tda.core.pose_breaks import (
+    ACCEPTED,
+    KIND_MANUAL,
+    PROPOSED,
+    REJECTED,
+    describe_discard,
+    describe_uncarried,
+)
+from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 from tda.ui.app_widgets import Bar
@@ -139,8 +147,14 @@ class PoseMixin:
 
     # ------------------------------------------------------------ frame hook
     def on_frame_changed_pose(self, key) -> None:
-        """Offer the audit's proposal for this frame, and mark the accepted ones."""
-        row = self.pose_proposal(key)
+        """Offer the audit's proposal for this frame, and mark the accepted ones.
+
+        Only in Annotate mode.  Accepting is a structural split, and offering it
+        beside a read-only Review canvas -- where every other editing key says
+        "press R to rework" -- was a button that did more than anything else on
+        that screen can.
+        """
+        row = self.pose_proposal(key) if self.mode == A.MODE_ANNOTATE else None
         if row is None:
             self.pose_bar.hide()
         else:
@@ -177,7 +191,7 @@ class PoseMixin:
     @S.guard
     def accept_pose_proposal(self) -> None:
         """Accept the audit's proposal for this frame: the same dialog, pre-filled."""
-        row = self.pose_proposal()
+        row = self.pose_proposal() if self.mode == A.MODE_ANNOTATE else None
         if row is None:
             self.report("这一帧没有待确认的位姿断点 / no proposed break on this frame")
             return
@@ -188,7 +202,7 @@ class PoseMixin:
     @S.guard
     def reject_pose_proposal(self) -> None:
         """Reject the audit's proposal: the row stays, so it is not proposed again."""
-        row = self.pose_proposal()
+        row = self.pose_proposal() if self.mode == A.MODE_ANNOTATE else None
         if row is None:
             return
         self.leave_frame(lambda: self._reject(row))
@@ -200,9 +214,11 @@ class PoseMixin:
                                           int(row["step"]), REJECTED)
             # rejecting one that was never accepted cuts nothing; rejecting one
             # that was merges the two segments back
-            self.db.recut_view(int(key.desktop), str(key.view), annotator=self.annotator)
+            out = self.db.recut_view(int(key.desktop), str(key.view),
+                                     annotator=self.annotator)
         self.pose_bar.hide()
-        self._reopen_here(f"step {row['step']}: 位姿断点已拒绝 / pose break rejected")
+        self._reopen_here(self._recut_message(
+            int(row["step"]), out, "位姿断点已拒绝 / pose break rejected"))
 
     # ------------------------------------------------------------ the re-cut
     def _split_pose_here(self, carry: Optional[bool], proposal: Optional[dict] = None
@@ -255,13 +271,25 @@ class PoseMixin:
             return None
         return dialog.carry()
 
-    def _recut_message(self, step: int, out: dict) -> str:
-        parts = [f"step {step}: 新位姿段 / new pose segment "
-                 f"({len(out['ranges'])} segments)"]
+    def _recut_message(self, step: int, out: dict, what: str = "") -> str:
+        """What the re-cut did, **including what it could not keep**.
+
+        The status bar is where the annotator learns this: somebody who rejects
+        a break after re-ordering the layers behind it has to be told then, not
+        at the next ``load-index`` (which writes it into a meta field nobody
+        reads on the day).  Same wording as the command line, because
+        :func:`~tda.core.pose_breaks.describe_discard` is the same function.
+        """
+        head = what or f"新位姿段 / new pose segment ({len(out['ranges'])} segments)"
+        parts = [f"step {step}: {head}"]
         if out["carried"]:
             parts.append(f"{len(out['carried'])} shapes carried")
         if out["rechecked"]:
             parts.append(f"{len(out['rechecked'])} verified frames queued for re-check")
+        view = self.session.view if compat.is_open(self.session) else ""
+        parts += [describe_discard(view, d) for d in out["discarded"]]
+        if out["uncarried"]:
+            parts.append(describe_uncarried(out["uncarried"]))
         return "; ".join(parts)
 
     def _reopen_here(self, message: str) -> None:

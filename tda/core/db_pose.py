@@ -32,12 +32,18 @@ from tda.core.pose_breaks import (
     STATUSES,
     RecutPlan,
     boundaries,
+    merge_orders,
     recut_plan,
     straddling,
 )
 
 #: The step type that breaks the pose in **every** view at once (spec 2.5).
 REORIENT_STEP = StepType.REORIENT.value
+#: Below this much measured movement the chassis is still in the same place, so
+#: the ROI of one side of a break is still the right window on the other. The
+#: window's split dialog starts its "carry shapes" checkbox from the same number
+#: (:data:`tda.ui.app_pose.CARRY_BELOW_PX`, :data:`tda.cli_pose.CARRY_BELOW_PX`).
+SMALL_MOVE_PX = 25.0
 
 __all__ = ["POSE_GEOMETRY_COLUMNS", "RECUT_OP", "PoseSegmentMixin", "clean_roi"]
 
@@ -101,6 +107,55 @@ def _needs_repair(rows: list[dict]) -> bool:
                for r in rows)
 
 
+def _contributors(plan: "RecutPlan") -> dict[int, list[int]]:
+    """``{new segment: [old segments whose per-segment rows land in it]}``.
+
+    In step order, and the one notion of "where do this segment's rows come
+    from": a split puts one old segment into several new ones, a merge puts
+    several into one, and both cases have to be answered the same way for the
+    rectangles and for the layer order, or a merge ends up with two winners.
+    """
+    out: dict[int, list[int]] = {seg: [] for seg, _s, _e in plan.ranges}
+    for seg, start, end in plan.old:
+        for target in (plan.split.get(seg) or [plan.renumber.get(seg)]):
+            if target in out:
+                out[target].append(seg)
+    return out
+
+
+def _roi_copies(by_seg: dict, plan: "RecutPlan", contributors: dict,
+                small_at: set[int]) -> dict[tuple, bool]:
+    """``{(old segment, new segment): may it carry the two rectangles over?}``.
+
+    The piece that still holds the old segment's reference step keeps them --
+    it is the same frame the rectangle was drawn on.  Another piece gets a copy
+    only when every new boundary between it and that one is *small*: a 3 px
+    nudge leaves the chassis where it was, a 190 px knock or a 90 degree
+    rotation does not, and neither does a break somebody typed by hand (which
+    carries no measured movement at all).  Without a copy the segment's
+    ``roi_json`` stays NULL and the window's ordinary first-open proposal asks
+    for it there -- which is the annotator confirming it, with no new UI.
+    """
+    ranges = {seg: (start, end) for seg, start, end in plan.ranges}
+    out: dict[tuple, bool] = {}
+    for seg, _start, _end in plan.old:
+        pieces = [p for p in (plan.split.get(seg) or [plan.renumber.get(seg)])
+                  if p in ranges]
+        if not pieces:
+            continue
+        stored = (by_seg.get(seg) or {}).get("ref_step")
+        home = len(pieces) - 1
+        for index, piece in enumerate(pieces):
+            low, high = ranges[piece]
+            if stored is not None and low <= int(stored) <= high:
+                home = index
+        for index, piece in enumerate(pieces):
+            between = [ranges[pieces[k]][0]
+                       for k in range(min(index, home) + 1, max(index, home) + 1)]
+            out[(seg, piece)] = all(b in small_at for b in between)
+    return out
+
+
 def _keeper_of(by_seg: dict, sources: list[int], start: int, end: int) -> Optional[int]:
     """Which of several merging segments gives the merged one its reference frame.
 
@@ -110,6 +165,8 @@ def _keeper_of(by_seg: dict, sources: list[int], start: int, end: int) -> Option
     (spec 4.2 annotates the most disassembled frame first) and it is the piece
     the chassis corners were left with.
     """
+    if len(sources) == 1:
+        return sources[0]
     inside = [s for s in sources
               if (by_seg.get(s) or {}).get("ref_step") is not None
               and start <= int(by_seg[s]["ref_step"]) <= end]
@@ -440,6 +497,20 @@ class PoseSegmentMixin:
                     self.pose_breaks(desktop, view, status=ACCEPTED)]
         return boundaries(n_steps, reorients, accepted), n_steps
 
+    def small_breaks(self, desktop: int, view: str,
+                     below_px: float = SMALL_MOVE_PX) -> list[int]:
+        """Accepted breaks of this view whose measured movement was small.
+
+        "Small" is what decides whether the chassis ROI is still the right
+        window on the other side of the boundary. A break with no measured
+        ``magnitude_px`` -- every hand-typed one, and every ``reorient`` step,
+        which has no break row at all -- is *not* small: unknown movement is
+        treated as large, so the rectangle is asked for again rather than
+        quietly reused.
+        """
+        return [int(b["step"]) for b in self.pose_breaks(desktop, view, status=ACCEPTED)
+                if b["magnitude_px"] is not None and float(b["magnitude_px"]) < below_px]
+
     def recut_view(self, desktop: int, view: str, *, carry_at: Iterable[int] = (),
                    annotator: str = "system", note: str = "") -> dict:
         """Re-derive one view's boundaries and apply them; the re-cut summary.
@@ -451,12 +522,14 @@ class PoseSegmentMixin:
         """
         bounds, n_steps = self.view_boundaries(desktop, view)
         return self.apply_recut(desktop, view, bounds, n_steps, carry_at=carry_at,
+                                small_at=self.small_breaks(desktop, view),
                                 annotator=annotator, note=note)
 
     # --------------------------------------------------------------- the re-cut
     def apply_recut(self, desktop: int, view: str, new_bounds: Iterable[int],
                     n_steps: Optional[int] = None, *, carry_at: Iterable[int] = (),
-                    annotator: str = "system", note: str = "") -> dict:
+                    small_at: Iterable[int] = (), annotator: str = "system",
+                    note: str = "") -> dict:
         """Re-cut one view's pose segments at ``new_bounds``, in ONE transaction.
 
         ``new_bounds`` is the whole boundary list the view should have
@@ -474,12 +547,19 @@ class PoseSegmentMixin:
           ``carry_at``, in which case every keyframe whose coverage straddles it
           is **duplicated** into the earlier segment with
           ``anchor_step = boundary - 1`` and ``source='carried'``;
-        * **per-segment** rows -- the layer order, the pair overrides, the
-          chassis ROI and the staging-area ROI -- are *copied* into every piece
-          a segment was split into: after a 3 px camera nudge they are still the
-          best first guess, and the annotator re-confirms the ROI;
-        * the **chassis corners** and the homography drawn against them follow
-          the reference step and are dropped only where it no longer is;
+        * the **layer order** and the **pair overrides** are copied into every
+          piece a segment was split into: the order the parts are stacked in does
+          not change because the camera moved;
+        * the **chassis ROI**, the **staging-area ROI**, the **chassis corners**
+          and the homography stay with the piece that still holds the reference
+          step.  The other side of a *small* boundary (a measured
+          ``magnitude_px`` under 25, passed in ``small_at``) gets a copy of the
+          two rectangles, because they are still the right window; the other
+          side of a large or unmeasured one -- a 190 px knock, a 90 degree
+          rotation, any break typed by hand -- gets none, so the window's
+          ordinary first-open ROI proposal appears there and the annotator
+          confirms it.  The corners are never copied: they are semantic points
+          on one frame;
         * **verified** frames of every affected segment are queued for a
           re-check (``recheck_queue`` -> the conflict queue).  Not one compiled
           row is written here: a frozen row changes only through that queue (I1).
@@ -513,11 +593,21 @@ class PoseSegmentMixin:
         carry = sorted({int(b) for b in carry_at} & (new_starts - old_starts))
         gone = sorted(old_starts - new_starts)
 
+        by_seg = {int(r["seg"]): r for r in rows}
+        contributors = _contributors(plan)
+        # One winner per merged segment, for the rectangles, the corners AND the
+        # layer order: two different winners inside one merge is how the window
+        # ended up showing a ROI from one piece and an order from the other.
+        keepers = {seg: _keeper_of(by_seg, contributors.get(seg) or [], start, end)
+                   for seg, start, end in plan.ranges}
+        roi_ok = _roi_copies(by_seg, plan, contributors, {int(b) for b in small_at})
+
         with self.transaction():
             carried = self._carry_keyframes(desktop, view, plan, carry)
             summary["ref_moves"], summary["discarded"] = self._recut_segment_rows(
-                desktop, view, rows, plan)
-            summary["discarded"] += self._recut_layer_rows(desktop, view, plan)
+                desktop, view, by_seg, plan, keepers, contributors, roi_ok)
+            summary["discarded"] += self._recut_layer_rows(
+                desktop, view, plan, keepers, contributors)
             self._recut_keyframes(desktop, view, plan)
             self._recut_frame_overrides(desktop, view, plan)
             summary["carried"] = [self._insert_carried(desktop, view, plan, *c)
@@ -544,50 +634,49 @@ class PoseSegmentMixin:
         return summary
 
     # -- the five row groups a re-cut touches ---------------------------------
-    def _recut_segment_rows(self, desktop: int, view: str, rows: list[dict],
-                            plan: RecutPlan) -> tuple[list[dict], list[dict]]:
+    def _recut_segment_rows(self, desktop: int, view: str, by_seg: dict,
+                            plan: RecutPlan, keepers: dict, contributors: dict,
+                            roi_ok: dict) -> tuple[list[dict], list[dict]]:
         """Rewrite the segment table itself; returns (reference moves, discarded).
 
-        The columns are split by what they are drawn against: ``ref_step`` is
-        re-chosen the way a new cut has always chosen it (keep the stored one
-        while it is still inside the segment, else its last step -- the most
-        disassembled frame, which spec 4.2 annotates first), the corners and the
-        homography survive only where that reference step did, and the two
-        rectangles survive everywhere because they are windows in the view's own
-        image, not a coordinate system (spec 2.4).
+        ``ref_step`` is re-chosen the way a new cut has always chosen it (keep
+        the stored one while it is still inside the segment, else its last step
+        -- the most disassembled frame, which spec 4.2 annotates first).  The
+        corners and the homography survive only where that reference step did;
+        the two rectangles survive there too, and on the other side of a
+        boundary only when ``roi_ok`` says the movement was small enough for the
+        old window still to be the right one.
         """
-        by_seg = {int(r["seg"]): r for r in rows}
         ref_moves: list[dict] = []
         discarded: list[dict] = []
         new_rows: list[tuple] = []
         for seg, start, end in plan.ranges:
-            sources = plan.merged.get(seg) or []
-            keeper = _keeper_of(by_seg, sources, start, end) if len(sources) > 1 else (
-                sources[0] if sources else plan.old_segment_of(start))
+            keeper = keepers.get(seg)
             src = by_seg.get(keeper if keeper is not None else -1) or {}
             stored = src.get("ref_step")
             ref = stored if (stored is not None and start <= int(stored) <= end) else end
             kept_ref = stored is not None and ref == stored
+            boxes = roi_ok.get((keeper, seg), True)
             data = {
                 "start_step": start, "end_step": end, "ref_step": int(ref),
                 "corners_json": R.dumps(src.get("corners")) if kept_ref else None,
                 "homography_json": R.dumps(src.get("homography")) if kept_ref else None,
-                "roi_json": R.dumps(src.get("roi")),
-                "bench_roi_json": R.dumps(src.get("bench_roi")),
+                "roi_json": R.dumps(src.get("roi")) if boxes else None,
+                "bench_roi_json": R.dumps(src.get("bench_roi")) if boxes else None,
             }
             new_rows.append((desktop, view, seg, *data.values()))
             if not kept_ref and src:
                 ref_moves.append({"seg": seg, "start": start, "end": end,
                                   "ref_step": int(ref), "old": src,
                                   "dropped": _has_ref_geometry(src)})
-            for extra in [s for s in sources if s != keeper]:
+            for extra in [s for s in (contributors.get(seg) or []) if s != keeper]:
                 # only what the merge really loses: the pieces of a split carry
                 # copies of one another's rectangles, and reporting those back
                 # as "discarded" would be a warning about nothing
-                lost = {n: (by_seg.get(extra) or {}).get(n)
+                other = by_seg.get(extra) or {}
+                lost = {n: other.get(n)
                         for n in ("corners", "homography", "roi", "bench_roi")
-                        if (by_seg.get(extra) or {}).get(n) is not None
-                        and (by_seg.get(extra) or {}).get(n) != src.get(n)}
+                        if other.get(n) is not None and other.get(n) != src.get(n)}
                 if lost:
                     discarded.append({"table": "pose_segment", "pose_segment": extra,
                                       "into": seg, "row": lost})
@@ -599,55 +688,82 @@ class PoseSegmentMixin:
             "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", new_rows)
         return ref_moves, discarded
 
-    def _recut_layer_rows(self, desktop: int, view: str, plan: RecutPlan) -> list[dict]:
-        """Re-key the layer order and the pair overrides; returns what was dropped.
+    def _recut_layer_rows(self, desktop: int, view: str, plan: RecutPlan,
+                          keepers: dict, contributors: dict) -> list[dict]:
+        """Re-key the layer order and the pair overrides; returns what was reported.
 
-        A **split** copies both into every piece.  A **merge** unions the pair
-        overrides -- they are a set of exceptions, so nothing has to give way --
-        but a z-order is a total order and two of them cannot be merged: the
-        earlier segment's wins, the later one's is recorded here and in the op
-        log, and the caller says so.
+        A **split** copies both into every piece: the order the parts are
+        stacked in does not change because the camera moved.  A **merge** unions
+        the pair overrides -- a set of exceptions, so nothing has to give way --
+        and folds the layer orders with
+        :func:`~tda.core.pose_breaks.merge_orders`: the keeper's order (the same
+        piece that keeps the reference frame and the rectangles) comes first and
+        every key only the other had is appended, so no instance can fall into
+        ``zorder_missing`` because two segments became one.  What is reported is
+        only the pairs whose relative order actually changed -- undoing a split
+        merges two byte-identical copies and says nothing at all.
+
+        Rows keyed to a segment number the plan does not know are orphans left
+        by an earlier shrink.  They are never deleted: one at a number nothing
+        uses is left where it is, one standing on a number this re-cut writes is
+        replaced and reported, and both end up in the op log.
         """
-        dropped: list[dict] = []
-        targets = {seg for seg, _s, _e in plan.ranges}
-        touched = set(plan.renumber) | targets
+        reported: list[dict] = []
+        known = set(plan.renumber)
+        targets = [seg for seg, _s, _e in plan.ranges]
+        # every row of the view, not only the ones the plan owns: an orphan at a
+        # segment number nobody uses has to be *seen* to be reported
+        z_by_seg = {int(r["pose_segment"]): r
+                    for r in self._rows_of("zorder", desktop, view)}
+        p_rows = self._rows_of("pair_override", desktop, view)
+        orphans = (set(z_by_seg) | {int(r["pose_segment"]) for r in p_rows}) - known
 
-        z_rows = self._rows_in("zorder", desktop, view, touched)
-        p_rows = self._rows_in("pair_override", desktop, view, touched)
-        keys = ", ".join("?" * len(touched))
+        keys = ", ".join("?" * len(known))
         for table in ("zorder", "pair_override"):
             self.conn.execute(
                 f"DELETE FROM {table} WHERE desktop=? AND view=? AND pose_segment IN ({keys})",
-                (desktop, view, *sorted(touched)))
+                (desktop, view, *sorted(known)))
 
-        placed: set[int] = set()
-        for row in z_rows:                      # in old-segment order: earliest wins
-            for target in self._targets_of(plan, int(row["pose_segment"])):
-                if target in placed:
-                    dropped.append({"table": "zorder",
-                                    "pose_segment": int(row["pose_segment"]),
-                                    "into": target,
-                                    "row": R.loads(row["order_json"])})
+        for seg in targets:
+            sources = contributors.get(seg) or []
+            keeper = keepers.get(seg)
+            kept = z_by_seg.get(keeper) if keeper is not None else None
+            order = list(R.loads(kept["order_json"]) or []) if kept is not None else []
+            version = int(kept["version"]) if kept is not None else 1
+            present = kept is not None
+            for other in [s for s in sources if s != keeper]:
+                row = z_by_seg.get(other)
+                if row is None:
                     continue
-                placed.add(target)
+                present = True
+                order, changed = merge_orders(order, R.loads(row["order_json"]) or [])
+                if changed:
+                    reported.append({"table": "zorder", "pose_segment": other,
+                                     "into": seg, "changed_pairs": changed})
+            if present:
+                if seg in orphans:
+                    reported.append({"table": "zorder", "pose_segment": seg,
+                                     "into": seg, "orphan": True, "replaced": True})
                 self.conn.execute(
-                    "INSERT INTO zorder(desktop, view, pose_segment, order_json, version) "
-                    "VALUES(?, ?, ?, ?, ?)",
-                    (desktop, view, target, row["order_json"], row["version"]))
+                    "INSERT OR REPLACE INTO zorder(desktop, view, pose_segment, order_json, "
+                    "version) VALUES(?, ?, ?, ?, ?)",
+                    (desktop, view, seg, R.dumps(order), version))
         for row in p_rows:
             for target in self._targets_of(plan, int(row["pose_segment"])):
                 self.conn.execute(
                     "INSERT OR IGNORE INTO pair_override(desktop, view, pose_segment, "
                     "above, below) VALUES(?, ?, ?, ?, ?)",
                     (desktop, view, target, row["above"], row["below"]))
-        return dropped
+        reported += [{"table": "zorder" if seg in z_by_seg else "pair_override",
+                      "pose_segment": seg, "into": None, "orphan": True}
+                     for seg in sorted(orphans - set(targets))]
+        return reported
 
-    def _rows_in(self, table: str, desktop: int, view: str, segs: set[int]) -> list:
-        """Every row of ``table`` for this view in one of ``segs``, oldest segment first."""
-        keys = ", ".join("?" * len(segs))
+    def _rows_of(self, table: str, desktop: int, view: str) -> list:
+        """Every row of ``table`` for one view, oldest segment first."""
         return self.conn.execute(
-            f"SELECT * FROM {table} WHERE desktop=? AND view=? AND pose_segment IN ({keys}) "
-            f"ORDER BY pose_segment", (desktop, view, *sorted(segs))).fetchall()
+            f"SELECT * FROM {table} WHERE desktop=? AND view=? ORDER BY pose_segment",
+            (desktop, view)).fetchall()
 
     @staticmethod
     def _targets_of(plan: RecutPlan, seg: int) -> list[int]:
@@ -773,22 +889,25 @@ class PoseSegmentMixin:
             (new_id, int(keyframe_id)))
         return new_id
 
-    def _drop_carried(self, desktop: int, view: str, gone: list[int]) -> list[int]:
+    def _drop_carried(self, desktop: int, view: str, gone: list[int]) -> list[dict]:
         """Undo the duplicates of the boundaries that have just disappeared.
 
         Only the untouched ones: a carried keyframe the annotator has since
         redrawn carries a version above 1 and is their work, not bookkeeping, so
-        it stays and its id is returned for the caller to mention.
+        it stays, and it comes back as ``{"id", "instance", "anchor_step"}`` --
+        with the instance, because "2 carried shapes were kept" is not something
+        anybody can act on and "psu.01 at step 18" is.
         """
-        kept: list[int] = []
+        kept: list[dict] = []
         for boundary in gone:
             rows = self.conn.execute(
-                "SELECT id, version, edit_count FROM shape_keyframe WHERE desktop=? AND "
-                "view=? AND source=? AND anchor_step=?",
+                "SELECT id, instance, anchor_step, version, edit_count FROM shape_keyframe "
+                "WHERE desktop=? AND view=? AND source=? AND anchor_step=?",
                 (desktop, view, CARRIED, int(boundary) - 1)).fetchall()
             for row in rows:
                 if int(row["version"]) > 1 or int(row["edit_count"]) > 0:
-                    kept.append(int(row["id"]))
+                    kept.append({"id": int(row["id"]), "instance": row["instance"],
+                                 "anchor_step": int(row["anchor_step"])})
                     continue
                 self.conn.execute("DELETE FROM shape_part WHERE keyframe_id=?", (row["id"],))
                 self.conn.execute("DELETE FROM shape_keyframe WHERE id=?", (row["id"],))

@@ -27,8 +27,14 @@ from tda.core.model import (
     StepRec,
     ZOrderRec,
 )
-from tda.core.pose_breaks import boundaries, recut_plan, straddling
-from truth_scenes import DESKTOP, PSU, SCREW, VIEW, rect
+from tda.core.pose_breaks import (
+    boundaries,
+    describe_discard,
+    merge_orders,
+    recut_plan,
+    straddling,
+)
+from truth_scenes import DESKTOP, FAN, PSU, SCREW, VIEW, rect
 
 
 # --------------------------------------------------------------------------- #
@@ -130,6 +136,81 @@ def test_a_keyframe_entirely_on_one_side_never_straddles():
 
 
 # --------------------------------------------------------------------------- #
+# merging two layer orders (round 1, I-2)
+# --------------------------------------------------------------------------- #
+A, B, C, D = ["a", "main"], ["b", "main"], ["c", "main"], ["d", "main"]
+
+
+def test_two_identical_orders_merge_to_themselves_and_report_nothing():
+    merged, changed = merge_orders([A, B, C], [A, B, C])
+    assert merged == [A, B, C] and changed == []
+
+
+def test_keys_only_the_other_order_has_are_appended():
+    """Nothing may drop out: an instance missing from the order is zorder_missing."""
+    merged, changed = merge_orders([A, B], [C, D])
+    assert merged == [A, B, C, D]
+    assert changed == []          # the two orders share no pair, so none changed
+
+
+def test_only_the_pairs_that_actually_changed_places_are_reported():
+    merged, changed = merge_orders([A, B, C], [C, B, A])
+    assert merged == [A, B, C]
+    assert changed == [[C, B], [C, A], [B, A]]
+
+
+def test_a_partially_different_order_reports_only_its_own_inversions():
+    merged, changed = merge_orders([A, B, C], [A, C, B])
+    assert merged == [A, B, C]
+    assert changed == [[C, B]]
+
+
+def test_merging_with_an_empty_order_is_the_other_one():
+    assert merge_orders([], [A, B]) == ([A, B], [])
+    assert merge_orders([A, B], []) == ([A, B], [])
+
+
+def test_merge_orders_accepts_the_tuples_and_the_json_lists():
+    merged, _changed = merge_orders([("a", "main")], [["b", "main"]])
+    assert merged == [A, B]
+
+
+# --------------------------------------------------------------------------- #
+# one sentence per thing a re-cut could not keep (round 1, I-1)
+# --------------------------------------------------------------------------- #
+def test_a_discarded_layer_order_is_rendered_without_exploding():
+    """The regression: `', '.join(sorted(d['row']))` on a list of layer keys."""
+    text = describe_discard("scan", {
+        "table": "zorder", "pose_segment": 2, "into": 1,
+        "changed_pairs": [[A, B], [C, D]],
+    })
+    assert "2 pair(s) changed places" in text
+    assert "a over b" in text and "c over d" in text
+
+
+def test_many_changed_pairs_are_summarised():
+    pairs = [[[f"i{i}", "main"], [f"j{i}", "main"]] for i in range(7)]
+    text = describe_discard("scan", {"table": "zorder", "pose_segment": 2, "into": 1,
+                                     "changed_pairs": pairs})
+    assert "7 pair(s)" in text and "(+4 more)" in text
+
+
+def test_a_discarded_segment_row_names_its_fields():
+    text = describe_discard("oak1", {"table": "pose_segment", "pose_segment": 2,
+                                     "into": 1, "row": {"roi": [1, 2, 3, 4]}})
+    assert "kept its own roi" in text
+
+
+def test_an_orphan_row_says_whether_it_was_left_or_replaced():
+    left = describe_discard("scan", {"table": "zorder", "pose_segment": 9, "into": None,
+                                     "orphan": True})
+    assert "left in place" in left
+    replaced = describe_discard("scan", {"table": "zorder", "pose_segment": 2, "into": 2,
+                                         "orphan": True, "replaced": True})
+    assert "was replaced" in replaced
+
+
+# --------------------------------------------------------------------------- #
 # the transactional re-cut (task B1 step 3)
 # --------------------------------------------------------------------------- #
 #: The scene these tests re-cut: eight steps of one view, with something in
@@ -215,20 +296,60 @@ def test_a_recut_moves_every_keyframe_to_the_segment_of_its_own_anchor(scene: Db
     assert len(scene.keyframes(DESKTOP, VIEW)) == 3
 
 
-def test_per_segment_rows_are_copied_into_both_halves(scene: Db):
+def test_the_layer_order_and_the_overrides_are_copied_into_both_halves(scene: Db):
+    """Which part is on top of which does not change because the camera moved."""
     scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS)
 
     for seg in (1, 2):
         assert scene.zorder(DESKTOP, VIEW, seg).order == [(PSU, "main"), (SCREW, "main")]
         assert [(p.above, p.below) for p in scene.pair_overrides(DESKTOP, VIEW, seg)] \
             == [(PSU, SCREW)]
+
+
+def test_a_large_move_asks_for_the_roi_again_on_the_other_side(scene: Db):
+    """190 px or 90 degrees: the old window is not the right one any more."""
+    scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS)      # nothing declared small
+
+    rows = {r["seg"]: r for r in scene.pose_segments(DESKTOP, VIEW)}
+    # ref_step 8 is in the second half, so that is the piece the rectangles and
+    # the corners stay with
+    assert rows[2]["roi"] == [4, 4, 60, 60]
+    assert rows[2]["bench_roi"] == [0, 0, 32, 32]
+    assert rows[2]["corners"] == [[0.0, 0.0], [63.0, 0.0], [63.0, 63.0], [0.0, 63.0]]
+    # the other piece gets none: the window proposes a fresh one on first open
+    assert rows[1]["roi"] is None and rows[1]["bench_roi"] is None
+    assert rows[1]["corners"] is None
+
+
+def test_a_small_move_carries_the_two_rectangles_over(scene: Db):
+    scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS, small_at=[BOUNDARY])
+
     rows = {r["seg"]: r for r in scene.pose_segments(DESKTOP, VIEW)}
     assert rows[1]["roi"] == [4, 4, 60, 60] and rows[2]["roi"] == [4, 4, 60, 60]
     assert rows[1]["bench_roi"] == [0, 0, 32, 32]
     assert rows[2]["bench_roi"] == [0, 0, 32, 32]
-    # the corners are drawn against ref_step 8, which is in the second half only
+    # the corners are semantic points on one frame and are never copied
     assert rows[1]["corners"] is None
-    assert rows[2]["corners"] == [[0.0, 0.0], [63.0, 0.0], [63.0, 63.0], [0.0, 63.0]]
+
+
+def test_recut_view_calls_a_small_break_small_and_an_unmeasured_one_large(scene: Db):
+    scene.add_pose_break(DESKTOP, VIEW, BOUNDARY, status="accepted", kind="camera",
+                         magnitude_px=8.6, source="audit:events.csv")
+    assert scene.small_breaks(DESKTOP, VIEW) == [BOUNDARY]
+
+    scene.recut_view(DESKTOP, VIEW)
+    assert {r["seg"]: r["roi"] for r in scene.pose_segments(DESKTOP, VIEW)} == {
+        1: [4, 4, 60, 60], 2: [4, 4, 60, 60]}
+
+    scene.apply_recut(DESKTOP, VIEW, [], STEPS)          # merge back
+    scene.set_pose_break_status(DESKTOP, VIEW, BOUNDARY, "rejected")
+    scene.add_pose_break(DESKTOP, VIEW, BOUNDARY - 1, status="accepted", kind="manual",
+                         source="manual:anna")
+    assert scene.small_breaks(DESKTOP, VIEW) == []        # no magnitude: not small
+
+    scene.recut_view(DESKTOP, VIEW)
+    assert {r["seg"]: r["roi"] for r in scene.pose_segments(DESKTOP, VIEW)} == {
+        1: None, 2: [4, 4, 60, 60]}
 
 
 def test_frame_level_rows_are_not_touched_by_a_recut(scene: Db):
@@ -276,9 +397,52 @@ def test_rejecting_the_break_merges_the_segments_back_and_drops_the_duplicate(sc
     assert _anchors(scene) == {(PSU, 4): 1, (PSU, 8): 1, (SCREW, 8): 1}
     assert [kf for kf in scene.keyframes(DESKTOP, VIEW) if kf.source == "carried"] == []
     assert out["uncarried"] == []                  # nothing had to be kept
-    # the second segment's layer order could not survive the merge and says so
-    assert [d["table"] for d in out["discarded"]] == ["zorder"]
+    # the two halves carry byte-identical copies of one order, so undoing the
+    # split loses nothing and reports nothing
+    assert out["discarded"] == []
+    assert scene.zorder(DESKTOP, VIEW, 1).order == [(PSU, "main"), (SCREW, "main")]
     assert scene.zorder(DESKTOP, VIEW, 2).order == []
+
+
+def test_a_merge_keeps_every_layer_key_and_reports_only_what_changed_places(scene: Db):
+    """Review focus 1: nothing may fall out of the order because of a merge."""
+    scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS)
+    # the annotator re-orders the later segment and adds a part only it has
+    scene.set_zorder(ZOrderRec(DESKTOP, VIEW, 2,
+                               [(SCREW, "main"), (PSU, "main"), (FAN, "main")]))
+
+    out = scene.apply_recut(DESKTOP, VIEW, [], STEPS)
+
+    # segment 2 held the reference step, so its order is the one that survives
+    assert scene.zorder(DESKTOP, VIEW, 1).order == [
+        (SCREW, "main"), (PSU, "main"), (FAN, "main")]
+    assert [d["table"] for d in out["discarded"]] == ["zorder"]
+    # the pair that really changed places, and only it
+    assert out["discarded"][0]["changed_pairs"] == [[[PSU, "main"], [SCREW, "main"]]]
+
+
+def test_a_merge_appends_the_keys_only_the_other_segment_had(scene: Db):
+    scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS)
+    scene.set_zorder(ZOrderRec(DESKTOP, VIEW, 1, [(FAN, "main")]))
+
+    out = scene.apply_recut(DESKTOP, VIEW, [], STEPS)
+
+    order = scene.zorder(DESKTOP, VIEW, 1).order
+    assert order == [(PSU, "main"), (SCREW, "main"), (FAN, "main")]
+    assert out["discarded"] == []        # no pair changed places, nothing to say
+
+
+def test_one_merge_has_one_winner_for_the_roi_and_the_order(scene: Db):
+    """The ruling: the piece that keeps the reference step keeps both."""
+    scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS, small_at=[BOUNDARY])
+    scene.set_pose_segment_roi(DESKTOP, VIEW, 1, [1, 1, 20, 20])
+    scene.set_zorder(ZOrderRec(DESKTOP, VIEW, 1, [(FAN, "main")]))
+
+    scene.apply_recut(DESKTOP, VIEW, [], STEPS)
+
+    rows = {r["seg"]: r for r in scene.pose_segments(DESKTOP, VIEW)}
+    assert rows[1]["roi"] == [4, 4, 60, 60]          # segment 2's, which held ref 8
+    assert scene.zorder(DESKTOP, VIEW, 1).order[0] == (PSU, "main")  # and its order
 
 
 def test_a_carried_keyframe_the_annotator_edited_survives_the_merge(scene: Db):
@@ -289,8 +453,29 @@ def test_a_carried_keyframe_the_annotator_edited_survives_the_merge(scene: Db):
 
     out = scene.apply_recut(DESKTOP, VIEW, [], STEPS)
 
-    assert out["uncarried"] == [carried.id]
+    assert out["uncarried"] == [{"id": carried.id, "instance": SCREW,
+                                 "anchor_step": BOUNDARY - 1}]
     assert any(kf.id == carried.id for kf in scene.keyframes(DESKTOP, VIEW))
+
+
+def test_an_orphan_layer_row_is_never_deleted_only_reported(scene: Db):
+    """M3b: a row of a segment that no longer exists is left, or replaced and said."""
+    scene.set_zorder(ZOrderRec(DESKTOP, VIEW, 7, [(FAN, "main")]))   # nothing uses 7
+
+    out = scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS)
+
+    assert scene.zorder(DESKTOP, VIEW, 7).order == [(FAN, "main")]   # left in place
+    assert [(d["pose_segment"], d["orphan"]) for d in out["discarded"]] == [(7, True)]
+
+
+def test_an_orphan_standing_on_a_new_segment_number_is_replaced_and_said(scene: Db):
+    scene.set_zorder(ZOrderRec(DESKTOP, VIEW, 2, [(FAN, "main")]))   # 2 is about to exist
+
+    out = scene.apply_recut(DESKTOP, VIEW, [BOUNDARY], STEPS)
+
+    assert scene.zorder(DESKTOP, VIEW, 2).order == [(PSU, "main"), (SCREW, "main")]
+    assert [(d["pose_segment"], d.get("replaced")) for d in out["discarded"]] \
+        == [(2, True)]
 
 
 def test_a_recut_that_changes_nothing_writes_nothing(scene: Db):

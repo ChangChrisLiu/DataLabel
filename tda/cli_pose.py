@@ -38,7 +38,14 @@ from typing import Iterable, Optional
 from tda.cli_common import EXIT_ERROR, EXIT_OK, safety_backup as _safety_backup, session as _session
 from tda.core.db import Db
 from tda.core.model import VIEWS
-from tda.core.pose_breaks import ACCEPTED, KIND_CHASSIS, PROPOSED, REJECTED
+from tda.core.pose_breaks import (
+    ACCEPTED,
+    KIND_CHASSIS,
+    PROPOSED,
+    REJECTED,
+    describe_discard,
+    describe_uncarried,
+)
 
 __all__ = [
     "ANNOTATOR", "AUDIT_KINDS", "AUDIT_VERDICTS", "CARRY_BELOW_PX", "Proposal",
@@ -160,12 +167,22 @@ def import_events(db: Db, path: str, *, min_px: float = MIN_PX, dry_run: bool = 
     the same six camera moves come out of every re-run of the audit, and an
     accepted or rejected break is a human's answer, not something an import may
     take back.
+
+    A desktop the database does not have is reported and skipped rather than
+    created: a break on a machine with no frames, no steps and no segments is
+    not a proposal anybody can act on, and conjuring the ``desktop`` row to hold
+    it would make ``status`` claim a machine that was never imported.
     """
     proposals, skipped = read_events(path, min_px)
     run = ImportRun(source=os.path.basename(str(path)), dry_run=dry_run,
                     proposals=proposals, skipped=skipped)
     source = f"audit:{run.source}"
+    known = set(db.desktop_ids())
     for p in proposals:
+        if p.desktop not in known:
+            run.skipped.append(f"D{p.desktop:02d} is not in the database; "
+                               f"{p.view} step {p.step} skipped (run load-index first)")
+            continue
         stored = db.pose_break(p.desktop, p.view, p.step)
         if stored is not None:
             run.known.append(p)
@@ -222,7 +239,8 @@ def accept_break(db: Db, desktop: int, view: str, step: int, *,
         out = db.recut_view(desktop, view, carry_at=[int(step)] if carry else (),
                             annotator=ANNOTATOR)
     if log:
-        _log_recut(log, f"accepted D{desktop:02d} {view} step {step}", out, carry)
+        _log_recut(log, f"accepted D{desktop:02d} {view} step {step}", out, carry,
+                   view)
     return out
 
 
@@ -240,24 +258,27 @@ def reject_break(db: Db, desktop: int, view: str, step: int, *, dry_run: bool = 
         db.set_pose_break_status(desktop, view, step, REJECTED)
         out = db.recut_view(desktop, view, annotator=ANNOTATOR)
     if log:
-        _log_recut(log, f"rejected D{desktop:02d} {view} step {step}", out, None)
+        _log_recut(log, f"rejected D{desktop:02d} {view} step {step}", out, None,
+                   view)
     return out
 
 
-def _log_recut(log, what: str, out: dict, carry: Optional[bool]) -> None:
-    """One line for the verdict, then one per thing the re-cut could not keep."""
+def _log_recut(log, what: str, out: dict, carry: Optional[bool], view: str = "") -> None:
+    """One line for the verdict, then one per thing the re-cut could not keep.
+
+    The wording is :func:`~tda.core.pose_breaks.describe_discard`'s, which the
+    pipeline's ``pose_issues`` and the window's status bar also use: one event,
+    one sentence, wherever the annotator meets it.
+    """
     ranges = ", ".join(f"{seg}:[{start}-{end}]" for seg, start, end in out["ranges"])
     tail = "" if carry is None else f", carry {'on' if carry else 'off'}"
     log(f"[pose-breaks] {what}{tail}: {len(out['ranges'])} segments ({ranges})")
     if out["carried"]:
         log(f"[pose-breaks]   {len(out['carried'])} shapes carried across the boundary")
     if out["uncarried"]:
-        log(f"[pose-breaks]   {len(out['uncarried'])} carried shapes had been edited "
-            f"and were kept; check their anchors")
+        log(f"[pose-breaks]   {describe_uncarried(out['uncarried'])}")
     for dropped in out["discarded"]:
-        log(f"[pose-breaks]   {dropped['table']} of segment {dropped['pose_segment']} "
-            f"could not survive the merge into segment {dropped['into']}; it is in "
-            f"the op log")
+        log(f"[pose-breaks]   {describe_discard(view, dropped)}")
     if out["rechecked"]:
         log(f"[pose-breaks]   {len(out['rechecked'])} verified frames queued for a "
             f"re-check: {out['rechecked']}")
@@ -302,6 +323,15 @@ def cmd_pose_breaks(args: argparse.Namespace) -> int:
         return EXIT_ERROR
 
     with _session(args, lock=True) as (paths, db):
+        # Everything that can be refused is refused BEFORE the backup: an
+        # 18 MB safety copy taken for a typo is noise in `backup_dir`, and the
+        # database must come out of a refused command byte for byte as it went
+        # in -- including not having gained a `desktop` row for D99.
+        try:
+            _refuse_early(args, db)
+        except ValueError as exc:
+            print(f"[pose-breaks] {exc}")
+            return EXIT_ERROR
         if writes and not _safety_backup(
                 paths, db, "pose-breaks",
                 "it re-cuts a view's pose segments and moves the rows keyed by them"):
@@ -311,6 +341,22 @@ def cmd_pose_breaks(args: argparse.Namespace) -> int:
         except (ValueError, OSError) as exc:
             print(f"[pose-breaks] {exc}")
             return EXIT_ERROR
+
+
+def _refuse_early(args: argparse.Namespace, db: Db) -> None:
+    """Raise :class:`ValueError` for anything that cannot work, before any write."""
+    if args.action == "import":
+        if not os.path.exists(str(args.events)):
+            raise ValueError(f"cannot read {args.events}: no such file")
+        return
+    if args.action not in ("accept", "reject"):
+        return
+    desktop, view, step = int(args.desktop), str(args.view), int(args.step)
+    if desktop not in set(db.desktop_ids()):
+        raise ValueError(f"D{desktop:02d} is not in the database; nothing was written")
+    if db.pose_break(desktop, view, step) is None:
+        raise ValueError(f"D{desktop:02d} {view} has no break at step {step}; add one "
+                         f"with `pose-breaks import`, or in the window")
 
 
 def _run(args: argparse.Namespace, db: Db) -> int:

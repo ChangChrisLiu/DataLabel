@@ -124,6 +124,24 @@ def test_the_dialog_is_told_how_many_shapes_the_boundary_cuts(window: MainWindow
     assert all(k.anchor_step == CUT - 1 and k.pose_segment == 1 for k in carried)
 
 
+def test_a_split_clears_the_undo_history(window: MainWindow):
+    """The guide says so, because the session is re-opened on the same frame."""
+    window.session.goto(CUT, force=True)
+    instance = next(str(r["key"]) for r in window.session.instance_rows()
+                    if r.get("placement") == "in_chassis")
+    window.on_request_edit(instance)
+    mask = window.session.editing_mask().copy()
+    mask[2:6, 2:6] = True
+    window.set_editing_mask(mask, undoable=True)
+    window.act_commit()
+    assert window.session.undo_stack.can_undo
+    answer(window, carry=False)
+
+    window.act_split_pose()
+
+    assert not window.session.undo_stack.can_undo
+
+
 def test_a_split_at_the_first_step_is_refused_with_a_reason(window: MainWindow):
     window.session.goto(min(window.session.steps()), force=True)
     asked = answer(window, carry=False)
@@ -230,6 +248,60 @@ def test_rejecting_an_accepted_break_merges_the_segments_back(window: MainWindow
 
     assert segments(window) == [(1, 1, LAST_STEP)]
     assert [k for k in window.db.keyframes(DESKTOP, VIEW) if k.source == "carried"] == []
+
+
+def test_the_bar_is_not_offered_outside_annotate_mode(window: MainWindow):
+    """M2: accepting is a structural split; the Review canvas is read-only."""
+    window.db.add_pose_break(DESKTOP, VIEW, CUT, status="proposed", kind="camera",
+                             magnitude_px=8.6, source="audit:events.csv")
+    window.session.goto(CUT, force=True)
+    window.set_mode("review")
+    window.render_frame()
+    asked = answer(window, carry=True)
+
+    assert not window.pose_bar.isVisibleTo(window)
+    window.accept_pose_proposal()
+    window.reject_pose_proposal()
+
+    assert asked == []
+    assert segments(window) == [(1, 1, LAST_STEP)]
+    assert window.db.pose_break(DESKTOP, VIEW, CUT)["status"] == "proposed"
+
+
+# --------------------------------------------------------------------------- #
+# what the re-cut could not keep reaches the status bar (round 1, I-3)
+# --------------------------------------------------------------------------- #
+def test_the_status_bar_says_which_layer_pairs_a_merge_changed(window: MainWindow):
+    from tda.core.model import ZOrderRec
+
+    window.session.goto(CUT, force=True)
+    answer(window, carry=False)
+    window.act_split_pose()
+    order = list(window.db.zorder(DESKTOP, VIEW, 2).order)
+    window.db.set_zorder(ZOrderRec(DESKTOP, VIEW, 1, list(reversed(order))))
+    window.db.set_pose_break_status(DESKTOP, VIEW, CUT, "proposed")
+    window.render_frame()
+
+    window.reject_pose_proposal()
+
+    assert "changed places" in window.status_message()
+    assert "pose break rejected" in window.status_message()
+
+
+def test_the_status_bar_names_a_carried_shape_the_merge_had_to_keep(window: MainWindow):
+    window.session.goto(CUT, force=True)
+    answer(window, carry=True)
+    window.act_split_pose()
+    carried = next(k for k in window.db.keyframes(DESKTOP, VIEW) if k.source == "carried")
+    carried.parts = list(carried.parts)
+    window.db.update_keyframe(carried)          # a redraw bumps the version
+    window.db.set_pose_break_status(DESKTOP, VIEW, CUT, "proposed")
+    window.render_frame()
+
+    window.reject_pose_proposal()
+
+    assert carried.instance in window.status_message()
+    assert "were kept" in window.status_message()
 
 
 # --------------------------------------------------------------------------- #

@@ -27,7 +27,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
-__all__ = ["RecutPlan", "boundaries", "recut_plan", "straddling"]
+__all__ = ["RecutPlan", "boundaries", "describe_discard", "describe_uncarried",
+           "merge_orders", "recut_plan", "straddling"]
 
 #: A break row's ``status``.  Only ``accepted`` ever cuts a segment.
 PROPOSED = "proposed"
@@ -155,6 +156,81 @@ def recut_plan(old: list[tuple[int, int, int]], new_bounds: list[int],
     for seg, _start, _end in old:
         merged.setdefault(renumber[seg], []).append(seg)
     return RecutPlan(ranges=ranges, renumber=renumber, split=split, merged=merged, old=old)
+
+
+def merge_orders(keeper: Iterable, other: Iterable) -> tuple[list, list]:
+    """Fold two layer orders into one; returns ``(merged, changed pairs)``.
+
+    Undoing a split merges two segments, and each may carry a
+    :class:`~tda.core.model.ZOrderRec` -- a *total* order, which has no union.
+    The rule, so that nothing silently disappears:
+
+    * the keeper's order comes first, exactly as it is;
+    * every layer key that exists only in ``other`` is **appended**, keeping
+      their relative order among themselves.  Nothing drops out, so no instance
+      falls into ``zorder_missing`` because two segments became one;
+    * what genuinely could not be kept is the *relative* order of a pair that
+      ``other`` ordered the other way round.  Those pairs -- and only those --
+      come back as ``[a, b]`` meaning "``other`` had ``a`` above ``b``, the
+      merged order does not".
+
+    Identical orders therefore produce no changed pairs at all, which is what
+    makes "the split you just undid" silent.
+    """
+    kept = [tuple(entry) for entry in keeper]
+    rest = [tuple(entry) for entry in other]
+    merged = kept + [entry for entry in rest if entry not in kept]
+    rank = {entry: i for i, entry in enumerate(merged)}
+    changed = [
+        [list(a), list(b)]
+        for i, a in enumerate(rest) for b in rest[i + 1:]
+        if a in rank and b in rank and rank[a] > rank[b]
+    ]
+    return [list(entry) for entry in merged], changed
+
+
+def describe_discard(view: str, item: dict) -> str:
+    """The one sentence every caller says about something a re-cut could not keep.
+
+    The pipeline writes it into ``pose_issues``, the command line prints it and
+    the window puts it in the status bar, so an annotator cannot be told three
+    different things about one event -- and a renderer that assumes the wrong
+    shape cannot abort an import (``d['row']`` is a dict for a segment row and a
+    list of layer keys for an order).
+    """
+    where = f"{view} pose segment {item['pose_segment']}"
+    if item.get("orphan"):
+        table = item["table"]
+        if item.get("replaced"):
+            return (f"{where}: a stray {table} row of a segment that no longer exists "
+                    f"was replaced by segment {item['into']}'s own; it is in the op log")
+        return (f"{where}: a stray {table} row of a segment that no longer exists was "
+                f"left in place, and nothing reads it")
+    if item["table"] == "zorder":
+        pairs = item.get("changed_pairs") or []
+        shown = "; ".join(f"{a[0]} over {b[0]}" for a, b in pairs[:3])
+        more = f" (+{len(pairs) - 3} more)" if len(pairs) > 3 else ""
+        return (f"{where}: merged into segment {item['into']}, which kept its own layer "
+                f"order; {len(pairs)} pair(s) changed places: {shown}{more}")
+    if item["table"] == "pose_segment":
+        fields = ", ".join(sorted(item.get("row") or {}))
+        return (f"{where}: merged into segment {item['into']}, which kept its own "
+                f"{fields}; the discarded values are in the op log")
+    return (f"{where}: merged into segment {item['into']}; the discarded values are in "
+            f"the op log")
+
+
+def describe_uncarried(kept: list) -> str:
+    """The one sentence about carried shapes a merge had to keep, with the instances.
+
+    "2 carried keyframes were kept" is not something anybody can act on;
+    "psu.01 at step 18" is -- that is the frame to open and the anchor to look
+    at.
+    """
+    named = ", ".join(f"{k['instance']} at step {k['anchor_step']}" for k in kept[:3])
+    more = f" (+{len(kept) - 3} more)" if len(kept) > 3 else ""
+    return (f"{len(kept)} carried shape(s) had been edited and were kept when the "
+            f"break was removed: {named}{more}; check their anchors")
 
 
 def straddling(anchors: Iterable[int], start: int, boundary: int) -> list[int]:

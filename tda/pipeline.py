@@ -25,6 +25,7 @@ from typing import Callable, Iterable, Optional
 
 from tda.core import db_pose
 from tda.core.db import Db
+from tda.core.pose_breaks import describe_discard, describe_uncarried
 from tda.core.db_backup import DEFAULT_KEEP
 from tda.core.db_status import VIEW_COUNTERS
 from tda.core.index import DesktopIndex, load_index
@@ -383,17 +384,14 @@ def _recut_issues(view: str, result: dict) -> list[str]:
         # skim this list.
         if move["dropped"] or move["old"].get("ref_step") is not None
     ]
-    lines += [
-        f"{view} pose segment {d['pose_segment']}: merged back into segment "
-        f"{d['into']}, which kept its own {', '.join(sorted(d['row']))}; the "
-        f"discarded values are in the op log"
-        for d in result["discarded"]
-    ]
+    # One renderer for every caller (:func:`tda.core.pose_breaks.describe_discard`).
+    # Rendering it here by hand is what made a discarded *layer order* -- whose
+    # payload is a list of layer keys, not a dict of column names -- raise a
+    # TypeError out of ``split_pose_segments``, and with it roll back the whole
+    # desktop of a ``load-index`` or an ``import-logs``.
+    lines += [describe_discard(view, d) for d in result["discarded"]]
     if result["uncarried"]:
-        lines.append(
-            f"{view}: {len(result['uncarried'])} carried keyframes had been edited "
-            f"and were kept when the break was removed; check their anchors"
-        )
+        lines.append(f"{view}: {describe_uncarried(result['uncarried'])}")
     return lines
 
 

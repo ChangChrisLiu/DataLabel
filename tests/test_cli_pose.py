@@ -67,6 +67,10 @@ def env(tmp_path: Path) -> dict:
 
     db = Db(str(db_path))
     db.upsert_desktop(DESKTOP, {"brand": "Dell"})
+    # the machines the fixture CSV names: a proposal for a desktop the database
+    # does not have is skipped, not conjured into existence
+    for other in (1, 2, 3, 4, 36, 63):
+        db.upsert_desktop(other, {})
     db.upsert_instance(InstanceRec(key="psu.01", desktop=DESKTOP, cls="psu"))
     db.replace_steps(DESKTOP,
                      [StepRec(DESKTOP, k, "normal", f"row {k}")
@@ -182,6 +186,25 @@ def test_import_without_a_file_is_one_line_and_an_error(env: dict):
 
 def test_a_missing_events_file_is_reported_not_a_traceback(env: dict):
     assert run(env, "pose-breaks", "import", str(env["root"] / "nope.csv")) == EXIT_ERROR
+    assert not (env["root"] / "backups").exists()   # refused before the backup
+
+
+def test_a_proposal_for_an_unknown_desktop_is_skipped_not_invented(env: dict, events: str):
+    """M3a: `pose_break` has a foreign key; a break must not conjure a machine."""
+    db = open_db(env)
+    try:
+        db.conn.execute("DELETE FROM desktop WHERE id=63")
+        db.conn.commit()
+        before = set(db.desktop_ids())
+
+        run_out = import_events(db, events, log=None)
+
+        assert set(db.desktop_ids()) == before
+        assert db.pose_breaks(63) == []
+        assert any("D63 is not in the database" in line for line in run_out.skipped)
+        assert db.pose_break(2, "oak1", 6) is not None    # the rest still landed
+    finally:
+        db.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -263,6 +286,28 @@ def test_accepting_a_break_that_is_not_there_is_refused(env: dict):
 
 def test_accept_needs_a_desktop_a_view_and_a_step(env: dict):
     assert run(env, "pose-breaks", "accept", "--desktop", str(DESKTOP)) == EXIT_ERROR
+
+
+def test_an_unknown_desktop_is_refused_before_the_backup(env: dict):
+    """M3a: no backup, no `desktop` row, exit 1."""
+    assert run(env, "pose-breaks", "accept", "--desktop", "99", "--view", VIEW,
+               "--step", "19") == EXIT_ERROR
+    assert run(env, "pose-breaks", "reject", "--desktop", "99", "--view", VIEW,
+               "--step", "19") == EXIT_ERROR
+
+    assert not (env["root"] / "backups").exists()
+    db = open_db(env)
+    try:
+        assert 99 not in db.desktop_ids()
+        assert db.pose_breaks(99) == []
+    finally:
+        db.close()
+
+
+def test_a_break_that_is_not_there_is_refused_before_the_backup(env: dict):
+    assert run(env, "pose-breaks", "reject", "--desktop", str(DESKTOP), "--view", VIEW,
+               "--step", "19") == EXIT_ERROR
+    assert not (env["root"] / "backups").exists()
 
 
 def test_a_break_for_a_view_with_no_frames_is_stored_and_cuts_nothing(env: dict):

@@ -575,6 +575,65 @@ def test_a_reorient_and_a_manual_break_at_the_same_step_are_one_boundary(env):
         db.close()
 
 
+def test_a_discarded_layer_order_does_not_abort_the_whole_import(env):
+    """Round 1, I-1: `_recut_issues` rendered a list of layer keys as a dict.
+
+    Fed the shape ``apply_recut`` really produces for a discarded z-order, the
+    audit line used to raise ``TypeError`` -- inside ``split_pose_segments``,
+    inside the desktop's own transaction, so a whole ``load-index`` or
+    ``import-logs`` rolled back over one merged layer order.
+    """
+    from tda.pipeline import _recut_issues
+
+    lines = _recut_issues("scan", {
+        "ref_moves": [],
+        "discarded": [{"table": "zorder", "pose_segment": 2, "into": 1,
+                       "changed_pairs": [[["psu.01", "main"], ["screw.psu.01", "main"]]]}],
+        "uncarried": [{"id": 4, "instance": "psu.01", "anchor_step": 18}],
+        "ranges": [(1, 1, 42)],
+    })
+
+    assert any("1 pair(s) changed places" in line for line in lines)
+    assert any("psu.01 at step 18" in line for line in lines)
+
+
+def test_a_step_that_stops_being_a_reorient_merges_back_without_crashing(env):
+    """The end-to-end shape of I-1: cut at a reorient, correct the log, merge.
+
+    D77's sheet flips the chassis at step 3.  The cut copies the layer order
+    into both halves; correcting the step type merges them again, which is
+    exactly the path that used to abort the run.
+    """
+    from tda.core.model import ZOrderRec
+    from tda.pipeline import split_pose_segments
+
+    assert run(env, "load-index") == EXIT_OK
+    assert run(env, "import-logs") == EXIT_OK
+    db = open_db(env)
+    try:
+        assert len(_ranges(db, 77, "scan")) == 2
+        # the annotator re-ordered the two layers in the earlier half
+        db.set_zorder(ZOrderRec(77, "scan", 1, [("psu.01", "main"), ("fan.01", "main")]))
+        db.set_zorder(ZOrderRec(77, "scan", 2, [("fan.01", "main"), ("psu.01", "main")]))
+        steps = [s for s in db.steps(77)]
+        for step in steps:
+            if step.step_type == StepType.REORIENT.value:
+                step.step_type = StepType.NORMAL.value
+        db.replace_steps(77, steps, db.actions(77))
+        db.upsert_desktop(77, {"pose_issues": []})
+
+        counts = split_pose_segments(db, 77)      # used to raise TypeError
+
+        assert counts["scan"] == 1
+        assert len(_ranges(db, 77, "scan")) == 1
+        # nothing fell out of the order, and what changed places is reported
+        assert db.zorder(77, "scan", 1).order == [("fan.01", "main"), ("psu.01", "main")]
+        issues = (db.get_desktop(77) or {}).get("pose_issues") or []
+        assert any("changed places" in line for line in issues)
+    finally:
+        db.close()
+
+
 def test_a_proposed_or_rejected_break_cuts_nothing(env):
     assert run(env, "load-index") == EXIT_OK
     assert run(env, "import-logs") == EXIT_OK
