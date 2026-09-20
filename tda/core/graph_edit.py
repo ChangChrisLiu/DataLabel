@@ -43,7 +43,8 @@ from tda.core.graph import (
     is_provisional,
     validate_sequence,
 )
-from tda.core.graph_rules import BLOCKED_MODES, CABLE_PREFIX
+from tda.core.graph_derive import MANUAL, OVERRIDE, RULE
+from tda.core.graph_rules import BLOCKED_MODES, CABLE_PREFIX, is_orphan
 from tda.core.model import ActionRec, InstanceRec
 
 __all__ = [
@@ -54,21 +55,15 @@ __all__ = [
     "GraphEditError",
     "Violation",
     "add_manual_edge",
+    "adopt_orphan",
+    "drop_orphan",
     "editable",
+    "is_orphan",
     "remove_manual_edge",
     "set_rule_decision",
     "violations",
     "violations_of",
 ]
-
-#: ``relation.source`` of an edge a human wrote. ``constraints`` keeps it.
-MANUAL = "manual"
-#: ``relation.source`` of an edge the spec 7.3 rules derived; re-derived on
-#: every ``constraints`` run, and never edited in place.
-RULE = "rule"
-#: ``relation.source`` of a human decision *about* a rule edge (spec 7.3): the
-#: same triple, the rule's reason, a status the re-run respects.
-OVERRIDE = "override"
 
 #: What :func:`set_rule_decision` accepts. ``proposed`` clears the decision and
 #: gives the rules their edge back.
@@ -288,7 +283,15 @@ def set_rule_decision(
     decision survives every re-run. ``proposed`` clears the decision and hands
     the triple back to the rules.
 
-    A manual edge carries no decision: remove it instead.
+    Either of the two that make the edge **active again** is checked for
+    acyclicity, because rejecting one edge and writing its reverse by hand is a
+    legal pair of edits whose *undo* would close a loop -- and a stored cycle is
+    a graph the planner cannot answer for and the next ``constraints`` run
+    refuses. Rejecting is never refused: it can only take an edge out.
+
+    A manual edge carries no decision (remove it instead), and neither does an
+    orphaned one -- the rule edge it was about is not derived any more, so
+    :func:`adopt_orphan` and :func:`drop_orphan` are what is left.
     """
     if decision not in DECISIONS:
         raise GraphEditError(
@@ -298,6 +301,12 @@ def set_rule_decision(
     found = _find(edges, src, kind, dst)
     if found is None:
         raise GraphEditError(f"没有这条边 / D has no edge {kind}({src}, {dst})")
+    if is_orphan(found):
+        raise GraphEditError(
+            f"规则已经不再推导这条边 / the rules no longer derive {found.label()}, so "
+            f"there is nothing left to accept or reject: keep it as a manual edge "
+            f"or clear it"
+        )
     if found.source not in (RULE, OVERRIDE):
         raise GraphEditError(
             f"{found.source} 边没有接受/拒绝 / a {found.source} edge is not accepted or "
@@ -307,7 +316,51 @@ def set_rule_decision(
         new = replace(found, source=RULE, status="proposed")
     else:
         new = replace(found, source=OVERRIDE, status=decision)
-    return [new if e is found else e for e in edges]
+    out = [new if e is found else e for e in edges]
+    if decision != "rejected":
+        _check_no_new_cycle(edges, out)
+    return out
+
+
+def adopt_orphan(
+    edges: list[Edge],
+    src: str,
+    kind: str,
+    dst: str,
+    *,
+    note: str = "",
+    instances: dict[str, InstanceRec],
+) -> list[Edge]:
+    """Keep an orphaned decision as a manual edge of the annotator's own.
+
+    The rules stopped deriving the edge this decision was about, so the decision
+    has nothing left to be about (:mod:`tda.core.graph_derive`). If the
+    annotator still believes the constraint, it becomes theirs: same triple,
+    same mode and necessity, ``source='manual'``, and their own reason. It goes
+    through every check a new edge goes through -- endpoints, cycles, the lot --
+    because that is exactly what it now is.
+    """
+    found = _find(edges, src, kind, dst)
+    if found is None or not is_orphan(found):
+        raise GraphEditError(
+            f"这不是一条已失去规则的决定 / {kind}({src}, {dst}) is not an orphaned "
+            f"decision"
+        )
+    without = [e for e in edges if e is not found]
+    return add_manual_edge(without, src, kind, dst, necessity=found.necessity,
+                           mode=found.mode, note=note or found.reason,
+                           instances=instances)
+
+
+def drop_orphan(edges: list[Edge], src: str, kind: str, dst: str) -> list[Edge]:
+    """Clear an orphaned decision: the edge is gone, so is the decision."""
+    found = _find(edges, src, kind, dst)
+    if found is None or not is_orphan(found):
+        raise GraphEditError(
+            f"这不是一条已失去规则的决定 / {kind}({src}, {dst}) is not an orphaned "
+            f"decision"
+        )
+    return [e for e in edges if e is not found]
 
 
 # --------------------------------------------------------------------------- #

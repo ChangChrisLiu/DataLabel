@@ -37,6 +37,8 @@ from tda.core.graph_edit import (
     RULE,
     GraphEditError,
     add_manual_edge,
+    adopt_orphan,
+    drop_orphan,
     remove_manual_edge,
     set_rule_decision,
     violations,
@@ -289,13 +291,122 @@ def test_deciding_about_an_edge_that_is_not_there_is_refused(rules):
 
 
 # --------------------------------------------------------------------------- #
+# a decision that makes an edge active again cannot close a cycle (C1)
+# --------------------------------------------------------------------------- #
+COOLER, CPU = "cpu_cooler.fan.01", "cpu.01"
+COVER_EDGE = (CPU, "covered_by", COOLER)
+
+
+def reversed_pair(rules, instances) -> list[Edge]:
+    """Reject `cpu covered_by cooler`, then write the reverse by hand.
+
+    Both steps are legal on their own: the rejected edge gates nothing, so the
+    reverse closes no loop while it stands.
+    """
+    out = set_rule_decision(rules, *COVER_EDGE, "rejected")
+    return add(out, instances, COOLER, "blocked_by", CPU, **BLOCK)
+
+
+def test_accepting_an_edge_back_into_a_cycle_is_refused(rules, instances):
+    staged = reversed_pair(rules, instances)
+    with pytest.raises(GraphEditError) as excinfo:
+        set_rule_decision(staged, *COVER_EDGE, "accepted")
+    text = str(excinfo.value)
+    assert "/" in text and "->" in text
+    assert CPU in text and COOLER in text
+
+
+def test_clearing_a_decision_back_into_a_cycle_is_refused(rules, instances):
+    staged = reversed_pair(rules, instances)
+    with pytest.raises(GraphEditError) as excinfo:
+        set_rule_decision(staged, *COVER_EDGE, "proposed")
+    assert "->" in str(excinfo.value)
+
+
+def test_the_panel_path_cannot_store_a_cycle(rules, instances):
+    """The C1 reproduction, end to end: the third Apply is the one refused."""
+    staged = reversed_pair(rules, instances)
+    assert find_cycles(active_edges(staged)) == []
+    for decision in ("accepted", "proposed"):
+        with pytest.raises(GraphEditError):
+            set_rule_decision(staged, *COVER_EDGE, decision)
+    assert find_cycles(active_edges(staged)) == []
+
+
+def test_rejecting_an_edge_that_breaks_a_cycle_is_allowed(rules, instances):
+    """A database can already hold a loop; rejecting is how you get out of it."""
+    looped = [*rules, Edge(type="blocked_by", target=COOLER, blocker=CPU,
+                           mode="physical_path", source=MANUAL, status="accepted")]
+    assert find_cycles(active_edges(looped))
+    out = set_rule_decision(looped, *COVER_EDGE, "rejected")
+    assert find_cycles(active_edges(out)) == []
+
+
+# --------------------------------------------------------------------------- #
+# orphaned decisions (I2): keep as a manual edge, or clear
+# --------------------------------------------------------------------------- #
+def orphaned(rules) -> list[Edge]:
+    """The bench's cooler-over-CPU decision, orphaned by a later S1 correction."""
+    from dataclasses import replace
+
+    return [replace(e, source=OVERRIDE, status="accepted_orphan")
+            if (e.target, e.type, e.blocker) == COVER_EDGE else e
+            for e in rules]
+
+
+def test_an_orphan_can_be_kept_as_a_manual_edge(rules, instances):
+    out = adopt_orphan(orphaned(rules), *COVER_EDGE, note="真的压在上面",
+                       instances=instances)
+    edge = one(out, "covered_by", CPU, COOLER)
+    assert (edge.source, edge.status) == (MANUAL, "accepted")
+    assert edge.reason == "真的压在上面"
+    assert edge in active_edges(out)
+    assert len(out) == len(rules)
+
+
+def test_keeping_an_orphan_runs_the_add_time_checks(rules, instances):
+    """It becomes a new manual edge, so it has to pass what a new edge passes."""
+    staged = add(orphaned(rules), instances, COOLER, "blocked_by", CPU, **BLOCK)
+    with pytest.raises(GraphEditError) as excinfo:
+        adopt_orphan(staged, *COVER_EDGE, instances=instances)
+    assert "->" in str(excinfo.value)
+
+
+def test_keeping_an_orphan_whose_endpoint_is_gone_is_refused(rules, instances):
+    del instances[COOLER]
+    with pytest.raises(GraphEditError) as excinfo:
+        adopt_orphan(orphaned(rules), *COVER_EDGE, instances=instances)
+    assert COOLER in str(excinfo.value)
+
+
+def test_an_orphan_can_be_cleared(rules):
+    out = drop_orphan(orphaned(rules), *COVER_EDGE)
+    assert len(out) == len(rules) - 1
+    assert not [e for e in out if (e.type, e.target, e.blocker) == ("covered_by", CPU, COOLER)]
+
+
+def test_only_an_orphan_can_be_cleared_that_way(rules):
+    with pytest.raises(GraphEditError):
+        drop_orphan(rules, *COVER_EDGE)
+
+
+def test_an_orphan_is_not_accepted_or_rejected(rules):
+    """There is no rule edge to decide about any more."""
+    with pytest.raises(GraphEditError) as excinfo:
+        set_rule_decision(orphaned(rules), *COVER_EDGE, "accepted")
+    assert "/" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
 # what the graph then says (the exports read exactly this)
 # --------------------------------------------------------------------------- #
 def test_a_manual_edge_removes_an_action_from_the_legal_set(rules, instances, tax):
+    """`tool_access` is the mode that stops you reaching the plug at all."""
     state = state_at(instances, [], 1, tax)
     assert ("disconnect", "connector.sata_data.01") in legal_actions(
         instances, active_edges(rules), state, tax, strict=False)
-    out = add(rules, instances, "connector.sata_data.01", "blocked_by", "psu.01", **BLOCK)
+    out = add(rules, instances, "connector.sata_data.01", "blocked_by", "psu.01",
+              mode="tool_access")
     assert ("disconnect", "connector.sata_data.01") not in legal_actions(
         instances, active_edges(out), state, tax, strict=False)
 

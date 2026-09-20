@@ -319,14 +319,18 @@ def test_a_real_run_takes_a_safety_backup(env, capsys):
 
 
 def test_one_desktop_is_one_transaction(env, monkeypatch):
-    """A desktop that raises half way through must leave no edge behind."""
+    """A desktop that raises half way through must leave no edge behind.
+
+    The write lives in :mod:`tda.core.graph_derive` now -- the one derivation
+    the S1 ``Apply`` shares -- so that is where the disk is taken away.
+    """
     from tda.core import graph as graph_module
 
     def boom(db, desktop, edges):
         edges_to_db(db, desktop, edges[:2])
         raise RuntimeError("the disk went away")
 
-    monkeypatch.setattr("tda.cli_graph.edges_to_db", boom)
+    monkeypatch.setattr("tda.core.graph_derive.edges_to_db", boom)
     assert run(env, "constraints", "--desktops", str(DESKTOP)) == EXIT_ERROR
     assert relations(env) == []
     assert graph_module.edges_to_db is not boom  # the real one is untouched

@@ -40,11 +40,18 @@ from tda.core.taxonomy import Taxonomy
 
 __all__ = [
     "AMBIGUOUS",
+    "ACCEPTED",
+    "BLOCKED_GATES",
     "CABLE_DEFAULT_STATE",
     "CABLE_PREFIX",
+    "INACTIVE_STATUSES",
     "LS_PREFIX",
     "NO_CANDIDATE",
+    "ORPHAN_OF",
+    "PROPOSED",
+    "REJECTED",
     "SCREW_ROLE_CLASSES",
+    "SETTLED_OF",
     "UNRESOLVED",
     "Edge",
     "GATED_VERBS",
@@ -54,6 +61,7 @@ __all__ = [
     "VerbTarget",
     "gated_verbs",
     "active_edges",
+    "is_orphan",
     "blocker_state",
     "cable_nodes",
     "cable_owner",
@@ -115,17 +123,50 @@ GATES: dict[str, frozenset[str]] = {
 }
 
 
-def gated_verbs(edge_type: str) -> frozenset[str]:
-    """Which verbs an edge of this type gates; an unknown type gates them all.
+#: What each ``blocked_by`` mode actually stops (spec 7.1). The mode was stored,
+#: digested and never read, so every manual ``blocked_by`` gated every verb --
+#: the same over-binding the ``connected_to`` row of :data:`GATES` removed. The
+#: distinction is again *moving the part* versus *reaching it*:
+#:
+#: * ``cable_tension`` -- a cable under tension lets the part swing aside, it
+#:   only stops it leaving the machine, exactly like ``connected_to``;
+#: * ``physical_path`` -- the blocker is in the part's way, so it can neither be
+#:   taken out nor moved, but its own screws and plugs are still reachable;
+#: * ``tool_access`` -- you cannot get at it at all, so every gated verb waits.
+BLOCKED_GATES: dict[str, frozenset[str]] = {
+    "cable_tension": frozenset({"remove"}),
+    "physical_path": frozenset({"remove", "displace"}),
+    "tool_access": GATED_VERBS,
+}
 
-    Gating too much is noisy and visible; gating too little silently drops a
-    constraint out of the ground truth, so an unrecognised type errs the loud way.
+
+def gated_verbs(edge_type: str, mode: Optional[str] = None) -> frozenset[str]:
+    """Which verbs an edge of this type (and ``blocked_by`` mode) gates.
+
+    An unknown type, and a ``blocked_by`` whose mode is missing or unknown, gate
+    them all: gating too much is noisy and visible, gating too little silently
+    drops a constraint out of the ground truth, so both err the loud way.
     """
+    if edge_type == "blocked_by":
+        return BLOCKED_GATES.get(mode or "", GATED_VERBS)
     return GATES.get(edge_type, GATED_VERBS)
 
 CABLE_PREFIX = "cable:"
 REMOVED = "removed"
+PROPOSED = "proposed"
+ACCEPTED = "accepted"
 REJECTED = "rejected"
+
+#: The status a human decision falls back to while the rules no longer derive
+#: the edge it was about (spec 7.3 gives no word for it, so the two are spelled
+#: out rather than encoded in another column -- no migration). See
+#: :mod:`tda.core.graph_derive`.
+ORPHAN_OF = {ACCEPTED: "accepted_orphan", REJECTED: "rejected_orphan"}
+SETTLED_OF = {orphan: settled for settled, orphan in ORPHAN_OF.items()}
+
+#: Statuses that gate nothing: a human said no, or the rule that justified the
+#: decision is no longer derived, so the decision is about nothing.
+INACTIVE_STATUSES = frozenset({REJECTED, *ORPHAN_OF.values()})
 
 #: The default state of a ``cable:*`` node, mirroring ``taxonomy.yaml``. A
 #: cable enters the frame state only once an event names it (see
@@ -183,8 +224,18 @@ class Edge:
 # shared helpers: edge status, verb applicability, cable nodes
 # --------------------------------------------------------------------------- #
 def active_edges(edges: Iterable["Edge"]) -> list["Edge"]:
-    """Edges a human has not rejected (spec 7.3: proposed / accepted / rejected)."""
-    return [e for e in edges if e.status != REJECTED]
+    """Edges that still gate something (spec 7.3: proposed / accepted / rejected).
+
+    Out go the ones a human rejected and the **orphaned decisions**: a decision
+    about a rule edge the rules no longer derive gates nothing, because the edge
+    it was about is gone (:data:`INACTIVE_STATUSES`).
+    """
+    return [e for e in edges if e.status not in INACTIVE_STATUSES]
+
+
+def is_orphan(edge: "Edge") -> bool:
+    """Is this a decision whose rule edge is no longer derived?"""
+    return edge.status in SETTLED_OF
 
 
 def verb_effect(tax: Taxonomy, cls: str, attrs: dict, verb: str) -> Optional[str]:

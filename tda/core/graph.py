@@ -113,14 +113,18 @@ def applicable_preconditions(edges: list[Edge], action: ActionLike) -> list[Edge
     taken away but not swung aside. A verb nothing can block (only ``reorient``
     today) has no preconditions at all.
 
+    A ``blocked_by`` edge gates by its ``mode`` (spec 7.1): a cable under
+    tension stops the part leaving, a blocked path stops it moving as well, and
+    only ``tool_access`` stops you reaching its own screws and plugs.
+
     ``action`` is an :class:`~tda.core.model.ActionRec` or a plain
-    ``(verb, target)`` pair. Rejected edges are dropped.
+    ``(verb, target)`` pair. Rejected and orphaned edges are dropped.
     """
     verb, target = _verb_target(action)
     if verb not in GATED_VERBS:
         return []
     return [e for e in active_edges(edges)
-            if e.target == target and verb in gated_verbs(e.type)]
+            if e.target == target and verb in gated_verbs(e.type, e.mode)]
 
 
 def _necessity_rank(necessity: str) -> int:
