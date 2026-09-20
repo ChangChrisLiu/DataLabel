@@ -26,6 +26,36 @@ label and the ``input_hash`` are :mod:`tda.core.compiler_visibility`'s. Both
 modules exist to keep this one readable; :func:`above` and
 :func:`derive_visibility` are re-exported here.
 
+Windows: every pixel touched is one a shape could reach
+-------------------------------------------------------
+The masks this produces are full-frame, in native image coordinates (spec 2.4),
+and so is every mask it reads. What it does **not** do is compute them
+full-frame. A part covers its own bounding box and nothing else, and that box
+is read off the stored RLE's run lengths (:func:`tda.core.masks.rle_bbox_xywh`)
+without decoding anything, so the compositing, the occluder subtraction, the
+areas, the bounding boxes and the visibility ladder all run on a slice of the
+canvas rather than on the canvas.
+
+On a 4032x3040 OAK frame with forty instances that is the difference between
+2.9 s and a tenth of it: the old pass did about five full-frame boolean
+operations per layer -- ``mask & ~claimed`` alone allocated two 12 MB
+temporaries -- plus a 12 MB copy of every decoded part.
+
+Three things follow and are not negotiable, since the ``input_hash`` and the
+stored run lengths must not move by one byte
+(``tests/test_compiler_golden.py``):
+
+* a window is rounded **outwards** and may be larger than the shape; it may
+  never be smaller. A warped part is padded by :data:`WARP_SLACK` because
+  nearest-neighbour resampling can land a pixel just outside the transformed
+  box, and a part rasterised from a bare rectangle is padded because
+  ``fillPoly`` rounds its corners.
+* an **empty** part is still a layer. It takes part in the z-order and
+  therefore in the hash, exactly as it did when it was a canvas of zeros.
+* the canvases are allocated in **Fortran order**, which is what
+  :func:`tda.core.masks.encode_rle` needs to store them without transposing,
+  and they are ``np.zeros``, which costs nothing until a page is written.
+
 Box-only geometry (``geom_type == "box"``, typically a part lying on the bench)
 carries no mask: it is not a layer, it never occludes anything and is never
 occluded, and it is reported with ``visible=None``, ``amodal=None``,
@@ -52,7 +82,7 @@ import numpy as np
 
 from tda.core import masks
 from tda.core.compiler_layers import LayerKey, above, group_order
-from tda.core.compiler_visibility import derive_visibility, input_hash
+from tda.core.compiler_visibility import derive_visibility, input_hash, visibility_for
 from tda.core.model import (
     FrameKey,
     FrameOverride,
@@ -83,6 +113,18 @@ ON_BENCH = Placement.ON_BENCH.value
 OUT_OF_VIEW = Visibility.OUT_OF_VIEW.value
 
 _MISSING = "missing"
+
+#: ``(x0, y0, x1, y1)``, upper bounds exclusive, already clipped to the canvas.
+Window = tuple[int, int, int, int]
+
+#: Pixels a window is grown by when the shape inside it was resampled rather
+#: than read off run lengths: a nearest-neighbour warp, or a rectangle
+#: rasterised by ``fillPoly``, can set a pixel just outside the exact box.
+WARP_SLACK = 2
+
+#: The transform that leaves a mask where it is -- what an occluder RLE and a
+#: frame override are already in, so their windows are their own run lengths'.
+IDENTITY = Similarity()
 
 
 # --------------------------------------------------------------------------- #
@@ -210,25 +252,140 @@ def _transform_box(box, transform: Similarity) -> tuple[float, float, float, flo
     return (min(xs), min(ys), max(xs), max(ys))
 
 
-def _part_mask(
+# --------------------------------------------------------------------------- #
+# windows
+# --------------------------------------------------------------------------- #
+def _clip_window(box, hw: tuple[int, int]) -> Window:
+    """``box`` rounded **outwards** to whole pixels and clipped to the canvas."""
+    height, width = int(hw[0]), int(hw[1])
+    x0 = int(min(max(np.floor(box[0]), 0), width))
+    y0 = int(min(max(np.floor(box[1]), 0), height))
+    x1 = int(min(max(np.ceil(box[2]), x0), width))
+    y1 = int(min(max(np.ceil(box[3]), y0), height))
+    return (x0, y0, x1, y1)
+
+
+def _empty_window(window: Optional[Window]) -> bool:
+    return window is None or window[2] <= window[0] or window[3] <= window[1]
+
+
+def _union_window(a: Optional[Window], b: Optional[Window]) -> Optional[Window]:
+    if _empty_window(a):
+        return None if _empty_window(b) else b
+    if _empty_window(b):
+        return a
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
+
+def _intersect_window(a: Window, b: Window) -> Optional[Window]:
+    found = (max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3]))
+    return None if _empty_window(found) else found
+
+
+def _view(canvas: np.ndarray, window: Window) -> np.ndarray:
+    """The part of a full-canvas array ``window`` covers (no copy)."""
+    return canvas[window[1]:window[3], window[0]:window[2]]
+
+
+def _merge_layer(
+    mask_a: np.ndarray, window_a: Window, mask_b: np.ndarray, window_b: Window
+) -> tuple[np.ndarray, Window]:
+    """Two parts sharing one name, unioned into one window (spec 3.3 step 5).
+
+    A keyframe may list the same part name twice; that has always been *one*
+    layer covering both, and the z-order lists it once.
+    """
+    if _empty_window(window_b):
+        return mask_a, window_a
+    if _empty_window(window_a):
+        return mask_b, window_b
+    window = _union_window(window_a, window_b)
+    out = np.zeros((window[3] - window[1], window[2] - window[0]),
+                   dtype=bool, order="F")
+    for mask, box in ((mask_a, window_a), (mask_b, window_b)):
+        out[box[1] - window[1]:box[3] - window[1],
+            box[0] - window[0]:box[2] - window[0]] |= mask
+    return out, window
+
+
+def _rle_window(rle: dict, transform: Similarity, hw: tuple[int, int]) -> Window:
+    """Where this RLE's pixels are, straight off the run lengths.
+
+    ``toBbox`` reads the encoding, so finding out costs no decode at all -- and
+    on a 12 MP canvas measuring it afterwards with :func:`tda.core.masks.bbox`
+    would cost more than the compositing the window exists to shrink.
+    """
+    x, y, width, height = masks.rle_bbox_xywh(rle)
+    if width <= 0 or height <= 0:
+        return (0, 0, 0, 0)
+    box = (x, y, x + width, y + height)
+    if transform.is_identity():
+        return _clip_window(box, hw)
+    warped = _transform_box(box, transform)
+    return _clip_window(
+        (warped[0] - WARP_SLACK, warped[1] - WARP_SLACK,
+         warped[2] + WARP_SLACK, warped[3] + WARP_SLACK), hw
+    )
+
+
+def _part_window(
     part: ShapePart, transform: Similarity, hw: tuple[int, int]
+) -> Optional[Window]:
+    """A window guaranteed to contain this part's mask, or ``None`` for no mask.
+
+    Always a superset: a window that is too large only costs time, one that is
+    too small silently truncates a stored annotation.
+    """
+    if part.rle is not None:
+        return _rle_window(part.rle, transform, hw)
+    if part.box is not None:
+        box = _transform_box(part.box, transform)
+        return _clip_window(
+            (box[0] - WARP_SLACK, box[1] - WARP_SLACK,
+             box[2] + WARP_SLACK, box[3] + WARP_SLACK), hw
+        )
+    return None
+
+
+def _part_mask(
+    part: ShapePart, transform: Similarity, hw: tuple[int, int],
+    window: Optional[Window] = None,
 ) -> Optional[np.ndarray]:
-    """One part's amodal mask in frame coordinates, ``None`` when it has none.
+    """One part's amodal mask, ``None`` when it has none.
+
+    With ``window`` the array returned covers **only that window** -- which is
+    what :func:`compile_frame` composites with -- and without it the whole
+    frame, which is what a caller outside this module means by "the part's
+    mask". Both are Fortran-ordered, so storing one costs no transpose.
 
     An RLE is decoded and warped (identity is a fast path: no warp at all); a
-    part that carries only a box is rasterised from its transformed corners.
-    An RLE whose own size is not ``hw`` yields ``None`` as well -- see
+    part that carries only a box is rasterised from its transformed corners,
+    translated into the window, which is exact because the translation is by
+    whole pixels. An RLE whose own size is not ``hw`` yields ``None`` -- see
     :func:`_wrong_size`; the mask loop reports that case before asking.
     """
     if part.rle is not None:
         if _wrong_size(part.rle, hw):
             return None
         mask = masks.decode_rle(part.rle)
-        if transform.is_identity():
+        if not transform.is_identity():
+            mask = np.asfortranarray(masks.warp_mask(mask, transform, hw))
+        if window is None:
             return mask
-        return masks.warp_mask(mask, transform, hw)
+        return np.asfortranarray(_view(mask, window))
     if part.box is not None:
-        return masks.polygons_to_mask([_box_corners(part.box, transform)], hw)
+        flat = _box_corners(part.box, transform)
+        if window is None:
+            return np.asfortranarray(masks.polygons_to_mask([flat], hw))
+        x0, y0, x1, y1 = window
+        if _empty_window(window):
+            # the rectangle is entirely off the canvas: an empty layer, which
+            # is still a layer (it takes part in the z-order and the hash)
+            return np.zeros((y1 - y0, x1 - x0), dtype=bool, order="F")
+        moved = [v - (x0 if index % 2 == 0 else y0) for index, v in enumerate(flat)]
+        return np.asfortranarray(
+            masks.polygons_to_mask([moved], (y1 - y0, x1 - x0))
+        )
     return None
 
 
@@ -241,12 +398,14 @@ def _keyframe_box(
         if part.box is not None:
             boxes.append(_transform_box(part.box, transform))
             continue
-        mask = _part_mask(part, transform, hw)
+        window = _part_window(part, transform, hw)
+        mask = None if window is None else _part_mask(part, transform, hw, window)
         if mask is None:
             continue
         found = masks.bbox(mask)
         if found is not None:
-            boxes.append(tuple(float(v) for v in found))  # type: ignore[arg-type]
+            boxes.append((float(found[0] + window[0]), float(found[1] + window[1]),
+                          float(found[2] + window[0]), float(found[3] + window[1])))
     if not boxes:
         return None
     return (
@@ -257,13 +416,48 @@ def _keyframe_box(
     )
 
 
-def _occlusion_ratio(visible: np.ndarray, amodal: np.ndarray) -> float:
-    """``1 - |V| / |A|``, clamped to ``[0, 1]`` (0 when the amodal mask is empty)."""
-    total = masks.area(amodal)
-    if total == 0:
+def _occlusion_ratio(visible_area: int, amodal_area: int) -> float:
+    """``1 - |V| / |A|``, clamped to ``[0, 1]`` (0 when the amodal mask is empty).
+
+    Takes the two pixel counts rather than the two masks: both are measured
+    inside the instance's own window, which on a 12 MP canvas is the difference
+    between two full-frame scans per instance and two small ones.
+    """
+    if amodal_area == 0:
         return 0.0
-    ratio = 1.0 - masks.area(visible) / total
+    ratio = 1.0 - visible_area / amodal_area
     return float(min(1.0, max(0.0, ratio)))
+
+
+def _window_bbox(canvas: np.ndarray, window: Optional[Window]) -> Optional[tuple]:
+    """:func:`tda.core.masks.bbox` of what a window holds, in frame coordinates."""
+    if _empty_window(window):
+        return None
+    found = masks.bbox(_view(canvas, window))
+    if found is None:
+        return None
+    return (found[0] + window[0], found[1] + window[1],
+            found[2] + window[0], found[3] + window[1])
+
+
+def _window_area(canvas: np.ndarray, window: Optional[Window]) -> int:
+    if _empty_window(window):
+        return 0
+    return masks.area(_view(canvas, window))
+
+
+def _label_for(box: Optional[tuple], ratio: float, *, present: bool = True) -> str:
+    """:func:`derive_visibility`, asked of a box instead of of a mask.
+
+    The ladder only ever looked at the shorter side of the visible mask's
+    bounding box and at the occlusion ratio (spec 3.3 step 7), and the box has
+    already been measured by then. ``present=False`` is the "no geometry at
+    all" case, which is ``out_of_view``.
+    """
+    if not present:
+        return visibility_for(None, ratio)
+    side = 0 if box is None else int(min(box[2] - box[0], box[3] - box[1]))
+    return visibility_for(side, ratio)
 
 
 
@@ -422,8 +616,13 @@ def compile_frame(
     # --- step 4: transform the shapes into frame coordinates --------------- #
     kinds: dict[str, str] = {}
     layer_masks: dict[LayerKey, np.ndarray] = {}
+    layer_windows: dict[LayerKey, Window] = {}
     groups: dict[str, list[LayerKey]] = {}
     amodals: dict[str, np.ndarray] = {}
+    #: Where each instance's pixels can be. Everything measured about the
+    #: instance afterwards -- its visible mask, its areas, its box -- is
+    #: measured inside this and nowhere else.
+    windows: dict[str, Optional[Window]] = {}
     boxes: dict[str, Optional[tuple]] = {}
     for inst in instances:
         kf = selected[inst]
@@ -441,49 +640,72 @@ def compile_frame(
             boxes[inst] = _keyframe_box(kf, transform, canvas)
             continue
         kinds[inst] = GEOM_MASK
-        amodal = np.zeros(canvas, dtype=bool)
+        amodal = np.zeros(canvas, dtype=bool, order="F")
+        window: Optional[Window] = None
         for part in kf.parts:
             if _wrong_size(part.rle, canvas):
                 problems.append(f"shape_size_mismatch:{inst}/{part.name}")
                 continue
-            mask = _part_mask(part, transform, canvas)
+            here = _part_window(part, transform, canvas)
+            if here is None:
+                continue
+            mask = _part_mask(part, transform, canvas, here)
             if mask is None:
                 continue
             layer = (inst, part.name)
             if layer in layer_masks:  # a repeated part name is one layer
-                layer_masks[layer] |= mask
+                layer_masks[layer], layer_windows[layer] = _merge_layer(
+                    layer_masks[layer], layer_windows[layer], mask, here
+                )
             else:
-                layer_masks[layer] = mask.copy()
+                layer_masks[layer] = mask
+                layer_windows[layer] = here
                 groups.setdefault(placement_of[inst], []).append(layer)
-            amodal |= mask
+            _view(amodal, here)[...] |= mask
+            window = _union_window(window, here)
         amodals[inst] = amodal
+        windows[inst] = window
 
     # --- step 5: paint each group top-down --------------------------------- #
-    visibles = {inst: np.zeros(canvas, dtype=bool) for inst in amodals}
+    visibles = {inst: np.zeros(canvas, dtype=bool, order="F") for inst in amodals}
     painted: dict[str, list[LayerKey]] = {}
     for group in sorted(groups):
         bottom_up, group_problems = group_order(groups[group], zorder, overrides)
         problems.extend(group_problems)
         painted[group] = bottom_up
-        claimed = np.zeros(canvas, dtype=bool)
+        claimed = np.zeros(canvas, dtype=bool, order="F")
         for layer in reversed(bottom_up):  # topmost layer claims first
+            here = layer_windows[layer]
+            if _empty_window(here):
+                continue
             mask = layer_masks[layer]
-            visibles[layer[0]] |= mask & ~claimed
-            claimed |= mask
+            taken = _view(claimed, here)
+            _view(visibles[layer[0]], here)[...] |= mask & ~taken
+            taken |= mask
 
     # --- step 6: occluders ------------------------------------------------- #
     frame_occluders = [occ for occ in occluders if occ.frame == key]
     occluded = None
+    occluded_window: Optional[Window] = None
     for occ in frame_occluders:
         if _wrong_size(occ.rle, canvas):
             problems.append(f"shape_size_mismatch:occluder/{occ.occluder_type}")
             continue
-        mask = masks.decode_rle(occ.rle)
-        occluded = mask if occluded is None else (occluded | mask)
-    if occluded is not None:
-        keep = ~occluded
-        for inst in visibles:
-            visibles[inst] &= keep
+        here = _rle_window(occ.rle, IDENTITY, canvas)
+        if occluded is None:
+            occluded = np.zeros(canvas, dtype=bool, order="F")
+        if not _empty_window(here):
+            # occluder RLEs are already in frame coordinates (see the docstring),
+            # so the window is the run lengths' own box
+            _view(occluded, here)[...] |= _view(masks.decode_rle(occ.rle), here)
+        occluded_window = _union_window(occluded_window, here)
+    if occluded is not None and occluded_window is not None:
+        for inst, visible in visibles.items():
+            overlap = (None if _empty_window(windows.get(inst))
+                       else _intersect_window(windows[inst], occluded_window))
+            if overlap is None:
+                continue
+            _view(visible, overlap)[...] &= ~_view(occluded, overlap)
 
     # --- step 7: overrides, ratios, labels --------------------------------- #
     compiled: dict[str, CompiledInstance] = {}
@@ -497,23 +719,25 @@ def compile_frame(
 
         # a "just this frame" visible mask, shared by all three branches
         patch = None
+        patch_window: Optional[Window] = None
         if override is not None and override.visible_rle is not None:
             if _wrong_size(override.visible_rle, canvas):
                 problems.append(f"shape_size_mismatch:{inst}/override")
             else:
                 patch = masks.decode_rle(override.visible_rle)
+                patch_window = _rle_window(override.visible_rle, IDENTITY, canvas)
 
         if kind == _MISSING:
             # no shape to composite, but an override may still say what is
             # visible here; the missing keyframe stays reported either way
-            label = forced or (
-                OUT_OF_VIEW if patch is None else derive_visibility(patch, None, 0.0)
-            )
+            patch_box = (None if patch is None
+                         else _window_bbox(patch, patch_window))
+            label = forced or _label_for(patch_box, 0.0, present=patch is not None)
             visible = None if label == OUT_OF_VIEW else patch
             compiled[inst] = CompiledInstance(
                 instance=inst,
                 visible=visible,
-                box=None if visible is None else masks.bbox(visible),
+                box=None if visible is None else patch_box,
                 amodal=None,
                 occlusion_ratio=0.0,
                 visibility=label,
@@ -524,11 +748,13 @@ def compile_frame(
 
         if kind == GEOM_BOX:
             visible = patch
-            box = boxes.get(inst) if patch is None else masks.bbox(patch)
+            patch_box = (None if patch is None
+                         else _window_bbox(patch, patch_window))
+            box = boxes.get(inst) if patch is None else patch_box
             label = forced or (
                 Visibility.VISIBLE.value
                 if patch is None
-                else derive_visibility(patch, None, 0.0)
+                else _label_for(patch_box, 0.0)
             )
             if label == OUT_OF_VIEW:
                 visible, box = None, None
@@ -545,11 +771,16 @@ def compile_frame(
             continue
 
         amodal = amodals[inst]
-        visible = visibles[inst] if patch is None else patch
-        ratio = _occlusion_ratio(visible, amodal)
-        label = forced or derive_visibility(visible, amodal, ratio)
-        box = masks.bbox(visible)
-        if override is None and masks.area(visible) == 0:
+        window = windows[inst]
+        if patch is None:
+            visible, visible_window = visibles[inst], window
+        else:
+            visible, visible_window = patch, patch_window
+        visible_area = _window_area(visible, visible_window)
+        ratio = _occlusion_ratio(visible_area, _window_area(amodal, window))
+        box = _window_bbox(visible, visible_window)
+        label = forced or _label_for(box, ratio)
+        if override is None and visible_area == 0:
             problems.append(f"empty_visible:{inst}")
         if label == OUT_OF_VIEW:
             visible, box, ratio = None, None, 1.0
