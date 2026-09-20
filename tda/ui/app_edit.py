@@ -112,10 +112,20 @@ class EditMixin:
 
         self.roi_editing = False
         self.roi_draft: Optional[tuple] = None
-        #: ``(desktop, view, segment)`` already proposed in this run.  Asking
-        #: again on every frame of a segment would steal the tool -- and with
-        #: it the pending SAM prompt -- from an annotator who declined once.
-        self._roi_asked: set[tuple] = set()
+        #: Segments whose ROI proposal the annotator has **dismissed** -- keyed
+        #: by ``(desktop, view, seg, start_step, end_step)``.  Asking again on
+        #: every frame of a segment would steal the tool, and with it the
+        #: pending SAM prompt, from somebody who declined once.
+        #:
+        #: The step range is in the key on purpose: this used to record every
+        #: segment it *asked* about, so a pose re-cut that left the earlier
+        #: piece without an ROI -- which is exactly what a large camera move is
+        #: supposed to do (task B1) -- was never asked about, because that piece
+        #: usually keeps segment number 1 and 1 had "already been asked".  Those
+        #: frames then diffed over the whole image and prompted SAM with an
+        #: unbounded box, silently.  A re-cut always moves a range, so the key
+        #: cannot survive one.
+        self._roi_dismissed: set[tuple] = set()
         self._pending_scope: Optional[str] = None
         self._restore_offer: Optional[dict] = None
         #: The instance an ``add_bench_box`` card item armed the box tool for.
@@ -202,7 +212,13 @@ class EditMixin:
 
     # ------------------------------------------------------------ frame hook
     def on_frame_changed_edit(self, key) -> None:
-        """What the editing half has to do when the frame changes."""
+        """What the editing half has to do when the frame changes.
+
+        The ROI question is asked from the *stored* state, never from a memory
+        of having asked: a segment with no rectangle gets the proposal unless
+        this annotator has dismissed it for that segment (see
+        :attr:`_roi_dismissed`).
+        """
         self._pending_scope = None
         self.scope_bar.hide()
         self.disarm_bench()
@@ -211,15 +227,37 @@ class EditMixin:
         # including a view with no image at this step.
         self.forget_draft_ghost()
         if self.session.image() is not None:
-            segment = (int(key.desktop), str(key.view), self._pose_segment(key))
             if self.roi() is not None:
-                self._roi_asked.add(segment)
                 if self.roi_editing:
                     self.cancel_roi_edit()
-            elif segment not in self._roi_asked and not self.roi_editing:
-                self._roi_asked.add(segment)
+            elif self.roi_key() not in self._roi_dismissed and not self.roi_editing:
                 self.start_roi_edit()
         self._offer_restore(key)
+
+    def roi_key(self) -> Optional[tuple]:
+        """What a dismissed ROI proposal is remembered by, or ``None``.
+
+        ``(desktop, view, seg, start_step, end_step)``: the range is what makes
+        the memory self-invalidating.  A pose re-cut only ever writes when a
+        range or a number moves (:meth:`tda.core.db.Db.apply_recut`), so a
+        segment that has just lost its ROI to one cannot be mistaken for the
+        segment somebody declined ten minutes ago.
+        """
+        if not compat.is_open(self.session):
+            return None
+        key = self.session.current()
+        row = self.db.pose_segment_for(key) or {}
+        return (int(key.desktop), str(key.view), row.get("seg"),
+                row.get("start_step"), row.get("end_step"))
+
+    def reset_roi_proposals(self) -> None:
+        """Forget every dismissal: the segments themselves have just changed.
+
+        Called by whatever re-opens the session on the same frame after a
+        structural edit -- a pose re-cut, an S1 Apply -- so the annotator is
+        asked about the pieces that came out of it.
+        """
+        self._roi_dismissed.clear()
 
     def _sync_editing_layer(self, repaint: bool = True) -> None:
         """Keep the overlay's edit layer in step with the session's.

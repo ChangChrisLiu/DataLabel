@@ -8,6 +8,7 @@
     python -m tda.cli import-ls   [--export PATH]     # Label Studio export -> drafts
     python -m tda.cli infer-relations [--dry-run]     # fill empty relational fields
     python -m tda.cli constraints [--validate]        # spec-7 edges -> relation rows
+    python -m tda.cli pose-breaks list|import|...     # per-view pose breaks (2.5)
     python -m tda.cli backup                          # SQLite backup API -> backup_dir
     python -m tda.cli status      [--desktop N]       # what the database holds
 
@@ -60,6 +61,7 @@ from tda.cli_common import (
     session as _session,
 )
 from tda.cli_graph import _add_constraints
+from tda.cli_pose import _add_pose_breaks
 from tda.cli_relations import _add_infer_relations
 from tda.core.db import Db
 from tda.core.index import build_index, load_index, save_index
@@ -524,6 +526,7 @@ SUBCOMMANDS: tuple[Callable[[argparse._SubParsersAction], None], ...] = (
     _add_import_ls,
     _add_infer_relations,
     _add_constraints,
+    _add_pose_breaks,
     _add_backup,
     _add_status,
     *_APP_SUBCOMMANDS,

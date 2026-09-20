@@ -176,9 +176,13 @@ def test_annotation_guide_embeds_the_generated_table():
     assert A.shortcut_markdown() in body
     prose = [l for l in body.splitlines() if not l.startswith("| `")]
     # A budget, not a fact: the table may grow freely, the prose may not drift.
-    # Raised from 200 by the two FAQ entries about parts that leave inside
-    # something else (board-mounted latches) and covers logged as `open`.
-    assert len(prose) <= 212, "the prose is the part that has to stay readable"
+    # Counted in characters, not lines: a line budget was met three times in a
+    # row by joining lines (5,881 characters in 200 lines became 7,026 in 214),
+    # which made the guide harder to read while the guard stayed green. The
+    # figure is the guide as of the pose-break and draft-adoption sections plus
+    # about 4 %; a new section has to pay for itself by tightening an old one.
+    assert sum(len(l) for l in prose) <= 7300, (
+        "the prose is the part that has to stay readable")
 
 
 # --------------------------------------------------------------------------- #

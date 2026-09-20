@@ -12,6 +12,7 @@ import pytest
 
 from steps_fixtures import seeded_db
 from tda.core.db import Db
+from tda.core.model import VIEWS, FrameKey, ShapeKeyframe, ShapePart
 from tda.core.taxonomy import load_taxonomy
 from tda.ui.steps_model import LS_NOTE_PREFIX, EditError, StepTableData, thumb_path
 
@@ -588,3 +589,85 @@ def test_thumb_path_agrees_with_the_cache_module(tmp_path):
     expected.parent.mkdir(parents=True)
     expected.write_bytes(b"x")
     assert thumb_path(tmp_path, key.desktop, key.step, key.view) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Apply re-cuts the pose segments when a `reorient` appears or goes (round 1)
+# --------------------------------------------------------------------------- #
+N_STEPS = 42
+CUT = 20
+
+
+def _seed_views(db: Db, desktop: int = 13) -> None:
+    """One frame row and one pose segment per view, plus a shape to be moved."""
+    for view in VIEWS:
+        for step in range(1, N_STEPS + 1):
+            db.upsert_frame(FrameKey(desktop, step, view), f"s{step}.jpg",
+                            {"hw": [64, 64]}, None)
+        db.set_pose_segment(desktop, view, 1, 1, N_STEPS, N_STEPS, None, None)
+    db.add_keyframe(ShapeKeyframe(
+        id=None, instance="chassis", desktop=desktop, view="scan", pose_segment=1,
+        anchor_step=N_STEPS, placement="in_chassis", geom_type="mask",
+        parts=[ShapePart("main", {"size": [64, 64], "counts": "0 8 4088"})]))
+
+
+def _ranges(db: Db, view: str, desktop: int = 13) -> list[tuple]:
+    return [(r["seg"], r["start_step"], r["end_step"])
+            for r in db.pose_segments(desktop, view)]
+
+
+def test_apply_cuts_every_view_when_a_step_becomes_a_reorient(db: Db, data, tax):
+    _seed_views(db)
+    data.apply_edit(CUT, "step_type", "reorient")
+
+    data.save(db)
+
+    assert data.recut == {view: 2 for view in VIEWS}
+    for view in VIEWS:
+        assert _ranges(db, view) == [(1, 1, CUT - 1), (2, CUT, N_STEPS)]
+    # the shape went with its own anchor, in the same transaction
+    assert db.keyframes(13, "scan")[0].pose_segment == 2
+
+
+def test_apply_merges_the_segments_back_when_the_reorient_goes(db: Db, data, tax):
+    _seed_views(db)
+    data.apply_edit(CUT, "step_type", "reorient")
+    data.save(db)
+
+    data.apply_edit(CUT, "step_type", "normal")
+    data.save(db)
+
+    assert data.recut == {view: 1 for view in VIEWS}
+    for view in VIEWS:
+        assert _ranges(db, view) == [(1, 1, N_STEPS)]
+    assert db.keyframes(13, "scan")[0].pose_segment == 1
+
+
+def test_an_edit_that_is_not_about_reorients_re_cuts_nothing(db: Db, data, tax):
+    _seed_views(db)
+    data.apply_edit(4, "notes", "checked by hand")
+
+    data.save(db)
+
+    assert data.recut == {}
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM op_log WHERE kind='pose_recut'").fetchone()[0] == 0
+
+
+def test_a_failing_recut_rolls_the_whole_apply_back(db: Db, data, tax, monkeypatch):
+    _seed_views(db)
+    before_notes = db.steps(13)[3].notes
+    data.apply_edit(CUT, "step_type", "reorient")
+    data.apply_edit(4, "notes", "this must not survive")
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("disk I/O error")
+
+    monkeypatch.setattr(type(db), "apply_recut", explode)
+    with pytest.raises(RuntimeError):
+        data.save(db)
+    monkeypatch.undo()
+
+    assert db.steps(13)[3].notes == before_notes
+    assert db.steps(13)[CUT - 1].step_type != "reorient"
+    assert _ranges(db, "scan") == [(1, 1, N_STEPS)]

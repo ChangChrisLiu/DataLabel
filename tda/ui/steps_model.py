@@ -129,6 +129,19 @@ class StepRow:
 # --------------------------------------------------------------------------- #
 # the edit session
 # --------------------------------------------------------------------------- #
+def _reorients_moved(before: list[StepRec], after: list[StepRec]) -> bool:
+    """Did any step become, or stop being, a ``reorient``?
+
+    Only that: every other edit in S1 -- a verb, a target, a split compound row
+    -- leaves the pose boundaries exactly where they were, and re-cutting on
+    every Apply would put a ``pose_recut`` row in the op log for each of them.
+    """
+    kind = StepType.REORIENT.value
+    was = {s.step for s in before if s.step_type == kind}
+    now = {s.step for s in after if s.step_type == kind}
+    return was != now
+
+
 @dataclass
 class StepTableData:
     """One desktop's step table and instance table, loaded for review."""
@@ -146,6 +159,11 @@ class StepTableData:
     #: by :func:`tda.ui.steps_delete.delete_instance`, so the questions
     #: :mod:`tda.ui.steps_issues` asks do not argue with a decision already made.
     declined: set[str] = field(default_factory=set)
+    #: ``{view: segments}`` when the last :meth:`save` re-cut the pose segments
+    #: because a step became -- or stopped being -- a ``reorient``; empty
+    #: otherwise. The panel says so, because the annotator has just moved a
+    #: boundary that every shape of that view is anchored to.
+    recut: dict[str, int] = field(default_factory=dict)
 
     # -- loading ---------------------------------------------------------- #
     @classmethod
@@ -423,14 +441,30 @@ class StepTableData:
         as it was. The hand-written (``auto=False``) events survive; the
         returned list is what :func:`~tda.core.states.validate_events` says
         about the whole log afterwards, and is also kept in :attr:`messages`.
+
+        A step whose type becomes -- or stops being -- ``reorient`` moves a pose
+        boundary in **all four views** (spec 2.5), so the segments are re-cut in
+        the same transaction. Leaving that to the next ``load-index`` was the
+        gap: the annotator corrected a compound row in S1, carried on drawing,
+        and the shapes went into a segment the pipeline later renumbered under
+        them. The re-cut moves the keyframes, the layer order and the ROIs and
+        queues the frozen frames for a re-check exactly as
+        :meth:`tda.core.db.Db.apply_recut` does everywhere else -- and a re-cut
+        that raises takes the whole Apply with it.
         """
+        from tda.pipeline import split_pose_segments    # late: tda.pipeline is heavy
+
         actions = self.actions
+        self.recut = {}
         with db.transaction():
+            moved = _reorients_moved(db.steps(self.desktop), self.steps)
             db.replace_steps(self.desktop, self.steps, actions)
             for inst in self.instances.values():
                 db.upsert_instance(inst)
             events = events_from_actions(self.instances, actions, self.tax)
             db.replace_events(self.desktop, events, auto_only=True)
+            if moved:
+                self.recut = split_pose_segments(db, self.desktop)
         self.messages = validate_events(self.instances, db.events(self.desktop), self.tax)
         self.refresh_issues()
         return list(self.messages)

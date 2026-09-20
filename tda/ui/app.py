@@ -42,6 +42,7 @@ from tda.ui.app_assist import AssistMixin
 from tda.ui.app_commit import CommitMixin
 from tda.ui.app_edit import EditMixin
 from tda.ui.app_keys import FLASH_UNNAMED, KeysMixin
+from tda.ui.app_pose import PoseMixin
 from tda.ui.app_roi import RoiMixin
 from tda.ui.app_shell import (
     MODE_TITLES,
@@ -66,7 +67,8 @@ __all__ = ["MainWindow", "main", "take_lock"]
 __all__ += ["CANDIDATES_DROPPED", "FLASH_UNNAMED", "GRID_OFF", "OPACITY_STEP"]
 
 
-class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, AssistMixin, KeysMixin,
+class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, AssistMixin,
+                 KeysMixin,
                  ToolsMixin, StatusMixin, ShellMixin, QMainWindow):
     """One annotator, one desktop/view, three modes."""
 
@@ -105,6 +107,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, AssistMixin, Keys
         self._build_status_bar()
         self._init_edit()
         self._init_adopt()
+        self._init_pose()
         self._init_assist(sam_queue)
         self._connect_session()
 
@@ -189,6 +192,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, AssistMixin, Keys
                          key.step, self.session.frame_status(key.step))
 
         self.on_frame_changed_edit(key)
+        self.on_frame_changed_pose(key)
         self.on_frame_changed_assist(key)
         self.update_status()
 
@@ -302,6 +306,9 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, AssistMixin, Keys
 
         def reopen() -> None:
             self._steps_dirty = False
+            # Apply re-cuts the pose segments when a step became (or stopped
+            # being) a `reorient`, so the pieces on screen may be new ones.
+            self.reset_roi_proposals()
             self.session.open(int(desktop), self.session.view, force=True)
             if step is not None and step in self.session.steps():
                 self.session.goto(step, force=True)
