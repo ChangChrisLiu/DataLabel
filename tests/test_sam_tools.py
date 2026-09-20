@@ -413,7 +413,13 @@ def test_sam_tools_without_a_queue_do_not_crash(rig):
 # ---------------------------------------------------------------------------
 # applying a result
 # ---------------------------------------------------------------------------
-def test_sam_point_tool_result_replaces_the_editing_layer(zoomed):
+def test_sam_point_tool_result_is_added_to_the_editing_layer(zoomed):
+    """A prompt SAM saw no prior mask for may only *add* (task U1, report 1).
+
+    This used to assert the opposite -- "non-refine results replace the layer"
+    -- which is the defect the annotator hit on their first day: the pixels
+    already in the layer are theirs and SAM was never shown them.
+    """
     canvas, ov = zoomed
     ov.editing[0:5, 0:5] = True
     queue = StubQueue(_blob_result)
@@ -425,7 +431,7 @@ def test_sam_point_tool_result_replaces_the_editing_layer(zoomed):
     assert _spin(lambda: bool(strokes))
     # _blob_result fills rows h/4..h/2, cols w/4..w/2 of the 60x80 crop
     assert ov.editing[20, 25]
-    assert not ov.editing[0, 0], "non-refine results replace the layer"
+    assert ov.editing[0, 0], "the pixels the annotator owned were thrown away"
 
 
 def test_sam_point_tool_refine_keeps_the_mask_outside_the_crop(qapp):
@@ -1073,3 +1079,127 @@ def test_a_reset_prompt_does_not_stop_the_next_one(zoomed):
     _drain()
 
     assert ov.editing.any(), "the prompt after the reset was dropped too"
+
+
+# ---------------------------------------------------------------------------
+# a new prompt never destroys the pixels the annotator owns (task U1, report 1)
+# ---------------------------------------------------------------------------
+# "SAM 给出掩码之后，如果我用 B 来补充的话，同时会删掉所有的 SAM 做的本身的掩码，
+# 就是成了替代了，而不是添加" -- the annotator's first trial.  Measured on the
+# real D13/scan/step 42 with SAM 2.1: a box prompt produced 595,473 px, two
+# brush strokes added 2,372 px, and the next box prompt left 244,356 px with
+# **0** of the hand-painted ones.  The rule this section pins down: SAM may only
+# take away pixels it was *shown* (``mask_input``); everything else in the layer
+# is owned by the annotator and is composed with the result, never replaced.
+def _painted(ov, box) -> np.ndarray:
+    """Put a block into the editing layer and hand back a copy of it."""
+    x0, y0, x1, y1 = box
+    layer = ov.editing.copy()
+    layer[y0:y1, x0:x1] = True
+    ov.set_editing(ov.editing_instance or "inst-x", layer)
+    own = np.zeros_like(layer)
+    own[y0:y1, x0:x1] = True
+    return own
+
+
+def test_a_box_prompt_keeps_the_pixels_the_annotator_owns(zoomed):
+    """The report, in one test: a box prompt is an addition, not a replacement."""
+    canvas, ov = zoomed
+    own = _painted(ov, (60, 50, 70, 58))  # far from _blob_result's block
+    queue = StubQueue(_blob_result)
+    tool = _box_tool(canvas, ov, queue)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: bool(strokes))
+
+    assert ov.editing[20, 25], "the SAM result did not land"
+    assert (ov.editing & own).sum() == own.sum(), "the annotator's pixels were erased"
+
+
+def test_a_second_box_prompt_keeps_the_first_result_and_the_brush_strokes(zoomed):
+    """X, drag, B, paint, X, drag -- the exact sequence of the trial."""
+    canvas, ov = zoomed
+    queue = StubQueue(_blob_result)
+    tool = _box_tool(canvas, ov, queue)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: bool(strokes))
+    first = ov.editing.copy()
+
+    brush = BrushTool(canvas, ov, radius=2)
+    brush.on_press(5.0, 55.0, None)
+    brush.on_release(5.0, 55.0, None)
+    hand = ov.editing & ~first
+    assert hand.any(), "the brush stroke did not land"
+
+    tool.reset_prompt()          # a new box is a new prompt
+    tool.on_press(12.0, 12.0, None)
+    tool.on_move(46.0, 46.0, None)
+    tool.on_release(46.0, 46.0, None)
+    assert _spin(lambda: len(strokes) > 1)
+
+    assert (ov.editing & hand).sum() == hand.sum(), "the brush strokes were erased"
+    assert (ov.editing & first).sum() == first.sum(), "the first mask was erased"
+
+
+def test_cycling_swaps_only_the_current_prompts_contribution(zoomed):
+    """``C`` walks SAM's three answers; the owned pixels never move."""
+    canvas, ov = zoomed
+    own = _painted(ov, (60, 50, 70, 58))
+    queue = StubQueue(_multi_result)
+    tool = _box_tool(canvas, ov, queue)
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: tool.candidate_count == 3)
+
+    seen = set()
+    for _ in range(3):
+        assert (ov.editing & own).sum() == own.sum(), "cycling ate the owned pixels"
+        seen.add(int((ov.editing & ~own).sum()))
+        tool.cycle_candidate()
+    assert len(seen) == 3, f"the candidates did not differ: {seen}"
+
+
+def test_one_undo_takes_the_whole_sam_application_back(zoomed):
+    canvas, ov = zoomed
+    own = _painted(ov, (60, 50, 70, 58))
+    queue = StubQueue(_blob_result)
+    tool = _box_tool(canvas, ov, queue)
+    stack = _wire_undo(tool, ov)
+
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: len(stack) == 1)
+
+    stack.undo()
+    assert np.array_equal(ov.editing, own), "one undo did not reach the owned mask"
+
+
+def test_a_refinement_may_still_remove_the_pixels_sam_was_shown(zoomed):
+    """Negative points stay a way to take pixels off: SAM saw that mask."""
+    canvas, ov = zoomed
+    prior = np.zeros((60, 80), dtype=bool)
+    prior[20:40, 20:40] = True
+    ov.set_editing("inst-x", prior)
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue, refine=True)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(25.0, 25.0, None)
+    assert _spin(lambda: bool(strokes))
+
+    assert queue.last.mask_input is not None, "the prior mask was not sent"
+    # _blob_result covers rows 15..30, cols 20..40 of the 60x80 crop: the part of
+    # the prior mask below row 30 was shown to SAM and comes back removed.
+    assert not ov.editing[35, 25], "a refinement must be able to remove pixels"

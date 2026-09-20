@@ -138,6 +138,9 @@ class SamToolBase(CandidatesMixin, Tool):
         self._candidate_index = 0
         self._candidate_rect: Optional[Rect] = None
         self._candidate_base: Optional[np.ndarray] = None
+        #: Whether the current result is **added** to the base rather than
+        #: replacing it inside the crop; see :meth:`_on_result`.
+        self._candidate_union = True
         self._candidate_identity: Any = None
         #: ``(frame token, instance)`` the prompt being built belongs to.
         self._prompt_identity: Any = None
@@ -329,6 +332,13 @@ class SamToolBase(CandidatesMixin, Tool):
             return
 
         mask_input = self._mask_input(rect, crop.shape[:2])
+        # **The rule of U1 report 1**: SAM may only take pixels away when it was
+        # shown them.  ``mask_input`` is the only thing it is ever shown, so a
+        # request that carries one is a request *about* that mask and its answer
+        # supersedes it (a negative point has to be able to remove something);
+        # a request without one knows nothing about what is in the layer, and
+        # its answer is composed with it instead of replacing it.
+        blended = mask_input is not None
         req = SamRequest(
             image_crop=crop,
             points=crop_points,
@@ -351,13 +361,13 @@ class SamToolBase(CandidatesMixin, Tool):
                  self._target_instance(), len(crop_points), crop_box is not None,
                  bool(self.refine), bool(req.multimask))
         stamp = (self._token, self._identity())
-        bridge, refine = self._bridge, self.refine
+        bridge = self._bridge
         # on_error matters as much as the callback: without it a failed
         # inference (out of memory, a malformed prompt) leaves the annotator
         # waiting for a mask that is never coming, with nothing on screen.
         self._submit_to_queue(
             req,
-            lambda res: bridge.deliver((res, rect, refine, stamp)),
+            lambda res: bridge.deliver((res, rect, blended, stamp)),
             lambda exc: bridge.deliver_error(f"SAM failed: {exc}"),
         )
 
@@ -393,7 +403,7 @@ class SamToolBase(CandidatesMixin, Tool):
         Every rejection path returns quietly instead of raising: this runs as a
         Qt slot, where an exception would escape into the event loop.
         """
-        result, rect, refine, stamp = payload  # type: ignore[misc]
+        result, rect, blended, stamp = payload  # type: ignore[misc]
         token, identity = stamp
         if token != self._token:
             # Superseded.  By a newer prompt -- nothing to report, the annotator
@@ -424,11 +434,17 @@ class SamToolBase(CandidatesMixin, Tool):
         self._candidate_rect = rect
         self._candidate_identity = identity
         self._renders = None
-        # Outside the crop the prediction says nothing: in refine mode the prior
-        # mask survives there, otherwise the layer is replaced outright. The
-        # base is snapshotted once so that switching candidates re-renders from
-        # the same starting point instead of compounding onto the previous one.
-        self._candidate_base = self.overlay.editing.copy() if refine else None
+        # **Everything already in the layer is the annotator's** -- hand
+        # strokes, an adopted draft, the shape ``begin_edit`` loaded from a
+        # keyframe, an earlier prompt's accepted result -- and none of it came
+        # from this prompt.  It is snapshotted once, here, so that switching
+        # candidates re-renders from the same starting point instead of
+        # compounding onto the previous one, and so that a stroke made while
+        # the prompt was in flight counts as owned rather than as a proposal.
+        self._candidate_base = self.overlay.editing.copy()
+        # Whether the crop's contents may be thrown away: only when SAM was
+        # handed them as ``mask_input`` (see :meth:`_submit`).
+        self._candidate_union = not bool(blended)
         self._apply_candidate()
 
 

@@ -82,9 +82,7 @@ class CandidatesMixin:
             self.sigHint.emit(HINT_EDITED)
             return 0
         self._candidate_index = (match + int(step)) % len(renders)
-        log.info("sam candidate instance=%s picked=%d/%d",
-                 self._target_instance(), self._candidate_index + 1, len(renders))
-        self._apply_candidate()
+        self._apply_candidate(why="cycle")
         return self._candidate_index
 
     def _reset_candidates(self) -> None:
@@ -93,13 +91,28 @@ class CandidatesMixin:
         self._candidate_index = 0
         self._candidate_rect = None
         self._candidate_base = None
+        self._candidate_union = True
         self._candidate_identity = None
         self._renders = None
 
+    def owned_mask(self) -> Optional[np.ndarray]:
+        """The pixels the current prompt found in the layer and may not touch.
 
+        ``None`` before a result has landed.  What "owned" means is spelled out
+        in :meth:`~tda.ui.canvas.sam_tools.SamToolBase._on_result`: everything
+        that was in the editing layer when the answer arrived, because none of
+        it came from this prompt.
+        """
+        return self._candidate_base
 
     def _render(self, index: int) -> Optional[np.ndarray]:
-        """The full-frame editing layer candidate ``index`` would produce."""
+        """The full-frame editing layer candidate ``index`` would produce.
+
+        ``owned ∪ candidate``, except inside the crop of a prompt that carried
+        the prior mask as ``mask_input``: there SAM was shown the pixels and its
+        answer replaces them, which is what keeps a negative point able to
+        remove something.
+        """
         if self.overlay is None or not self._fits(self._candidate_rect):
             return None
         if not 0 <= index < len(self._candidates):
@@ -117,7 +130,10 @@ class CandidatesMixin:
                 interpolation=cv2.INTER_NEAREST,
             ).astype(bool)
         full = base.copy() if base is not None else np.zeros(self.overlay.hw, dtype=bool)
-        full[y0:y1, x0:x1] = mask
+        if self._candidate_union:
+            full[y0:y1, x0:x1] |= mask
+        else:
+            full[y0:y1, x0:x1] = mask
         return full
 
     def _ensure_renders(self) -> list[np.ndarray]:
@@ -131,7 +147,7 @@ class CandidatesMixin:
             self._renders = [] if any(r is None for r in rendered) else rendered
         return [r for r in self._renders if r is not None]
 
-    def _apply_candidate(self) -> None:
+    def _apply_candidate(self, why: str = "apply") -> None:
         """Write the selected candidate into the editing layer (GUI thread)."""
         renders = self._ensure_renders()
         if not renders or self.overlay is None or self._candidate_rect is None:
@@ -141,6 +157,16 @@ class CandidatesMixin:
         # sigStroke fires, so one applied mask is one undoable op.
         self.stroke_before = self.overlay.editing.copy()
         instance = self._target_instance() or FALLBACK_INSTANCE
+        owned = self._candidate_base
+        log.info(
+            "sam %s instance=%s candidate=%d/%d compose=%s layer %d -> %d px "
+            "owned %d kept %d",
+            why, instance, self._candidate_index + 1, len(renders),
+            "union" if self._candidate_union else "replace-in-crop",
+            int(self.stroke_before.sum()), int(layer.sum()),
+            0 if owned is None else int(owned.sum()),
+            0 if owned is None else int((owned & layer).sum()),
+        )
         self.overlay.set_editing(instance, layer)
         if self.canvas is not None:
             self.canvas.refresh(self._candidate_rect)
