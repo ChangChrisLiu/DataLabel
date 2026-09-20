@@ -15,16 +15,26 @@ derivation is a real one -- V12's events come from a state diff and V15's
 same-moment answer from comparing two folded states -- so corrupting a record
 makes this file fail, which ``test_vlm_tasks.py`` asserts directly.
 
-**The two tables below are transcribed, and one of them is not the spec's
-literal text.** :data:`REQUIRED_STATES` is spec 7.2 verbatim. :data:`GATES` is
-spec 7.2 **as amended by the implementation** (``tda.core.graph_rules.GATES``):
-the spec says every hard edge gates every verb, which across the 66 sheets
-produced 34 "displace psu.01 violates connected_to(...)" lines, every one of
-them describing correct work -- swinging a PSU aside is how you reach its plugs.
-The amendment distinguishes *moving the part* from *reaching it*, and the
-controller is amending the spec to match. Transcribing it here rather than
-importing it means a change to that table has to be a deliberate act in two
-files, which is what an independent checker is for.
+**The tables below are transcribed, and two of them are not the spec's literal
+text.** :data:`REQUIRED_STATES` is spec 7.2 verbatim. :data:`GATES` and
+:data:`BLOCKED_GATES` are spec 7.2 **as amended by the implementation**
+(``tda.core.graph_rules``):
+
+* the spec says every hard edge gates every verb, which across the 66 sheets
+  produced 34 "displace psu.01 violates connected_to(...)" lines, every one of
+  them describing correct work -- swinging a PSU aside is how you reach its
+  plugs. The amendment distinguishes *moving the part* from *reaching it*;
+* a ``blocked_by`` edge gates by its ``mode``: a cable under tension only stops
+  the part leaving, something in the way stops it moving at all, and something
+  you cannot reach past stops everything. A missing or unrecognised mode gates
+  every verb, which is the loud way to be wrong.
+
+:data:`INACTIVE_STATUSES` is the third transcription: a rejected edge and an
+*orphaned decision* -- a human's yes or no about a rule the derivation no longer
+produces -- gate nothing.
+
+Transcribing rather than importing means a change to any of them has to be a
+deliberate act in two files, which is what an independent checker is for.
 """
 from __future__ import annotations
 
@@ -53,7 +63,26 @@ GATES = {
     "connected_to": {"remove"},
 }
 
+#: What each ``blocked_by`` mode stops. A missing or unknown mode gates
+#: everything, because gating too little drops a constraint silently.
+BLOCKED_GATES = {
+    "cable_tension": {"remove"},
+    "physical_path": {"remove", "displace"},
+    "tool_access": set(GATED_VERBS),
+}
+
+#: A rejected edge, and a decision about a rule that is no longer derived, gate
+#: nothing. Everything else -- proposed, accepted -- does.
+INACTIVE_STATUSES = {"rejected", "accepted_orphan", "rejected_orphan"}
+
 HARD_TYPES = tuple(REQUIRED_STATES)
+
+
+def gates(edge_type: str, mode=None) -> set:
+    """Which verbs one edge gates, by type and (for ``blocked_by``) by mode."""
+    if edge_type == "blocked_by":
+        return BLOCKED_GATES.get(mode or "", set(GATED_VERBS))
+    return GATES.get(edge_type, set(GATED_VERBS))
 
 #: Which states a verb may be applied *from* (spec 6.2/6.3).
 VERB_FROM_STATES = {
@@ -105,7 +134,8 @@ class Checker:
         self.steps = {s.step: s for s in db.steps(desktop)}
         self.edges = [
             row for row in db.relations(desktop)
-            if row["type"] in HARD_TYPES and row["status"] != "rejected"
+            if row["type"] in HARD_TYPES
+            and row["status"] not in INACTIVE_STATUSES
             and not str(row["target"]).startswith(LS_PREFIX)
             and not str(row["blocker"]).startswith(LS_PREFIX)
         ]
@@ -230,14 +260,19 @@ class Checker:
         return None
 
     def unmet(self, verb: str, target: str, frame: dict[str, dict]) -> list[dict]:
-        """Every required edge of spec 7.2 this action would break."""
+        """Every required edge of spec 7.2 this action would break.
+
+        A blocker that is ``removed``, or that is not a node of this desktop at
+        all, satisfies any edge: it is out of the way, whatever the edge asked
+        for. A ``recommended`` edge is a preference and gates nothing.
+        """
         if verb not in GATED_VERBS:
             return []
         out = []
         for edge in self.edges:
             if edge["target"] != target or edge["necessity"] != "required":
                 continue
-            if verb not in GATES.get(edge["type"], GATED_VERBS):
+            if verb not in gates(edge["type"], edge["mode"]):
                 continue
             current = self._blocker_state(frame, edge["blocker"])
             if current is None or current == REMOVED:
@@ -248,6 +283,8 @@ class Checker:
 
     def applies(self, key: str, verb: str, frame: dict[str, dict]) -> bool:
         slot = frame.get(key)
+        if slot is None and key.startswith(CABLE_PREFIX):
+            slot = {"state": self.tax.default_state("cable")}
         if slot is None or slot["state"] == REMOVED:
             return False
         effect = self._effect(key, verb)
@@ -632,6 +669,9 @@ class Checker:
         effect = self._effect(target, verb)
         if effect is None or effect[0] != "state":
             return
+        if target not in frame:  # a `cable:*` node no event has named yet
+            frame[target] = {"state": self.tax.default_state("cable"),
+                             "placement": IN_CHASSIS, "left_with": None}
         frame[target]["state"] = effect[1]
         if effect[1] != REMOVED:
             return

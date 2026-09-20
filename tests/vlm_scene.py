@@ -91,6 +91,12 @@ def _steps() -> list[StepRec]:
     ]
 
 
+#: The PSU's loom, released at step 4 when ``cable=True``. It is a virtual node
+#: (spec 3.1): no instance row, no mask, its own small state machine -- and a
+#: `blocked_by` edge may name it, which is the case V16 has to catch.
+CABLE = "cable:psu"
+
+
 def _actions() -> list[ActionRec]:
     return [
         ActionRec(DESKTOP, 2, 0, SCREW, "unscrew", tool="PH2", direction="+Z"),
@@ -170,7 +176,7 @@ TINY_RECT = (60, 60, 63, 63)
 
 
 def build(db: Db, *, views=VIEWS, verified_steps=STEPS, skip_actions=(),
-          tiny_screw=False) -> Taxonomy:
+          tiny_screw=False, cable=False, edges=()) -> Taxonomy:
     """Seed ``db`` with the whole scene and return the taxonomy it was built on.
 
     ``skip_actions`` drops the action of those steps from the log without
@@ -189,8 +195,15 @@ def build(db: Db, *, views=VIEWS, verified_steps=STEPS, skip_actions=(),
             key=TINY_SCREW, desktop=DESKTOP, cls="screw",
             attrs={"role": "psu", "head": "PH2", "captive": False},
         ))
-    db.replace_steps(DESKTOP, _steps(),
-                     [a for a in _actions() if a.step not in set(skip_actions)])
+    steps, actions = _steps(), [a for a in _actions()
+                                if a.step not in set(skip_actions)]
+    if cable:
+        # step 4 becomes compound: the plug comes out, then the loom is freed
+        for rec in steps:
+            if rec.step == 4:
+                rec.step_type = "compound"
+        actions.append(ActionRec(DESKTOP, 4, 1, CABLE, "release", tool="hand"))
+    db.replace_steps(DESKTOP, steps, actions)
     for view in views:
         for step in STEPS:
             db.upsert_frame(
@@ -215,8 +228,24 @@ def build(db: Db, *, views=VIEWS, verified_steps=STEPS, skip_actions=(),
                 FrameOverride(FrameKey(DESKTOP, step, view), instance, None, visibility)
             )
     edges_to_db(db, DESKTOP, propose_edges(db.instances(DESKTOP), tax))
+    for spec in edges:
+        # `{"type", "target", "blocker", "mode"?, "status"?, "source"?, "necessity"?}`
+        db.add_relation(DESKTOP, spec["type"], spec["target"], spec["blocker"],
+                        necessity=spec.get("necessity", "required"),
+                        mode=spec.get("mode"), source=spec.get("source", "manual"),
+                        status=spec.get("status", "accepted"))
     freeze(db, tax, views=views, steps=verified_steps)
     return tax
+
+
+def set_status(db: Db, rel_type: str, target: str, blocker: str, status: str) -> None:
+    """Decide an existing edge the way the Relations tab does (B5)."""
+    with db.conn:
+        db.conn.execute(
+            'UPDATE relation SET status=? WHERE desktop=? AND "type"=? '
+            "AND target=? AND blocker=?",
+            (status, DESKTOP, rel_type, target, blocker),
+        )
 
 
 def freeze(db: Db, tax: Taxonomy, *, views=VIEWS, steps=STEPS) -> None:

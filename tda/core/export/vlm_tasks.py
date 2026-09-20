@@ -60,6 +60,7 @@ from tda.core.graph import (
     Edge,
     REQUIRED_STATES,
     applicable_preconditions,
+    find_deadlocks,
     legal_actions,
     unmet,
 )
@@ -638,23 +639,33 @@ def exclusion_reason(ctx: DesktopCtx, edges: list[Edge],
                      graph_version: Optional[str]) -> Optional[str]:
     """Why this desktop's graph-derived tasks are refused, or ``None`` (C2).
 
-    A desktop with no graph is not a desktop whose affordance questions are
-    easy; it is one whose answers would all be "nothing is blocked", which is
-    the most confidently wrong ground truth this export could ship. That is the
-    whole test: no version stamp, or no **active** edge behind it.
+    Three reasons, and all three are the same reason: the blocked and permitted
+    sets would not be trustworthy.
+
+    * ``no_graph_version`` / ``no_constraint_edges`` -- a desktop with no graph
+      is not one whose affordance questions are easy, it is one whose every
+      answer would be "nothing is blocked", the most confidently wrong ground
+      truth this export could ship;
+    * ``deadlock`` -- :func:`~tda.core.graph_plan.find_deadlocks` finds a ring of
+      actions each of which waits on the next (spec 7.4). Nothing in that ring
+      can ever be done, so the graph contradicts a teardown that demonstrably
+      happened, and "what can be done now" has no honest answer while it stands.
+      Required edges only: a ``recommended`` edge is a preference and never
+      makes anything impossible.
 
     A desktop carrying more Label Studio drafts than resolved instances used to
     be refused here too. It is not a reason: ``ls:*`` rows are reference
     geometry somebody traced in a parallel table, they are already out of
     :attr:`~tda.core.export.coco.DesktopCtx.instances`, and the five desktops it
     caught (D13, D18, D19, D24, D33) carry 41-49 hard edges each and a complete
-    instance table. Draft count says nothing about whether the identities are
-    settled.
+    instance table.
     """
     if graph_version is None:
         return "no_graph_version"
     if not active_edges(edges):
         return "no_constraint_edges"
+    if find_deadlocks(edges, ctx.instances, ctx.tax, necessity="required"):
+        return "deadlock"
     return None
 
 
@@ -1629,16 +1640,23 @@ def _simulate(tc: TaskCtx, step: int, plan: Sequence[tuple[str, str]]
     sim = _copy_state(tc.state(step))
     for index, (verb, target) in enumerate(plan):
         rec = tc.ctx.instances.get(target)
-        if rec is None:
+        # a `cable:*` node is a real step of the teardown with no instance row:
+        # releasing a loom is what makes the part behind it reachable, and a
+        # plan that leaves it out is a plan that cannot be carried out
+        cls = rec.cls if rec is not None else (
+            CABLE_CLASS if target.startswith(CABLE_PREFIX) else None)
+        if cls is None:
             return index, []
+        attrs = rec.attrs if rec is not None else {}
         bad = unmet_for(tc, verb, target, sim)
         if bad:
             # every edge this step breaks, not the first one the list happened
             # to hold: "which constraint stopped it" has no single answer when
             # a part is both screwed down and still plugged in
             return index, sorted(bad, key=lambda e: (e.type, e.target, e.blocker))
-        current = sim[target].state if target in sim else ""
-        if not verb_applies(tc.tax, rec.cls, rec.attrs, verb, current):
+        current = (sim[target].state if target in sim
+                   else tc.tax.default_state(cls))
+        if not verb_applies(tc.tax, cls, attrs, verb, current):
             return index, []
         _apply_effect(tc.tax, tc.ctx.instances, sim, target, verb)
     return None, []
@@ -1727,8 +1745,12 @@ def gen_v16(tc: TaskCtx, step: int) -> Iterator[dict]:
             return  # a suffix built on a contradiction is not a plan
         for action in tc.named_actions(candidate):
             # a plan is a sequence of disassembly actions; `reorient` is a
-            # capture action with no state effect and nothing gating it
-            if action.target in tc.ctx.instances and tc.changes_state(action):
+            # capture action with no state effect and nothing gating it. A
+            # `cable:*` node has no instance row and belongs in the plan all the
+            # same -- releasing a loom is what frees the part behind it.
+            known = (action.target in tc.ctx.instances
+                     or action.target.startswith(CABLE_PREFIX))
+            if known and tc.changes_state(action):
                 plan.append((action.verb, action.target))
         if len(plan) >= V16_PLAN_LEN:
             break

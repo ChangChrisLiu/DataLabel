@@ -571,6 +571,133 @@ def test_an_unknown_tool_is_never_a_graded_field(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------- #
+# the graph B5 left behind: modes, decisions, deadlocks
+# --------------------------------------------------------------------------- #
+def _bounded(records, step: int) -> tuple[set, set]:
+    """``(must_not_include, permitted_upper_bound)`` of the V5 record at ``step``."""
+    record = next(r for r in _of(records, "V5") if r["step"] == step)
+    return ({(a["verb"], a["target"]) for a in record["answer"]["must_not_include"]},
+            {(a["verb"], a["target"])
+             for a in record["answer"]["permitted_upper_bound"]})
+
+
+@pytest.mark.parametrize("mode,open_blocked,displace_blocked", [
+    ("cable_tension", False, False),   # it only stops the part leaving
+    ("physical_path", False, True),    # in the way: no moving it either
+    ("tool_access", True, True),       # cannot be reached at all
+    (None, True, True),                # an unstated mode gates everything
+])
+def test_a_blocked_by_edge_gates_by_its_mode(tmp_path: Path, mode, open_blocked,
+                                             displace_blocked):
+    """B5 made `blocked_by` read its mode; the checker learned the same table.
+
+    Two edges, one target each, so each verb is decided by the mode alone: the
+    latch has nothing else gating ``open``, and the board's only other edge
+    (`connected_to`) gates ``remove`` and nothing more.
+    """
+    db = Db(str(tmp_path / f"mode_{mode}.sqlite"))
+    tax = S.build(db, views=(S.VIEW,), verified_steps=(), edges=[
+        {"type": "blocked_by", "target": S.LATCH, "blocker": S.PSU, "mode": mode},
+        {"type": "blocked_by", "target": S.BOARD, "blocker": S.RAM, "mode": mode},
+    ])
+    records = _run(db, tax, tmp_path / "v.jsonl")
+    must_not, permitted = _bounded(records, 1)
+
+    assert (("open", S.LATCH) in must_not) is open_blocked
+    assert (("open", S.LATCH) in permitted) is not open_blocked
+    assert (("displace", S.BOARD) in must_not) is displace_blocked
+    assert (("remove", S.BOARD) in must_not)     # every mode stops removal
+    # and the independent checker, which transcribed the table, agrees
+    assert Checker(db, tax, S.DESKTOP).check_all(records) == len(records)
+    db.close()
+
+
+@pytest.mark.parametrize("status", ["rejected", "accepted_orphan", "rejected_orphan"])
+def test_an_inactive_decision_gates_nothing(tmp_path: Path, status):
+    """A rejected edge, and a decision about a rule nobody derives any more."""
+    db = Db(str(tmp_path / f"decided_{status}.sqlite"))
+    tax = S.build(db, views=(S.VIEW,), verified_steps=())
+    before = _run(db, tax, tmp_path / "before.jsonl")
+    assert ("remove", S.RAM) in _bounded(before, 1)[0]     # locked by the latch
+    assert any(S.LATCH in r["answer"]["blockers"] for r in _of(before, "V4"))
+
+    S.set_status(db, "locked_by", S.RAM, S.LATCH, status)
+    records = _run(db, tax, tmp_path / "after.jsonl")
+    must_not, permitted = _bounded(records, 1)
+    assert ("remove", S.RAM) not in must_not
+    assert ("remove", S.RAM) in permitted
+    assert not [r for r in _of(records, "V4") if S.LATCH in r["answer"]["blockers"]]
+    assert Checker(db, tax, S.DESKTOP).check_all(records) == len(records)
+    db.close()
+
+
+def test_a_manual_edge_on_a_cable_node_catches_a_reordered_plan(tmp_path: Path):
+    """The loom is released at step 4; a plan that removes the PSU first cannot work.
+
+    The edge names a virtual ``cable:*`` node, which has no instance row and no
+    mask -- the case where V16's own replay used to disagree with V4 about
+    whether a blocker missing from the snapshot counts as satisfied. It goes
+    through the shared `unmet` now, so it cannot.
+    """
+    db = Db(str(tmp_path / "cable.sqlite"))
+    tax = S.build(db, views=(S.VIEW,), verified_steps=(), cable=True, edges=[
+        {"type": "blocked_by", "target": S.PSU, "blocker": S.CABLE,
+         "mode": "physical_path", "source": "manual"},
+    ])
+    records = _run(db, tax, tmp_path / "v.jsonl")
+    plans = _of(records, "V16")
+    assert plans
+
+    # the true plan keeps the release where the log put it
+    true_at_3 = next(r for r in plans if r["step"] == 3 and r["answer"]["valid"])
+    listed = [(i["verb"], i["target"]) for i in true_at_3["answer_check"]["plan"]]
+    assert ("release", S.CABLE) in listed
+    assert listed.index(("release", S.CABLE)) < listed.index(("remove", S.PSU))
+
+    caught = [r for r in plans
+              if r["answer"].get("violated_edge") == f"blocked_by({S.PSU}, {S.CABLE})"]
+    assert caught, [r["answer"].get("violated_edge") for r in plans]
+    for record in caught:
+        corrupted = [(i["verb"], i["target"]) for i in record["answer_check"]["plan"]]
+        bad = record["answer"]["first_error_index"]
+        assert corrupted[bad] == ("remove", S.PSU)
+        assert corrupted.index(("release", S.CABLE)) > bad
+    assert Checker(db, tax, S.DESKTOP).check_all(records) == len(records)
+    db.close()
+
+
+def test_a_deadlocked_graph_answers_no_affordance_question(tmp_path: Path):
+    """Two parts each waiting for the other: nothing in the ring can ever be done."""
+    db = Db(str(tmp_path / "deadlock.sqlite"))
+    tax = S.build(db, views=(S.VIEW,), verified_steps=(), edges=[
+        {"type": "blocked_by", "target": S.PSU, "blocker": S.RAM,
+         "mode": "tool_access"},
+        {"type": "blocked_by", "target": S.RAM, "blocker": S.PSU,
+         "mode": "tool_access"},
+    ])
+    summary = _export(db, tax, tmp_path / "v.jsonl")
+    assert summary["excluded_desktops"] == {S.DESKTOP: "deadlock"}
+    assert not set(summary["by_task"]) & {"V4", "V5", "V6", "V16"}
+    assert {"V3", "V10"} <= set(summary["by_task"])
+    db.close()
+
+
+def test_a_recommended_edge_never_makes_anything_impossible(tmp_path: Path):
+    """A preference is not a physical law (spec 7.1), so it blocks nothing."""
+    db = Db(str(tmp_path / "recommended.sqlite"))
+    tax = S.build(db, views=(S.VIEW,), verified_steps=(), edges=[
+        {"type": "blocked_by", "target": S.LATCH, "blocker": S.PSU,
+         "mode": "tool_access", "necessity": "recommended"},
+    ])
+    records = _run(db, tax, tmp_path / "v.jsonl")
+    must_not, permitted = _bounded(records, 1)
+    assert ("open", S.LATCH) not in must_not
+    assert ("open", S.LATCH) in permitted
+    assert Checker(db, tax, S.DESKTOP).check_all(records) == len(records)
+    db.close()
+
+
+# --------------------------------------------------------------------------- #
 # V10, V12
 # --------------------------------------------------------------------------- #
 def test_v10_reports_the_history_the_progress_and_the_remainder(scene, tmp_path: Path):
