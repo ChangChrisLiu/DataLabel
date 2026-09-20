@@ -340,3 +340,36 @@ def test_one_desktop_is_one_transaction(env, monkeypatch):
 def test_a_desktop_that_is_not_in_the_database_is_reported_not_fatal(env, capsys):
     assert run(env, "constraints", "--desktops", "404") == EXIT_OK
     assert "404" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# dead ends: reported and counted, never an error (round 4, I-1b)
+# --------------------------------------------------------------------------- #
+def test_a_dead_end_reaches_the_report_without_failing_the_run(env):
+    db = open_db(env)
+    try:
+        edges_to_db(db, DESKTOP, [
+            Edge("locked_by", "motherboard.01", "chassis", source="manual",
+                 status="accepted"),
+        ])
+    finally:
+        db.close()
+    out = Path(env["tmp"]) / "dead_ends.md"
+
+    code = run(env, "constraints", "--desktops", str(DESKTOP), "--report", str(out))
+
+    text = out.read_text(encoding="utf-8")
+    assert code == EXIT_OK, "a modelling gap is not a failure"
+    assert "### dead ends" in text
+    assert "no plan for motherboard.01" in text
+    assert "locked_by(motherboard.01, chassis)" in text
+    assert "- dead ends" in text and ": 1" in text
+
+
+def test_a_clean_desktop_says_it_has_no_dead_ends(env):
+    out = Path(env["tmp"]) / "clean.md"
+    assert run(env, "constraints", "--desktops", str(DESKTOP),
+               "--report", str(out)) == EXIT_OK
+    text = out.read_text(encoding="utf-8")
+    assert "- none: every part can still be planned out of the machine" in text
+    assert "dead ends" in text

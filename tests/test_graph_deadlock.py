@@ -24,7 +24,7 @@ import pytest
 from graph_scenes import DESKTOP, bench_instances
 
 from tda.core.graph import Edge, legal_actions, propose_edges, remaining_plan
-from tda.core.graph_plan import find_deadlocks, plan_removal
+from tda.core.graph_plan import find_dead_ends, find_deadlocks, plan_removal
 from tda.core.graph_rules import REQUIRED_STATES, active_edges, verb_effect
 from tda.core.model import InstanceRec
 from tda.core.states import initial_state
@@ -273,8 +273,9 @@ def test_the_label_names_the_edges_that_hold_the_loop(bracket, tax):
 PARTS = 5
 GRAPHS = 200
 KINDS = (("fastened_by", None), ("covered_by", None), ("connected_to", None),
-         ("blocked_by", "physical_path"), ("blocked_by", "tool_access"),
-         ("blocked_by", "cable_tension"))
+         ("locked_by", None),        # nothing can `open` a card: only
+         ("blocked_by", "physical_path"),   # removing the blocker clears it
+         ("blocked_by", "tool_access"), ("blocked_by", "cable_tension"))
 #: Drawn per edge, so the invariants are asserted over preferences and over
 #: rows a human has taken out of the graph as well.
 NECESSITIES = ("required", "required", "required", "recommended")
@@ -368,3 +369,87 @@ def test_no_deadlock_if_and_only_if_every_part_can_be_planned_out(tax):
     assert both["deadlock+noplan"] > 0 and both["clean+plan"] > 0, both
     assert both["clean+noplan"] > 0, "the dead-end bucket must not be empty"
     assert relaxed > 0, "no scene needed a preference dropped"
+
+
+# --------------------------------------------------------------------------- #
+# round 4: taking the blocker out is a clearing too, and a dead end is loud
+# --------------------------------------------------------------------------- #
+def locked(target: str, blocker: str) -> Edge:
+    return Edge(type="locked_by", target=target, blocker=blocker, source="manual",
+                status="accepted")
+
+
+def test_removing_the_blocker_clears_an_edge_no_verb_can_satisfy(bench, tax):
+    """`unmet` counts a removed blocker as satisfying any edge; so must the planner.
+
+    One Add-edge click used to be enough to write this and hear nothing: the
+    PSU cannot be `open`ed, `locked_by` accepts only `open`, and the plan for
+    the board was `None` for ever.
+    """
+    edges = [locked("motherboard.01", "psu.01")]
+    assert deadlocks(edges, bench, tax) == []
+    assert find_dead_ends(edges, bench, tax) == []
+    plan = remaining_plan(bench, edges, initial_state(bench, tax), "motherboard.01", tax)
+    assert plan is not None and ("remove", "psu.01") in plan
+
+
+def test_taking_the_blocker_out_is_the_last_resort(clipped, tax):
+    """A clip that can be opened is opened, not ripped out."""
+    edges = [locked(PART, CLIP)]
+    plan = remaining_plan(clipped, edges, initial_state(clipped, tax), PART, tax)
+    assert plan is not None
+    assert ("open", CLIP) in plan and ("remove", CLIP) not in plan
+
+
+def test_a_blocker_that_cannot_be_removed_either_is_a_dead_end(bench, tax):
+    edges = [locked("motherboard.01", "chassis")]
+    assert deadlocks(edges, bench, tax) == []
+    found = find_dead_ends(edges, bench, tax)
+    assert [d.instance for d in found] == ["motherboard.01"]
+    assert found[0].edge.label() == "locked_by(motherboard.01, chassis)"
+    text = found[0].label()
+    assert "/" in text and "motherboard.01" in text and "chassis" in text
+    assert remaining_plan(bench, edges, initial_state(bench, tax),
+                          "motherboard.01", tax) is None
+
+
+def test_a_clean_graph_has_no_dead_ends(bench, tax):
+    assert find_dead_ends(propose_edges(bench, tax), bench, tax) == []
+
+
+def test_a_deadlock_is_not_also_reported_as_a_dead_end(bracket, tax):
+    edges = [*propose_edges(bracket, tax), block(SCREW, BRACKET, "tool_access")]
+    assert deadlocks(edges, bracket, tax)
+    assert find_dead_ends(edges, bracket, tax) == []
+
+
+def test_a_dead_end_names_one_instance_per_unplannable_part(bench, tax):
+    edges = [locked("motherboard.01", "chassis"), locked("psu.01", "chassis")]
+    assert {d.instance for d in find_dead_ends(edges, bench, tax)} ==         {"motherboard.01", "psu.01"}
+
+
+def test_a_dead_end_behind_another_part_is_still_found(bench, tax):
+    """The board waits on the drive, which waits on something nothing can clear."""
+    edges = [locked("motherboard.01", "storage_drive.hdd.01"),
+             locked("storage_drive.hdd.01", "chassis")]
+    found = find_dead_ends(edges, bench, tax)
+    assert {d.instance for d in found} == {"motherboard.01", "storage_drive.hdd.01"}
+    assert all(d.edge.blocker == "chassis" for d in found)
+
+
+def test_a_relaxed_plan_names_only_the_preference_it_had_to_drop(bracket, tax):
+    """Round 4 minor: the note must not over-report."""
+    harmless = Edge(type="blocked_by", target=BRACKET, blocker="psu.01",
+                    mode="cable_tension", necessity="recommended", source="manual",
+                    status="accepted")
+    loop = [Edge(type="blocked_by", target=SCREW, blocker=BRACKET, mode="tool_access",
+                 necessity="recommended", source="manual", status="accepted"),
+            Edge(type="blocked_by", target=BRACKET, blocker=SCREW, mode="tool_access",
+                 necessity="recommended", source="manual", status="accepted")]
+    edges = [*propose_edges(bracket, tax), harmless, *loop]
+
+    plan = plan_removal(bracket, edges, initial_state(bracket, tax), BRACKET, tax)
+
+    assert plan is not None and plan.relaxed
+    assert harmless not in plan.dropped, "a preference that was honoured"
+    assert len(plan.dropped) < len(loop) + 1

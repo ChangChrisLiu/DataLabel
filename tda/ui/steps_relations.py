@@ -46,6 +46,7 @@ from tda.core.graph import (
     Edge,
     edge_digest,
     edges_from_db,
+    find_dead_ends,
     find_deadlocks,
     graph_version,
     is_provisional,
@@ -155,6 +156,16 @@ class RelationsData:
     def cycles(self) -> list:
         """The spec 7.4 deadlock check over the staged **active** graph."""
         return find_deadlocks(self.view().edges, self.data.instances, self.data.tax)
+
+    def dead_ends(self) -> list:
+        """Instances that cannot be planned out, and the edge nothing can clear.
+
+        Not a refusal: an edge no action satisfies is a modelling gap, and the
+        way out may be to create the missing part rather than to change the
+        edge. It must not be *silent* either -- one ``Add edge`` click can write
+        one (round 4, I-1).
+        """
+        return find_dead_ends(self.view().edges, self.data.instances, self.data.tax)
 
     def soft_conflicts(self) -> list:
         """Recommended edges that contradict each other -- a note, not a refusal.

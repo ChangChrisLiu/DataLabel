@@ -52,6 +52,7 @@ from tda.core.graph import (
     Edge,
     edge_digest,
     edges_from_db,
+    find_dead_ends,
     find_deadlocks,
     graph_version,
     is_provisional,
@@ -109,6 +110,9 @@ class DesktopGraph:
     imported: int = 0  # hard edges from the Label Studio import
     protected_other: int = 0  # rows of a type that is not a hard constraint
     cycles: list[str] = field(default_factory=list)  # deadlock labels
+    #: Instances no plan can reach, because an edge in the way is one nothing
+    #: can clear. A modelling gap, reported and counted, never an error.
+    dead_ends: list[str] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     unresolved: list[str] = field(default_factory=list)
     version: Optional[str] = None
@@ -177,6 +181,10 @@ class GraphRun:
         return sum(len(r.cycles) for r in self.applied)
 
     @property
+    def dead_ends(self) -> int:
+        return sum(len(r.dead_ends) for r in self.applied)
+
+    @property
     def violations(self) -> int:
         return sum(len(r.violations) for r in self.applied)
 
@@ -185,8 +193,8 @@ class GraphRun:
         types = ", ".join(f"{t} {self.by_type.get(t, 0)}" for t in HARD_TYPES
                           if self.by_type.get(t))
         return (f"{len(self.applied)} desktops, {self.edges} edges ({types or 'none'}), "
-                f"{self.cycles} cycles, {self.violations} violations, "
-                f"{len(self.failed)} failed")
+                f"{self.cycles} cycles, {self.dead_ends} dead ends, "
+                f"{self.violations} violations, {len(self.failed)} failed")
 
 
 # --------------------------------------------------------------------------- #
@@ -218,6 +226,7 @@ def _summary(desktop: int, derivation: Derivation, instances: dict, tax: Taxonom
         imported=counts["imported"],
         protected_other=counts["other"],
         cycles=[d.label() for d in find_deadlocks(derivation.edges, instances, tax)],
+        dead_ends=[d.label() for d in find_dead_ends(derivation.edges, instances, tax)],
         version=edge_digest(derivation.edges),
         validated=validate,
     )
@@ -333,6 +342,8 @@ def _log_desktop(log, prefix: str, one: DesktopGraph) -> None:
         f"graph_version {one.version or '-'}")
     for cycle in one.cycles:
         log(f"{prefix}   DEADLOCK {cycle}")
+    for text in one.dead_ends:
+        log(f"{prefix}   DEAD END {text}")
     for text in one.orphans:
         log(f"{prefix}   ORPHANED DECISION {text} (its rule edge is no longer derived)")
     for text in one.unresolved:
@@ -360,6 +371,8 @@ def constraints_report(run: GraphRun) -> str:
         f"{sum(len(r.orphans) for r in applied)} orphaned; "
         f"{sum(r.manual for r in applied)} manual edges",
         f"- deadlocks (spec 7.4): {run.cycles}",
+        f"- dead ends (an edge nothing can clear; a modelling gap, not an error): "
+        f"{run.dead_ends}",
         f"- violations: {run.violations}"
         + (f" ({sum(len(r.breaches) for r in applied)} likely log gaps, "
            f"{sum(len(r.hints) for r in applied)} failed attempts wanting a "
@@ -412,6 +425,18 @@ def _desktop_section(r: DesktopGraph) -> list[str]:
     lines.extend([f"- {cycle}" for cycle in r.cycles]
                  or ["- none (no loop of actions waits on itself, as spec 7.4 "
                      "requires; the graph is acyclic in the sense that matters)"])
+    lines.append("")
+    lines.append("### dead ends")
+    lines.append("")
+    if r.dead_ends:
+        lines.append("An edge in the way of taking a part out that **no action can "
+                     "clear**: not a loop and not an error, a gap in the model. "
+                     "Either the blocker is missing a part that would move (create "
+                     "it in S1) or the edge is too strong (change it in the "
+                     "Relations tab).")
+        lines.append("")
+    lines.extend([f"- {text}" for text in r.dead_ends]
+                 or ["- none: every part can still be planned out of the machine"])
     lines.append("")
     lines.append("### likely log gaps")
     lines.append("")
