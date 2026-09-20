@@ -1025,3 +1025,29 @@ def test_clearing_the_status_bar_drops_what_was_waiting(window):
     _time.sleep(0.09)
     QApplication.processEvents()
     assert window.status_message() == ""
+
+
+def test_closing_the_window_joins_the_timeline_thumbnail_reader(qapp, tmp_path):
+    """No thread may outlive the window it belongs to (the smoke checks this).
+
+    The timeline reads a row's picture on a thread of its own -- without the
+    offline thumbnail pass that picture is the 12 MP frame itself -- so the
+    window's shutdown has to stop it, like the diff worker and the SAM queue.
+    """
+    import threading
+    import time
+
+    win = open_window(tmp_path)
+    try:
+        win.resize(1200, 900)
+        win.show()
+        QApplication.processEvents()
+        win.timeline.ensure_visible_thumbs()
+        deadline = time.perf_counter() + 5.0
+        while win.timeline._asked and time.perf_counter() < deadline:
+            QApplication.processEvents()
+        assert win.timeline._thumbs, "no row picture was ever read"
+    finally:
+        close_window(win)
+    assert win.timeline._reader.running() is False
+    assert "tda-thumbs" not in {t.name for t in threading.enumerate() if t.is_alive()}

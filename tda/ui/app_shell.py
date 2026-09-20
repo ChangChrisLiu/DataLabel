@@ -347,6 +347,7 @@ class ShellMixin:
             return
         self.closed = True
         self.shutdown_assist()
+        self.timeline.shutdown()   # the thumbnail reader has a thread of its own
         self._detach_tool()
         try:
             QApplication.instance().removeEventFilter(self)

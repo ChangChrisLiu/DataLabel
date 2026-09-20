@@ -16,10 +16,11 @@ no matter who moved the frame -- including when the window refuses the move.
 """
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QIcon, QPixmap
+from PySide6.QtCore import QObject, QPoint, QSize, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QIcon, QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -34,7 +35,101 @@ from PySide6.QtWidgets import (
 from tda.ui import session_api as api
 from tda.ui.panels import session_is_open
 
-__all__ = ["BREAK_COLOR", "BREAK_ROLE", "TimelinePanel", "STATUS_COLORS", "status_brush"]
+__all__ = ["BREAK_COLOR", "BREAK_ROLE", "TimelinePanel", "STATUS_COLORS",
+           "read_thumb", "status_brush"]
+
+
+def read_thumb(path: str, size: int) -> Optional[QImage]:
+    """One image decoded **at row size**, or ``None`` when it cannot be read.
+
+    ``session.thumb_path`` falls back to the frame itself when the offline
+    thumbnail pass has not run, and on an OAK view that frame is 4032x3040.
+    ``QImageReader`` is told the size that is wanted, so a JPEG is decoded
+    scaled by its own codec: 63 ms becomes 16 ms, measured on a real oak1
+    frame.  (A PNG has no scaled decode, so a scanner frame still costs a full
+    one -- which is why this runs on a thread of its own.)
+
+    No ``QPixmap``: that is a GUI-thread type, and the point of this function
+    is that it can be called from anywhere.
+    """
+    reader = QImageReader(str(path))
+    reader.setAutoTransform(True)
+    wanted = reader.size()
+    if wanted.isValid() and (wanted.width() > size or wanted.height() > size):
+        wanted.scale(size, size, Qt.AspectRatioMode.KeepAspectRatio)
+        reader.setScaledSize(wanted)
+    image = reader.read()
+    return None if image.isNull() else image
+
+
+class _ThumbReader(QObject):
+    """Reads the timeline's pictures on a thread of its own.
+
+    One thread, a newest-first stack of requests and a queued signal back:
+    scrolling fast asks for a screenful of rows and then scrolls past them, so
+    the row the annotator is looking at *now* is the one worth reading next.
+    A request for a row that has already been answered is simply dropped by
+    the panel when it lands.
+    """
+
+    #: ``(cache_key, QImage | None)``, delivered on the GUI thread.
+    sigThumb = Signal(object)
+
+    def __init__(self, size: int, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._size = int(size)
+        self._lock = threading.Condition()
+        self._queue: list[tuple] = []
+        self._stopped = False
+        #: Started by the first request, not by the constructor: a panel that
+        #: is built and never shown -- which is most of them in a test run --
+        #: has nothing to read, and a thread per panel adds up.
+        self._thread: Optional[threading.Thread] = None
+
+    def ask(self, cache_key: tuple, path: str) -> None:
+        """Queue one picture; the newest request is read first."""
+        with self._lock:
+            if self._stopped:
+                return
+            self._queue.append((cache_key, str(path)))
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run,
+                                                name="tda-thumbs", daemon=True)
+                self._thread.start()
+            self._lock.notify()
+
+    def running(self) -> bool:
+        """Is the reader's thread alive?  (Lifecycle tests.)"""
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    def forget(self) -> None:
+        """Drop everything still queued (the view or the machine changed)."""
+        with self._lock:
+            self._queue.clear()
+
+    def _run(self) -> None:
+        while True:
+            with self._lock:
+                while not self._queue and not self._stopped:
+                    self._lock.wait()
+                if self._stopped:
+                    return
+                cache_key, path = self._queue.pop()
+            try:
+                image = read_thumb(path, self._size)
+            except Exception:  # noqa: BLE001 - a worker must never crash Qt
+                image = None
+            self.sigThumb.emit((cache_key, image))
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        with self._lock:
+            self._stopped = True
+            self._queue.clear()
+            self._lock.notify_all()
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout)
 
 #: Item data roles.
 STEP_ROLE = int(Qt.ItemDataRole.UserRole)
@@ -115,8 +210,6 @@ class TimelinePanel(QWidget):
     BAR_WIDTH = 6
     #: Extra rows loaded above and below the visible range.
     PREFETCH = 2
-    #: Thumbnails decoded per event-loop turn (see ``ensure_visible_thumbs``).
-    THUMBS_PER_TICK = 2
 
     def __init__(self, session: Optional[api.SessionLike] = None,
                  parent: Optional[QWidget] = None) -> None:
@@ -125,6 +218,11 @@ class TimelinePanel(QWidget):
         # Keyed by (desktop, view, step): step numbers repeat across machines
         # and the four views show different images of the same step.
         self._thumbs: dict[tuple[int, str, int], QPixmap] = {}
+        #: Rows the reader has been asked for and has not answered yet.
+        self._asked: set[tuple[int, str, int]] = set()
+        self._reader = _ThumbReader(self.THUMB_SIZE, self)
+        self._reader.sigThumb.connect(self._on_thumb,
+                                      Qt.ConnectionType.QueuedConnection)
         self._context: Optional[tuple[int, str]] = None
         self._placeholder_pm: Optional[QPixmap] = None
         self._descending = True
@@ -178,6 +276,8 @@ class TimelinePanel(QWidget):
             self._session.sigFrameChanged.disconnect(self._on_frame_changed)
         self._session = session
         self._thumbs.clear()
+        self._asked.clear()
+        self._reader.forget()
         self._context = None
         if session is not None:
             session.sigFrameChanged.connect(self._on_frame_changed)
@@ -314,28 +414,12 @@ class TimelinePanel(QWidget):
         return pm
 
     def _load_thumb(self, path: str) -> Optional[QPixmap]:
-        """Read one image scaled to :data:`THUMB_SIZE`, never at full size.
+        """Read one image at row size, here and now (see :func:`read_thumb`)."""
+        image = read_thumb(path, self.THUMB_SIZE)
+        return None if image is None else self._as_pixmap(image)
 
-        ``thumb_path`` falls back to the frame itself when the offline
-        thumbnail pass has not run, and on an OAK view that frame is 4032x3040:
-        building a 48 MB ``QPixmap`` of it and then smooth-scaling all 12 MP
-        down to 96 px cost 50 ms per row -- a fifth of a timeline click, for a
-        picture the size of a postage stamp.  ``QImageReader`` is told the size
-        that is wanted, so the decoder produces it directly.
-        """
-        from PySide6.QtGui import QImageReader
-
-        reader = QImageReader(str(path))
-        reader.setAutoTransform(True)
-        size = reader.size()
-        if size.isValid() and (size.width() > self.THUMB_SIZE
-                               or size.height() > self.THUMB_SIZE):
-            size.scale(self.THUMB_SIZE, self.THUMB_SIZE,
-                       Qt.AspectRatioMode.KeepAspectRatio)
-            reader.setScaledSize(size)
-        image = reader.read()
-        if image.isNull():
-            return None
+    def _as_pixmap(self, image: QImage) -> QPixmap:
+        """A row-sized pixmap from a decoded image (GUI thread only)."""
         loaded = QPixmap.fromImage(image)
         if loaded.width() <= self.THUMB_SIZE and loaded.height() <= self.THUMB_SIZE:
             return loaded
@@ -347,32 +431,60 @@ class TimelinePanel(QWidget):
         )
 
     def ensure_visible_thumbs(self) -> None:
-        """Load the thumbnails of the rows currently on screen (plus a margin).
+        """Ask for the pictures of the rows on screen (plus a margin), off-thread.
 
-        At most :data:`THUMBS_PER_TICK` of them per call; the rest are picked up
-        from a zero-timer, so the GUI thread goes back to the annotator between
-        batches.  Jumping to an unvisited part of the list scrolled a whole
-        screenful of *new* rows into view, and decoding and scaling all of them
-        synchronously is a large part of why a timeline click cost three times
-        what ``PgDn`` costs (313 ms against 114 ms measured).
+        The rows are asked for, not read: jumping to an unvisited part of the
+        list scrolls a screenful of *new* rows into view, and without the
+        offline thumbnail pass -- which ``oak1`` and ``oak2`` have never had --
+        each of those is a 12 MP decode.  Reading two per event-loop turn was
+        still 118 ms of a 12 MP timeline click, spent on pictures the size of a
+        postage stamp while the annotator waited for the frame.  The reader has
+        its own thread and the icons appear as they land; the GUI thread only
+        asks where each file is.
         """
         rows = self._visible_rows()
-        if not rows:
+        if not rows or not session_is_open(self._session):
             return
         first = max(0, min(rows) - self.PREFETCH)
         last = min(self._list.count() - 1, max(rows) + self.PREFETCH)
-        loaded = 0
         for row in range(first, last + 1):
             item = self._list.item(row)
             if item is None:
                 continue
-            if self._cache_key(int(item.data(STEP_ROLE))) in self._thumbs:
+            step = int(item.data(STEP_ROLE))
+            cache_key = self._cache_key(step)
+            if cache_key in self._thumbs or cache_key in self._asked:
                 continue
-            if loaded >= self.THUMBS_PER_TICK:
-                QTimer.singleShot(0, self.ensure_visible_thumbs)
-                return
-            self.thumbnail(int(item.data(STEP_ROLE)))
-            loaded += 1
+            path = self._session.thumb_path(step)
+            if not path:
+                # nothing to read: the placeholder is the answer, and caching
+                # it is what stops the path being looked up on every scroll
+                self._thumbs[cache_key] = self._placeholder()
+                item.setIcon(QIcon(self._thumbs[cache_key]))
+                continue
+            self._asked.add(cache_key)
+            self._reader.ask(cache_key, path)
+
+    def _on_thumb(self, payload: object) -> None:
+        """One picture came back from the reader (GUI thread)."""
+        cache_key, image = payload  # type: ignore[misc]
+        self._asked.discard(cache_key)
+        if cache_key in self._thumbs:
+            return
+        pm = self._placeholder() if image is None else self._as_pixmap(image)
+        self._thumbs[cache_key] = pm
+        if self._context is not None and cache_key[:2] == self._context:
+            item = self._item_for(cache_key[2])
+            if item is not None:
+                item.setIcon(QIcon(pm))
+
+    def shutdown(self) -> None:
+        """Stop the thumbnail reader; the panel is done with its thread.
+
+        Called by the window on its way out: a daemon thread that outlives the
+        window is exactly the leak ``scripts/mvp_smoke.py`` checks for.
+        """
+        self._reader.shutdown()
 
     # -- Qt overrides -------------------------------------------------------
     def showEvent(self, event) -> None:  # noqa: D102 - Qt override

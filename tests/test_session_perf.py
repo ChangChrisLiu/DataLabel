@@ -582,30 +582,6 @@ BUDGET_WINDOW_REPAINT = 0.05
 OAK_ZOOM = 0.59
 
 
-def _seed_thumbs(session) -> int:
-    """Write the offline timeline thumbnails the shipped cache carries.
-
-    ``TimelinePanel`` draws a 96 px picture per row from
-    ``<cache>/thumbs/<view>/D13/s003.jpg``, built by a pass over the cache.
-    Without one it falls back to the frame itself, and decoding a 12 MP frame
-    per row is a cost of that *missing pass*, not of a timeline click -- it is
-    measured and reported separately (task B7), and mixing it in here would
-    make this test about which machine had run the pass.
-    """
-    import cv2
-
-    from tda.ui.session_images import thumb_path
-
-    written = 0
-    for step in session.steps():
-        key = FrameKey(DESKTOP, int(step), VIEW)
-        path = Path(thumb_path(session.truth.cache_dir, key))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(path), np.full((72, 96, 3), 40 + int(step) % 200, np.uint8))
-        written += 1
-    return written
-
-
 def _open_window(session, tmp_path: Path):
     """A real ``MainWindow`` on this session, laid out like the annotator's."""
     from PySide6.QtCore import Qt
@@ -650,14 +626,16 @@ def test_window_gesture_budgets_on_a_12mp_frame_with_forty_instances(
     against a 0.5 s ``commit_edit``.
 
     **In the shipped configuration**: the sweeper is on, the frame is the one
-    with every instance still in the machine, and the canvas stands where the
-    annotator stands -- zoomed into the ROI, not fitted to the whole frame.
+    with every instance still in the machine, the canvas stands where the
+    annotator stands -- zoomed into the ROI, not fitted to the whole frame --
+    and the cache carries no offline timeline thumbnails, which is the state
+    ``oak1`` and ``oak2`` are in today, so the timeline rows are read from the
+    12 MP frames themselves.
     """
     session = make_session(tmp_path, last_step=BOARD_STEP, hw=OAK_HW)
     session.goto(OAK_STEP)
     drawn = seed_shapes(session, OAK_STEP, grid=7, anchor=BOARD_STEP, refresh=False)
     assert len(drawn) >= 40, f"the scene has only {len(drawn)} instances"
-    assert _seed_thumbs(session) >= 40
     session.compiled()
     window = _open_window(session, tmp_path)
     try:
