@@ -43,8 +43,8 @@ from tda.core.model import InstanceRec
 from tda.core.states import FrameState, initial_state
 from tda.core.taxonomy import Taxonomy
 
-__all__ = ["Deadlock", "Plan", "clearing_actions", "find_deadlocks", "plan_removal",
-           "remaining_plan"]
+__all__ = ["DeadEnd", "Deadlock", "Plan", "clearing_actions", "find_dead_ends",
+           "find_deadlocks", "plan_removal", "remaining_plan"]
 
 #: Spec 7.1's weaker necessity: a preference about the order, never a law. The
 #: checker, the legal-action set and the deadlock check all bind ``required``
@@ -76,12 +76,22 @@ def _choose_verbs(
     first answer and stopping called a plannable machine deadlocked (the panel
     then refused a legitimate edge), so the caller gets the whole set and tries
     them in order.
+
+    **Taking the blocker out is always one of them**, last, whenever its class
+    can be removed at all: :func:`~tda.core.graph.unmet` counts a ``removed``
+    blocker as satisfying *any* edge, so a ``locked_by`` whose blocker no verb
+    can ``open`` is still cleared by removing it. Leaving that out made one
+    ``Add edge`` click enough to write a constraint nothing could ever satisfy,
+    silently (round 4, I-1).
     """
     out: list[str] = []
     for verb in VERB_PREFERENCE:
         new = verb_effect(tax, rec.cls, rec.attrs, verb)
         if new in wanted and verb_applies(tax, rec.cls, rec.attrs, verb, current):
             out.append(verb)
+    if REMOVED not in wanted and "remove" not in out \
+            and verb_applies(tax, rec.cls, rec.attrs, "remove", current):
+        out.append("remove")
     return out
 
 
@@ -179,17 +189,33 @@ def plan_removal(
 
     ``None`` only when there is no plan under the required edges either.
     """
-    strict = _plan_once(instances, active_edges(edges), state, goal, tax)
+    active = active_edges(edges)
+    strict = _plan_once(instances, active, state, goal, tax)
     if strict is not None:
         return Plan(actions=tuple(strict))
-    required = [e for e in active_edges(edges) if e.necessity != RECOMMENDED]
-    dropped = tuple(e for e in active_edges(edges) if e.necessity == RECOMMENDED)
-    if not dropped:
+    required = [e for e in active if e.necessity != RECOMMENDED]
+    recommended = [e for e in active if e.necessity == RECOMMENDED]
+    if not recommended:
         return None
-    relaxed = _plan_once(instances, required, state, goal, tax)
-    if relaxed is None:
+    if _plan_once(instances, required, state, goal, tax) is None:
         return None
-    return Plan(actions=tuple(relaxed), relaxed=True, dropped=dropped)
+    # Which preferences really had to go? Greedily: hand them back one at a
+    # time, in their stored order, and keep each one that still leaves a plan.
+    # That is a *minimal* set (dropping any one of the kept ones back in breaks
+    # it), not the smallest possible one, and it costs one planning pass per
+    # recommended edge -- so the panel's note names the edges that are actually
+    # in the way instead of every preference on the desktop.
+    kept: list[Edge] = []
+    plan: Optional[list[VerbTarget]] = None
+    for edge in recommended:
+        trial = _plan_once(instances, [*required, *kept, edge], state, goal, tax)
+        if trial is not None:
+            kept.append(edge)
+            plan = trial
+    if plan is None:
+        plan = _plan_once(instances, required, state, goal, tax)
+    dropped = tuple(e for e in recommended if all(e is not k for k in kept))
+    return Plan(actions=tuple(plan or ()), relaxed=True, dropped=dropped)
 
 
 def remaining_plan(
@@ -447,6 +473,148 @@ def _goal_actions(instances: dict[str, InstanceRec], sim: dict[str, str],
     return roots
 
 
+def _analyse(
+    edges: list[Edge],
+    instances: dict[str, InstanceRec],
+    tax: Taxonomy,
+    state: Optional[FrameState],
+    necessity: str,
+) -> tuple[dict[VerbTarget, list[tuple[Edge, list[VerbTarget]]]], set[VerbTarget],
+           dict[str, str]]:
+    """The reachable action graph and which of its actions can be done at all.
+
+    Shared by :func:`find_deadlocks` and :func:`find_dead_ends` so the two
+    cannot disagree about what is stuck:
+
+    1. expand from the goal actions -- an action nobody could ask for is not a
+       problem, it is unreachable -- recording, per action, each gating edge
+       with its alternatives (``clearing_actions``);
+    2. a least fixpoint: an action is **doable** when every edge gating it
+       either needs nothing or has at least one doable alternative (AND over the
+       edges, OR over the alternatives).
+    """
+    binding = _binding(edges, necessity)
+    sim = _simulated(binding, instances, tax, state)
+    by_target: dict[str, list[Edge]] = {}
+    for edge in binding:
+        by_target.setdefault(edge.target, []).append(edge)
+
+    def gating(action: VerbTarget) -> list[tuple[Edge, list[VerbTarget]]]:
+        """The edges in this action's way, each with its alternatives."""
+        verb, node = action
+        out: list[tuple[Edge, list[VerbTarget]]] = []
+        for edge in by_target.get(node, ()):
+            if verb not in gated_verbs(edge.type, edge.mode):
+                continue
+            alternatives = clearing_actions(edge, instances, sim, tax)
+            if alternatives is not None:      # None: nothing to do for this edge
+                out.append((edge, sorted(alternatives)))
+        return out
+
+    waits: dict[VerbTarget, list[tuple[Edge, list[VerbTarget]]]] = {}
+    queue = sorted(set(_goal_actions(instances, sim, tax)))
+    while queue:
+        action = queue.pop()
+        if action in waits:
+            continue
+        waits[action] = gating(action)
+        for _edge, alternatives in waits[action]:
+            queue.extend(a for a in alternatives if a not in waits)
+
+    doable: set[VerbTarget] = set()
+    changed = True
+    while changed:
+        changed = False
+        for action, gates in waits.items():
+            if action in doable:
+                continue
+            if all(any(a in doable for a in alternatives) for _edge, alternatives in gates):
+                doable.add(action)
+                changed = True
+    return waits, doable, sim
+
+
+@dataclass(frozen=True)
+class DeadEnd:
+    """An instance that cannot be planned out, and the edge nothing can clear.
+
+    Not a deadlock: no loop, just a constraint no action satisfies -- a blocker
+    that can neither reach a state the edge accepts nor be removed (the chassis,
+    a latch, a lever). It is a modelling gap, so nothing is refused over it, but
+    it is never silent either: the panel says so and ``constraints`` lists it.
+    """
+
+    instance: str
+    edge: Edge
+    action: VerbTarget
+
+    def label(self) -> str:
+        """``motherboard.01: nothing can clear locked_by(motherboard.01, chassis)``."""
+        return (f"{self.instance} 无法排出拆解计划：没有动作能解除 {self.edge.label()} / "
+                f"no plan for {self.instance}: nothing can clear {self.edge.label()}")
+
+
+def find_dead_ends(
+    edges: list[Edge],
+    instances: dict[str, InstanceRec],
+    tax: Taxonomy,
+    state: Optional[FrameState] = None,
+) -> list[DeadEnd]:
+    """Every instance whose removal is impossible for want of an action.
+
+    One entry per instance, naming the first edge (in a stable order) that has
+    to give way and that nothing can make give way. An instance stuck only
+    inside a loop is **not** listed here -- :func:`find_deadlocks` names that,
+    and the two together explain every ``remaining_plan`` that answers ``None``
+    apart from classes that cannot be removed at all (spec 6.3).
+    """
+    waits, doable, sim = _analyse(edges, instances, tax, state, "required")
+    out: list[DeadEnd] = []
+    for key in sorted(instances):
+        if is_provisional(key):
+            continue
+        target = _removal_goal(instances, key)
+        chain = _removal_chain(tax, instances[target], sim.get(target, ""))
+        if chain is None:                      # the class cannot be removed at all
+            continue
+        stuck = [(verb, target) for verb in chain if (verb, target) not in doable]
+        if not stuck:
+            continue
+        blame = _first_dead_end(stuck[0], waits, doable)
+        if blame is not None:
+            edge, action = blame
+            out.append(DeadEnd(instance=key, edge=edge, action=action))
+    return out
+
+
+def _first_dead_end(
+    start: VerbTarget,
+    waits: dict[VerbTarget, list[tuple[Edge, list[VerbTarget]]]],
+    doable: set[VerbTarget],
+) -> Optional[tuple[Edge, VerbTarget]]:
+    """Walk the stuck actions from ``start`` to an edge with no alternative.
+
+    Breadth-first over the stuck part of the graph, in a stable order, so the
+    same graph always blames the same edge. ``None`` when every stuck edge on
+    the way has alternatives -- the action is inside a loop, which is a
+    deadlock and is reported as one.
+    """
+    seen = {start}
+    queue = [start]
+    while queue:
+        action = queue.pop(0)
+        for edge, alternatives in waits.get(action, ()):
+            if any(a in doable for a in alternatives):
+                continue
+            if not alternatives:
+                return edge, action
+            for nxt in alternatives:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    queue.append(nxt)
+    return None
+
+
 def find_deadlocks(
     edges: list[Edge],
     instances: dict[str, InstanceRec],
@@ -482,47 +650,7 @@ def find_deadlocks(
     planner drops. ``state`` defaults to the initial state, which is the state
     the graph is written about.
     """
-    binding = _binding(edges, necessity)
-    sim = _simulated(binding, instances, tax, state)
-    by_target: dict[str, list[Edge]] = {}
-    for edge in binding:
-        by_target.setdefault(edge.target, []).append(edge)
-
-    def gating(action: VerbTarget) -> list[tuple[Edge, list[VerbTarget]]]:
-        """The edges in this action's way, each with its alternatives."""
-        verb, node = action
-        out: list[tuple[Edge, list[VerbTarget]]] = []
-        for edge in by_target.get(node, ()):
-            if verb not in gated_verbs(edge.type, edge.mode):
-                continue
-            alternatives = clearing_actions(edge, instances, sim, tax)
-            if alternatives is not None:      # None: nothing to do for this edge
-                out.append((edge, sorted(alternatives)))
-        return out
-
-    # 1. the reachable action graph (an action nobody could ask for is not a
-    #    deadlock, it is unreachable)
-    waits: dict[VerbTarget, list[tuple[Edge, list[VerbTarget]]]] = {}
-    queue = sorted(set(_goal_actions(instances, sim, tax)))
-    while queue:
-        action = queue.pop()
-        if action in waits:
-            continue
-        waits[action] = gating(action)
-        for _edge, alternatives in waits[action]:
-            queue.extend(a for a in alternatives if a not in waits)
-
-    # 2. least fixpoint: who can be done at all
-    doable: set[VerbTarget] = set()
-    changed = True
-    while changed:
-        changed = False
-        for action, gates in waits.items():
-            if action in doable:
-                continue
-            if all(any(a in doable for a in alternatives) for _edge, alternatives in gates):
-                doable.add(action)
-                changed = True
+    waits, doable, _sim = _analyse(edges, instances, tax, state, necessity)
 
     # 3. among the stuck ones, the arrows that are loops rather than dead ends
     graph: dict[VerbTarget, list[VerbTarget]] = {}

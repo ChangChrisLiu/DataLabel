@@ -495,3 +495,56 @@ def test_the_open_question_jumps_to_the_edge_too(tab, panel):
     assert panel.tabs.currentWidget() is tab
     row = tab.model.row_of("screw.cpu_cooler.01", "blocked_by", "cpu_cooler.fan.01")
     assert tab.view.currentIndex().row() == row
+
+
+# --------------------------------------------------------------------------- #
+# round 4: a dead end is never silent
+# --------------------------------------------------------------------------- #
+def dead_ended(panel) -> None:
+    """One Add-edge click: nothing can `open` the chassis, so nothing clears it."""
+    panel.data.relations.add("motherboard.01", "locked_by", "chassis")
+    panel.relations_tab.refresh()
+    panel._refresh_issues()
+
+
+def test_a_dead_end_is_allowed_but_said_out_loud(tab, panel):
+    dead_ended(panel)
+
+    assert panel.data.relations.cycles() == [], "no loop: nothing is refused"
+    assert not tab.cycles_label.styleSheet(), "a note, not an error"
+    assert "motherboard.01" in tab.cycles_label.text()
+    assert "locked_by(motherboard.01, chassis)" in tab.cycles_label.text()
+    assert any("no plan for motherboard.01" in panel.issues.item(i).text()
+               for i in range(panel.issues.count()))
+
+
+def test_the_dead_end_apply_still_goes_through(tab, panel, db):
+    dead_ended(panel)
+
+    panel.apply()
+
+    assert "Saved" in panel.status.text()
+    assert ("locked_by", "motherboard.01", "chassis") in triples(
+        edges_from_db(db, DESKTOP))
+
+
+def test_the_dead_end_question_jumps_to_its_edge(tab, panel):
+    dead_ended(panel)
+    item = next(panel.issues.item(i) for i in range(panel.issues.count())
+                if "no plan for" in panel.issues.item(i).text())
+
+    panel._on_issue_activated(item)
+
+    assert panel.tabs.currentWidget() is tab
+    assert tab.view.currentIndex().row() == tab.model.row_of(
+        "motherboard.01", "locked_by", "chassis")
+
+
+def test_an_edge_whose_blocker_can_be_removed_is_no_dead_end(tab, panel):
+    """`unmet` accepts a removed blocker, so the PSU clears this by leaving."""
+    panel.data.relations.add("motherboard.01", "locked_by", PSU)
+    panel.relations_tab.refresh()
+    panel._refresh_issues()
+
+    assert panel.data.relations.dead_ends() == []
+    assert "none" in tab.cycles_label.text().lower()

@@ -27,7 +27,13 @@ from __future__ import annotations
 import hashlib
 from typing import Optional, Union
 
-from tda.core.graph_plan import Deadlock, find_deadlocks, remaining_plan
+from tda.core.graph_plan import (
+    DeadEnd,
+    Deadlock,
+    find_dead_ends,
+    find_deadlocks,
+    remaining_plan,
+)
 from tda.core.graph_rules import (
     BLOCKED_MODES,
     Edge,
@@ -58,6 +64,7 @@ from tda.core.taxonomy import Taxonomy
 
 __all__ = [
     "BLOCKED_MODES",
+    "DeadEnd",
     "Deadlock",
     "Edge",
     "GATED_VERBS",
@@ -72,6 +79,7 @@ __all__ = [
     "edge_digest",
     "edges_from_db",
     "edges_to_db",
+    "find_dead_ends",
     "find_deadlocks",
     "gated_verbs",
     "graph_version",
