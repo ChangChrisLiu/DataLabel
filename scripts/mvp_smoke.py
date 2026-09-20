@@ -198,6 +198,10 @@ class Smoke:
             closed = time.perf_counter()
             window.close()
             self.report["close_ms"] = (time.perf_counter() - closed) * 1000
+            # Every worker the window owns has to be joined by close(): the diff
+            # map, the truth sweeper, the SAM queue and the ROI proposer all
+            # hold something the window is about to drop.
+            self.report["threads_after_close"] = _thread_names()
             db.close()
             self.note_peak()
             self.report["peak_rss_mb"] = self.peak
@@ -217,6 +221,14 @@ class Smoke:
         self.report["roi_proposed"] = bool(window.roi_editing)
         started = time.perf_counter()
         if window.roi_editing:
+            # The rectangle is measured on three frames of the pose segment, on
+            # a worker, so the window is usable at once and the box arrives a
+            # moment later.  An annotator drags or waits; a smoke run has to
+            # wait, or it would press Enter on an empty draft and report that
+            # the detector found nothing.
+            note("waiting for the chassis measurement")
+            self.report["roi_measured"] = bool(window.wait_for_roi_proposal())
+            self.report["roi_measure_ms"] = (time.perf_counter() - started) * 1000
             window.act_commit()
         self.report["roi_accept_ms"] = (time.perf_counter() - started) * 1000
         self.report["roi"] = list(window.roi() or [])
