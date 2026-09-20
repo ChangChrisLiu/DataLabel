@@ -71,6 +71,16 @@ def check_deletable(data: "StepTableData", db: Db, key: str) -> None:
     for rel in db.relations(data.desktop):
         if key in (rel.get("target"), rel.get("blocker")):
             raise EditError(f"{key!r} is still used by a {rel.get('type')!r} constraint edge")
+    # A staged edge is not in the table yet, so the loop above cannot see it --
+    # and this delete writes straight through, which would leave the Relations
+    # tab holding an edge whose endpoint no longer exists and `Apply` writing a
+    # dangling row. The staging is refused rather than silently cleaned: the
+    # annotator asserted that edge one minute ago.
+    for edge in data.relations.names(key) if data.relations is not None else ():
+        raise EditError(
+            f"{key!r} 还挂着未保存的 {edge.type} 约束边 / {key!r} is named by a staged "
+            f"{edge.type} constraint edge; apply or revert the Relations tab first"
+        )
     counts = db.instance_reference_counts(data.desktop, key)
     if counts:
         named = ", ".join(f"{n} row(s) in {table}" for table, n in sorted(counts.items()))

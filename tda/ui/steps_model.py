@@ -35,6 +35,7 @@ from tda.core.states import (
 )
 from tda.core.taxonomy import Taxonomy, load_taxonomy, parse_raw_name
 from tda.ui.steps_delete import delete_instance
+from tda.ui.steps_relations import RelationsData
 from tda.ui.steps_issues import (
     dangling_issues,
     draft_issues,
@@ -164,11 +165,19 @@ class StepTableData:
     #: otherwise. The panel says so, because the annotator has just moved a
     #: boundary that every shape of that view is anchored to.
     recut: dict[str, int] = field(default_factory=dict)
+    #: The desktop's constraint edges, staged like everything else here and
+    #: written by :meth:`save` in the same transaction
+    #: (:mod:`tda.ui.steps_relations`, stage S6).
+    relations: "RelationsData" = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.relations is None:
+            self.relations = RelationsData(data=self)
 
     # -- loading ---------------------------------------------------------- #
     @classmethod
     def load(cls, db: Db, desktop: int, tax: Taxonomy | None = None) -> "StepTableData":
-        """Read one desktop's steps, actions and instances out of the database."""
+        """Read one desktop's steps, actions, instances and constraint edges."""
         tax = tax or load_taxonomy()
         by_step: dict[int, list[ActionRec]] = {}
         for action in db.actions(desktop):
@@ -176,6 +185,7 @@ class StepTableData:
         rows = [StepRow(step=rec, actions=by_step.get(rec.step, [])) for rec in db.steps(desktop)]
         data = cls(desktop=desktop, tax=tax, rows=rows, instances=db.instances(desktop),
                    declined=set(db.declined_implied(desktop)))
+        data.relations.reload(db)
         data.refresh_issues()
         return data
 
@@ -451,6 +461,10 @@ class StepTableData:
         queues the frozen frames for a re-check exactly as
         :meth:`tda.core.db.Db.apply_recut` does everywhere else -- and a re-cut
         that raises takes the whole Apply with it.
+
+        The staged constraint edges (stage S6) go in the same transaction, last,
+        so an edge can name an instance this very Apply created and a re-cut
+        that fails rolls the edges back with everything else.
         """
         from tda.pipeline import split_pose_segments    # late: tda.pipeline is heavy
 
@@ -465,6 +479,8 @@ class StepTableData:
             db.replace_events(self.desktop, events, auto_only=True)
             if moved:
                 self.recut = split_pose_segments(db, self.desktop)
+            self.relations.write(db)
+        self.relations.committed()
         self.messages = validate_events(self.instances, db.events(self.desktop), self.tax)
         self.refresh_issues()
         return list(self.messages)
