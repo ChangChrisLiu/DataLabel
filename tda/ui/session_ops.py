@@ -314,6 +314,9 @@ def keyframe_state(kf: Optional[ShapeKeyframe], ref: dict,
         "ref": ref, "exists": True, "instance": kf.instance, "desktop": kf.desktop,
         "view": kf.view, "pose_segment": kf.pose_segment, "anchor_step": kf.anchor_step,
         "placement": kf.placement, "geom_type": kf.geom_type, "version": kf.version,
+        # where the pixels came from travels with them: a redo that re-inserted
+        # the row as hand-drawn would lose the draft reference of spec 3.1
+        "source": kf.source, "draft_id": kf.draft_id,
         "parts": [_part_state(p) for p in kf.parts],
     }
 
@@ -362,6 +365,9 @@ def _apply_keyframe(db: Db, state: dict) -> None:
         existing.placement = state["placement"]
         existing.geom_type = state["geom_type"]
         existing.parts = parts
+        # an older payload has neither field; then the row keeps what it has
+        existing.source = state.get("source", existing.source)
+        existing.draft_id = state.get("draft_id", existing.draft_id)
         db.update_keyframe(existing)
         return
     kf = new_keyframe(
@@ -370,6 +376,8 @@ def _apply_keyframe(db: Db, state: dict) -> None:
         state["placement"], parts, state["geom_type"],
     )
     kf.version = int(state.get("version") or 1)
+    kf.source = state.get("source") or kf.source
+    kf.draft_id = state.get("draft_id")
     ref["keyframe_id"] = db.add_keyframe(kf, keep_id=kid)
 
 

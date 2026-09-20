@@ -162,6 +162,8 @@ ACTIONS: tuple[Action, ...] = (
            "笔刷变大", "tool", (+1,), _ANN, repeat=True),
     Action("cycle_candidate", ("C",), "act_cycle_candidate", "Next SAM candidate",
            "切换 SAM 候选掩码", "tool", (), _ANN),
+    Action("adopt_draft", ("Shift+A",), "act_adopt_draft", "Adopt a Label Studio draft",
+           "采纳 Label Studio 旧草稿（再按一次换下一个）", "tool", (), _ANN),
     Action("fill_holes", ("Shift+F",), "act_fill_holes", "Fill holes",
            "填补掩码内部空洞", "tool", (), _ANN),
     Action("despeckle", ("Shift+D",), "act_despeckle", "Remove specks",

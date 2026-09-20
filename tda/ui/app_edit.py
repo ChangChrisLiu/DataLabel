@@ -206,6 +206,10 @@ class EditMixin:
         self._pending_scope = None
         self.scope_bar.hide()
         self.disarm_bench()
+        # A draft ghost is about one instance on one frame.  ``_sync_editing_layer``
+        # covers the frames that repaint; this covers the ones that do not,
+        # including a view with no image at this step.
+        self.forget_draft_ghost()
         if self.session.image() is not None:
             segment = (int(key.desktop), str(key.view), self._pose_segment(key))
             if self.roi() is not None:
@@ -224,9 +228,18 @@ class EditMixin:
         tool -- a commit, ``Esc``, an undo, a restored sidecar all end here --
         so it is where the half-built prompt is dropped.  Keeping the points
         made the next click refine a layer their result no longer had anything
-        to do with.
+        to do with.  A draft ghost, and the note saying the layer came from a
+        draft, describe the same vanished layer and go with them.
+
+        The **area warning** goes too, and this is the place that catches the
+        one an undo or a redo would otherwise leave standing: it is an offer
+        about a specific mask ("press Enter again and I will write these 2,116
+        pixels"), and ``Ctrl+Z`` back to a hundred of them made the next Enter
+        commit a hundred pixels while logging an override of two thousand.
         """
         self.reset_sam_prompt()
+        self.forget_draft_ghost()
+        self._invalidate_area_warning()
         if self.overlay is None:
             return
         instance = getattr(self.session, "editing_instance", None)
@@ -362,6 +375,9 @@ class EditMixin:
         ``commit_box`` directly.
         """
         self.cancel_roi_edit()
+        # This branch of ``on_request_edit`` never reaches _sync_editing_layer,
+        # so a ghost offered for the previous instance would still be on screen.
+        self.forget_draft_ghost()
         self.bench_instance = str(instance)
         self._tool_name = "bench_box"
         self.set_sam_instance(None)
@@ -438,10 +454,26 @@ class EditMixin:
         if self._paint_blocked or instance is None or self.overlay is None:
             self._revert_blocked_stroke()
             return
+        self._invalidate_area_warning()
         compat.push_stroke(self.session, instance,
                            getattr(tool, "stroke_before", None), self.overlay.editing)
         self.queue_sidecar(self.session.current(), instance, self.overlay.editing)
         self.update_status()
+
+    def _invalidate_area_warning(self) -> None:
+        """Take back a size warning whose mask has just changed underneath it.
+
+        The warning is an offer -- "press Enter again and I will write this
+        1.5 Mpx screw" -- and the second Enter logs *the facts of the mask it
+        was raised on*.  Painting in between made those facts describe a mask
+        nobody was warned about, and the override rode on a commit the
+        annotator never confirmed.  So any change of the layer ends the
+        conversation and the next Enter asks again.
+        """
+        if self._pending_warning is None:
+            return
+        self._pending_warning = None
+        self.warn_bar.hide()
 
     def _revert_blocked_stroke(self) -> None:
         """Undo a stroke that had no instance to belong to."""
@@ -498,7 +530,10 @@ class EditMixin:
             return
         key, instance, mask = pending
         try:
-            self.sidecar.save(key, instance, mask)
+            # The adopted drafts go with the pixels: a crash takes the undo
+            # history, which is where the provenance otherwise lives.
+            self.sidecar.save(key, instance, mask,
+                              adopted=self.pending_adoptions(key, instance))
         except Exception as exc:  # noqa: BLE001 - reported, never raised at a stroke
             self._sidecar_broken = SIDECAR_BROKEN.format(why=exc)
             self.logger.error("sidecar write failed: %s", exc)
@@ -540,13 +575,21 @@ class EditMixin:
             self.sidecar.clear(key, instance)
             self._sidecar_written.discard(self._sidecar_id(key, instance))
 
-    def set_editing_mask(self, mask: np.ndarray, undoable: bool = False) -> None:
-        """Replace the editing layer everywhere it is held at once."""
+    def set_editing_mask(self, mask: np.ndarray, undoable: bool = False,
+                         adopted: Optional[dict] = None) -> None:
+        """Replace the editing layer everywhere it is held at once.
+
+        ``adopted`` marks the change as an adopted Label Studio draft, which
+        travels on the undo entry and into the crash sidecar.
+        """
         instance = getattr(self.session, "editing_instance", None)
         before = None if self.overlay is None else self.overlay.editing.copy()
         mask = np.asarray(mask, dtype=bool)
+        # The pixels the area warning was computed on are gone, so the answer
+        # to it is gone with them (see ``_invalidate_area_warning``).
+        self._invalidate_area_warning()
         if undoable and instance is not None:
-            compat.push_stroke(self.session, instance, before, mask)
+            compat.push_stroke(self.session, instance, before, mask, adopted)
             self.queue_sidecar(self.session.current(), instance, mask)
         else:
             self.session.set_editing_mask(mask)

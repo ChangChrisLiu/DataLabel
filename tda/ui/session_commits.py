@@ -102,6 +102,17 @@ class CommitMixin:
         """The instance being drawn, or ``None``."""
         return self.layer.instance
 
+    @property
+    def editing_id(self) -> Optional[int]:
+        """Identity of the edit being made, or ``None`` when none is open.
+
+        One ``begin_edit`` to the ``clear_edit``/commit that ends it.  The undo
+        history is per view and outlives every edit in it, so this is what
+        tells "the pixels I am about to commit" from "the pixels I committed
+        here an hour ago".
+        """
+        return self.layer.edit_id
+
     def editing_mask(self) -> Optional[np.ndarray]:
         """The editing layer as the session last saw it, or ``None``.
 
@@ -114,14 +125,31 @@ class CommitMixin:
         """Take a copy of the layer the window has been painting into."""
         self.layer.set(mask)
 
-    def push_stroke(self, before: np.ndarray, after: np.ndarray) -> None:
+    def push_stroke(self, before: np.ndarray, after: np.ndarray,
+                    adopted: Optional[dict] = None) -> None:
         """Record one brush/eraser stroke on the undo stack (spec 4.6).
 
         The pixels are already painted, so the op is logged rather than applied;
         undoing it hands the earlier mask back on :attr:`sigEditingChanged`.
+
+        ``adopted`` names the Label Studio draft a stroke came from, for the
+        commit that later reads its own provenance off this history.
         """
-        self.undo_stack.push(self.layer.stroke_op(before, after), apply=False)
+        self.undo_stack.push(self.layer.stroke_op(before, after, adopted), apply=False)
         self._refresh_dirty()
+
+    def adoptions_in_history(self) -> list[dict]:
+        """The ``adopted`` notes of every stroke that is applied right now.
+
+        Oldest first, undone strokes left out -- the undo stack's own account
+        of which drafts are actually in the layer.
+        """
+        out = []
+        for op in self.undo_stack.ops:
+            adopted = (op.payload or {}).get("adopted") if op.kind == "edit_editing_mask" else None
+            if adopted:
+                out.append(dict(adopted))
+        return out
 
     def clear_edit(self) -> None:
         """Drop the editing layer without writing anything."""
