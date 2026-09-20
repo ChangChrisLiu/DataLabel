@@ -78,14 +78,16 @@ class RoiMixin:
         """Propose a rectangle and let the annotator drag it (``Enter`` accepts).
 
         The proposal is measured on **three frames of the pose segment** -- its
-        first, its middle and its last that have an image -- and the union of
-        what they say is what is offered (:func:`tda.core.cache.suggest_roi_over`).
-        Inside a pose segment the machine does not move, so all three are
-        measurements of the same rectangle, and a per-frame box can only be too
-        small: segmentation clips where contrast fails, which by the late steps
-        is most of an emptied chassis. Measuring the frame that happened to be
-        open was worse still -- that is the *last* step, a bright empty box
-        where both scanner strategies give up.
+        first, its middle and its last that have an image -- and what they agree
+        on is what is offered (:func:`tda.core.cache.suggest_roi_over`). Inside
+        a pose segment the machine does not move, so all three are measurements
+        of the same rectangle. On the scanner a per-frame box can only be too
+        small -- segmentation clips where contrast fails, which by the late
+        steps is most of an emptied chassis -- so the three are unioned. On an
+        OAK view a box can also be too *big*, the tape square having let the
+        bench in, so each edge is the median of the three instead. Measuring the
+        frame that happened to be open was worse still -- that is the *last*
+        step, a bright empty box where both scanner strategies give up.
 
         It is **asynchronous**. Three decodes and three detections are 165 ms on
         a 12 MP OAK segment and 465 ms on a scanner one, which is not something
