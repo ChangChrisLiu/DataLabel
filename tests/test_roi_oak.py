@@ -143,6 +143,27 @@ def test_the_scanner_is_not_measured_the_oak_way():
     assert oak_chassis_box(np.full((*HW, 3), 240, np.uint8)) is None
 
 
+def test_the_detector_is_useless_on_rgb_and_the_window_knows_it():
+    """The session hands out RGB; every stage that looks at hue works in BGR.
+
+    This is not a style point. The tape square read in the wrong channel order
+    is a cyan blob, ``inRange`` finds no square, and an OAK frame -- where the
+    square *is* the region the detector may look in -- then has no proposal at
+    all. It is what made every real OAK ROI come back as the whole frame even
+    after the detector existed.
+    """
+    from tda.ui.app_roi import as_bgr
+
+    bgr = bench()
+    rgb = bgr[:, :, ::-1].copy()
+
+    assert suggest_roi(bgr, "oak1") != full_frame(HW[1], HW[0])
+    assert suggest_roi(rgb, "oak1") == full_frame(HW[1], HW[0])
+    assert suggest_roi(as_bgr(rgb), "oak1") == suggest_roi(bgr, "oak1")
+    assert np.array_equal(as_bgr(rgb), bgr)
+    assert as_bgr(None) is None
+
+
 # --------------------------------------------------------------------------- #
 # real frames (skipped without F:)
 # --------------------------------------------------------------------------- #

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import cv2
+import numpy as np
 from PySide6.QtCore import Qt
 
 from tda.core.cache import suggest_roi
@@ -17,13 +19,30 @@ from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 from tda.ui import session_api as api
 
-__all__ = ["RoiMixin"]
+__all__ = ["RoiMixin", "as_bgr"]
 
 #: What :meth:`SessionLike.instance_rows` calls a part lying in the staging area.
 ON_BENCH = "on_bench"
 #: Shown when the detector returns the whole frame, which means "not found".
 NO_CHASSIS_FOUND = ("未能自动找到机箱：请拖一个框 / could not find the chassis: "
                     "drag a box around it (Enter stores it)")
+
+
+def as_bgr(rgb: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    """The session hands out **RGB**; :mod:`tda.core.cache` measures **BGR**.
+
+    The two channel orders had never been reconciled, and the detector was fed
+    the session's array as it came. It is a colour detector: the yellow tape
+    square read as BGR is a cyan blob, ``inRange`` finds no square, and the
+    stage that needs one returns nothing. On the scanner that was invisible --
+    the second stage, "whatever is not the scan bed", does not look at hue and
+    carried every frame -- and on an OAK frame, where the tape square *is* the
+    region the detector may look in, it meant every proposal was the whole
+    frame, which is what the controller measured as ``roi: []``.
+    """
+    if rgb is None or getattr(rgb, "ndim", 0) != 3 or rgb.shape[2] != 3:
+        return rgb
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
 
 class RoiMixin:
@@ -72,7 +91,7 @@ class RoiMixin:
             self.roi_draft = tuple(int(v) for v in stored)
         else:
             reference, scale = self._roi_reference_image(image)
-            box = suggest_roi(reference, self.session.view)
+            box = suggest_roi(as_bgr(reference), self.session.view)
             self.roi_draft = self._scaled_box(box, scale, image.shape[:2])
         self.roi_editing = True
         # Arm the tool first: detaching a SAM tool clears the rubber band, so

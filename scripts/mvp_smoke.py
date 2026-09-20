@@ -103,6 +103,17 @@ def copy_database(src: str, dst: Path) -> float:
     return dst.stat().st_size / 1e6
 
 
+def note(what: str) -> None:
+    """Say where the run has got to, on stderr.
+
+    A 12 MP run with SAM loaded takes minutes and used to print nothing until
+    the end, so "still working" and "wedged on a modal dialog nobody can click"
+    looked exactly alike. The report itself still goes to stdout untouched.
+    """
+    sys.stderr.write(f"[smoke {time.strftime('%H:%M:%S')}] {what}\n")
+    sys.stderr.flush()
+
+
 def rss_mb() -> float:
     try:
         import psutil
@@ -137,6 +148,7 @@ class Smoke:
         config = P.load_paths(self.args.paths)
         tmp = Path(P.require(config, "cache_dir")).parent / ".cache" / "tmp"
         copy = tmp / "tda_smoke.sqlite"
+        note("copying the database")
         self.report["db_mb"] = copy_database(P.require(config, "db_path"), copy)
         # The frames still come from the real cache, but the INI, the log and
         # the sidecars go to a directory of their own: a smoke run must not
@@ -146,6 +158,7 @@ class Smoke:
                       app_dir=str(state))
         self.report["app_state_dir"] = str(state)
 
+        note("opening the session")
         app = QApplication.instance() or QApplication(sys.argv[:1])
         started = time.perf_counter()
         db = P.open_db(config, str(copy))
@@ -170,6 +183,18 @@ class Smoke:
         try:
             self.drive(window, app)
         finally:
+            note("closing the window")
+            # A run must never wedge on the "Uncommitted edit" question: it is
+            # a modal dialog, the platform plugin is offscreen and there is
+            # nobody to answer it, so the process simply stops for ever. Any
+            # layer still open here belongs to a measurement, not to an
+            # annotator, and is dropped through the session's own API so no
+            # window guard can refuse it.
+            try:
+                session.clear_edit()
+            except Exception as exc:  # noqa: BLE001 - closing must not raise
+                self.report["clear_edit_failed"] = f"{type(exc).__name__}: {exc}"
+            QApplication.processEvents()
             closed = time.perf_counter()
             window.close()
             self.report["close_ms"] = (time.perf_counter() - closed) * 1000
@@ -196,10 +221,13 @@ class Smoke:
         self.report["roi_accept_ms"] = (time.perf_counter() - started) * 1000
         self.report["roi"] = list(window.roi() or [])
 
+        note(f"ROI {self.report['roi']}")
         if int(self.args.instances) > 0:
+            note(f"seeding {self.args.instances} instances")
             self.report["seeded"] = self.seed_instances(window, int(self.args.instances))
 
         if self.args.sam:
+            note("loading SAM")
             started = time.perf_counter()
             from tda.models.sam_service import SamQueue, SamService
 
@@ -207,28 +235,47 @@ class Smoke:
             self.report["sam_load_ms"] = (time.perf_counter() - started) * 1000
         self.note_peak()
 
-        for _ in range(int(self.args.frames)):
+        for index in range(int(self.args.frames)):
+            note(f"frame {index + 1}/{self.args.frames} at step {window.session.current().step}")
             self.report["frames"].append(self.one_frame(window, app))
             self.note_peak()
 
+        note("drawing the named instances")
         self.report["drawn"] = [self.draw_named(window, spec)
                                 for spec in self.args.draw]
+        note("checking the prompt points")
         self.report["prompt_points"] = self.check_prompt_points(window)
+        note("timeline jumps")
+        window.act_clear_edit()
+        window.session.clear_edit()
         self.report["timeline_jump_ms"] = self.time_timeline_jumps(window)
         if self.args.profile:
+            note("profiling one commit, one Space and one frame change")
             self.report["profiles"] = self.profile_ops(window)
         if self.args.shots:
             self.report["cjk_shot"] = self.shoot_blocked_hint(window)
             self.report["refused_space_shot"] = self.shoot_refused_space(window)
         self.note_peak()
 
+        note(f"leak check: {self.args.leak_steps} frame changes")
+        # A step is refused while an editing layer is open -- including one a
+        # SAM result repopulated after the measurement that asked for it -- and
+        # a refusal is very fast, so without this the report would have called
+        # "nothing happened" a 2 ms frame change.
+        window.act_clear_edit()
+        window.session.clear_edit()
+        QApplication.processEvents()
         latencies = []
+        moved = 0
         for index in range(int(self.args.leak_steps)):
+            before = window.session.current().step
             started = time.perf_counter()
             window.act_step(-1 if index % 2 == 0 else +1)
             QApplication.processEvents()
             latencies.append((time.perf_counter() - started) * 1000)
+            moved += int(window.session.current().step != before)
         self.report["frame_change_ms"] = latencies
+        self.report["frame_changes_that_moved"] = moved
         self.report["rss_after_leak_check_mb"] = rss_mb()
         self.report["live_threads"] = _thread_names()
         self.note_peak()
@@ -337,9 +384,13 @@ class Smoke:
                 out["commit"] = self._profiled(window.act_commit)
                 window.act_clear_edit()
         out["confirm"] = self._profiled(window.act_confirm)
+        window.act_clear_edit()
+        window.session.clear_edit()
         QApplication.processEvents()
+        out["step_before_change"] = window.session.current().step
         out["frame_change"] = self._profiled(lambda: window.act_step(-1))
         QApplication.processEvents()
+        out["step_after_change"] = window.session.current().step
         return out
 
     @staticmethod
@@ -519,6 +570,8 @@ class Smoke:
             started = time.perf_counter()
             window.timeline_goto(int(step))
             QApplication.processEvents()
+            if window.session.current().step != int(step):
+                continue          # refused: that is not a jump time
             out.append((time.perf_counter() - started) * 1000)
         return out
 
