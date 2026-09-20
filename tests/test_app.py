@@ -495,6 +495,25 @@ def test_leaving_steps_mode_with_unsaved_edits_asks_first(window, monkeypatch):
     assert window.mode == A.MODE_ANNOTATE
 
 
+def test_a_staged_constraint_edge_is_an_unsaved_step_table_edit(window, monkeypatch):
+    """B5: the Relations tab goes through the one gate, not around it."""
+    from PySide6.QtWidgets import QMessageBox
+
+    window.set_mode(A.MODE_STEPS)
+    tab = window.steps_panel.relations_tab
+    tab.target_box.setCurrentText("storage_drive.ssd.01")
+    tab.kind_box.setCurrentText("blocked_by")
+    tab.blocker_box.setCurrentText("psu.01")
+
+    tab.add_edge()
+
+    assert window._steps_dirty
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
+    window.set_mode(A.MODE_ANNOTATE)
+    assert window.mode == A.MODE_STEPS  # refused, like any other unsaved edit
+
+
 def test_a_missing_frame_does_not_replace_the_step_table(qapp, tmp_path):
     """Steps mode is about the log, not about the image: it stays put."""
     win = open_window(tmp_path, missing=(LAST_STEP,))
@@ -1025,3 +1044,55 @@ def test_clearing_the_status_bar_drops_what_was_waiting(window):
     _time.sleep(0.09)
     QApplication.processEvents()
     assert window.status_message() == ""
+
+
+def test_closing_the_window_joins_the_timeline_thumbnail_reader(qapp, tmp_path):
+    """No thread may outlive the window it belongs to (the smoke checks this).
+
+    The timeline reads a row's picture on a thread of its own -- without the
+    offline thumbnail pass that picture is the 12 MP frame itself -- so the
+    window's shutdown has to stop it, like the diff worker and the SAM queue.
+    """
+    import threading
+    import time
+
+    win = open_window(tmp_path)
+    try:
+        win.resize(1200, 900)
+        win.show()
+        QApplication.processEvents()
+        win.timeline.ensure_visible_thumbs()
+        deadline = time.perf_counter() + 5.0
+        while win.timeline._asked and time.perf_counter() < deadline:
+            QApplication.processEvents()
+        assert win.timeline._thumbs, "no row picture was ever read"
+    finally:
+        close_window(win)
+    assert win.timeline._reader.running() is False
+    assert "tda-thumbs" not in {t.name for t in threading.enumerate() if t.is_alive()}
+
+
+def test_a_reader_that_will_not_stop_does_not_skip_the_rest_of_the_teardown(
+    qapp, tmp_path, monkeypatch
+):
+    """The signal disconnects outrank the thumbnail reader.
+
+    A sweeper still delivering into a window that has let go of its session is
+    an exception out of a Qt slot with nothing left to catch it; a reader that
+    outlives its panel is a idle thread. So the one that can fail goes inside
+    a guard, and the log says it happened.
+    """
+    win = open_window(tmp_path)
+    monkeypatch.setattr(win.timeline, "shutdown",
+                        lambda: (_ for _ in ()).throw(RuntimeError("stuck")))
+    try:
+        win.shutdown()
+        assert win.closed is True
+        # the disconnects ran: the session can announce into nothing now
+        win.session.sigFrameChanged.emit(win.session.current())
+        QApplication.processEvents()
+    finally:
+        win.hide()
+        win.setParent(None)
+        win.deleteLater()
+        QApplication.processEvents()

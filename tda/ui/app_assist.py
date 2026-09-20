@@ -78,7 +78,7 @@ class AssistMixin:
 
         self.assist = AssistController(self)
         self.assist.sigBlobs.connect(self._on_blobs)
-        self.assist.sigFailed.connect(self.report_error)
+        self.assist.sigFailed.connect(self._on_assist_failed)
         # the chassis ROI is measured on three frames of the pose segment, which
         # is three decodes and three detections: not something to spend before
         # the first paint (tda/ui/app_roi_worker.py)
@@ -86,6 +86,11 @@ class AssistMixin:
         self.roi_proposer.sigProposed.connect(self._on_roi_proposed)
         self.roi_proposer.sigFailed.connect(self.report_error)
         self.assist_result: Optional[dict] = None
+        #: What the comparison last asked for was *about* -- see
+        #: :meth:`_assist_subject`.  A frame re-announced for any other reason
+        #: (a commit, an undo, ``F5``) asks the same question again, and at
+        #: 12 MP the answer costs 130 ms to arrive at twice.
+        self._assist_asked: Optional[tuple] = None
         self._unexplained: dict[int, list[Box]] = {}
         #: Steps confirmed while the comparison had not landed (spec 4.4).
         self.unanalysed: set[int] = set()
@@ -190,9 +195,54 @@ class AssistMixin:
         self.set_sam_instance(getattr(self.session, "editing_instance", None))
         if not self.roi_editing:
             self.canvas.set_rubber_band(None)
+        if self._assist_subject() == self._assist_asked:
+            # The same two frames, inside the same ROI: the difference between
+            # them cannot have changed, so the comparison on hand (or the one
+            # on its way) is still the answer.  A **commit** arrives here --
+            # the session re-announces the frame -- and re-running a 12 MP
+            # comparison because an annotation changed put 130 ms of waiting
+            # into the ``Space`` that followed. What the annotation changes is
+            # which blobs are *explained*, and that is a re-split of blobs
+            # already in hand.
+            #
+            # Everything :meth:`_on_blobs` does when a comparison lands has to
+            # be done here too, and for the same reason: the lines above have
+            # just cleared the prompt box, both SAM tools' copies and the
+            # rubber band, and on this path nothing is coming back to put them
+            # there again. Without it every SAM click *after a commit* went out
+            # point-only -- the configuration that returned the whole chassis
+            # on 7 of 13 real frames -- and ``Shift+A`` lost the difference box
+            # it falls back to.
+            self._settle_assist()
+            return
         self.assist_result = None
         self.heat_item.setVisible(False)
         self.request_assist()
+
+    def _settle_assist(self) -> None:
+        """Re-split this frame's blobs and show what they mean.
+
+        The two things a comparison's arrival is good for once the blobs
+        themselves are known: the heat map under ``D``, and the box prompt the
+        task card's open item is armed with.  Shared by :meth:`_on_blobs`, for
+        a comparison that has just landed, and by the frame hook, for one that
+        landed earlier and is still the answer.
+        """
+        payload = self.re_explain()
+        if self.heat_visible and payload is not None:
+            self._paint_heat()
+        self._arm_from_card()
+
+    def _assist_subject(self) -> Optional[tuple]:
+        """What a comparison would be *about*: the frame, its neighbour, the ROI.
+
+        Everything the difference map reads, and nothing the annotator can
+        change by drawing.  ``None`` when there is no frame to compare.
+        """
+        if not compat.is_open(self.session):
+            return None
+        return (self.session.current(), compat.task_neighbour(self.session),
+                self.roi())
 
     def request_assist(self) -> None:
         """Compare the open frame with its task-card neighbour, off the GUI thread.
@@ -208,8 +258,26 @@ class AssistMixin:
         image = self.session.image()
         neighbour = compat.task_neighbour(self.session)
         self.report_neighbour_gap(key, neighbour)
-        previous = None if neighbour is None else self.session.image_at(neighbour)
+        previous = None if neighbour is None else self._neighbour_pixels(neighbour)
+        self._assist_asked = self._assist_subject()
         self.assist.request(key, image, previous, self.roi(), self.expected_now())
+
+    def _neighbour_pixels(self, neighbour: int):
+        """The neighbour frame for the comparison: its pixels, or its path.
+
+        Stepping back one frame, ``k+1`` is the frame just left and is already
+        decoded, so the worker gets the array.  A timeline click lands on a
+        frame whose neighbour nobody has opened, and decoding 12 MP of it on
+        the GUI thread -- 46 ms, purely to hand a worker something it could
+        have read itself -- was a tenth of the click.  The path goes instead;
+        :func:`tda.ui.app_diff._pixels_of` reads it on the worker.
+        """
+        held = compat.peek_image_at(self.session, neighbour)
+        if held is not None:
+            return held
+        path = getattr(self.session, "image_path", None)
+        found = path(neighbour) if callable(path) else None
+        return found or self.session.image_at(neighbour)
 
     def report_neighbour_gap(self, key, neighbour: Optional[int]) -> None:
         """Say so when the neighbour is not the adjacent step.
@@ -236,7 +304,7 @@ class AssistMixin:
         box, so the old version was always empty and nothing was ever explained.
         """
         wanted = self._card_instances()
-        masks, _order = compat.overlay_layers(self.session)
+        masks, _order, _windows = compat.overlay_layers(self.session)
         chosen = {key: mask for key, mask in masks.items() if key in wanted}
         boxes = []
         for key, inst in self.session.compiled().instances.items():
@@ -260,17 +328,32 @@ class AssistMixin:
 
     # --------------------------------------------------------------- results
     @S.guard
+    def _on_assist_failed(self, text: str) -> None:
+        """The comparison raised on the worker: say so, and do not call it asked.
+
+        ``_assist_asked`` is what stops a commit asking the same question
+        twice; a question that *raised* has not been answered, so the stamp
+        comes off and the next re-announcement -- a commit, ``F5`` -- asks
+        again, which is what main did with no stamp at all.
+        """
+        self._assist_asked = None
+        self.report_error(text)
+
+    @S.guard
     def _on_blobs(self, payload: object) -> None:
         """A comparison came back on the GUI thread."""
         self.assist_result = payload if isinstance(payload, dict) else None
-        if self.assist_result is None or not compat.is_open(self.session):
+        if self.assist_result is None:
+            # No comparison to be had -- no neighbour, or one that could not be
+            # read. Not an answer, so it is not remembered as one.
+            self._assist_asked = None
+            return
+        if not compat.is_open(self.session):
             return
         if self.assist_result.get("key") != self.session.current():
             self.assist_result = None
             return
-        if self.heat_visible:
-            self._paint_heat()
-        self._arm_from_card()
+        self._settle_assist()
 
     def re_explain(self) -> Optional[dict]:
         """Re-split the blobs of this frame against what it holds *now*.

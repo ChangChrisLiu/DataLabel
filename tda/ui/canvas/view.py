@@ -57,6 +57,7 @@ class OverlayItem(QGraphicsItem):
     def __init__(self) -> None:
         super().__init__()
         self._image: Optional[QImage] = None
+        self._ensure = None
         # Without this flag Qt reports the whole bounding rect as exposed.
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, True)
 
@@ -65,6 +66,17 @@ class OverlayItem(QGraphicsItem):
         self.prepareGeometryChange()
         self._image = image
         self.update()
+
+    def set_ensure(self, ensure) -> None:
+        """Install the callback that composites a region before it is drawn.
+
+        The overlay only composites what somebody is about to look at, so the
+        buffer this item draws from is not promised to be right everywhere --
+        it is promised to be right where it has been asked for.  This item is
+        the last thing that knows, exactly, which pixels are about to reach
+        the screen, so it is the one that asks.
+        """
+        self._ensure = ensure
 
     def image(self) -> Optional[QImage]:
         return self._image
@@ -90,6 +102,11 @@ class OverlayItem(QGraphicsItem):
             float(np.ceil(exposed.width()) + 1),
             float(np.ceil(exposed.height()) + 1),
         ).intersected(self.boundingRect())
+        if self._ensure is not None:
+            self._ensure((
+                int(np.floor(box.left())), int(np.floor(box.top())),
+                int(np.ceil(box.right())), int(np.ceil(box.bottom())),
+            ))
         painter.drawImage(box, self._image, box)
 
 
@@ -196,6 +213,9 @@ class ImageCanvas(QGraphicsView):
     GRID_ZOOM = 4.0
     #: Fraction of the box added on each side by :meth:`zoom_to`.
     FIT_MARGIN = 0.05
+    #: Fraction of the viewport composited beyond it, so that a pan does not
+    #: ask the overlay for a new sliver on every mouse move.
+    OVERLAY_MARGIN = 0.25
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -224,6 +244,7 @@ class ImageCanvas(QGraphicsView):
         self._image_item.setZValue(0)
         self._overlay_item = OverlayItem()
         self._overlay_item.setZValue(1)
+        self._overlay_item.set_ensure(self._ensure_overlay)
         self._scene.addItem(self._image_item)
         self._scene.addItem(self._overlay_item)
 
@@ -293,14 +314,22 @@ class ImageCanvas(QGraphicsView):
 
         ``rect`` is a hint; the overlay may rebuild a slightly larger region
         (the outline halo) and reports it as ``last_rebuild_rect``, which is
-        what gets invalidated.  ``None`` there means nothing was stale, so no
-        repaint is scheduled at all.
+        what gets invalidated.  ``None`` there means nothing was stale *inside
+        the part being composited*, so no repaint is scheduled at all.
+
+        What is composited is the viewport plus :data:`OVERLAY_MARGIN`, not the
+        frame: an OAK frame is 12 MP and a 950x770 viewport at 59 % zoom holds
+        a sixth of it, so the other five sixths would be 90 ms of every
+        gesture spent on pixels nobody can see.  They are not skipped, only
+        deferred -- :class:`OverlayItem` composites whatever it is about to
+        draw, so panning to them pays for them then, and in a strip.
         """
         if self._overlay is None:
             self._overlay_item.set_image(None)
             return
         image = self._overlay.qimage(
-            rect, alpha=self.overlay_alpha, outline=self.overlay_outline
+            rect, alpha=self.overlay_alpha, outline=self.overlay_outline,
+            clip=self.overlay_clip(),
         )
         if self._overlay_item.image() is not image:
             # First draw, or the overlay rebuilt its buffer: repaint it all.
@@ -313,6 +342,26 @@ class ImageCanvas(QGraphicsView):
         self._overlay_item.update(
             QRectF(x0, y0, max(0, x1 - x0), max(0, y1 - y0))
         )
+
+    def overlay_clip(self) -> Rect:
+        """The region of the frame worth compositing now: the viewport + margin.
+
+        The margin is there so that a slow drag does not ask for a new sliver
+        on every mouse move; it is a fraction of the viewport, so it is small
+        when zoomed in (where a sliver is cheap) and large when zoomed out
+        (where the whole frame is on screen anyway).
+        """
+        x0, y0, x1, y1 = self.viewport_image_rect()
+        mx = int(round((x1 - x0) * self.OVERLAY_MARGIN))
+        my = int(round((y1 - y0) * self.OVERLAY_MARGIN))
+        return (x0 - mx, y0 - my, x1 + mx, y1 + my)
+
+    def _ensure_overlay(self, box: Rect) -> None:
+        """Composite ``box`` before the item draws it (see :meth:`refresh`)."""
+        if self._overlay is not None:
+            self._overlay.qimage(
+                alpha=self.overlay_alpha, outline=self.overlay_outline, clip=box
+            )
 
     def set_rubber_band(
         self, box: Optional[tuple[float, float, float, float]]

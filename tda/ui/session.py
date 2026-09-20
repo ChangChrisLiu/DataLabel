@@ -354,6 +354,16 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
         key = self._key(step)
         return None if key is None else self.images.get(key)
 
+    def peek_image_at(self, step: int) -> Optional[np.ndarray]:
+        """One step's image **if it is already decoded**, reading no file.
+
+        For a caller that wants the pixels but has somewhere else to get them
+        from when they are not to hand -- the difference map hands its worker a
+        path rather than making the GUI thread decode 12 MP for it.
+        """
+        key = self._key(step)
+        return None if key is None else self.images.peek(key)
+
     @property
     def image_budget_bytes(self) -> int:
         """Memory the decoded-image cache may use."""
@@ -396,8 +406,8 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
             self._hidden,
         )
 
-    def overlay_layers(self) -> tuple[dict[str, np.ndarray], list[str]]:
-        """Visible masks and bottom-up paint order for the canvas overlay."""
+    def overlay_layers(self) -> tuple[dict[str, np.ndarray], list[str], dict]:
+        """Visible masks, bottom-up paint order and windows for the overlay."""
         return rows.overlay_layers(self.compiled(), self._hidden)
 
     def task_card(self) -> list[dict]:

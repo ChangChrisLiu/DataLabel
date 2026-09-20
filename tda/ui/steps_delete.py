@@ -9,7 +9,9 @@ Two halves:
 
 * :func:`check_deletable` -- refuse while anything a *human* made still depends
   on the key: a step targeting it, a shape keyframe in any of the four views, a
-  constraint edge (spec 7.1), a frame override, a layering exception, an entry
+  constraint edge somebody decided on (manual / override / imported -- a
+  **rule** edge is derived from the instance table itself and goes with the
+  delete, see :func:`derived_relations`), a frame override, a layering exception, an entry
   in a z-order, an open conflict, a hand-written state event, or a **verified**
   compiled row. An ``auto`` compiled row is not one of those: the compiler
   writes one per instance the frame needs, geometry or not, so counting it made
@@ -36,6 +38,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 from tda.core.db import Db
+from tda.core.graph_derive import RULE
+from tda.core.graph_rules import HARD_TYPES, active_edges
 from tda.core.implied import is_implied
 from tda.core.logs import CHASSIS_KEY
 from tda.core.ls_import import SOURCE as LS_SOURCE
@@ -45,8 +49,28 @@ from tda.ui.steps_values import RELATION_FIELDS, EditError
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, fine for typing
     from tda.ui.steps_model import StepTableData
 
-__all__ = ["PAIRED_WITH_PARENT", "check_deletable", "delete_instance",
+__all__ = ["ANNOTATOR", "OP_KIND", "OP_VIEW", "PAIRED_WITH_PARENT",
+           "check_deletable", "delete_instance", "derived_relations",
            "stored_neighbours"]
+
+#: ``op_log.annotator`` when the window did not say who is editing.
+ANNOTATOR = "ui:steps"
+
+
+def derived_relations(db: Db, desktop: int, key: str) -> list[tuple[str, str, str]]:
+    """The **rule** edges naming ``key``: derived, so they go with the delete.
+
+    A rule edge is not somebody's work, it is a reading of the instance table
+    (spec 7.3), and the instance is about to leave that table -- the next
+    derivation would drop the edge anyway. Dropping them here, in the same
+    transaction, keeps the database free of a row pointing at a part that no
+    longer exists. Every other source is a human's decision and blocks the
+    delete instead (:func:`check_deletable`).
+    """
+    return [(rel["type"], rel["target"], rel["blocker"])
+            for rel in db.relations(desktop)
+            if rel.get("source") == RULE
+            and key in (rel.get("target"), rel.get("blocker"))]
 
 
 def check_deletable(data: "StepTableData", db: Db, key: str) -> None:
@@ -69,8 +93,19 @@ def check_deletable(data: "StepTableData", db: Db, key: str) -> None:
         if held:
             raise EditError(f"{key!r} still has shape keyframes in view {view!r}")
     for rel in db.relations(data.desktop):
-        if key in (rel.get("target"), rel.get("blocker")):
-            raise EditError(f"{key!r} is still used by a {rel.get('type')!r} constraint edge")
+        if key in (rel.get("target"), rel.get("blocker")) and rel.get("source") != RULE:
+            raise EditError(f"{key!r} is still used by a {rel.get('type')!r} constraint "
+                            f"edge ({rel.get('source')})")
+    # A staged edge is not in the table yet, so the loop above cannot see it --
+    # and this delete writes straight through, which would leave the Relations
+    # tab holding an edge whose endpoint no longer exists and `Apply` writing a
+    # dangling row. The staging is refused rather than silently cleaned: the
+    # annotator asserted that edge one minute ago.
+    for edge in data.relations.names(key) if data.relations is not None else ():
+        raise EditError(
+            f"{key!r} 还挂着未保存的 {edge.type} 约束边 / {key!r} is named by a staged "
+            f"{edge.type} constraint edge; apply or revert the Relations tab first"
+        )
     counts = db.instance_reference_counts(data.desktop, key)
     if counts:
         named = ", ".join(f"{n} row(s) in {table}" for table, n in sorted(counts.items()))
@@ -127,6 +162,35 @@ def stored_neighbours(
 #: Unticked whenever ``parent`` is cleared; see :func:`stored_neighbours`.
 PAIRED_WITH_PARENT = "attached"
 
+#: ``op_log`` scope and kind of the row a delete leaves behind.
+OP_KIND = "instance_delete"
+OP_VIEW = "-"
+
+
+def _restamp(db: Db, data: "StepTableData", key: str, dropped: int) -> None:
+    """Re-stamp the desktop's graph meta after a delete. **In the transaction.**
+
+    The delete takes the instance's rule edges with it, so the stored
+    ``graph_version`` is about a graph that no longer exists -- and an export
+    quoting it would be quoting something else. The version is read back through
+    the accessor, exactly as the derivation and the ``constraints`` command do.
+    """
+    from tda.core.graph import edges_from_db, graph_version   # local: import cycle
+    from tda.core.graph_derive import settled_instances
+    from tda.core.graph_plan import find_deadlocks
+    from tda.pipeline import merge_desktop_meta                # late: heavy module
+
+    left = {k: rec for k, rec in data.instances.items() if k != key}
+    edges = [e for e in edges_from_db(db, data.desktop) if e.type in HARD_TYPES]
+    merge_desktop_meta(db, data.desktop, {
+        "graph_version": graph_version(db, data.desktop),
+        "graph_edges": len(active_edges(edges)),
+        "graph_cycles": len(find_deadlocks(edges, settled_instances(left), data.tax)),
+    })
+    db.log_op(data.desktop, OP_VIEW, OP_KIND,
+              {"instance": key, "relations": dropped},
+              {"instance": key}, ANNOTATOR)
+
 
 def _clear_pointers(rec: InstanceRec, key: str, revert_to: Optional[str]) -> None:
     """Drop every pointer ``rec`` holds to ``key``, in place."""
@@ -154,8 +218,11 @@ def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
     check_deletable(data, db, key)
     implied_cls = data.instances[key].cls if is_implied(data.instances[key]) else None
     neighbours = stored_neighbours(db, data.desktop, key, revert_to=implied_cls)
+    derived = derived_relations(db, data.desktop, key)
     try:
         with db.transaction():
+            for triple in derived:
+                db.delete_relation(data.desktop, *triple)
             if is_provisional(key):
                 # the draft and the shapes it was made of are one thing: a key
                 # nobody adopted leaves nothing behind but orphaned pixels
@@ -166,6 +233,7 @@ def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
                 db.upsert_instance(rec)
             if implied_cls:
                 db.decline_implied(data.desktop, implied_cls)
+            _restamp(db, data, key, len(derived))
     except Exception as error:  # the database rolled back; so must memory
         raise EditError(f"could not delete {key!r}: {error}") from error
 

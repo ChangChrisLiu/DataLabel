@@ -96,6 +96,152 @@ def test_erasing_the_overlap_suggests_putting_the_other_one_above(session):
     assert session.suggest_scope() == f"zorder:below:{CHASSIS}"
 
 
+def _reference_suggest_scope(compiled, instance: str, before, edited) -> str:
+    """The straightforward answer: every comparison over the whole canvas.
+
+    What :func:`tda.ui.session_scope.suggest_scope` used to do, kept here as the
+    oracle the windowed version is measured against.  It is the definition of
+    the answer; the shipped one only narrows *where* it looks for it.
+    """
+    from tda.ui.session_scope import ZORDER_HINT_FRAC
+
+    before = np.asarray(before, dtype=bool)
+    edited = np.asarray(edited, dtype=bool)
+    added, erased = edited & ~before, before & ~edited
+
+    def paints_above(other: str) -> object:
+        for order in compiled.painted.values():
+            if other in order and instance in order:
+                return order.index(other) > order.index(instance)
+        return None
+
+    def partner(changed, above: bool):
+        total = int(changed.sum())
+        if total == 0:
+            return None
+        best, best_overlap = None, 0
+        for other, inst in compiled.instances.items():
+            if other == instance or paints_above(other) is not above:
+                continue
+            region = inst.visible if above else inst.amodal
+            if region is None:
+                continue
+            overlap = int(np.count_nonzero(changed & region))
+            if overlap > best_overlap:
+                best, best_overlap = other, overlap
+        return best if best_overlap >= ZORDER_HINT_FRAC * total else None
+
+    covering = partner(added, above=True)
+    if covering is not None:
+        return f"zorder:above:{covering}"
+    covered = partner(erased, above=False)
+    if covered is not None:
+        return f"zorder:below:{covered}"
+    return api.SCOPE_KEYFRAME
+
+
+def _scope_scenes(hw=(64, 64)):
+    """Edits that exercise every branch of the suggestion, as ``(before, edited)``.
+
+    Each one is a pair of full-canvas masks; the shapes of the seeded scene sit
+    at known places, so "inside the chassis", "clear of everything", "exactly
+    the overlap" and "the whole canvas" are all representable.
+    """
+    rng = np.random.default_rng(20260920)
+    scenes = [
+        ("untouched", SMALL, SMALL),
+        ("added inside the chassis", SMALL, SMALL | rect(4, 4, 16, 16, hw)),
+        ("added in free space", SMALL, SMALL | rect(44, 20, 56, 32, hw)),
+        ("erased the overlap", rect(20, 20, 50, 50, hw),
+         rect(20, 20, 50, 50, hw) & ~BIG),
+        ("erased everything", SMALL, np.zeros(hw, dtype=bool)),
+        ("painted the whole canvas", SMALL, np.ones(hw, dtype=bool)),
+        ("one pixel at the origin", SMALL, SMALL | rect(0, 0, 1, 1, hw)),
+        ("one pixel at the far corner", SMALL,
+         SMALL | rect(hw[1] - 1, hw[0] - 1, hw[1], hw[0], hw)),
+        ("a border row", SMALL, SMALL | rect(0, 0, hw[1], 1, hw)),
+        ("a border column", SMALL, SMALL | rect(hw[1] - 1, 0, hw[1], hw[0], hw)),
+    ]
+    for index in range(6):
+        noise = rng.random(hw) < 0.02
+        scenes.append((f"scattered noise {index}", SMALL, SMALL ^ noise))
+    return scenes
+
+
+def test_the_windowed_scope_suggestion_answers_exactly_what_a_full_scan_does(two_shapes):
+    """Narrowing where it looks may never change what it finds.
+
+    ``suggest_scope`` used to compare every changed pixel against every
+    instance's mask across the whole canvas -- 1.09 s of a 1.9 s ``Enter`` on a
+    12 MP frame with forty instances.  It now works inside the box the edit
+    actually touched, intersected with each instance's own window, which is a
+    statement about *where the answer can be*, not about what it is: this test
+    is the oracle that keeps the two the same.
+    """
+    from tda.ui import session_scope
+
+    compiled = two_shapes.compiled()
+    checked = 0
+    for name, before, edited in _scope_scenes():
+        for instance in (COOLER, CHASSIS):
+            expected = _reference_suggest_scope(compiled, instance, before, edited)
+            got = session_scope.suggest_scope(compiled, instance, before, edited)
+            assert got == expected, f"{name} on {instance}: {got!r} != {expected!r}"
+            checked += 1
+    assert checked == 2 * len(_scope_scenes())
+
+
+def test_the_scope_suggestion_refuses_a_mask_of_the_wrong_size(two_shapes):
+    """A mask that is not this frame's canvas is a bug, not a quiet answer.
+
+    The whole-canvas version raised out of numpy the moment it tried to ``&``
+    the changed pixels with an instance's mask.  Working inside boxes means
+    the slices always line up, so nothing would have complained -- and an edit
+    of the wrong size would have been explained against the wrong pixels.
+    """
+    from tda.ui import session_scope
+
+    compiled = two_shapes.compiled()
+    small = np.zeros((32, 32), dtype=bool)
+    other = small.copy()
+    other[4:8, 4:8] = True
+    with pytest.raises(ValueError, match="canvas"):       # both the wrong size
+        session_scope.suggest_scope(compiled, COOLER, small, other)
+    with pytest.raises(ValueError, match="two states"):   # ... or two sizes
+        session_scope.suggest_scope(compiled, COOLER, SMALL, other)
+    # the right size still answers
+    assert session_scope.suggest_scope(compiled, COOLER, SMALL, SMALL) \
+        == api.SCOPE_KEYFRAME
+
+
+def test_the_scope_suggestion_reads_only_the_windows_it_has_to(two_shapes, monkeypatch):
+    """A small edit must not walk forty full-canvas masks to be explained.
+
+    The guard is on the *pixels read*, not on the clock: counting the elements
+    of every array handed to ``count_nonzero`` is the same measurement on a
+    fast machine and a busy one.  A stroke of 144 px inside a 64x64 scene may
+    look at the instances' own windows and nothing more.
+    """
+    import numpy as np_mod
+
+    from tda.ui import session_scope
+
+    seen: list[int] = []
+    real = np_mod.count_nonzero
+
+    def counted(a, *args, **kwargs):
+        arr = np_mod.asarray(a)
+        seen.append(int(arr.size))
+        return real(a, *args, **kwargs)
+
+    monkeypatch.setattr(session_scope.np, "count_nonzero", counted)
+    compiled = two_shapes.compiled()
+    session_scope.suggest_scope(compiled, COOLER, SMALL, SMALL | rect(4, 4, 16, 16))
+
+    assert seen, "the suggestion compared nothing at all"
+    assert max(seen) <= 16 * 16, f"a 12x12 stroke read a {max(seen)}-pixel array"
+
+
 def test_commit_with_nothing_edited_is_a_no_op(two_shapes):
     two_shapes.begin_edit(COOLER)
     versions = [kf.version for kf in two_shapes.db.keyframes(DESKTOP, VIEW, COOLER)]
@@ -204,18 +350,27 @@ def test_instance_rows_follow_the_compiler_not_the_stored_order(session):
 def test_overlay_layers_hands_the_window_masks_and_the_paint_order(session):
     session.goto(10)
     seed_shapes(session, 10)
-    layers, order = session.overlay_layers()
+    layers, order, windows = session.overlay_layers()
     assert order and set(order) <= set(layers)
     assert order == session.compiled().painted["in_chassis"] + session.compiled().painted.get(
         "on_bench", []
     )
     for mask in layers.values():
         assert mask.dtype == bool
+    # every mask comes with the box the compiler knows it is empty outside,
+    # and the box really does contain it
+    assert set(windows) == set(layers)
+    for key, box in windows.items():
+        assert box is not None, f"{key} was handed over without a window"
+        assert masks.bbox(layers[key]) is None or (
+            masks.bbox(layers[key])[0] >= box[0] and masks.bbox(layers[key])[1] >= box[1]
+            and masks.bbox(layers[key])[2] <= box[2] and masks.bbox(layers[key])[3] <= box[3]
+        ), f"{key}'s window does not contain it"
 
     hidden = order[0]
     session.set_hidden(hidden, True)
-    layers, order = session.overlay_layers()
-    assert hidden not in layers and hidden not in order
+    layers, order, windows = session.overlay_layers()
+    assert hidden not in layers and hidden not in order and hidden not in windows
 
 
 # --------------------------------------------------------------------------- #

@@ -20,7 +20,7 @@ from tda.core.graph import (
     Edge,
     edges_from_db,
     edges_to_db,
-    find_cycles,
+    find_deadlocks,
     legal_actions,
     propose_edges,
     remaining_plan,
@@ -100,36 +100,34 @@ def test_validate_sequence_orders_actions_within_a_step(bench, tax):
 
 
 # --------------------------------------------------------------------------- #
-# 5. cycles
+# 5. deadlocks (the spec 7.4 check; see tests/test_graph_deadlock.py for the
+#    definition itself -- these two pin the planner and the check together)
 # --------------------------------------------------------------------------- #
-def test_find_cycles_on_an_acyclic_graph(bench, tax):
-    assert find_cycles(propose_edges(bench, tax)) == []
+def test_the_bench_graph_deadlocks_nothing(bench, tax):
+    assert find_deadlocks(propose_edges(bench, tax), bench, tax) == []
 
 
-def test_find_cycles_finds_a_two_node_loop(bench, tax):
+def test_a_two_node_block_is_a_deadlock_and_the_planner_agrees(bench, tax):
     edges = propose_edges(bench, tax) + [
         Edge("blocked_by", "psu.01", "motherboard.01", mode="physical_path"),
         Edge("blocked_by", "motherboard.01", "psu.01", mode="physical_path"),
     ]
-    assert find_cycles(edges) == [["motherboard.01", "psu.01"]]
+    found = find_deadlocks(edges, bench, tax)
+    assert len(found) == 1
+    assert remaining_plan(bench, edges, initial_state(bench, tax), "psu.01", tax) is None
 
 
-def test_find_cycles_finds_a_self_loop_and_a_longer_loop():
-    edges = [
-        Edge("blocked_by", "a", "a"),
-        Edge("blocked_by", "b", "c"),
-        Edge("blocked_by", "c", "d"),
-        Edge("blocked_by", "d", "b"),
-    ]
-    assert find_cycles(edges) == [["a"], ["b", "c", "d"]]
-
-
-def test_find_cycles_survives_a_long_chain():
-    """Tarjan is iterative, so a chain far deeper than the recursion limit is fine."""
-    edges = [Edge("blocked_by", f"n{i}", f"n{i + 1}") for i in range(5000)]
-    edges.append(Edge("blocked_by", "n5000", "n0"))
-    assert len(find_cycles(edges)) == 1
-    assert len(find_cycles(edges)[0]) == 5001
+def test_a_long_chain_does_not_blow_the_recursion_limit(tax):
+    """Tarjan is iterative, so a chain far deeper than the limit is fine."""
+    keys = [f"expansion_card.{i:04d}" for i in range(2000)]
+    instances = {k: InstanceRec(key=k, desktop=900, cls="expansion_card") for k in keys}
+    edges = [Edge("blocked_by", keys[i], keys[i + 1], mode="physical_path")
+             for i in range(len(keys) - 1)]
+    assert find_deadlocks(edges, instances, tax) == []
+    edges.append(Edge("blocked_by", keys[-1], keys[0], mode="physical_path"))
+    found = find_deadlocks(edges, instances, tax)
+    assert len(found) == 1
+    assert len(found[0].actions) == len(keys)
 
 
 # --------------------------------------------------------------------------- #
@@ -456,7 +454,7 @@ def test_real_log_smoke(desktop, tax):
     infer_relational_fields(imported.instances, tax)
     edges = propose_edges(imported.instances, tax)
     assert edges  # the attribute rules find something on every real machine
-    assert find_cycles(edges) == []
+    assert find_deadlocks(edges, imported.instances, tax) == []
     problems = validate_sequence(imported.instances, edges, imported.actions, tax)
     assert isinstance(problems, list)
     assert all(isinstance(p, str) for p in problems)

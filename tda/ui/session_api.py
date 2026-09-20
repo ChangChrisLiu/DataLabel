@@ -207,7 +207,12 @@ class SessionLike(Protocol):
         """Compiler output for the current frame."""
 
     def overlay_layers(self):
-        """``({instance: visible mask}, bottom-up order)`` for the canvas overlay."""
+        """``({instance: mask}, bottom-up order, {instance: window})`` for the canvas.
+
+        The window is the box each mask is empty outside, straight off the
+        compiled frame; a session that answers with only the first two is read
+        as "nothing known about where they are" (:func:`tda.ui.app_compat`).
+        """
 
     def task_neighbour(self) -> int | None:
         """The annotated frame :meth:`task_card` is diffed against, or ``None``."""

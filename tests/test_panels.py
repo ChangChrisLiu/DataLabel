@@ -16,6 +16,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -306,6 +308,11 @@ def _hide_what_was_shown():
     yield
     while _SHOWN:
         panel = _SHOWN.pop()
+        # A timeline reads its pictures on a thread of its own; a panel that
+        # is dropped without stopping it leaves it waiting for the rest of the
+        # run, which is exactly what the window's shutdown avoids.
+        if hasattr(panel, "shutdown"):
+            panel.shutdown()
         panel.hide()
         panel.setParent(None)
         panel.deleteLater()
@@ -456,6 +463,65 @@ def test_timeline_loads_thumbnails_lazily_and_caches_them(session: StubSession) 
 def test_timeline_loads_visible_thumbnails_when_shown(session: StubSession) -> None:
     panel = show(TimelinePanel(session), 200, 400)
     assert session.thumb_calls  # the visible rows were filled in
+    panel.shutdown()
+
+
+def test_timeline_reads_its_pictures_off_the_gui_thread(session: StubSession) -> None:
+    """A screenful of rows may not be decoded while the annotator waits.
+
+    Without the offline thumbnail pass -- which ``oak1`` and ``oak2`` have
+    never had -- ``thumb_path`` answers with the 12 MP frame itself, and
+    reading a screenful of those on the GUI thread was 118 ms of a timeline
+    click for pictures 96 px across.
+    """
+    panel = show(TimelinePanel(session), 200, 400)
+    try:
+        panel._thumbs.clear()
+        panel._asked.clear()
+        panel.ensure_visible_thumbs()
+        assert panel._asked, "nothing was asked for"
+        # ... and nothing was decoded here: the icons are still to come
+        assert not any(key in panel._thumbs for key in panel._asked)
+
+        deadline = time.perf_counter() + 5.0
+        while panel._asked and time.perf_counter() < deadline:
+            QApplication.processEvents()
+        assert not panel._asked, "the reader never answered"
+        loaded = [pm for pm in panel._thumbs.values() if isinstance(pm, QPixmap)]
+        assert loaded and all(pm.height() <= TimelinePanel.THUMB_SIZE
+                              for pm in loaded)
+    finally:
+        panel.shutdown()
+
+
+def test_the_thumbnail_reader_is_started_on_demand_and_joined_on_shutdown(
+    session: StubSession,
+) -> None:
+    panel = TimelinePanel(session)
+    assert panel._reader.running() is False, "a hidden panel started a thread"
+    panel.shutdown()
+
+    panel = show(TimelinePanel(session), 200, 400)
+    panel.ensure_visible_thumbs()
+    panel.shutdown()
+    assert panel._reader.running() is False
+    assert "tda-thumbs" not in {t.name for t in threading.enumerate()
+                                if t.is_alive()}
+
+
+def test_a_row_with_no_picture_at_all_gets_the_placeholder(session: StubSession) -> None:
+    panel = show(TimelinePanel(session), 200, 400)
+    try:
+        deadline = time.perf_counter() + 5.0
+        while panel._asked and time.perf_counter() < deadline:
+            QApplication.processEvents()
+        # step 11 has no thumbnail in the stub, and must not be asked twice
+        assert panel._cache_key(11) in panel._thumbs
+        calls = list(session.thumb_calls)
+        panel.ensure_visible_thumbs()
+        assert session.thumb_calls == calls
+    finally:
+        panel.shutdown()
 
 
 def test_timeline_thumbnail_cache_is_scoped_to_the_view(session: StubSession) -> None:

@@ -347,6 +347,15 @@ class ShellMixin:
             return
         self.closed = True
         self.shutdown_assist()
+        try:
+            # The timeline reads its row pictures on a thread of its own. Its
+            # own failure must not be able to skip the signal disconnects
+            # below: a sweeper still delivering into a window that has let go
+            # of its session is an exception out of a Qt slot, which is a worse
+            # outcome than a reader that outlives its panel.
+            self.timeline.shutdown()
+        except Exception as exc:  # noqa: BLE001 - closing must not raise
+            self.logger.warning("the timeline reader did not stop: %s", exc)
         self._detach_tool()
         try:
             QApplication.instance().removeEventFilter(self)

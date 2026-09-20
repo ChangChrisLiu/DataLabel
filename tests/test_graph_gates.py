@@ -168,3 +168,82 @@ def test_a_displace_inside_a_plan_does_not_drag_the_cables_along(bench, tax):
     assert atx in plan
     assert plan.index(atx) < plan.index(("remove", "motherboard.01"))
     assert ("displace", "motherboard.01") not in plan
+
+
+# --------------------------------------------------------------------------- #
+# `blocked_by` gates by its mode (spec 7.1), not all-or-nothing (B5 round 1)
+# --------------------------------------------------------------------------- #
+BLOCK = "blocked_by"
+
+
+def blocked(target: str, blocker: str, mode=None):
+    from tda.core.graph import Edge
+
+    return Edge(type=BLOCK, target=target, blocker=blocker, mode=mode,
+                source="manual", status="accepted")
+
+
+def test_cable_tension_gates_taking_the_part_away_only():
+    """A cable under tension lets the part move, it does not let it leave."""
+    assert gated_verbs(BLOCK, "cable_tension") == frozenset({"remove"})
+
+
+def test_physical_path_gates_remove_and_displace():
+    assert gated_verbs(BLOCK, "physical_path") == frozenset({"remove", "displace"})
+
+
+def test_tool_access_gates_every_gated_verb():
+    assert gated_verbs(BLOCK, "tool_access") == GATED_VERBS
+
+
+def test_a_missing_or_unknown_mode_gates_everything():
+    """Conservative: gating too much is visible, gating too little is silent."""
+    assert gated_verbs(BLOCK) == GATED_VERBS
+    assert gated_verbs(BLOCK, "in_the_way") == GATED_VERBS
+
+
+def test_the_mode_only_matters_for_blocked_by():
+    assert gated_verbs("connected_to", "cable_tension") == GATES["connected_to"]
+
+
+def test_a_cable_tension_edge_leaves_displace_legal(bench, tax, edges):
+    """The D35 acceptance edge: the part may still be swung aside."""
+    drive = "storage_drive.hdd.01"
+    edge = blocked(drive, "motherboard.01", "cable_tension")
+    state = initial_state(bench, tax)
+    assert applicable_preconditions([edge], ("displace", drive)) == []
+    assert ("displace", drive) in legal_actions(bench, [*edges, edge], state, tax)
+    assert applicable_preconditions([edge], ("remove", drive)) == [edge]
+
+
+def test_a_physical_path_edge_stops_the_displace_too(bench, tax, edges):
+    drive = "storage_drive.hdd.01"
+    edge = blocked(drive, "motherboard.01", "physical_path")
+    state = initial_state(bench, tax)
+    assert ("displace", drive) not in legal_actions(bench, [*edges, edge], state, tax)
+
+
+def test_a_tool_access_edge_stops_unscrewing_its_target(bench, tax):
+    edge = blocked("screw.motherboard.01", "cover.01", "tool_access")
+    state = initial_state(bench, tax)
+    assert ("unscrew", "screw.motherboard.01") not in legal_actions(
+        bench, [edge], state, tax)
+
+
+def test_validate_sequence_lets_a_displace_under_cable_tension_pass(bench, tax):
+    edge = blocked("psu.01", "motherboard.01", "cable_tension")
+    assert validate_sequence(bench, [edge], [act(1, "psu.01", "displace")], tax) == []
+    assert validate_sequence(bench, [edge], [act(1, "psu.01", "remove")], tax)
+
+
+def test_the_planner_reads_the_same_mode_table(bench, tax, edges):
+    """The planner clears a `cable_tension` blocker before the remove it gates."""
+    edge = blocked("psu.01", "storage_drive.hdd.01", "cable_tension")
+    plan = remaining_plan(bench, [*edges, edge], initial_state(bench, tax), "psu.01", tax)
+    assert plan is not None
+    moved = ("displace", "storage_drive.hdd.01")   # least destructive way out of the way
+    assert moved in plan
+    assert plan.index(moved) < plan.index(("remove", "psu.01"))
+    assert remaining_plan(bench, edges, initial_state(bench, tax), "psu.01", tax) \
+        is not None and moved not in remaining_plan(
+            bench, edges, initial_state(bench, tax), "psu.01", tax)

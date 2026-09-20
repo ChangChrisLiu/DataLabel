@@ -20,6 +20,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import statistics
 import time
 from pathlib import Path
 
@@ -331,16 +332,41 @@ def best_of(measure, setup=None, times: int = BEST_OF) -> tuple[float, list[floa
 
 
 def _under(budget: float, what: str, runs: list[float]) -> None:
+    """Assert the **best** of ``runs`` is inside ``budget``.
+
+    Best, not every run: a run that was descheduled while another suite had
+    the machine measures the machine.  The cost of that choice is that one
+    lucky run hides a regression of the typical case, which is why the 12 MP
+    window gestures are also checked on their median (:func:`_median_under`).
+    """
     best = min(runs)
     assert best <= budget, (
-        f"{what} took {best:.3f}s, over the {budget:.2f}s budget; "
-        f"all {len(runs)} runs: " + ", ".join(f"{r:.3f}s" for r in runs)
+        f"{what} took {best:.3f}s at best, over the {budget:.2f}s best-of-"
+        f"{len(runs)} budget; all runs: "
+        + ", ".join(f"{r:.3f}s" for r in runs)
+    )
+
+
+def _median_under(budget: float, what: str, runs: list[float]) -> None:
+    """Assert the **median** of ``runs`` is inside ``budget``.
+
+    The guard the best-of cannot give: a regression that leaves one run fast
+    and the rest slow passes :func:`_under` and fails here.
+    """
+    middle = statistics.median(runs)
+    assert middle <= budget, (
+        f"{what} took {middle:.3f}s at the median of {len(runs)}, over the "
+        f"{budget:.2f}s budget; all runs: "
+        + ", ".join(f"{r:.3f}s" for r in runs)
     )
 
 
 @pytest.mark.slow
 def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path, as_shipped):
-    """A chassis-sized commit at 1600x1600 over 40 steps, plus browsing."""
+    """A chassis-sized commit at 1600x1600 over 40 steps, plus browsing.
+
+    Asserted on the **best of** :data:`BEST_OF` runs (see :func:`_under`).
+    """
     session = make_session(tmp_path, last_step=40, hw=(1600, 1600))
     session.goto(2)  # almost everything is still in the chassis here
     drawn = seed_shapes(session, 2, grid=8, anchor=40)
@@ -405,6 +431,8 @@ def test_confirming_a_frame_is_under_budget_at_full_scanner_resolution(
     qapp, tmp_path, monkeypatch, as_shipped, step: int
 ):
     """Space, in the configuration the annotator actually runs.
+
+    Asserted on the **best of** :data:`BEST_OF` runs (see :func:`_under`).
 
     Two costs had to go. ``verify_frame`` compares every frozen row against a
     fresh compilation before it will confirm anything (the I1 gate), and
@@ -492,6 +520,8 @@ BEST_OF_12MP = 5
 def test_gui_thread_budgets_on_a_12mp_frame_with_forty_instances(qapp, tmp_path, as_shipped):
     """Commit, Space, frame change and timeline jump on a 4032x3040 frame.
 
+    Asserted on the **best of** :data:`BEST_OF_12MP` runs (see :func:`_under`).
+
     **In the shipped configuration**: the sweeper is on, so the prefetch of
     ``k-1`` competes for the same cores and the same database; the frame is the
     one with every instance still in the machine, so the truth table has forty
@@ -565,6 +595,193 @@ def test_gui_thread_budgets_on_a_12mp_frame_with_forty_instances(qapp, tmp_path,
     _under(BUDGET_CONFIRM, "confirm_frame (Space)", confirm_runs)
     _under(BUDGET_FRAME_CHANGE, "frame change", change_runs)
     _under(BUDGET_TIMELINE_JUMP, "timeline jump", jump_runs)
+
+
+# --------------------------------------------------------------------------- #
+# the window's half of the same three gestures (plan B task B7)
+# --------------------------------------------------------------------------- #
+#: Spec 4.2 read through plan B, for the whole gesture -- key press to a
+#: repainted canvas and panels that agree with it, not just the session call
+#: underneath.  The measurements above stop at the session; these do not.
+BUDGET_WINDOW_COMMIT = 0.6
+BUDGET_WINDOW_FRAME_CHANGE = 0.12
+BUDGET_WINDOW_TIMELINE_JUMP = 0.5
+BUDGET_WINDOW_REPAINT = 0.05
+#: Where the annotator stands on an OAK frame: the ROI zoomed to fill the
+#: canvas, which on a 4032x3040 frame in this window is about 59 %.
+OAK_ZOOM = 0.59
+
+
+def _open_window(session, tmp_path: Path):
+    """A real ``MainWindow`` on this session, laid out like the annotator's."""
+    from PySide6.QtCore import Qt
+
+    from tda.ui.app import MainWindow
+
+    window = MainWindow(session, {
+        "cache_dir": str(tmp_path / "cache"),
+        "db_path": str(tmp_path / "tda.sqlite"),
+        "backup_dir": str(tmp_path / "backups"),
+        "app_dir": str(tmp_path / "state"),
+    }, ANNOTATOR)
+    window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    window.resize(1920, 1200)
+    window.show()
+    QApplication.processEvents()
+    return window
+
+
+def _settle(window) -> None:
+    """Let Qt deliver everything the gesture posted, and really repaint.
+
+    ``processEvents`` alone leaves the canvas with a scheduled update; the
+    budget is about what the annotator waits for, which ends when the pixels
+    are on screen.
+    """
+    QApplication.processEvents()
+    window.canvas.viewport().repaint()
+
+
+@pytest.mark.slow
+def test_window_gesture_budgets_on_a_12mp_frame_best_and_median_of_five(
+    qapp, tmp_path, as_shipped
+):
+    """Enter, a frame change, a timeline jump and a repaint, through the window.
+
+    Asserted twice: on the **best** of five, which is what the code costs when
+    the machine is this test's, and on the **median** of five, so that a
+    regression of the typical case cannot hide behind one lucky run.  (The
+    session budgets above are best-of only; this is the newer, stricter shape
+    and the one to copy.)
+
+    The session budgets above measure ``commit_edit`` and ``goto``.  What the
+    annotator waits for is longer than either: ``Enter`` also asks what the
+    edit *meant*, repaints the overlay, re-syncs the editing layer and
+    refreshes the panels, and a frame change repaints a 12 MP canvas.
+    Measured on main before this task, the whole ``Enter`` was 1.8-1.9 s
+    against a 0.5 s ``commit_edit``.
+
+    **In the shipped configuration**: the sweeper is on, the frame is the one
+    with every instance still in the machine, the canvas stands where the
+    annotator stands -- zoomed into the ROI, not fitted to the whole frame --
+    and the cache carries no offline timeline thumbnails, which is the state
+    ``oak1`` and ``oak2`` are in today, so the timeline rows are read from the
+    12 MP frames themselves.
+    """
+    session = make_session(tmp_path, last_step=BOARD_STEP, hw=OAK_HW)
+    session.goto(OAK_STEP)
+    drawn = seed_shapes(session, OAK_STEP, grid=7, anchor=BOARD_STEP, refresh=False)
+    assert len(drawn) >= 40, f"the scene has only {len(drawn)} instances"
+    session.compiled()
+    window = _open_window(session, tmp_path)
+    try:
+        assert session.sweeper_enabled is True
+
+        def stand() -> None:
+            window.canvas.set_zoom(OAK_ZOOM)
+            window.canvas.center_on((OAK_HW[1] / 2, OAK_HW[0] / 2))
+
+        stand()
+        _settle(window)
+        shown = window.canvas.viewport_image_rect()
+        assert (shown[2] - shown[0]) < OAK_HW[1], \
+            "the canvas is showing the whole frame; that is not where an annotator stands"
+
+        # -- the whole Enter gesture ---------------------------------------
+        def before_commit(attempt: int) -> None:
+            window.act_clear_edit()
+            session.clear_edit()
+            session.goto(OAK_STEP, force=True)
+            _settle(window)
+            window.on_request_edit(CHASSIS)
+            mask = session.editing_mask()
+            painted = (np.zeros(OAK_HW, dtype=bool) if mask is None
+                       else mask.copy())
+            painted[1200:1400, 1500 + attempt:1700 + attempt] ^= True
+            window.set_editing_mask(painted, undoable=True)
+            _settle(window)
+
+        def commit(attempt: int) -> None:
+            window.act_commit()
+            for _ in range(2):
+                if not (window.warn_bar.isVisible() or window.scope_bar.isVisible()):
+                    break
+                window.act_commit()
+            _settle(window)
+
+        _, commit_runs = best_of(commit, before_commit, times=BEST_OF_12MP)
+        assert session.editing_instance is None, "the commit was refused"
+        assert len(session.db.compiled(FrameKey(DESKTOP, OAK_STEP, VIEW))) >= 40
+
+        # -- a frame change -------------------------------------------------
+        window.act_clear_edit()
+        session.clear_edit()
+        _settle(window)
+
+        def before_change(attempt: int) -> None:
+            session.goto(OAK_STEP + 1 + (attempt % 2) * 2, force=True)
+            session.drain_prefetch(timeout=120.0)
+            _settle(window)
+
+        def change(attempt: int) -> None:
+            window.act_step(-1)
+            _settle(window)
+
+        _, change_runs = best_of(change, before_change, times=BEST_OF_12MP)
+
+        # -- a timeline click ------------------------------------------------
+        steps = sorted(session.steps())
+
+        def before_jump(attempt: int) -> None:
+            session.goto(steps[-2], force=True)
+            session.images.clear()
+            session._invalidate()
+            _settle(window)
+
+        def jump(attempt: int) -> None:
+            window.timeline_goto(OAK_STEP + 6 + attempt)
+            _settle(window)
+
+        _, jump_runs = best_of(jump, before_jump, times=BEST_OF_12MP)
+        assert session.current().step == OAK_STEP + 6 + BEST_OF_12MP - 1, \
+            "a jump was refused; that is not a jump time"
+
+        # -- panning, which composites the strip it reveals -------------------
+        session.goto(OAK_STEP, force=True)
+        stand()
+        _settle(window)
+        bar = window.canvas.horizontalScrollBar()
+        pan_runs = []
+        for _attempt in range(4 * BEST_OF_12MP):
+            started = time.perf_counter()
+            bar.setValue(bar.value() + 40)
+            _settle(window)
+            pan_runs.append(time.perf_counter() - started)
+
+        zoom_runs = []
+        for attempt in range(2 * BEST_OF_12MP):
+            started = time.perf_counter()
+            window.canvas.set_zoom(
+                window.canvas.zoom_factor() * (1.25 if attempt % 2 else 0.8)
+            )
+            _settle(window)
+            zoom_runs.append(time.perf_counter() - started)
+    finally:
+        window.shutdown()
+        window.hide()
+        QApplication.processEvents()
+
+    for check in (_under, _median_under):
+        check(BUDGET_WINDOW_COMMIT, "the whole Enter gesture", commit_runs)
+        check(BUDGET_WINDOW_FRAME_CHANGE, "frame change (window)", change_runs)
+        check(BUDGET_WINDOW_TIMELINE_JUMP, "timeline jump (window)", jump_runs)
+    # A repaint is a fiftieth of the smallest of those, and there are twenty of
+    # them: the best-of is the measurement, the median only says the machine
+    # was not stolen mid-test.
+    _under(BUDGET_WINDOW_REPAINT, "pan repaint", pan_runs)
+    _under(BUDGET_WINDOW_REPAINT, "zoom repaint", zoom_runs)
+    _median_under(BUDGET_WINDOW_REPAINT, "pan repaint", pan_runs)
+    _median_under(BUDGET_WINDOW_REPAINT, "zoom repaint", zoom_runs)
 
 
 def _count_compiles_in(monkeypatch) -> list:
