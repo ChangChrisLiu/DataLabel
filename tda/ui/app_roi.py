@@ -67,6 +67,10 @@ class RoiMixin:
         image = self.session.image()
         if image is None:
             return
+        # The rectangle is about to take ``Enter`` and ``Esc``; a draft ghost
+        # holding them at the same time would leave two things on screen
+        # claiming the same two keys.
+        self.forget_draft_ghost()
         stored = self.roi()
         if stored is not None:
             self.roi_draft = tuple(int(v) for v in stored)

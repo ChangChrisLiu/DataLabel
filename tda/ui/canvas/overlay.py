@@ -26,6 +26,7 @@ from tda.core import masks as _masks
 __all__ = [
     "PALETTE_64",
     "EDIT_RGB",
+    "GHOST_RGB",
     "OCCLUDER_RGB",
     "OCCLUDER_TYPES",
     "LabelOverlay",
@@ -66,6 +67,10 @@ PALETTE_64: tuple[RGB, ...] = _build_palette()
 EDIT_RGB: RGB = (255, 232, 64)
 #: Frame-level occluder layer colour (spec 3.1 ``OccluderMask``).
 OCCLUDER_RGB: RGB = (255, 72, 72)
+#: Colour of a proposal nobody has accepted yet -- today the Label Studio draft
+#: on offer (``Shift+A``).  Neither a palette entry nor :data:`EDIT_RGB`: "this
+#: is not yours until you press Enter" has to be visible at a glance.
+GHOST_RGB: RGB = (96, 208, 255)
 
 _ALL = "all"  # sentinel: the whole buffer is stale
 
@@ -101,6 +106,8 @@ class LabelOverlay:
         palette: label id -> RGB, derived from the instance keys.
         id2key: label id -> instance key (inverse of the painting order).
         editing: boolean ``HxW`` layer of the instance under the cursor.
+        ghost: boolean ``HxW`` preview layer -- a proposal being *shown*, never
+            an edit; :attr:`has_ghost` says whether one is up.
         occluder: boolean ``HxW`` frame occluder layer.
         visible: when False :meth:`qimage` renders fully transparent, which is
             how the "hide masks" shortcut works without touching any data.
@@ -116,6 +123,12 @@ class LabelOverlay:
         self.id2key: dict[int, str] = {}
         self.editing_instance: Optional[str] = None
         self.editing = np.zeros((h, w), dtype=bool)
+        self.ghost = np.zeros((h, w), dtype=bool)
+        #: Whether :attr:`ghost` is being shown.  A flag rather than
+        #: ``ghost.any()``: clearing it runs on every commit, undo and frame
+        #: change, and scanning 12 MP to find out there was nothing to clear
+        #: would be a repaint nobody asked for.
+        self.has_ghost = False
         self.occluders: dict[str, np.ndarray] = {}
         self._visible = True
 
@@ -166,6 +179,26 @@ class LabelOverlay:
         """Drop the editing layer without touching the committed label map."""
         self.editing = np.zeros(self.hw, dtype=bool)
         self.editing_instance = None
+        self._dirty = _ALL
+
+    def set_ghost(self, mask: np.ndarray) -> None:
+        """Show a proposal over the frame without making it an edit.
+
+        The ghost is drawn *under* the editing layer, so a proposal can never
+        cover the pixels the annotator has already painted, and it takes part
+        in nothing else: no label id, no undo entry, no commit.  Whoever put it
+        up (:mod:`tda.ui.app_adopt`) is the only one who can turn it into pixels.
+        """
+        self.ghost = self._coerce(mask, "ghost mask")
+        self.has_ghost = True
+        self._dirty = _ALL
+
+    def clear_ghost(self) -> None:
+        """Take the proposal off the screen; a no-op when none is showing."""
+        if not self.has_ghost:
+            return
+        self.ghost = np.zeros(self.hw, dtype=bool)
+        self.has_ghost = False
         self._dirty = _ALL
 
     def occluder_layer(self, occluder_type: str) -> np.ndarray:
@@ -323,7 +356,11 @@ class LabelOverlay:
             edges = self._edges(self.labelmap, rect) & (labels != 0)
             np.copyto(out, line_lut[labels], where=edges)
 
-        layers = [(self.editing, EDIT_RGB)]
+        # A proposal goes under the editing layer: it is an offer, and the
+        # annotator's own pixels outrank it.  Left out entirely while none is
+        # up, so the ordinary repaint pays nothing for it.
+        layers = [(self.ghost, GHOST_RGB)] if self.has_ghost else []
+        layers += [(self.editing, EDIT_RGB)]
         # Occluders sit on top of the instance being edited: they mark what the
         # annotator cannot see, so they must not be hidden by it.
         layers += [

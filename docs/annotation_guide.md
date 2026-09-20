@@ -193,6 +193,7 @@ D:\Anaconda\envs\tda\python.exe -m tda.cli check --desktop 13 --view scan
 | `[` | 笔刷变小（可长按） | 工具 |
 | `]` | 笔刷变大（可长按） | 工具 |
 | `C` | 切换 SAM 候选掩码 | 工具 |
+| `Shift+A` | 采纳 Label Studio 旧草稿（再按一次换下一个） | 工具 |
 | `Shift+F` | 填补掩码内部空洞 | 工具 |
 | `Shift+D` | 删除小碎块（默认 <16 像素） | 工具 |
 | `Return / Enter` | 提交编辑（按建议范围） | 编辑与提交 |

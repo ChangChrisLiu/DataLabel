@@ -206,6 +206,10 @@ class EditMixin:
         self._pending_scope = None
         self.scope_bar.hide()
         self.disarm_bench()
+        # A draft ghost is about one instance on one frame.  ``_sync_editing_layer``
+        # covers the frames that repaint; this covers the ones that do not,
+        # including a view with no image at this step.
+        self.forget_draft_ghost()
         if self.session.image() is not None:
             segment = (int(key.desktop), str(key.view), self._pose_segment(key))
             if self.roi() is not None:
@@ -224,9 +228,11 @@ class EditMixin:
         tool -- a commit, ``Esc``, an undo, a restored sidecar all end here --
         so it is where the half-built prompt is dropped.  Keeping the points
         made the next click refine a layer their result no longer had anything
-        to do with.
+        to do with.  A draft ghost, and the note saying the layer came from a
+        draft, describe the same vanished layer and go with them.
         """
         self.reset_sam_prompt()
+        self.forget_draft_ghost()
         if self.overlay is None:
             return
         instance = getattr(self.session, "editing_instance", None)
@@ -362,6 +368,9 @@ class EditMixin:
         ``commit_box`` directly.
         """
         self.cancel_roi_edit()
+        # This branch of ``on_request_edit`` never reaches _sync_editing_layer,
+        # so a ghost offered for the previous instance would still be on screen.
+        self.forget_draft_ghost()
         self.bench_instance = str(instance)
         self._tool_name = "bench_box"
         self.set_sam_instance(None)

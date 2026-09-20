@@ -9,6 +9,7 @@ every one of them lands in.
 from __future__ import annotations
 
 import time
+from typing import Optional
 
 import numpy as np
 
@@ -33,13 +34,19 @@ class CommitMixin:
     # --------------------------------------------------------------- commits
     @S.guard
     def act_commit(self) -> None:
-        """``Enter``: store the ROI, accept the pending scope, or commit the edit.
+        """``Enter``: take the ghost, store the ROI, accept the scope, or commit.
 
-        The ROI comes first because while its bar is up it is what the bar is
-        talking about: "Enter 确认" next to a rectangle that ``Enter`` did not
-        store -- it committed the instance loaded behind it instead -- is the
-        kind of thing nobody notices until the rectangle is missing.
+        One chain, in the order of *what is on screen*.  The ROI is in it
+        because while its bar is up it is what the bar is talking about: "Enter
+        确认" next to a rectangle that ``Enter`` did not store -- it committed
+        the instance loaded behind it instead -- is the kind of thing nobody
+        notices until the rectangle is missing.  The draft ghost joins the same
+        chain at the top: it can only be up when none of the others is (see
+        :meth:`~tda.ui.app_adopt.AdoptMixin._adopt_refusal`), so the order
+        between them never has to be guessed at.
         """
+        if self.accept_draft_ghost():
+            return
         if self.roi_editing:
             self.accept_roi()
             return
@@ -151,9 +158,7 @@ class CommitMixin:
         mask = self.session.editing_mask()
         pixels = int(mask.sum()) if mask is not None else 0
         started = time.perf_counter()
-        # An override belongs to the one commit it was given for, whether that
-        # commit is taken or refused: it must not ride along on the next one.
-        extra, self._override_facts = self._override_facts, None
+        extra = self._commit_extra()
         try:
             result = self.session.commit_edit(scope, extra=extra) or {}
         except ValueError as refused:
@@ -184,14 +189,48 @@ class CommitMixin:
         # happens at confirm time, where the answer is actually used.
         self.report(f"committed ({scope}): {result.get('changed', '')}".strip())
 
+    def _commit_extra(self) -> Optional[dict]:
+        """The op-log note this commit carries: what the *window* knows about it.
+
+        Two facts, and they can both be true of one commit -- a draft adopted
+        into the layer and then committed at a size the priors call
+        implausible.  They expire differently, which is the whole reason they
+        are separate:
+
+        * the **area override** belongs to the one commit it was given for,
+          taken or refused, or the next ``Enter`` would inherit an answer to a
+          warning nobody read;
+        * the **adoption** belongs to the *pixels*.  It survives a refusal (the
+          annotator fixes the scope and commits the same layer) and is dropped
+          by :meth:`~tda.ui.app_adopt.AdoptMixin.forget_draft_ghost` wherever
+          the layer itself is replaced.
+
+        ``None`` rather than ``{}`` when there is nothing to say: the session
+        checks a dict for JSON-serialisability and merges it, and an empty one
+        would only add work to every commit.
+        """
+        facts: dict = {}
+        override, self._override_facts = self._override_facts, None
+        if override:
+            facts |= dict(override)
+        adopted = self.adopted_facts()
+        if adopted:
+            facts |= adopted
+        return facts or None
+
     @S.guard
     def act_clear_edit(self) -> None:
-        """``Esc``: abandon the ROI rectangle, the bench arm or the editing layer.
+        """``Esc``: dismiss the ghost, the ROI rectangle, the bench arm or the layer.
 
         Whichever gesture owns the canvas right now is the one ``Esc`` answers:
         while the ROI bar is up that is the rectangle, not the instance that
-        happens to be loaded behind it.
+        happens to be loaded behind it, and while a draft ghost is up it is the
+        ghost -- which is why it dismisses *only* the ghost and the layer under
+        it survives.
         """
+        if self.clear_draft_ghost():
+            self.report("草稿已取消 / the draft was dismissed")
+            return
         if self._pending_warning is not None:
             # The warning is the thing on screen: Esc answers it by taking the
             # annotator back to the layer, not by throwing the layer away.
