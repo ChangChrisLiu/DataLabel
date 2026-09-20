@@ -447,6 +447,122 @@ def test_dragging_a_handle_resizes_the_proposal_rather_than_replacing_it(qapp, t
 
 
 # --------------------------------------------------------------------------- #
+# a deliberate erase is a manual edit too (round 2, ruling E1)
+# --------------------------------------------------------------------------- #
+def _seed_layer(win: MainWindow, box=(8, 8, 40, 40)) -> str:
+    """Begin an edit and put a solid block into the layer."""
+    instance = first_task_instance(win)
+    win.on_request_edit(instance)
+    mask = np.zeros(win.overlay.hw, dtype=bool)
+    x0, y0, x1, y1 = box
+    mask[y0:y1, x0:x1] = True
+    win.set_editing_mask(mask, undoable=True)
+    return instance
+
+
+def test_an_eraser_stroke_is_remembered_as_erased(window):
+    _seed_layer(window)
+    assert window.erased_mask() is None, "nothing has been erased yet"
+
+    window.act_tool("eraser")
+    before = window.overlay.editing.copy()
+    paint(window)
+    erased = window.erased_mask()
+
+    assert erased is not None, "the eraser stroke was not remembered"
+    removed = before & ~window.overlay.editing
+    assert removed.any() and np.array_equal(erased, removed)
+
+
+def test_undo_and_redo_of_an_eraser_stroke_move_the_erased_set(window):
+    _seed_layer(window)
+    window.act_tool("eraser")
+    paint(window)
+    erased = window.erased_mask().copy()
+    layer = window.overlay.editing.copy()
+
+    window.act_undo()
+    QApplication.processEvents()
+    assert window.erased_mask() is None, "undo left the pixels protected"
+
+    window.act_redo()
+    QApplication.processEvents()
+    assert np.array_equal(window.session.editing_mask(), layer)
+    assert np.array_equal(window.erased_mask(), erased)
+
+
+def test_a_brush_stroke_over_erased_pixels_lifts_the_protection(window):
+    _seed_layer(window)
+    window.act_tool("eraser")
+    paint(window)
+    assert window.erased_mask().any()
+
+    window.act_tool("brush")
+    paint(window)                       # the same place, painting it back
+
+    remaining = window.erased_mask()
+    assert remaining is None or not (remaining & window.overlay.editing).any()
+    assert remaining is None or remaining.sum() < 1e9
+
+
+def test_the_erased_set_goes_out_with_the_edit(window):
+    _seed_layer(window)
+    window.act_tool("eraser")
+    paint(window)
+    assert window.erased_mask() is not None
+
+    window.act_clear_edit()             # Esc
+    assert window.erased_mask() is None
+
+
+def test_the_erased_set_travels_in_the_crash_sidecar(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.act_clear_edit()            # answer the ROI
+        instance = _seed_layer(win)
+        win.act_tool("eraser")
+        paint(win)
+        erased = win.erased_mask().copy()
+        key = win.session.current()
+        win.flush_sidecar()
+
+        entry = win.sidecar.pending_for(key, instance, win.overlay.hw)
+        assert entry is not None
+        assert np.array_equal(entry["erased"], erased), "the sidecar lost it"
+
+        win.session.clear_edit()
+        win._sync_editing_layer()
+        win._offer_restore(key, instance)
+        assert win.pending_restore() is not None
+        win.restore_pending()
+        assert np.array_equal(win.erased_mask(), erased), "the restore lost it"
+    finally:
+        close_window(win)
+
+
+def test_a_sam_result_does_not_put_an_erased_patch_back(window):
+    """The reviewer's case: erase most of a result, then click positively."""
+    _seed_layer(window)
+    window.act_tool("eraser")
+    paint(window)
+    erased = window.erased_mask().copy()
+    assert erased.any()
+
+    # a SAM point prompt somewhere else entirely; the stub's mask covers most
+    # of the crop, so without the protection it would cover the erased patch
+    before = int(window.overlay.editing.sum())
+    window.act_tool("sam_point")
+    window.sam_point.on_press(50.0, 50.0, None)
+    window.sam_queue.flush(multimask=True)
+    QApplication.processEvents()
+
+    assert int(window.overlay.editing.sum()) > before, "the result did not land"
+    assert window.sam_point.kept_out() == int(erased.sum())
+    assert not (window.overlay.editing & erased).any(), "the erasure was undone"
+    assert "保留擦除" in window.status_message()
+
+
+# --------------------------------------------------------------------------- #
 # a refused proposal must not wedge the window (round 2, C1 / M2 / M3 / I1)
 # --------------------------------------------------------------------------- #
 WHOLE_FRAME = (0, 0, 64, 64)

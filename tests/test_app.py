@@ -975,9 +975,13 @@ def test_the_log_records_every_sam_prompt(window):
     assert "sam prompt" in text
     assert "points=1" in text and "candidates=3" in text and "ms=" in text
     assert "hello from the service" in text, "the service's logger is not attached"
-    # What the trial's log could not say: how the mask was composed, and how
-    # much of what was already there survived it (task U1, ruling R3).
-    assert "sam apply" in text and "compose=" in text and "owned" in text
+    # What the trial's log could not say: how the mask was composed, what it
+    # added and removed, and what the annotator's erasures held back (R3, E1).
+    # ``owned kept`` moved to DEBUG in round 2: it is a second 13 ms pass over
+    # a 12 MP layer and the INFO line does not need it.
+    assert "sam apply" in text and "compose=add" in text
+    assert "(+3136/-0)" in text and "erased_kept_out 0" in text
+    assert "owned" not in text, "the DEBUG-only counts are on the INFO line"
 
     window.act_cycle_candidate()
     assert "sam cycle" in log_text(window)

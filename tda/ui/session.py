@@ -142,7 +142,11 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
         The window owns the overlay the strokes were painted into, so an undo
         has to hand the restored mask back rather than expect a shared buffer.
         """
-        self.layer.apply_stroke(payload, masks.decode_rle(payload["rle_after"]))
+        erased_rle = payload.get("rle_erased_after")
+        self.layer.apply_stroke(
+            payload, masks.decode_rle(payload["rle_after"]),
+            erased=None if erased_rle is None else masks.decode_rle(erased_rle),
+        )
         self.sigEditingChanged.emit(self.layer.mask())
 
     def _make_handler(self, apply: Callable[..., dict]) -> Callable[[dict], None]:

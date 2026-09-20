@@ -125,8 +125,17 @@ class CommitMixin:
         """Take a copy of the layer the window has been painting into."""
         self.layer.set(mask)
 
+    def erased_mask(self) -> Optional[np.ndarray]:
+        """Pixels this edit has deliberately taken off, or ``None`` (E1)."""
+        return self.layer.erased
+
+    def set_erased_mask(self, erased: Optional[np.ndarray]) -> None:
+        """Replace the protected set without recording an op."""
+        self.layer.set_erased(erased)
+
     def push_stroke(self, before: np.ndarray, after: np.ndarray,
-                    adopted: Optional[dict] = None) -> None:
+                    adopted: Optional[dict] = None,
+                    erased: Optional[np.ndarray] = None) -> None:
         """Record one brush/eraser stroke on the undo stack (spec 4.6).
 
         The pixels are already painted, so the op is logged rather than applied;
@@ -135,7 +144,8 @@ class CommitMixin:
         ``adopted`` names the Label Studio draft a stroke came from, for the
         commit that later reads its own provenance off this history.
         """
-        self.undo_stack.push(self.layer.stroke_op(before, after, adopted), apply=False)
+        self.undo_stack.push(self.layer.stroke_op(before, after, adopted, erased),
+                             apply=False)
         self._refresh_dirty()
 
     def adoptions_in_history(self) -> list[dict]:

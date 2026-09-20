@@ -256,7 +256,8 @@ class EditSidecar:
         return self._dir / name
 
     def save(self, key: FrameKey, instance: str, mask: Optional[np.ndarray],
-             adopted: Optional[list] = None) -> None:
+             adopted: Optional[list] = None,
+             erased: Optional[np.ndarray] = None) -> None:
         """Record ``mask`` as the layer being edited on ``(key, instance)``.
 
         An empty or missing mask removes the file instead of writing one: there
@@ -282,6 +283,13 @@ class EditSidecar:
             "rle": masks.encode_rle_boxed(np.asarray(mask, dtype=bool)),
             "adopted": [dict(entry) for entry in (adopted or [])],
         }
+        # What the annotator deliberately took off travels with the pixels for
+        # the same reason the adoptions do: a crash takes the undo history,
+        # and a restored layer that lost its erasures would have them put back
+        # by the next SAM prompt (round 2, E1).
+        if erased is not None and np.any(erased):
+            payload["rle_erased"] = masks.encode_rle_boxed(
+                np.asarray(erased, dtype=bool))
         target = self._file(key, instance)
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".tmp")
@@ -311,9 +319,14 @@ class EditSidecar:
         except (OSError, ValueError, KeyError, TypeError):
             return None
         adopted = payload.get("adopted")
+        try:
+            erased_rle = payload.get("rle_erased")
+            erased = None if erased_rle is None else masks.decode_rle(erased_rle)
+        except (ValueError, KeyError, TypeError):
+            erased = None      # an unreadable protection is no protection
         return {"key": key, "instance": str(payload["instance"]), "mask": mask,
                 "adopted": [dict(e) for e in adopted] if isinstance(adopted, list) else [],
-                "path": path}
+                "erased": erased, "path": path}
 
     def entries_for(self, key: FrameKey,
                     hw: Optional[tuple] = None) -> list[dict]:

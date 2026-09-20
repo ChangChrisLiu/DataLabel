@@ -112,7 +112,8 @@ def peek_image_at(session: Any, step: int) -> Optional[np.ndarray]:
 # the editing layer
 # --------------------------------------------------------------------------- #
 def push_stroke(session: Any, instance: str, before: Optional[np.ndarray],
-                after: np.ndarray, adopted: Optional[dict] = None) -> None:
+                after: np.ndarray, adopted: Optional[dict] = None,
+                erased: Optional[np.ndarray] = None) -> None:
     """Record one finished stroke as a single undoable op on the session.
 
     ``adopted`` marks a stroke that came from a Label Studio draft; a session
@@ -126,10 +127,15 @@ def push_stroke(session: Any, instance: str, before: Optional[np.ndarray],
     after = np.asarray(after, dtype=bool)
     if _has(session, "push_stroke"):
         try:
-            session.push_stroke(before, after, adopted)
+            session.push_stroke(before, after, adopted, erased)
         except TypeError:  # pragma: no cover - a session without the argument
-            _note("push_stroke(adopted=)", "the draft's provenance is not recorded")
-            session.push_stroke(before, after)
+            _note("push_stroke(erased=)", "erased pixels are not protected")
+            try:
+                session.push_stroke(before, after, adopted)
+            except TypeError:
+                _note("push_stroke(adopted=)",
+                      "the draft's provenance is not recorded")
+                session.push_stroke(before, after)
         return
     _note("push_stroke", "op pushed onto session.undo_stack directly")
     if before is None:

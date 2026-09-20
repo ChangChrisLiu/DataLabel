@@ -39,6 +39,12 @@ class EditingLayer:
         self.edit_id: Optional[int] = None
         self._mask: Optional[np.ndarray] = None
         self._before: Optional[np.ndarray] = None
+        #: Pixels the annotator has deliberately taken off **during this edit**
+        #: -- eraser strokes, and what a negative-point SAM prompt removed.
+        #: ``None`` while nothing has been erased, which is the common case and
+        #: costs nothing.  An add-only SAM result never puts these back: an
+        #: erase is a manual edit and a manual edit is never lost (ruling E1).
+        self.erased: Optional[np.ndarray] = None
 
     # -- state --------------------------------------------------------------
     @property
@@ -53,12 +59,16 @@ class EditingLayer:
         self._before = self._mask.copy()
         self.instance = instance
         self.edit_id = next(self._next_id)
+        self.erased = None
 
     def clear(self) -> None:
         self.instance = None
         self.edit_id = None
         self._mask = None
         self._before = None
+        # The protection belongs to the edit, not to the instance: it goes out
+        # with the layer it was about.
+        self.erased = None
 
     def mask(self) -> Optional[np.ndarray]:
         """The layer as the session last saw it; the session owns this array."""
@@ -93,8 +103,16 @@ class EditingLayer:
             self._before = self._mask.copy()
 
     # -- undo ---------------------------------------------------------------
+    def set_erased(self, erased: Optional[np.ndarray]) -> None:
+        """Replace the protected set (``None`` = nothing is protected)."""
+        if erased is None or not np.any(erased):
+            self.erased = None
+            return
+        self.erased = np.array(erased, dtype=bool, copy=True)
+
     def stroke_op(self, before: np.ndarray, after: np.ndarray,
-                  adopted: Optional[dict] = None) -> Op:
+                  adopted: Optional[dict] = None,
+                  erased: Optional[np.ndarray] = None) -> Op:
         """The undoable record of one brush or eraser stroke (spec 4.6).
 
         ``adopted`` travels with a stroke that came from a Label Studio draft,
@@ -105,12 +123,23 @@ class EditingLayer:
         """
         if self.instance is None:
             raise RuntimeError("a stroke needs an instance; call begin_edit() first")
+        was_erased = self.erased
         self.set(after)
+        self.set_erased(erased)
         if adopted:
             adopted = dict(adopted) | {"edit_id": self.edit_id}
-        return edit_editing_mask_op(self.instance, before, after, adopted)
+        return edit_editing_mask_op(self.instance, before, after, adopted,
+                                    erased_before=was_erased,
+                                    erased_after=self.erased)
 
-    def apply_stroke(self, payload: dict, mask: np.ndarray) -> None:
-        """Adopt the mask an undo or redo of a stroke restored."""
+    def apply_stroke(self, payload: dict, mask: np.ndarray,
+                     erased: Optional[np.ndarray] = None) -> None:
+        """Adopt the mask an undo or redo of a stroke restored.
+
+        ``erased`` is the protected set that belongs with it; ``None`` means
+        the payload carried none, i.e. nothing was protected at that point in
+        the history.
+        """
         self.instance = payload["instance"]
         self._mask = mask
+        self.set_erased(erased)

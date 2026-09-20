@@ -1296,6 +1296,102 @@ def test_one_undo_takes_a_negative_point_application_back(qapp):
     assert np.array_equal(ov.editing, prior), "undo did not restore the layer"
 
 
+# --------------------------------------------------------------------------- #
+# a deliberate erase is a manual edit too (round 2, ruling E1)
+# --------------------------------------------------------------------------- #
+# Erase 630 px out of an 840 px SAM result, then click positively somewhere
+# else: all 630 used to come straight back, reported as `SAM +630 px`.  An
+# erase is an edit, and "a manual edit is never lost" covers it.
+def test_an_add_only_result_does_not_put_erased_pixels_back(zoomed):
+    canvas, ov = zoomed
+    erased = np.zeros((60, 80), dtype=bool)
+    erased[20:25, 25:35] = True          # inside _blob_result's block
+    queue = StubQueue(_blob_result)
+    tool = _box_tool(canvas, ov, queue)
+    tool.erased_provider = lambda: erased
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: bool(strokes))
+
+    assert ov.editing[16, 25], "the rest of the result did not land"
+    assert not (ov.editing & erased).any(), "the erased pixels came back"
+
+
+def test_cycling_never_puts_erased_pixels_back(zoomed):
+    canvas, ov = zoomed
+    erased = np.zeros((60, 80), dtype=bool)
+    erased[16:20, 22:30] = True
+    queue = StubQueue(_multi_result)
+    tool = _box_tool(canvas, ov, queue)
+    tool.erased_provider = lambda: erased
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: tool.candidate_count == 3)
+
+    for _ in range(3):
+        assert not (ov.editing & erased).any(), "cycling put erased pixels back"
+        tool.cycle_candidate()
+
+
+def test_a_positive_point_inside_the_erased_set_asks_for_them_back(zoomed):
+    """They clicked there: that is the annotator lifting their own protection."""
+    canvas, ov = zoomed
+    erased = np.zeros((60, 80), dtype=bool)
+    erased[20:25, 25:35] = True
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue)
+    tool.erased_provider = lambda: erased
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(28.0, 22.0, _press(28.0, 22.0))    # inside the erased block
+    assert _spin(lambda: bool(strokes))
+
+    assert (ov.editing & erased).any(), "the click did not lift the protection"
+
+
+def test_a_negative_prompt_ignores_the_erased_set(zoomed):
+    """It replaces inside the crop; there is nothing to protect pixels from."""
+    canvas, ov = zoomed
+    prior = np.zeros((60, 80), dtype=bool)
+    prior[20:40, 20:40] = True
+    ov.set_editing("inst-x", prior)
+    erased = np.zeros((60, 80), dtype=bool)
+    erased[16:18, 22:24] = True
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue, refine=True)
+    tool.erased_provider = lambda: erased
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(25.0, 25.0, _negative(25.0, 25.0))
+    assert _spin(lambda: bool(strokes))
+    assert ov.editing[16, 22], "a negative prompt's own answer was suppressed"
+
+
+def test_the_status_line_reports_the_erased_pixels_kept_out(zoomed):
+    canvas, ov = zoomed
+    erased = np.zeros((60, 80), dtype=bool)
+    erased[20:25, 25:35] = True
+    queue = StubQueue(_blob_result)
+    tool = _box_tool(canvas, ov, queue)
+    tool.erased_provider = lambda: erased
+    hints: list[str] = []
+    tool.sigHint.connect(hints.append)
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: bool(hints))
+
+    assert "保留擦除 50 px" in hints[-1], hints
+    assert "50 erased px kept out" in hints[-1]
+
+
 def test_the_status_line_says_what_the_application_did(zoomed):
     """One clause, bilingual only where it has to be (ruling R2b)."""
     canvas, ov = zoomed

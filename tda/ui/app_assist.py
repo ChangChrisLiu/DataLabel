@@ -98,6 +98,9 @@ class AssistMixin:
             tool.sigStroke.connect(self.on_stroke)
             tool.sigHint.connect(self.report)
             tool.sigError.connect(self.on_sam_error)
+            # What the annotator has deliberately rubbed out is never put back
+            # by an add-only result (ruling E1); the session owns the set.
+            tool.erased_provider = self.erased_mask
 
         self.assist = AssistController(self)
         self.assist.sigBlobs.connect(self._on_blobs)

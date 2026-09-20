@@ -832,6 +832,7 @@ class RoiMixin:
             return
         self._restore_offer = {"instance": found["instance"], "mask": found["mask"],
                                "key": found["key"],
+                               "erased": found.get("erased"),
                                "adopted": list(found.get("adopted") or [])}
         self.restore_bar.show_text(
             f"上次未提交的编辑（{found['instance']}）可以恢复 / "
@@ -868,7 +869,10 @@ class RoiMixin:
         # ``set_sam_instance`` above does nothing at all when the restored
         # instance is the one already being edited, which is the common case.
         self.reset_sam_prompt()
-        self.set_editing_mask(offer["mask"])
+        # The erasures come back with the pixels: without them the first SAM
+        # prompt after a restore would put back what the annotator rubbed out
+        # before the crash (round 2, E1).
+        self.set_editing_mask(offer["mask"], erased=offer.get("erased"))
         # The layer is back; so is what it was built from, or the commit that
         # follows would file somebody's adopted draft as hand-drawn work.
         self.note_restored_adoptions(offer["key"], offer["instance"],

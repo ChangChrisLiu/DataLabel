@@ -132,6 +132,12 @@ class SamToolBase(CandidatesMixin, Tool):
         self.paused = False
         self.prompt_box: Optional[Box] = None
         self.stroke_before: Optional[np.ndarray] = None
+        #: Called for the pixels the annotator has deliberately taken off in
+        #: this edit -- eraser strokes and negative-point results -- or
+        #: ``None``.  An add-only result never puts them back (ruling E1); the
+        #: window wires this to the session's editing layer.
+        self.erased_provider: Optional[Any] = None
+        self._candidate_erased: Optional[np.ndarray] = None
         self._frame_token: Any = None
         self._token = 0
         self._candidates: list[np.ndarray] = []
@@ -346,6 +352,10 @@ class SamToolBase(CandidatesMixin, Tool):
         # still sent exactly when it was: it makes the answer better, and that
         # is a separate question from what the answer is allowed to do.
         subtractive = any(int(label) == 0 for _px, _py, label in crop_points)
+        # A positive point *inside* the erased set is the annotator asking for
+        # those pixels back -- they clicked there on purpose -- so this one
+        # application ignores the protection (ruling E1).
+        lifts = self._lifts_erasure(points)
         req = SamRequest(
             image_crop=crop,
             points=crop_points,
@@ -374,7 +384,7 @@ class SamToolBase(CandidatesMixin, Tool):
         # waiting for a mask that is never coming, with nothing on screen.
         self._submit_to_queue(
             req,
-            lambda res: bridge.deliver((res, rect, subtractive, stamp)),
+            lambda res: bridge.deliver((res, rect, (subtractive, lifts), stamp)),
             lambda exc: bridge.deliver_error(f"SAM failed: {exc}"),
         )
 
@@ -384,6 +394,40 @@ class SamToolBase(CandidatesMixin, Tool):
             self.queue.submit(req, callback, on_error)
         except TypeError:  # an older queue (or a stub) without the hook
             self.queue.submit(req, callback)
+
+    def erased_mask(self) -> Optional[np.ndarray]:
+        """The pixels this edit has deliberately taken off, or ``None``."""
+        provider = self.erased_provider
+        if provider is None:
+            return None
+        found = provider()
+        if found is None or self.overlay is None:
+            return None
+        found = np.asarray(found, dtype=bool)
+        return found if found.shape == self.overlay.hw else None
+
+    def _lifts_erasure(self, points: Sequence[Point]) -> bool:
+        """Does a positive point of this prompt land on an erased pixel?"""
+        erased = self.erased_mask()
+        if erased is None:
+            return False
+        height, width = erased.shape
+        for px, py, label in points:
+            if int(label) != 1:
+                continue
+            x, y = int(round(float(px))), int(round(float(py)))
+            if 0 <= y < height and 0 <= x < width and erased[y, x]:
+                return True
+        return False
+
+    @property
+    def removes_pixels(self) -> bool:
+        """Was the application that just landed allowed to take pixels off?
+
+        What the window needs in order to decide whether a removal is the
+        annotator's ("put that in ``erased``") or an artefact of composition.
+        """
+        return bool(self._candidates) and not self._candidate_union
 
     def _mask_input(
         self, rect: Rect, crop_hw: tuple[int, int]
@@ -410,7 +454,8 @@ class SamToolBase(CandidatesMixin, Tool):
         Every rejection path returns quietly instead of raising: this runs as a
         Qt slot, where an exception would escape into the event loop.
         """
-        result, rect, subtractive, stamp = payload  # type: ignore[misc]
+        result, rect, how, stamp = payload  # type: ignore[misc]
+        subtractive, lifts = how
         token, identity = stamp
         if token != self._token:
             # Superseded.  By a newer prompt -- nothing to report, the annotator
@@ -452,6 +497,12 @@ class SamToolBase(CandidatesMixin, Tool):
         # Whether the crop's contents may be thrown away: only once the prompt
         # holds a negative point (see :meth:`_submit`).
         self._candidate_union = not bool(subtractive)
+        # A subtractive prompt replaces inside the crop, so there is nothing to
+        # protect the erased pixels *from*; a lifted one was asked to put them
+        # back.  Snapshotted like the base, so a stroke made afterwards cannot
+        # change what this prompt's candidates render to.
+        erased = None if (subtractive or lifts) else self.erased_mask()
+        self._candidate_erased = None if erased is None else erased.copy()
         self._apply_candidate()
 
 

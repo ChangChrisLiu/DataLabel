@@ -567,10 +567,41 @@ class EditMixin:
             return
         self._invalidate_area_warning()
         before = getattr(tool, "stroke_before", None)
-        self.note_layer_change("stroke", instance, before, self.overlay.editing)
-        compat.push_stroke(self.session, instance, before, self.overlay.editing)
-        self.queue_sidecar(self.session.current(), instance, self.overlay.editing)
+        after = self.overlay.editing
+        erased = self.next_erased(tool, before, after)
+        self.note_layer_change("stroke", instance, before, after)
+        compat.push_stroke(self.session, instance, before, after, erased=erased)
+        self.queue_sidecar(self.session.current(), instance, after)
         self.update_status()
+
+    def erased_mask(self) -> Optional[np.ndarray]:
+        """Pixels this edit has deliberately taken off, or ``None`` (E1)."""
+        getter = getattr(self.session, "erased_mask", None)
+        return getter() if callable(getter) else None
+
+    def next_erased(self, tool, before, after) -> Optional[np.ndarray]:
+        """The protected set after one change of the layer.
+
+        Two rules, and they are the whole of ruling E1:
+
+        * a change that **deliberately** removes pixels -- an eraser stroke, a
+          negative-point SAM result -- adds what it removed to the set;
+        * a pixel that is back in the layer is not erased, whatever put it
+          there. That is what makes a brush stroke over an erased patch, or a
+          positive click inside one, lift the annotator's own protection
+          without a second mechanism to keep in step.
+        """
+        current = self.erased_mask()
+        after = np.asarray(after, dtype=bool)
+        deliberate = tool is self.eraser or bool(getattr(tool, "removes_pixels", False))
+        if deliberate and before is not None:
+            removed = np.asarray(before, dtype=bool) & ~after
+            if removed.any():
+                current = removed if current is None else (current | removed)
+        if current is None:
+            return None
+        current = current & ~after
+        return current if current.any() else None
 
     def note_layer_change(self, why: str, instance: Optional[str],
                           before, after) -> None:
@@ -677,7 +708,8 @@ class EditMixin:
             # The adopted drafts go with the pixels: a crash takes the undo
             # history, which is where the provenance otherwise lives.
             self.sidecar.save(key, instance, mask,
-                              adopted=self.pending_adoptions(key, instance))
+                              adopted=self.pending_adoptions(key, instance),
+                              erased=self.erased_mask())
         except Exception as exc:  # noqa: BLE001 - reported, never raised at a stroke
             self._sidecar_broken = SIDECAR_BROKEN.format(why=exc)
             self.logger.error("sidecar write failed: %s", exc)
@@ -720,11 +752,15 @@ class EditMixin:
             self._sidecar_written.discard(self._sidecar_id(key, instance))
 
     def set_editing_mask(self, mask: np.ndarray, undoable: bool = False,
-                         adopted: Optional[dict] = None) -> None:
+                         adopted: Optional[dict] = None,
+                         erased: Optional[np.ndarray] = None) -> None:
         """Replace the editing layer everywhere it is held at once.
 
         ``adopted`` marks the change as an adopted Label Studio draft, which
-        travels on the undo entry and into the crash sidecar.
+        travels on the undo entry and into the crash sidecar.  ``erased`` is a
+        caller that already knows the protected set -- a restored sidecar --
+        saying so; everything else keeps the invariant that a pixel in the
+        layer is not an erased one.
         """
         instance = getattr(self.session, "editing_instance", None)
         before = None if self.overlay is None else self.overlay.editing.copy()
@@ -732,11 +768,17 @@ class EditMixin:
         # The pixels the area warning was computed on are gone, so the answer
         # to it is gone with them (see ``_invalidate_area_warning``).
         self._invalidate_area_warning()
+        if erased is None:
+            erased = self.next_erased(None, before, mask)
         if undoable and instance is not None:
-            compat.push_stroke(self.session, instance, before, mask, adopted)
+            compat.push_stroke(self.session, instance, before, mask, adopted,
+                               erased=erased)
             self.queue_sidecar(self.session.current(), instance, mask)
         else:
             self.session.set_editing_mask(mask)
+            setter = getattr(self.session, "set_erased_mask", None)
+            if callable(setter):
+                setter(erased)
         if self.overlay is not None and instance is not None:
             self.overlay.set_editing(instance, mask)
             self.canvas.refresh()
