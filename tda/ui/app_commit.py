@@ -84,6 +84,8 @@ class CommitMixin:
     @S.guard
     def act_commit_override(self) -> None:
         """``Alt+Enter``: this frame only."""
+        if self.refuse_under_ghost():
+            return
         self._commit(api.SCOPE_FRAME_OVERRIDE)
 
     @S.guard
@@ -97,6 +99,8 @@ class CommitMixin:
         annotator can neither see nor explain.  ``Alt+Enter`` is different on
         purpose: a frame override makes this instance visible here by itself.
         """
+        if self.refuse_under_ghost():
+            return
         pending = self._pending_scope or ""
         if pending.startswith(A_ZORDER_ABOVE):
             self._commit(SPLIT_PREFIX + pending)
@@ -158,7 +162,7 @@ class CommitMixin:
         mask = self.session.editing_mask()
         pixels = int(mask.sum()) if mask is not None else 0
         started = time.perf_counter()
-        extra = self._commit_extra()
+        extra = self._commit_extra(key, instance, mask)
         try:
             result = self.session.commit_edit(scope, extra=extra) or {}
         except ValueError as refused:
@@ -189,21 +193,24 @@ class CommitMixin:
         # happens at confirm time, where the answer is actually used.
         self.report(f"committed ({scope}): {result.get('changed', '')}".strip())
 
-    def _commit_extra(self) -> Optional[dict]:
+    def _commit_extra(self, key, instance: str,
+                      mask: Optional[np.ndarray]) -> Optional[dict]:
         """The op-log note this commit carries: what the *window* knows about it.
 
-        Two facts, and they can both be true of one commit -- a draft adopted
-        into the layer and then committed at a size the priors call
-        implausible.  They expire differently, which is the whole reason they
-        are separate:
+        Two kinds of fact, and they can both be true of one commit -- a draft
+        adopted into the layer and then committed at a size the priors call
+        implausible.  They are found in completely different ways, which is the
+        point of keeping them apart:
 
-        * the **area override** belongs to the one commit it was given for,
-          taken or refused, or the next ``Enter`` would inherit an answer to a
-          warning nobody read;
-        * the **adoption** belongs to the *pixels*.  It survives a refusal (the
-          annotator fixes the scope and commits the same layer) and is dropped
-          by :meth:`~tda.ui.app_adopt.AdoptMixin.forget_draft_ghost` wherever
-          the layer itself is replaced.
+        * the **area override** is a flag the annotator set by answering a
+          warning.  It belongs to the one commit it was given for, taken or
+          refused, or the next ``Enter`` would inherit an answer to a warning
+          nobody read.
+        * the **adoptions** are *derived*: the applied-and-not-undone strokes
+          of this layer that came from a draft, each checked against the pixels
+          actually being written.  Nothing has to remember to clear them --
+          undoing the stroke removes it from the history, and erasing the
+          pixels removes it at the overlap check.
 
         ``None`` rather than ``{}`` when there is nothing to say: the session
         checks a dict for JSON-serialisability and merges it, and an empty one
@@ -213,9 +220,9 @@ class CommitMixin:
         override, self._override_facts = self._override_facts, None
         if override:
             facts |= dict(override)
-        adopted = self.adopted_facts()
+        adopted = self.adoptions_for_commit(key, instance, mask)
         if adopted:
-            facts |= adopted
+            facts["adopted"] = adopted
         return facts or None
 
     @S.guard
@@ -272,6 +279,8 @@ class CommitMixin:
         analysed" rather than as "nothing unexplained", which would quietly
         claim the frame had been checked.
         """
+        if self.refuse_under_ghost():
+            return False      # the preview owns every commit key while it is up
         if not self.can_leave_edit():
             return False      # confirming steps the frame back: same gate
         if not self._open_the_selected_entry():

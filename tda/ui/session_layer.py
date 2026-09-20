@@ -80,12 +80,17 @@ class EditingLayer:
             self._before = self._mask.copy()
 
     # -- undo ---------------------------------------------------------------
-    def stroke_op(self, before: np.ndarray, after: np.ndarray) -> Op:
-        """The undoable record of one brush or eraser stroke (spec 4.6)."""
+    def stroke_op(self, before: np.ndarray, after: np.ndarray,
+                  adopted: Optional[dict] = None) -> Op:
+        """The undoable record of one brush or eraser stroke (spec 4.6).
+
+        ``adopted`` travels with a stroke that came from a Label Studio draft,
+        so the commit can read its provenance off the history itself.
+        """
         if self.instance is None:
             raise RuntimeError("a stroke needs an instance; call begin_edit() first")
         self.set(after)
-        return edit_editing_mask_op(self.instance, before, after)
+        return edit_editing_mask_op(self.instance, before, after, adopted)
 
     def apply_stroke(self, payload: dict, mask: np.ndarray) -> None:
         """Adopt the mask an undo or redo of a stroke restored."""

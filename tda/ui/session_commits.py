@@ -114,14 +114,31 @@ class CommitMixin:
         """Take a copy of the layer the window has been painting into."""
         self.layer.set(mask)
 
-    def push_stroke(self, before: np.ndarray, after: np.ndarray) -> None:
+    def push_stroke(self, before: np.ndarray, after: np.ndarray,
+                    adopted: Optional[dict] = None) -> None:
         """Record one brush/eraser stroke on the undo stack (spec 4.6).
 
         The pixels are already painted, so the op is logged rather than applied;
         undoing it hands the earlier mask back on :attr:`sigEditingChanged`.
+
+        ``adopted`` names the Label Studio draft a stroke came from, for the
+        commit that later reads its own provenance off this history.
         """
-        self.undo_stack.push(self.layer.stroke_op(before, after), apply=False)
+        self.undo_stack.push(self.layer.stroke_op(before, after, adopted), apply=False)
         self._refresh_dirty()
+
+    def adoptions_in_history(self) -> list[dict]:
+        """The ``adopted`` notes of every stroke that is applied right now.
+
+        Oldest first, undone strokes left out -- the undo stack's own account
+        of which drafts are actually in the layer.
+        """
+        out = []
+        for op in self.undo_stack.ops:
+            adopted = (op.payload or {}).get("adopted") if op.kind == "edit_editing_mask" else None
+            if adopted:
+                out.append(dict(adopted))
+        return out
 
     def clear_edit(self) -> None:
         """Drop the editing layer without writing anything."""

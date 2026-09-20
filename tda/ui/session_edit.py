@@ -228,6 +228,7 @@ def _commit_shape(db: Db, truth: TruthService, key: FrameKey, instance: str,
     seg = pose_segment_of(db, key, cache)
     placement = placement_of(db, truth.tax, key, instance, cache)
     chosen = select_keyframe(chain_for(db, key, instance, seg, placement), key.step)
+    source, draft_id = _adoption(extra)
     ref: dict = {"keyframe_id": None}
     old_ref: dict = {"keyframe_id": None if chosen is None else chosen.id}
     before: list[dict] = []
@@ -248,6 +249,7 @@ def _commit_shape(db: Db, truth: TruthService, key: FrameKey, instance: str,
                 db.update_keyframe(chosen)
                 after.append(keyframe_state(chosen, old_ref))
             kf = new_keyframe(key, instance, seg, anchor, placement, parts, geom_type)
+            _stamp_source(kf, source, draft_id)
             # a new version of the shape has to outrank the one it was cut from:
             # select_keyframe breaks an anchor tie on the higher version
             kf.version = 1 if chosen is None else int(chosen.version) + 1
@@ -258,12 +260,14 @@ def _commit_shape(db: Db, truth: TruthService, key: FrameKey, instance: str,
             ref["keyframe_id"] = chosen.id
             before.append(keyframe_state(chosen, ref))
             chosen.parts = parts
+            _stamp_source(chosen, source, draft_id)
             db.update_keyframe(chosen)
             after.append(keyframe_state(chosen, ref))
             kf = chosen
         else:
             anchor = default_anchor(db, truth.tax, key, instance, seg, placement, cache)
             kf = new_keyframe(key, instance, seg, anchor, placement, parts, geom_type)
+            _stamp_source(kf, source, draft_id)
             before.append(keyframe_state(None, ref, template=kf))
             ref["keyframe_id"] = db.add_keyframe(kf)
             after.append(keyframe_state(kf, ref))
@@ -296,6 +300,20 @@ def _commit_shape(db: Db, truth: TruthService, key: FrameKey, instance: str,
     return _result(db, truth, key, steps, op,
                    {"keyframe_id": kf.id, "anchor_step": kf.anchor_step, "scope": scope,
                     "changed": True})
+
+
+def _stamp_source(kf: ShapeKeyframe, source: Optional[str],
+                  draft_id: Optional[int]) -> None:
+    """Point a written keyframe at the draft it came from, when there is one.
+
+    Only when there is: a commit that adopted nothing leaves ``source`` and
+    ``draft_id`` alone, so re-tracing an adopted shape by hand does not quietly
+    rewrite the row's history in either direction.
+    """
+    if source is None:
+        return
+    kf.source = source
+    kf.draft_id = draft_id
 
 
 def _pair_payload(state: Optional[dict], forward: bool) -> Optional[dict]:
@@ -420,6 +438,35 @@ def _cannot_split(chosen: Optional[ShapeKeyframe], step: int, direction: str) ->
     if chosen is None:
         return False
     return direction == REVERSE and int(chosen.anchor_step) == int(step)
+
+
+#: ``ShapeKeyframe.source`` of a shape the annotator took from a Label Studio
+#: draft (spec 3.1 来源).  Deliberately **not** ``labelstudio``: that value marks
+#: the importer's own untouched draft rows, and everything that acts on them --
+#: the ``import-ls`` purge (:func:`tda.core.ls_import._purge`), the draft-key
+#: delete rule in :mod:`tda.ui.steps_delete` -- matches it exactly.  An adopted
+#: shape is the annotator's work on a real instance key and must survive all of
+#: them.
+SOURCE_ADOPTED = "ls_adopted"
+
+
+def _adoption(extra: Optional[dict]) -> tuple[Optional[str], Optional[int]]:
+    """``(source, draft_id)`` for a commit that says it adopted a draft.
+
+    Spec 3.1 gives a keyframe a 来源 and a 初稿引用, and a shape that started as
+    somebody's old polygon should say so in its own row rather than only in the
+    op log.  The draft with the **largest overlap** is the one the row points
+    at: a mask can be built from two drafts, but ``draft_id`` is one column.
+    Neither value takes part in ``input_hash`` (:func:`tda.core.compiler_visibility.input_hash`
+    hashes a keyframe as id + version + content digest), so this cannot move a
+    compiled row on its own.
+    """
+    entries = [e for e in ((extra or {}).get("adopted") or []) if isinstance(e, dict)]
+    if not entries:
+        return (None, None)
+    best = max(entries, key=lambda e: int(e.get("overlap_px") or 0))
+    draft_id = best.get("keyframe_id")
+    return (SOURCE_ADOPTED, None if draft_id is None else int(draft_id))
 
 
 def _with_extra(common: dict, extra: Optional[dict]) -> dict:

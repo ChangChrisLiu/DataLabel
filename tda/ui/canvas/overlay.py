@@ -129,6 +129,7 @@ class LabelOverlay:
         #: change, and scanning 12 MP to find out there was nothing to clear
         #: would be a repaint nobody asked for.
         self.has_ghost = False
+        self._ghost_rect: Optional[Rect] = None
         self.occluders: dict[str, np.ndarray] = {}
         self._visible = True
 
@@ -181,25 +182,46 @@ class LabelOverlay:
         self.editing_instance = None
         self._dirty = _ALL
 
-    def set_ghost(self, mask: np.ndarray) -> None:
+    def set_ghost(self, mask: np.ndarray, rect: Optional[Rect] = None) -> None:
         """Show a proposal over the frame without making it an edit.
 
         The ghost is drawn *under* the editing layer, so a proposal can never
         cover the pixels the annotator has already painted, and it takes part
         in nothing else: no label id, no undo entry, no commit.  Whoever put it
         up (:mod:`tda.ui.app_adopt`) is the only one who can turn it into pixels.
+
+        ``rect`` is the region the proposal covers -- a caller that already
+        knows it (from the draft's stored bounding box) hands it over and only
+        that region is re-composited, together with whatever the previous ghost
+        covered.  Without one the whole buffer is marked stale, which on a
+        12 MP frame is a 123 ms repaint per keypress.
         """
+        stale = _union(self._ghost_rect, rect) if rect is not None else None
         self.ghost = self._coerce(mask, "ghost mask")
         self.has_ghost = True
-        self._dirty = _ALL
+        self._ghost_rect = None if rect is None else tuple(int(v) for v in rect)
+        self._mark(stale)
 
     def clear_ghost(self) -> None:
         """Take the proposal off the screen; a no-op when none is showing."""
         if not self.has_ghost:
             return
+        stale, self._ghost_rect = self._ghost_rect, None
         self.ghost = np.zeros(self.hw, dtype=bool)
         self.has_ghost = False
-        self._dirty = _ALL
+        self._mark(stale)
+
+    @property
+    def ghost_rect(self) -> Optional[Rect]:
+        """The region the ghost on screen covers, when its owner said so."""
+        return self._ghost_rect
+
+    def _mark(self, rect: Optional[Rect]) -> None:
+        """Mark ``rect`` stale, or the whole buffer when the caller cannot say."""
+        if rect is None:
+            self._dirty = _ALL
+            return
+        self._dirty = _ALL if self._dirty is _ALL else _union(self._dirty, rect)
 
     def occluder_layer(self, occluder_type: str) -> np.ndarray:
         """The occluder layer of ``occluder_type``, created empty if needed."""

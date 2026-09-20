@@ -255,12 +255,18 @@ class EditSidecar:
                 f"_s{int(key.step):03d}_{_slug(str(instance))}.json")
         return self._dir / name
 
-    def save(self, key: FrameKey, instance: str, mask: Optional[np.ndarray]) -> None:
+    def save(self, key: FrameKey, instance: str, mask: Optional[np.ndarray],
+             adopted: Optional[list] = None) -> None:
         """Record ``mask`` as the layer being edited on ``(key, instance)``.
 
         An empty or missing mask removes the file instead of writing one: there
         is nothing to offer back, and a stale file would make the next launch
         ask a pointless question.
+
+        ``adopted`` is the list of Label Studio drafts the layer was built from
+        (:mod:`tda.ui.app_adopt`). It travels with the pixels because a crash
+        takes the undo history with it, and a restored layer that quietly lost
+        its provenance would be committed as hand-drawn work.
         """
         if mask is None or not np.asarray(mask).any():
             self.clear(key, instance)
@@ -271,6 +277,7 @@ class EditSidecar:
             "view": str(key.view),
             "instance": str(instance),
             "rle": masks.encode_rle(np.asarray(mask, dtype=bool)),
+            "adopted": [dict(entry) for entry in (adopted or [])],
         }
         target = self._file(key, instance)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -300,7 +307,9 @@ class EditSidecar:
                            str(payload["view"]))
         except (OSError, ValueError, KeyError, TypeError):
             return None
+        adopted = payload.get("adopted")
         return {"key": key, "instance": str(payload["instance"]), "mask": mask,
+                "adopted": [dict(e) for e in adopted] if isinstance(adopted, list) else [],
                 "path": path}
 
     def entries_for(self, key: FrameKey,

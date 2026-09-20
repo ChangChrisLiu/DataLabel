@@ -38,6 +38,7 @@ from tda.core.db import Db
 from tda.core.model import InstanceRec, ShapeKeyframe, ShapePart
 from tda.ui import app_actions as A
 from tda.ui import app_adopt as adopt
+from tda.ui import session_api as api
 from tda.ui.app import MainWindow
 
 #: Labels of ``configs/ls_label_map.yaml``; the classes they map onto are the
@@ -334,8 +335,11 @@ def test_the_commit_records_which_draft_was_adopted(window):
     window.act_commit()             # the edit
 
     payload = last_op(window)
-    assert payload["adopted_from"] == draft
-    assert payload["adopted_step"] == step
+    entry = (payload.get("adopted") or [None])[0]
+    assert entry["adopted_from"] == draft
+    assert entry["adopted_step"] == step
+    assert entry["keyframe_id"] == draft_id_of(window, draft)
+    assert entry["overlap_px"] == 100
     assert payload["instance"] == COOLER
     assert "area_warning_overridden" not in payload
 
@@ -351,7 +355,7 @@ def test_an_area_override_and_an_adoption_ride_on_the_same_commit(window):
     window.act_commit()             # the second Enter goes ahead
 
     payload = last_op(window)
-    assert payload["adopted_from"] == draft
+    assert [e["adopted_from"] for e in payload["adopted"]] == [draft]
     assert payload["area_warning_overridden"] is True
 
 
@@ -378,7 +382,122 @@ def test_a_commit_after_a_discarded_ghost_claims_nothing(window):
     window.set_editing_mask(rect(40, 40, 50, 50), undoable=True)
     window.act_commit()
 
-    assert "adopted_from" not in last_op(window)
+    assert adopted_entries(last_op(window)) == []
+
+
+# --------------------------------------------------------------------------- #
+# round 1 C2: provenance is derived from the history, and checked against pixels
+# --------------------------------------------------------------------------- #
+def draft_id_of(win, key: str) -> int:
+    return int(win.db.keyframes(DESKTOP, VIEW, key)[0].id)
+
+
+def adopted_entries(payload: dict) -> list[dict]:
+    return list(payload.get("adopted") or [])
+
+
+def test_an_undone_brush_stroke_does_not_lose_the_adoption(window):
+    """The note is derived at commit time, not carried on the side."""
+    draft = seed_cooler_draft(window)
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.act_commit()                                   # the ghost
+    mask = window.session.editing_mask().copy()
+    mask[40:44, 40:44] = True
+    window.set_editing_mask(mask, undoable=True)          # a "brush stroke"
+    window.act_undo()                                     # take it back
+    window.act_commit()                                   # the edit
+
+    entries = adopted_entries(last_op(window))
+    assert [e["adopted_from"] for e in entries] == [draft]
+    assert entries[0]["overlap_px"] == 100
+
+
+def test_an_undone_adoption_is_not_claimed(window):
+    seed_cooler_draft(window)
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.act_commit()                                   # the ghost
+    window.act_undo()                                     # take the draft back
+    window.set_editing_mask(rect(40, 40, 50, 50), undoable=True)
+    window.act_commit()
+
+    assert adopted_entries(last_op(window)) == []
+
+
+def test_a_draft_erased_before_the_commit_is_not_claimed(window):
+    """Adopt, wipe every adopted pixel, draw by hand: nothing was reused."""
+    seed_cooler_draft(window)
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.act_commit()                                   # the ghost
+    window.set_editing_mask(rect(40, 40, 50, 50), undoable=True)   # disjoint
+    window.act_commit()
+
+    assert adopted_entries(last_op(window)) == []
+
+
+def test_two_adoptions_are_two_entries_with_their_own_overlap(window):
+    first = seed_cooler_draft(window, box=(20, 20, 30, 30))
+    second = add_draft(window.db, COOLER_LABEL, 2, window.session.current().step,
+                       (34, 34, 44, 44), cls="cpu_cooler")
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.act_commit()                                   # take the first
+    window.act_adopt_draft()
+    window.act_adopt_draft()                              # walk to the second
+    assert window.draft_candidates()[window._draft_index].key == second
+    window.act_commit()                                   # take it too
+    window.act_commit()                                   # commit the union
+
+    entries = adopted_entries(last_op(window))
+    assert sorted(e["adopted_from"] for e in entries) == sorted([first, second])
+    assert all(e["overlap_px"] == 100 for e in entries)
+
+
+def test_the_committed_keyframe_points_back_at_the_draft(window):
+    """Spec 3.1 来源 / 初稿引用: the row says where its pixels came from."""
+    draft = seed_cooler_draft(window)
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.act_commit()
+    window.act_commit()
+
+    written = window.db.keyframes(DESKTOP, VIEW, COOLER)
+    assert len(written) == 1
+    assert written[0].source == "ls_adopted"
+    assert written[0].draft_id == draft_id_of(window, draft)
+
+
+def test_a_hand_drawn_keyframe_keeps_the_ordinary_source(window):
+    edit_the_cooler(window)
+    window.set_editing_mask(rect(20, 20, 30, 30), undoable=True)
+    window.act_commit()
+    written = window.db.keyframes(DESKTOP, VIEW, COOLER)
+    assert written[0].source == "manual" and written[0].draft_id is None
+
+
+def test_the_sidecar_carries_the_adoption_across_a_crash(window):
+    """M7: a restore re-seeds the list the undo stack cannot survive."""
+    draft = seed_cooler_draft(window)
+    instance = edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.act_commit()
+    window.flush_sidecar()
+
+    stored = window.sidecar.pending_for(window.session.current(), instance, HW)
+    assert [e["adopted_from"] for e in stored["adopted"]] == [draft]
+
+    # the window is gone; a new one offers the layer back
+    window.act_clear_edit()
+    window.sidecar.save(stored["key"], instance, stored["mask"],
+                        adopted=stored["adopted"])
+    window._offer_restore(window.session.current(), instance)
+    window.restore_pending()
+    window.act_commit()
+
+    entries = adopted_entries(last_op(window))
+    assert [e["adopted_from"] for e in entries] == [draft]
 
 
 def test_adopting_and_committing_never_touches_the_draft(window):
@@ -439,3 +558,160 @@ def test_the_ghost_is_refused_while_a_bar_owns_enter_and_esc(window):
     window.act_adopt_draft()
     assert not window.showing_draft_ghost()
     assert adopt.ADOPT_BUSY.split("/")[0].strip() in window.status_message()
+
+
+# --------------------------------------------------------------------------- #
+# round 1 I2: every commit key belongs to the ghost while one is showing
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("slot", ["act_commit_override", "act_commit_split",
+                                  "act_confirm"])
+def test_the_other_commit_keys_are_refused_under_a_ghost(window, slot):
+    seed_cooler_draft(window)
+    instance = edit_the_cooler(window)
+    keyframes = len(window.db.keyframes(DESKTOP, VIEW, instance))
+    window.act_adopt_draft()
+
+    getattr(window, slot)()
+
+    assert window.showing_draft_ghost()                  # nothing was answered
+    assert window.session.editing_instance == instance   # the edit is still open
+    assert len(window.db.keyframes(DESKTOP, VIEW, instance)) == keyframes
+    assert adopt.ADOPT_FIRST in window.status_message()
+
+
+def test_the_task_card_buttons_are_refused_under_a_ghost(window):
+    seed_cooler_draft(window)
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.on_panel_commit(api.SCOPE_SPLIT)
+    assert window.showing_draft_ghost()
+    assert adopt.ADOPT_FIRST in window.status_message()
+
+
+def test_changing_the_mask_takes_back_a_pending_area_warning(window):
+    """Pre-existing: an override must only ever apply to the mask it was for."""
+    edit_the_cooler(window)
+    window.set_editing_mask(rect(6, 6, 52, 52), undoable=True)   # implausible
+    window.act_commit()
+    assert window._pending_warning is not None
+
+    window.set_editing_mask(rect(20, 20, 30, 30), undoable=True)  # plausible now
+
+    assert window._pending_warning is None
+    assert not window.warn_bar.isVisible()
+    window.act_commit()
+    assert "area_warning_overridden" not in last_op(window)
+
+
+# --------------------------------------------------------------------------- #
+# round 1 I3/I4/M1/M2: everything that takes the canvas away takes the ghost
+# --------------------------------------------------------------------------- #
+def test_enter_on_a_ghost_is_refused_while_another_frame_is_flashed(window):
+    seed_cooler_draft(window)
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    before = window.session.editing_mask().copy()
+
+    window.act_flash_compare(True)          # the ghost goes with the flash
+    assert not window.showing_draft_ghost()
+    window.act_commit()                     # would have pasted onto the other frame
+
+    assert np.array_equal(window.session.editing_mask(), before)
+    window.act_flash_compare(False)
+
+
+def test_hiding_the_overlays_dismisses_the_ghost(window):
+    seed_cooler_draft(window)
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.act_toggle_overlays()
+    assert not window.showing_draft_ghost()
+
+
+def test_switching_mode_dismisses_the_ghost(window):
+    seed_cooler_draft(window)
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.set_mode(A.MODE_REVIEW)
+    assert not window.showing_draft_ghost()
+    window.set_mode(A.MODE_ANNOTATE)
+
+
+def test_adoption_is_refused_while_a_bench_box_is_armed(window):
+    seed_screw_drafts(window)
+    edit_a_screw(window)
+    window.begin_bench_box(SCREWS[0])
+    window.act_adopt_draft()
+    assert not window.showing_draft_ghost()
+    assert adopt.ADOPT_BENCH in window.status_message()
+
+
+def test_adoption_is_refused_while_a_restore_offer_is_unanswered(window):
+    seed_cooler_draft(window)
+    key = window.session.current()
+    window.sidecar.save(key, COOLER, rect(40, 40, 50, 50))
+    edit_the_cooler(window)
+    assert window.pending_restore() is not None
+
+    window.act_adopt_draft()
+
+    assert not window.showing_draft_ghost()
+    assert adopt.ADOPT_RESTORE in window.status_message()
+
+
+def test_a_draft_that_does_not_fit_the_frame_says_so(window):
+    """M6: the refusal has to name the real reason."""
+    seed_cooler_draft(window)
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.draft_candidates()[0]._mask = np.zeros((8, 8), dtype=bool)
+    window._draft_candidates[0]._mask = np.zeros((8, 8), dtype=bool)
+
+    window.act_commit()
+
+    assert adopt.ADOPT_SHAPE_MISMATCH in window.status_message()
+    assert not window.showing_draft_ghost()
+
+
+def test_the_already_adopted_note_is_not_capped_at_the_last_ops(window):
+    """M5: the answer comes from a query, not from the last 200 rows."""
+    draft = seed_cooler_draft(window)
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.act_commit()
+    window.act_commit()
+    for _ in range(210):                     # bury it under newer operations
+        window.db.log_op(DESKTOP, VIEW, "set_zorder", {"noise": True},
+                         {"noise": True}, "tester")
+    assert window.adopted_draft_keys() == {draft}
+
+
+# --------------------------------------------------------------------------- #
+# round 1 C1: the cursor picks the draft
+# --------------------------------------------------------------------------- #
+def test_the_cursor_position_picks_which_draft_is_offered_first(window):
+    step = window.session.current().step
+    left = add_draft(window.db, SCREW_LABEL, 1, step, (2, 2, 5, 5), cls="screw")
+    right = add_draft(window.db, SCREW_LABEL, 2, step, (40, 40, 43, 43), cls="screw")
+    edit_a_screw(window)
+
+    window.act_adopt_draft(at=(41, 41))
+    assert window.draft_candidates()[0].key == right
+    window.act_clear_edit()
+    window.act_adopt_draft(at=(3, 3))
+    assert window.draft_candidates()[0].key == left
+
+
+def test_the_status_line_names_the_label_of_a_draft_of_another_class(window):
+    step = window.session.current().step
+    add_draft(window.db, SCREW_LABEL, 1, step, (2, 2, 5, 5), cls="screw")
+    add_draft(window.db, COOLER_LABEL, 1, step, (20, 20, 40, 40), cls="cpu_cooler")
+    edit_a_screw(window)
+
+    window.act_adopt_draft(at=(25, 25))
+
+    assert window.draft_candidates()[0].cls == "screw"
+    assert window.draft_candidates()[1].cls == "cpu_cooler"
+    window.act_adopt_draft()                     # walk to the other class
+    assert COOLER_LABEL in window.status_message()
+    assert "cpu_cooler" in window.status_message()

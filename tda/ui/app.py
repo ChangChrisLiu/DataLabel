@@ -261,6 +261,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, AssistMixin, Keys
             self._steps_dirty = False
         self.mode = mode
         self.disarm_bench()
+        self.forget_draft_ghost()   # the canvas it was offered on is going away
         if mode == A.MODE_STEPS:
             self.stack.setCurrentWidget(self.steps_panel)
         else:

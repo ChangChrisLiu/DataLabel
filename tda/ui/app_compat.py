@@ -87,8 +87,12 @@ def overlay_layers(session: Any) -> tuple[dict[str, np.ndarray], list[str]]:
 # the editing layer
 # --------------------------------------------------------------------------- #
 def push_stroke(session: Any, instance: str, before: Optional[np.ndarray],
-                after: np.ndarray) -> None:
+                after: np.ndarray, adopted: Optional[dict] = None) -> None:
     """Record one finished stroke as a single undoable op on the session.
+
+    ``adopted`` marks a stroke that came from a Label Studio draft; a session
+    too old to take it still records the stroke, it just cannot say where the
+    pixels came from.
 
     Fallback: the session registers an ``edit_editing_mask`` handler on its own
     undo stack (it is how it replays a stroke), so the op is built and pushed
@@ -96,16 +100,32 @@ def push_stroke(session: Any, instance: str, before: Optional[np.ndarray],
     """
     after = np.asarray(after, dtype=bool)
     if _has(session, "push_stroke"):
-        session.push_stroke(before, after)
+        try:
+            session.push_stroke(before, after, adopted)
+        except TypeError:  # pragma: no cover - a session without the argument
+            _note("push_stroke(adopted=)", "the draft's provenance is not recorded")
+            session.push_stroke(before, after)
         return
     _note("push_stroke", "op pushed onto session.undo_stack directly")
     if before is None:
         before = np.zeros_like(after)
     session.set_editing_mask(after)
     session.undo_stack.push(
-        edit_editing_mask_op(instance, np.asarray(before, dtype=bool), after),
+        edit_editing_mask_op(instance, np.asarray(before, dtype=bool), after, adopted),
         apply=False,
     )
+
+
+def adoptions_in_history(session: Any) -> list[dict]:
+    """Every applied stroke's ``adopted`` note, oldest first.
+
+    The window asks the session; a session that cannot answer reports none,
+    which under-claims rather than invents a provenance.
+    """
+    if _has(session, "adoptions_in_history"):
+        return list(session.adoptions_in_history())
+    _note("adoptions_in_history", "adopted drafts are not recorded on commits")
+    return []
 
 
 def editing_changed_signal(session: Any) -> Optional[Any]:

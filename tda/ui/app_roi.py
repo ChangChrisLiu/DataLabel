@@ -331,7 +331,8 @@ class RoiMixin:
             self.restore_bar.hide()
             return
         self._restore_offer = {"instance": found["instance"], "mask": found["mask"],
-                               "key": found["key"]}
+                               "key": found["key"],
+                               "adopted": list(found.get("adopted") or [])}
         self.restore_bar.show_text(
             f"上次未提交的编辑（{found['instance']}）可以恢复 / "
             f"an uncommitted edit of {found['instance']} was found"
@@ -363,6 +364,10 @@ class RoiMixin:
             return
         self.set_sam_instance(offer["instance"])
         self.set_editing_mask(offer["mask"])
+        # The layer is back; so is what it was built from, or the commit that
+        # follows would file somebody's adopted draft as hand-drawn work.
+        self.note_restored_adoptions(offer["key"], offer["instance"],
+                                     offer.get("adopted"))
         self._attach_tool()
         self.report(f"restored the uncommitted edit of {offer['instance']}")
 

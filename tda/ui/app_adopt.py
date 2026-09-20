@@ -5,34 +5,46 @@ Mixed into :class:`tda.ui.app.MainWindow` next to
 drafts could be the shape being drawn; what is here is the conversation about
 them, and it is deliberately the same conversation the ROI rectangle has:
 
-* ``Shift+A`` puts the best candidate on screen as a **ghost** -- the overlay's
-  preview layer, display-only.  Pressing it again walks the rest.
-* while a ghost is up it **owns** ``Enter`` and ``Esc``, through the same
-  layered chain in :mod:`tda.ui.app_commit` that already gives them to the ROI
-  rectangle and to the area warning.  ``Enter`` copies the ghost into the
+* ``Shift+A`` puts the draft **under the mouse cursor** on screen as a ghost --
+  the overlay's preview layer, display-only.  Pressing it again walks the rest,
+  nearest first.  The cursor is what tells fifteen "PSU to Motherboard
+  Connector" drafts of one frame apart; their ordinals cannot, and an order
+  that ignored the pointer put the right one somewhere in the middle of a list
+  nobody walks to the end of.
+* while a ghost is up it **owns every commit key** -- ``Enter``, ``Alt+Enter``,
+  ``Ctrl+K``, ``Space`` and the task card's buttons -- through the layered
+  chain in :mod:`tda.ui.app_commit` that already gives ``Enter``/``Esc`` to the
+  ROI rectangle and the area warning.  ``Enter`` copies the ghost into the
   editing layer as one undoable stroke (the sidecar follows, as after any
-  stroke); ``Esc`` takes the ghost away and leaves the layer exactly as it was.
+  stroke); the others are refused with a line saying to finish the preview
+  first; ``Esc`` takes the ghost away and leaves the layer exactly as it was.
 * anything that changes what the annotator is looking at -- another frame,
-  another instance, another view, a commit, an undo, the ROI rectangle -- takes
-  the ghost and the candidates with it, which is the hygiene a SAM prompt gets
-  for the same reason: a proposal is about one instance on one frame.
+  another instance, another view, another mode, a commit, an undo, the ROI
+  rectangle, a ``Tab`` flash, hiding the overlays -- takes the ghost with it.
 
-The draft itself is never touched.  What the commit carries is one line in its
-op-log ``extra`` -- ``adopted_from`` / ``adopted_step`` -- so the paper can say
-how much of the old annotation was reused.
+**Provenance is read back out of the history, never carried on the side.**  The
+stroke an adoption makes is stamped with the draft it came from, so at commit
+time the window asks the undo stack which adoptions are applied-and-not-undone
+and checks each of them against the pixels actually being written
+(``overlap_px``).  An undone adoption claims nothing; an adoption erased before
+the commit claims nothing; two adoptions are two entries.  The crash sidecar
+carries the same list, because a crash takes the undo stack with it.
 """
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 import numpy as np
 
 from tda.core import ls_adopt
+from tda.core import masks as _masks
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 
-__all__ = ["ADOPT_BUSY", "ADOPT_NEEDS_INSTANCE", "ADOPT_NO_IMAGE", "ADOPT_WRONG_MODE",
-           "AdoptMixin", "no_drafts_text"]
+__all__ = ["ADOPT_BENCH", "ADOPT_BUSY", "ADOPT_FIRST", "ADOPT_NEEDS_INSTANCE",
+           "ADOPT_NO_IMAGE", "ADOPT_RESTORE", "ADOPT_SHAPE_MISMATCH",
+           "ADOPT_WRONG_MODE", "AdoptMixin", "no_drafts_text"]
 
 #: Shown when ``Shift+A`` is pressed with nothing being edited.
 ADOPT_NEEDS_INSTANCE = ("先双击任务卡或实例表里的一条再按 Shift+A  "
@@ -40,10 +52,22 @@ ADOPT_NEEDS_INSTANCE = ("先双击任务卡或实例表里的一条再按 Shift+
 #: Shown when another non-modal bar already owns ``Enter`` / ``Esc``.
 ADOPT_BUSY = ("先处理屏幕下方那条提示（Enter / Esc）再采纳草稿  "
               "(answer the bar that owns Enter/Esc first)")
+#: Shown when a commit key that is not ``Enter`` is pressed under a ghost.
+ADOPT_FIRST = ("先处理草稿预览：Enter 采纳 / Esc 取消  "
+               "(finish the draft preview first: Enter adopt / Esc cancel)")
 #: Shown in Steps or Review mode, where there is no editing layer to adopt into.
 ADOPT_WRONG_MODE = "切到标注模式再采纳草稿 / switch to Annotate mode to adopt a draft"
 #: Shown on a frame this view never photographed.
 ADOPT_NO_IMAGE = "本帧没有图像，无法采纳草稿 / no image on this frame"
+#: Shown while the box tool is armed for a part on the bench.
+ADOPT_BENCH = ("台面框工具已武装：草稿是掩码，不是矩形  "
+               "(a bench box is armed: draft adoption draws a mask, not a box)")
+#: Shown while an unanswered crash-restore offer is on screen.
+ADOPT_RESTORE = ("先回答恢复提示（恢复 / 丢弃）再采纳草稿  "
+                 "(answer Restore/Discard first)")
+#: Shown when the draft's mask does not fit this frame's canvas after all.
+ADOPT_SHAPE_MISMATCH = ("草稿尺寸和当前帧不符，已跳过  "
+                        "(this draft does not fit the frame and was dropped)")
 
 
 def no_drafts_text(cls: str, stats: dict) -> str:
@@ -60,7 +84,7 @@ def no_drafts_text(cls: str, stats: dict) -> str:
 
 
 class AdoptMixin:
-    """``Shift+A``, the ghost, and what the commit records about it."""
+    """``Shift+A``, the ghost, and the provenance a commit reads off the history."""
 
     # ------------------------------------------------------------------ setup
     def _init_adopt(self) -> None:
@@ -70,8 +94,9 @@ class AdoptMixin:
         #: Draft keys this view's op log already records as adopted, read when
         #: the candidates are; only the status line uses them.
         self._draft_used: set[str] = set()
-        #: What an adopted draft adds to the next commit's op-log ``extra``.
-        self._adopted_facts: Optional[dict] = None
+        #: Adoptions a crash-restored layer brought back, which the undo stack
+        #: cannot know about: ``(key, instance) -> [adopted note, ...]``.
+        self._restored_adoptions: dict[tuple, list[dict]] = {}
 
     # ------------------------------------------------------------------ state
     def showing_draft_ghost(self) -> bool:
@@ -82,14 +107,15 @@ class AdoptMixin:
         """The candidates being walked (a copy; for the tests and the report)."""
         return list(self._draft_candidates)
 
-    def adopted_facts(self) -> Optional[dict]:
-        """The ``adopted_from`` note the next commit of this layer carries."""
-        return None if self._adopted_facts is None else dict(self._adopted_facts)
-
     # ----------------------------------------------------------------- action
     @S.guard
-    def act_adopt_draft(self) -> None:
-        """``Shift+A``: offer the old polygons of this class, one at a time.
+    def act_adopt_draft(self, at: Optional[tuple] = None) -> None:
+        """``Shift+A``: offer the drafts under the pointer, one at a time.
+
+        ``at`` overrides the mouse position with an image coordinate (the tests
+        and any future panel gesture); normally the cursor is read where the
+        key was pressed, which is the whole point -- *that* is the annotator
+        saying which of the frame's fifteen connectors they mean.
 
         Inert while ``Tab`` is held: the canvas is showing another frame, so
         every tool is detached there and a proposal about *this* frame would be
@@ -108,20 +134,22 @@ class AdoptMixin:
         if refusal:
             self.report(refusal)
             return
-        self._offer_drafts()
+        self._offer_drafts(self._cursor_xy(at))
 
     def _adopt_refusal(self) -> str:
         """Why ``Shift+A`` cannot open a ghost right now, or ``""``.
 
-        The last three are the ones that matter: a rectangle, a scope
-        suggestion and an area warning each already own ``Enter`` and ``Esc``,
-        and two owners of one key is how a rectangle gets stored by a press
-        that was meant for something else.
+        The last four are the ones that matter: a rectangle, a scope
+        suggestion, an area warning and a crash-restore offer each already own
+        ``Enter`` and ``Esc``, and two owners of one key is how a rectangle gets
+        stored by a press that was meant for something else.
         """
         if self.mode != "annotate":
             return ADOPT_WRONG_MODE
         if not compat.is_open(self.session) or self.session.image() is None:
             return ADOPT_NO_IMAGE
+        if getattr(self, "bench_instance", None) is not None:
+            return ADOPT_BENCH
         if getattr(self.session, "editing_instance", None) is None:
             return ADOPT_NEEDS_INSTANCE
         if self.overlay is None:
@@ -129,9 +157,58 @@ class AdoptMixin:
         if self.roi_editing or self._pending_scope is not None \
                 or self._pending_warning is not None:
             return ADOPT_BUSY
+        if self.pending_restore() is not None:
+            return ADOPT_RESTORE
         return ""
 
-    def _offer_drafts(self) -> None:
+    # ----------------------------------------------------------- the pointer
+    def _cursor_xy(self, at: Optional[tuple] = None) -> Optional[tuple]:
+        """Where the annotator is pointing, in image pixels, or ``None``.
+
+        In order: the caller's own coordinate, the mouse cursor over the canvas,
+        and -- when the pointer is somewhere else entirely -- the centre of the
+        strongest change this frame has not explained yet, which is the same
+        question asked by the difference map instead of by the hand.
+        """
+        point = self._as_image_point(at) if at is not None else self._mouse_image_xy()
+        return point if point is not None else self._unexplained_centre()
+
+    def _mouse_image_xy(self) -> Optional[tuple]:
+        """The mouse position in image coordinates, if it is over the canvas."""
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QCursor
+
+        viewport = self.canvas.viewport()
+        try:
+            local = viewport.mapFromGlobal(QCursor.pos())
+        except Exception:  # noqa: BLE001 - no pointer at all (offscreen, remote)
+            return None
+        if not viewport.rect().contains(local):
+            return None
+        return self._as_image_point(self.canvas.image_pos(QPointF(local)))
+
+    def _as_image_point(self, xy) -> Optional[tuple]:
+        """``(x, y)`` clipped to the frame, or ``None`` when it is outside it."""
+        if xy is None or self.overlay is None:
+            return None
+        h, w = self.overlay.hw
+        x, y = float(xy[0]), float(xy[1])
+        if not (0 <= x < w and 0 <= y < h):
+            return None
+        return (x, y)
+
+    def _unexplained_centre(self) -> Optional[tuple]:
+        """Centre of the strongest unexplained change on this frame, or ``None``."""
+        from tda.ui.app_diff import best_unexplained
+
+        blob = best_unexplained(getattr(self, "assist_result", None))
+        if blob is None:
+            return None
+        x0, y0, x1, y1 = (float(v) for v in blob.box)
+        return self._as_image_point(((x0 + x1) / 2.0, (y0 + y1) / 2.0))
+
+    # --------------------------------------------------------------- the list
+    def _offer_drafts(self, cursor: Optional[tuple]) -> None:
         """Read the candidates for the instance being edited and show the first."""
         key = self.session.current()
         instance = str(self.session.editing_instance)
@@ -139,10 +216,11 @@ class AdoptMixin:
         stats: dict = {}
         found = ls_adopt.drafts_for(
             self.db, self.session.tax, int(key.desktop), str(key.view), int(key.step),
-            cls, hw=self.overlay.hw, editing=self._adopt_reference(), stats=stats,
+            cls, hw=self.overlay.hw, editing=self._adopt_reference(), cursor=cursor,
+            stats=stats,
         )
-        self.logger.info("adopt D%s/%s step %s %s (%s): %s", key.desktop, key.view,
-                         key.step, instance, cls, stats)
+        self.logger.info("adopt D%s/%s step %s %s (%s) cursor=%s: %s", key.desktop,
+                         key.view, key.step, instance, cls, cursor, stats)
         if not found:
             self.report(no_drafts_text(cls, stats))
             return
@@ -151,36 +229,13 @@ class AdoptMixin:
         self._draft_used = self.adopted_draft_keys()
         self._show_draft()
 
-    def adopted_draft_keys(self, limit: int = 200) -> set[str]:
-        """Draft keys this view's op log already records as adopted.
-
-        Said, not refused.  The same draft is legitimately taken twice -- an
-        undo and a second try, a split that re-traces the same shape from this
-        step on -- so stopping the annotator would be wrong.  What this rules
-        out is the *quiet* duplicate: two instances of one view taking their
-        pixels from one old polygon with nothing on screen saying so.
-        """
-        used: set[str] = set()
-        try:
-            rows = self.db.ops(int(self.session.desktop), str(self.session.view),
-                               limit=int(limit))
-        except Exception:  # noqa: BLE001 - a note, never a reason to fail Shift+A
-            return used
-        for row in rows:
-            payload = row.get("payload")
-            key = payload.get("adopted_from") if isinstance(payload, dict) else None
-            if key:
-                used.add(str(key))
-        return used
-
     def _adopt_reference(self) -> Optional[np.ndarray]:
-        """What the candidates are ranked against: the layer, or the proposal.
+        """What ranks the candidates when there is no pointer at all.
 
         The editing layer once it holds pixels -- the annotator has already
         said roughly where the part is -- and otherwise the difference map's
-        armed prompt box, which is the same answer one step earlier.  With
-        neither, :func:`tda.core.ls_adopt.drafts_for` falls back to step
-        distance.
+        armed prompt box.  With neither,
+        :func:`tda.core.ls_adopt.drafts_for` falls back to step distance.
         """
         mask = self.session.editing_mask()
         if mask is not None and np.asarray(mask, dtype=bool).any():
@@ -202,20 +257,29 @@ class AdoptMixin:
         return mask
 
     def _show_draft(self) -> None:
-        """Paint the selected candidate as the overlay's ghost and say what it is."""
+        """Paint the selected candidate as the ghost and say what it is.
+
+        Exactly one candidate holds a decoded mask: the one on screen.  The
+        others are RLEs until they are shown, which is what makes offering
+        thirty-five drafts of a 12 MP frame cost nothing.
+        """
         candidate = self._draft_candidates[self._draft_index]
+        for other in self._draft_candidates:
+            if other is not candidate:
+                other.release()
         if self.overlay is None or candidate.mask.shape != self.overlay.hw:
             self.clear_draft_ghost()
-            self.report(ADOPT_NO_IMAGE)
+            self.report(ADOPT_SHAPE_MISMATCH)
             return
-        self.overlay.set_ghost(candidate.mask)
-        self.canvas.refresh()
+        self.overlay.set_ghost(candidate.mask, candidate.box)
+        self.canvas.refresh(candidate.box)
         seen = "（本视图已采纳过 / already adopted here）" \
             if candidate.key in self._draft_used else ""
+        other_class = "" if candidate.same_class else f"【{candidate.cls}】"
         self.report(
             f"草稿 {self._draft_index + 1}/{len(self._draft_candidates)}："
-            f"{candidate.key} @ step {candidate.step} "
-            f"(IoU {candidate.iou_with_editing:.2f}){seen} —— Enter 采纳 / Esc 取消  "
+            f"{other_class}{candidate.key} @ step {candidate.step} "
+            f"({candidate.area} px){seen} —— Enter 采纳 / Esc 取消  "
             f"(Shift+A for the next one)"
         )
 
@@ -229,33 +293,58 @@ class AdoptMixin:
         point for an empty layer, and a correction for one that already holds
         work.  Either way it is one
         :meth:`~tda.ui.app_edit.EditMixin.set_editing_mask` call, so it is one
-        entry on the same history as a brush stroke and one debounced sidecar
-        write.
+        entry on the same history as a brush stroke, one debounced sidecar
+        write, and one stamp saying where the pixels came from.
         """
         if not self.showing_draft_ghost():
             return False
+        if self.is_flashing():
+            # The canvas is showing the neighbour; pasting "what is under the
+            # ghost" would be pasting from a picture this frame is not about.
+            from tda.ui.app_edit import FLASH_HINT, FLASH_HINT_HOLD_MS
+
+            self.report(FLASH_HINT, hold_ms=FLASH_HINT_HOLD_MS)
+            return True
         candidate = self._draft_candidates[self._draft_index]
         instance = getattr(self.session, "editing_instance", None)
-        if instance is None or self.overlay is None \
-                or candidate.mask.shape != self.overlay.hw:
+        if instance is None:
             self.clear_draft_ghost()
             self.report(ADOPT_NEEDS_INSTANCE)
             return True
+        if self.overlay is None or candidate.mask.shape != self.overlay.hw:
+            self.clear_draft_ghost()
+            self.report(ADOPT_SHAPE_MISMATCH)
+            return True
+        key = self.session.current()
         current = self.session.editing_mask()
         empty = current is None or not np.asarray(current, dtype=bool).any()
         merged = (candidate.mask.copy() if empty
                   else np.asarray(current, dtype=bool) | candidate.mask)
+        note = {"adopted_from": str(candidate.key),
+                "adopted_step": int(candidate.step),
+                "keyframe_id": None if candidate.keyframe_id is None
+                else int(candidate.keyframe_id),
+                "instance": str(instance),
+                "frame": [int(key.desktop), int(key.step), str(key.view)]}
         self.clear_draft_ghost()
-        self.set_editing_mask(merged, undoable=True)
-        # After the stroke, so that the hygiene hook the stroke does *not* run
-        # cannot take it back out again.
-        self._adopted_facts = {"adopted_from": str(candidate.key),
-                               "adopted_step": int(candidate.step)}
+        self.set_editing_mask(merged, undoable=True, adopted=note)
         self.logger.info("adopted %s (step %s) into %s: %s", candidate.key,
                          candidate.step, instance, "replace" if empty else "union")
         self.report(f"采纳 {candidate.key}（{'替换' if empty else '并入'}编辑层）/ "
                     f"{'replaced' if empty else 'unioned'} from {candidate.key} "
                     f"— Enter 提交 / Esc 放弃")
+        return True
+
+    def refuse_under_ghost(self) -> bool:
+        """``True`` (and a line) when a commit key is not the ghost's ``Enter``.
+
+        Every other way of saying "write it" -- ``Alt+Enter``, ``Ctrl+K``,
+        ``Space``, the task card's four buttons -- would commit the layer
+        *under* the preview, which is not what the annotator is looking at.
+        """
+        if not self.showing_draft_ghost():
+            return False
+        self.report(ADOPT_FIRST)
         return True
 
     def clear_draft_ghost(self) -> bool:
@@ -266,23 +355,132 @@ class AdoptMixin:
         """
         if not self._draft_candidates:
             return False
-        self._draft_candidates = []
+        candidates, self._draft_candidates = self._draft_candidates, []
         self._draft_index = 0
+        for candidate in candidates:
+            candidate.release()
         if self.overlay is not None and self.overlay.has_ghost:
+            rect = self.overlay.ghost_rect
             self.overlay.clear_ghost()
-            self.canvas.refresh()
+            self.canvas.refresh(rect)
         return True
 
     def forget_draft_ghost(self) -> None:
-        """Drop the ghost *and* the adoption note: this layer is not that one.
+        """Drop the ghost: the layer it was offered against is not this one.
 
         Called wherever the editing layer is replaced from outside a tool (a
         commit, ``Esc``, an undo, a frame change) -- the same place
         :meth:`~tda.ui.app_assist.AssistMixin.reset_sam_prompt` is called, and
-        for the same reason.  The note goes too: a commit that claimed
-        ``adopted_from`` for pixels an undo had taken back would be a false
-        entry in the one audit trail that says how much of the old annotation
-        was reused.
+        for the same reason.  The *provenance* is not dropped here: it lives on
+        the undo history and is checked against the committed pixels, so an
+        undo takes it back by itself and nothing has to remember to.
         """
         self.clear_draft_ghost()
-        self._adopted_facts = None
+
+    # ----------------------------------------------------------- provenance
+    def pending_adoptions(self, key, instance: Optional[str]) -> list[dict]:
+        """Adoptions applied to this ``(frame, instance)`` layer right now.
+
+        The undo stack's applied strokes, plus whatever a crash-restored layer
+        brought back with it.  No pixel check here: this is what the sidecar
+        carries, and the sidecar's job is to lose nothing.
+        """
+        if instance is None:
+            return []
+        frame = [int(key.desktop), int(key.step), str(key.view)]
+        out = list(self._restored_adoptions.get(self._adopt_id(key, instance), []))
+        for note in compat.adoptions_in_history(self.session):
+            if str(note.get("instance")) != str(instance):
+                continue
+            if list(note.get("frame") or []) != frame:
+                continue
+            out.append(dict(note))
+        return out
+
+    def adoptions_for_commit(self, key, instance: Optional[str],
+                             mask: Optional[np.ndarray]) -> list[dict]:
+        """What the commit may claim: the adoptions still visible in the mask.
+
+        Each entry carries ``overlap_px`` -- how many of the pixels about to be
+        written lie inside that draft -- measured off the run lengths.  An entry
+        with no overlap left is dropped: the annotator adopted a draft, erased
+        it and drew the part by hand, and a commit that still said
+        ``adopted_from`` would put a false provenance into the only record of
+        how much old annotation this dataset reused.
+        """
+        pending = self.pending_adoptions(key, instance)
+        if not pending or mask is None:
+            return []
+        written = _masks.encode_rle(np.asarray(mask, dtype=bool))
+        out: dict[tuple, dict] = {}
+        for note in pending:
+            rle = ls_adopt.draft_rle(self.db, int(key.desktop), str(key.view),
+                                     str(note.get("adopted_from")),
+                                     note.get("keyframe_id"))
+            overlap = _masks.rle_overlap(written, rle)
+            if overlap <= 0:
+                continue
+            entry = {"adopted_from": str(note.get("adopted_from")),
+                     "adopted_step": int(note.get("adopted_step") or 0),
+                     "keyframe_id": note.get("keyframe_id"),
+                     "overlap_px": int(overlap)}
+            identity = (entry["adopted_from"], entry["keyframe_id"])
+            if overlap > int(out.get(identity, {}).get("overlap_px", -1)):
+                out[identity] = entry
+        return [out[k] for k in sorted(out, key=lambda k: (-out[k]["overlap_px"], k[0]))]
+
+    def _adopt_id(self, key, instance: str) -> tuple:
+        return (int(key.desktop), str(key.view), int(key.step), str(instance))
+
+    def note_restored_adoptions(self, key, instance: str, entries) -> None:
+        """Take the adoption list of a crash-restored layer back (spec 4.6).
+
+        A crash loses the undo history, so without this the recovered layer
+        would be committed as work nobody can trace to a draft.
+        """
+        identity = self._adopt_id(key, instance)
+        kept = [dict(entry) for entry in (entries or []) if entry.get("adopted_from")]
+        for entry in kept:
+            entry.setdefault("instance", str(instance))
+            entry.setdefault("frame", [int(key.desktop), int(key.step), str(key.view)])
+        if kept:
+            self._restored_adoptions[identity] = kept
+        else:
+            self._restored_adoptions.pop(identity, None)
+
+    def adopted_draft_keys(self, instance: Optional[str] = None) -> set[str]:
+        """Draft keys this view's op log already records as adopted.
+
+        Said, not refused.  The same draft is legitimately taken twice -- an
+        undo and a second try, a split that re-traces the same shape from this
+        step on -- so stopping the annotator would be wrong.  What this rules
+        out is the *quiet* duplicate: two instances of one view taking their
+        pixels from one old polygon with nothing on screen saying so.
+
+        Asked as a query over the whole view (narrowed to the rows that carry
+        an adoption at all, and to one instance when the caller names it),
+        because "the last two hundred operations" stops being the answer on the
+        second day of a machine.
+        """
+        used: set[str] = set()
+        if not compat.is_open(self.session):
+            return used
+        sql = ("SELECT payload_json FROM op_log WHERE desktop=? AND view=? "
+               "AND kind='commit_keyframe' AND payload_json LIKE '%\"adopted_from\"%'")
+        args: list = [int(self.session.desktop), str(self.session.view)]
+        if instance is not None:
+            sql += " AND payload_json LIKE ?"
+            args.append(f'%"instance": "{instance}"%')
+        try:
+            rows = self.db.conn.execute(sql, tuple(args)).fetchall()
+        except Exception:  # noqa: BLE001 - a note, never a reason to fail Shift+A
+            return used
+        for row in rows:
+            try:
+                payload = json.loads(row[0] or "{}")
+            except ValueError:
+                continue
+            for entry in payload.get("adopted") or ():
+                if entry.get("adopted_from"):
+                    used.add(str(entry["adopted_from"]))
+        return used
