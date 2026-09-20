@@ -349,8 +349,16 @@ def test_the_vlm_export_asks_about_the_latch_only_while_it_is_there(
 # --------------------------------------------------------------------------- #
 # VLM
 # --------------------------------------------------------------------------- #
+def _raw_records(path: Path) -> list[dict]:
+    """The JSONL exactly as written: ``{"id", "prompt", "label"}`` per line."""
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line]
+
+
 def _records(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    """The same records flattened, for assertions the prompt/label split does not
+    change. :func:`_raw_records` is what tests the split itself."""
+    return [{"id": r["id"], **r["prompt"], **r["label"]} for r in _raw_records(path)]
 
 
 def _confirm(d: Db, tax, steps) -> None:
@@ -387,7 +395,33 @@ def test_vlm_writes_at_least_one_record_per_task(db, tax, tmp_path: Path):
         assert rec["graph_version"] is None
         assert rec["question"] and isinstance(rec["question"], str)
         assert json.loads(json.dumps(rec["answer"])) == rec["answer"]
-        assert all(img.startswith("scan/D01/s") for img in rec["images"])
+        # the prompt names frames by an opaque id; the manifest holds the paths
+        assert all(img.startswith("img_") for img in rec["images"])
+
+
+def test_the_jsonl_is_split_into_what_the_model_sees_and_what_grades_it(
+    db, tax, tmp_path: Path
+):
+    """A prompt that says ``scan/D01/s003.png`` has answered half the P0 set."""
+    from tda.core.export.vlm import manifest_path
+
+    out = tmp_path / "vlm.jsonl"
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out))
+    raw = _raw_records(out)
+    assert raw
+    for rec in raw:
+        assert set(rec) == {"id", "prompt", "label"}
+        assert set(rec["prompt"]) <= {"task", "images", "question", "options"}
+        assert "answer" not in rec["prompt"] and "step" not in rec["prompt"]
+        assert rec["label"]["answer"] is not None
+
+    manifest = [json.loads(line) for line in
+                manifest_path(str(out)).read_text(encoding="utf-8").splitlines()]
+    assert manifest[0]["type"] == "header" and manifest[0]["salt"]
+    paths = {e["image"]: e["path"] for e in manifest[1:]}
+    for rec in raw:
+        for image in rec["prompt"]["images"]:
+            assert paths[image].startswith("scan/D01/s")
 
 
 def test_vlm_v1_lists_the_visible_components(db, tax, tmp_path: Path):
@@ -434,7 +468,10 @@ def test_vlm_v3_reads_the_action_between_two_frames(db, tax, tmp_path: Path):
     assert [r["step"] for r in records] == [2, 3]
 
     unscrew = records[0]
-    assert unscrew["images"] == ["scan/D01/s001.png", "scan/D01/s002.png"]
+    from tda.core.export.vlm_tasks import opaque_image_id
+
+    assert unscrew["images"] == [opaque_image_id(DESKTOP, VIEW, 1),
+                                 opaque_image_id(DESKTOP, VIEW, 2)]
     assert unscrew["answer"] == {
         "verb": "unscrew", "target_class": "screw",
         "target_instance": SCREW, "tool": "PH2",

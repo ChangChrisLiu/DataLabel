@@ -127,8 +127,11 @@ def _instances() -> list[InstanceRec]:
     ]
 
 
-def _keyframes(view: str) -> list[ShapeKeyframe]:
+def _keyframes(view: str, tiny_screw: bool = False) -> list[ShapeKeyframe]:
     """One in-chassis shape per instance, plus a bench box for what comes out."""
+    rects = dict(RECTS)
+    if tiny_screw:
+        rects[TINY_SCREW] = TINY_RECT  # 3 px: `too_small`, so it cannot be pointed at
     out = [
         ShapeKeyframe(
             id=None, instance=key, desktop=DESKTOP, view=view, pose_segment=1,
@@ -136,7 +139,7 @@ def _keyframes(view: str) -> list[ShapeKeyframe]:
             parts=[ShapePart("main", rle=masks.encode_rle(rect(box)))],
             amodal_complete=True,
         )
-        for key, box in RECTS.items()
+        for key, box in rects.items()
     ]
     out.extend(
         ShapeKeyframe(
@@ -159,7 +162,15 @@ FORCED = {
 }
 
 
-def build(db: Db, *, views=VIEWS, verified_steps=STEPS, skip_actions=()) -> Taxonomy:
+#: A second PSU-role screw nobody drew large enough to point at. It fastens
+#: nothing, so it adds no constraint edge and the teardown is unchanged; what it
+#: adds is a screw the count has to include and the frame cannot observe.
+TINY_SCREW = "screw.psu.02"
+TINY_RECT = (60, 60, 63, 63)
+
+
+def build(db: Db, *, views=VIEWS, verified_steps=STEPS, skip_actions=(),
+          tiny_screw=False) -> Taxonomy:
     """Seed ``db`` with the whole scene and return the taxonomy it was built on.
 
     ``skip_actions`` drops the action of those steps from the log without
@@ -173,6 +184,11 @@ def build(db: Db, *, views=VIEWS, verified_steps=STEPS, skip_actions=()) -> Taxo
                                 "chassis_type": "twr"})
     for rec in _instances():
         db.upsert_instance(rec)
+    if tiny_screw:
+        db.upsert_instance(InstanceRec(
+            key=TINY_SCREW, desktop=DESKTOP, cls="screw",
+            attrs={"role": "psu", "head": "PH2", "captive": False},
+        ))
     db.replace_steps(DESKTOP, _steps(),
                      [a for a in _actions() if a.step not in set(skip_actions)])
     for view in views:
@@ -183,13 +199,14 @@ def build(db: Db, *, views=VIEWS, verified_steps=STEPS, skip_actions=()) -> Taxo
                 flags={"review_status": ("verified" if step in verified_steps
                                          else "unlabeled")},
             )
-        for kf in _keyframes(view):
+        for kf in _keyframes(view, tiny_screw):
             db.add_keyframe(kf)
         # bottom-up: the chassis is behind everything, the small parts in front
-        db.set_zorder(ZOrderRec(DESKTOP, view, 1, [
-            (CHASSIS, "main"), (BOARD, "main"), (PSU, "main"), (PLUG, "main"),
-            (RAM, "main"), (LATCH, "main"), (SCREW, "main"),
-        ]))
+        order = [(CHASSIS, "main"), (BOARD, "main"), (PSU, "main"), (PLUG, "main"),
+                 (RAM, "main"), (LATCH, "main"), (SCREW, "main")]
+        if tiny_screw:
+            order.append((TINY_SCREW, "main"))
+        db.set_zorder(ZOrderRec(DESKTOP, view, 1, order))
         db.set_pose_segment(DESKTOP, view, 1, 1, LAST_STEP, 1, None, None)
         db.set_pose_segment_bench_roi(DESKTOP, view, 1, BENCH_ROI)
     for (view, step, instance), visibility in FORCED.items():

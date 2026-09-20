@@ -14,14 +14,14 @@ import pytest
 
 import vlm_scene as S
 from tda.core.db import Db
-from tda.core.export.vlm import TASKS, export_vlm
+from tda.core.export.vlm import TASKS, export_vlm, manifest_path
 from tda.core.export.vlm_reasoning import OPS, TERMINALS
 from tda.core.export.vlm_tasks import PERCEPTION_TASKS, PLANNING_TASKS
-from vlm_checker import Checker
+from vlm_checker import CheckFailure, Checker, scan_prompt_leaks
 
 
 # --------------------------------------------------------------------------- #
-# fixtures
+# fixtures and helpers
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def scene(tmp_db_path: str):
@@ -45,8 +45,23 @@ def _read(out: Path) -> list[dict]:
             out.read_text(encoding="utf-8").splitlines() if line]
 
 
+def flat(record: dict) -> dict:
+    """The record as one mapping, for assertions that do not care about the split."""
+    return {"id": record["id"], **record["prompt"], **record["label"]}
+
+
 def _of(records, task: str) -> list[dict]:
-    return [r for r in records if r["task"] == task]
+    return [flat(r) for r in records if r["prompt"]["task"] == task]
+
+
+def _frame_key(step: int, view: str = S.VIEW):
+    from tda.core.model import FrameKey
+
+    return FrameKey(S.DESKTOP, step, view)
+
+
+def _key(record: dict):
+    return _frame_key(record["step"], record["view"])
 
 
 # --------------------------------------------------------------------------- #
@@ -55,60 +70,47 @@ def _of(records, task: str) -> list[dict]:
 def test_every_p0_task_is_emitted_and_re_derivable(scene, tmp_path: Path):
     db, tax = scene
     records = _run(db, tax, tmp_path / "v.jsonl")
-    tasks = {r["task"] for r in records}
+    tasks = {r["prompt"]["task"] for r in records}
     assert tasks == set(TASKS), sorted(tasks)
 
     checker = Checker(db, tax, S.DESKTOP)
     assert checker.check_all(records) == len(records)
-    # every check type the format defines was actually exercised
-    assert set(checker.by_type) == {"boxes", "exact", "feasibility", "set",
-                                    "member_of", "history", "plan"}
+    assert set(checker.by_type) == {"boxes", "exact", "feasibility", "bounded_set",
+                                    "next_action", "history", "plan"}
 
 
 def test_every_record_carries_the_contract_fields(scene, tmp_path: Path):
     db, tax = scene
     for record in _run(db, tax, tmp_path / "v.jsonl"):
-        assert record["graph_version"] and isinstance(record["graph_version"], str)
-        assert record["layer"] in ("L1", "L2", "L3", "L4")
-        assert record["tier"] == "gold"
-        assert record["model_family"] == "EliteDesk 800 G2 TWR"
-        assert record["chassis_type"] == "twr"
-        assert record["template_id"].startswith(record["task"] + ".")
-        assert record["answer_check"]["type"]
-        assert isinstance(record["verified"], bool)
+        assert set(record) == {"id", "prompt", "label"}
+        label = record["label"]
+        assert label["graph_version"] and isinstance(label["graph_version"], str)
+        assert label["layer"] in ("L1", "L2", "L3", "L4")
+        assert label["tier"] == "gold"
+        assert label["model_family"] == "EliteDesk 800 G2 TWR"
+        assert label["chassis_type"] == "twr"
+        assert label["template_id"].startswith(record["prompt"]["task"] + ".")
+        assert label["answer_check"]["type"]
+        assert isinstance(label["verified"], bool)
 
 
 def test_nothing_in_a_record_depends_on_a_split(scene, tmp_path: Path):
-    """There is no split yet (spec 8.1: it is cut at freeze, platform-disjoint).
-
-    So a record may not carry one -- and must carry the chassis family, which is
-    what the cut will follow.
-    """
+    """There is no split yet (spec 8.1: it is cut at freeze, platform-disjoint)."""
     db, tax = scene
     db.upsert_desktop(S.DESKTOP, {"brand": "HP", "split": "train",
                                   "model_family": "EliteDesk 800 G2 TWR",
                                   "chassis_type": "twr"})
     for record in _run(db, tax, tmp_path / "v.jsonl"):
         assert "split" not in json.dumps(record)
-        assert record["model_family"]
-
-
-def test_image_paths_are_relative_to_the_dataset_root(scene, tmp_path: Path):
-    db, tax = scene
-    for record in _run(db, tax, tmp_path / "v.jsonl"):
-        assert record["images"]
-        for image in record["images"]:
-            assert not image.startswith(("F:", "D:", "/"))
-            assert image.split("/")[0] in S.VIEWS
-            assert image.endswith(".png")
+        assert record["label"]["model_family"]
 
 
 def test_every_rationale_stays_inside_the_closed_operation_set(scene, tmp_path: Path):
     db, tax = scene
     seen = set()
     for record in _run(db, tax, tmp_path / "v.jsonl"):
-        steps = record["rationale"]["steps"]
-        assert record["rationale"]["depth"] == len(steps)
+        steps = record["label"]["rationale"]["steps"]
+        assert record["label"]["rationale"]["depth"] == len(steps)
         assert steps[-1]["op"] in TERMINALS
         for step in steps:
             assert step["op"] in OPS
@@ -129,10 +131,60 @@ def test_the_two_sources_of_truth_are_kept_apart(scene, tmp_path: Path):
     other = Db(str(tmp_path / "bare.sqlite"))
     S.build(other, views=(S.VIEW,), verified_steps=())
     records = _run(other, tax, tmp_path / "bare.jsonl")
-    assert {r["task"] for r in records} & PERCEPTION_TASKS == set()
-    assert {r["task"] for r in records} == PLANNING_TASKS - {"V15"}
+    tasks = {r["prompt"]["task"] for r in records}
+    assert tasks & PERCEPTION_TASKS == set()
+    assert tasks == PLANNING_TASKS - {"V15"}
     assert Checker(other, tax, S.DESKTOP).check_all(records) == len(records)
     other.close()
+
+
+# --------------------------------------------------------------------------- #
+# prompt side vs label side
+# --------------------------------------------------------------------------- #
+def test_the_prompt_side_shows_the_model_nothing_it_must_infer(scene, tmp_path: Path):
+    db, tax = scene
+    records = _run(db, tax, tmp_path / "v.jsonl")
+    assert not scan_prompt_leaks(records)
+    for record in records:
+        assert set(record["prompt"]) <= {"task", "images", "question", "options"}
+        for image in record["prompt"]["images"]:
+            assert image.startswith("img_") and len(image) == 20
+            assert "scan" not in image and "D07" not in image
+
+
+def test_a_planted_leak_is_caught(scene, tmp_path: Path):
+    """The scan has to be able to fail, or it is decoration."""
+    db, tax = scene
+    records = _run(db, tax, tmp_path / "v.jsonl")
+    records[0]["prompt"]["question"] += " (frame s003 of this teardown)"
+    records[1]["prompt"]["question"] += f" -- is {S.PSU} feasible?"
+    problems = scan_prompt_leaks(records)
+    assert len(problems) >= 2
+    assert any("step/desktop" in p for p in problems)
+    assert any("label word" in p for p in problems)
+
+
+def test_the_manifest_maps_every_opaque_id_back(scene, tmp_path: Path):
+    db, tax = scene
+    out = tmp_path / "v.jsonl"
+    summary = _export(db, tax, out)
+    lines = [json.loads(line) for line in
+             manifest_path(str(out)).read_text(encoding="utf-8").splitlines() if line]
+    header, entries = lines[0], lines[1:]
+    assert header["type"] == "header" and header["salt"]
+    assert summary["manifest"] == str(manifest_path(str(out)))
+    assert len(entries) == summary["images"]
+
+    by_id = {e["image"]: e for e in entries}
+    for record in _read(out):
+        for image in record["prompt"]["images"]:
+            entry = by_id[image]
+            assert entry["desktop"] == S.DESKTOP
+            assert entry["path"] == f"{entry['view']}/D07/s{entry['step']:03d}.png"
+    # the ids really are a function of the frame, not of the record order
+    from tda.core.export.vlm_tasks import opaque_image_id
+
+    assert by_id[opaque_image_id(S.DESKTOP, S.VIEW, 1)]["step"] == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -143,32 +195,20 @@ def test_no_draft_and_no_part_that_left_inside_its_parent_is_asked_about(
 ):
     db, tax = scene
     records = _run(db, tax, tmp_path / "v.jsonl")
-    text = json.dumps(records)
-    assert "ls:" not in text
-
-    # the latch is moulded into the board: once the board is out it is inside it
-    after = [r for r in records if r["step"] == S.LAST_STEP]
-    assert after
-    board_gone = {k for k, v in Checker(db, tax, S.DESKTOP).state_at(S.LAST_STEP).items()
-                  if v["left_with"]}
-    assert S.LATCH not in board_gone  # the board never leaves in this scene
-    for record in records:
-        for action in record["answer"].get("done", []):
-            assert action["target"] in db.instances(S.DESKTOP)
+    assert "ls:" not in json.dumps(records)
 
 
 def test_a_latch_that_left_inside_the_board_is_asked_nothing(tmp_path: Path):
     """The ram latch after the board went: no state, no plan, no localisation."""
     db = Db(str(tmp_path / "board.sqlite"))
     tax = S.build(db, views=(S.VIEW,), verified_steps=())
-    # the board comes out at the last step, taking the latch with it
     from tda.core.model import ActionRec
 
     actions = list(db.actions(S.DESKTOP))
     actions.append(ActionRec(S.DESKTOP, S.LAST_STEP, 1, S.BOARD, "remove", tool="hand"))
     db.replace_steps(S.DESKTOP, db.steps(S.DESKTOP), actions)
 
-    records = _run(db, tax, tmp_path / "v.jsonl")
+    records = [flat(r) for r in _run(db, tax, tmp_path / "v.jsonl")]
     # V10 still *remembers* opening the latch -- that happened, and history is
     # what V10 is. Every present-tense question stops mentioning it.
     present = [r for r in records if r["step"] == S.LAST_STEP and r["task"] != "V10"]
@@ -187,19 +227,30 @@ def test_a_connector_is_never_asked_for_a_state_the_taxonomy_does_not_track(
     """An unplugged connector is untracked (spec 6.2), so "what state?" is a trap."""
     db, tax = scene
     records = _run(db, tax, tmp_path / "v.jsonl")
-    asked = {r["answer_check"].get("instance") for r in records
-             if r["task"] in ("V2", "V14", "V15")}
+    asked = {r["label"]["answer_check"].get("instance") for r in records
+             if r["prompt"]["task"] in ("V2", "V14", "V15")}
     assert S.PLUG not in asked
     assert S.CHASSIS not in asked   # one state, "present": the same rule
     assert S.PSU in asked and S.RAM in asked
 
 
-def test_an_implied_instance_is_marked_as_one(scene, tmp_path: Path):
+def test_the_chassis_is_not_a_free_point_in_v1_or_v8(scene, tmp_path: Path):
+    """It is in every frame and fills it: scoring on it measures nothing."""
     db, tax = scene
     records = _run(db, tax, tmp_path / "v.jsonl")
+    for record in _of(records, "V1"):
+        assert S.CHASSIS not in {c["instance"] for c in record["answer"]["components"]}
+        assert record["answer_check"]["exclude_classes"] == ["chassis"]
+    assert S.CHASSIS not in {r["answer"]["instance"] for r in _of(records, "V8")}
+    # ... and it is still in the truth table, for the COCO export
+    assert S.CHASSIS in db.compiled(_frame_key(1))
+
+
+def test_an_implied_instance_is_marked_as_one(scene, tmp_path: Path):
+    db, tax = scene
     flags = {}
-    for record in records:
-        for key, attrs in (record["evidence"].get("attributes") or {}).items():
+    for record in _run(db, tax, tmp_path / "v.jsonl"):
+        for key, attrs in (record["label"]["evidence"].get("attributes") or {}).items():
             if "implied" in attrs:
                 flags.setdefault(key, set()).add(attrs["implied"])
     assert flags[S.BOARD] == {True}
@@ -220,27 +271,143 @@ def test_perception_never_asks_about_a_row_it_cannot_point_at(scene, tmp_path: P
     assert (2, S.PLUG) not in grounded     # out_of_view there
 
 
+def test_v2_counts_what_the_frame_cannot_see(tmp_path: Path):
+    """The guarantee the rationale format exists for: observe, then propagate.
+
+    A second PSU screw is drawn three pixels wide, so the compiler calls it
+    ``too_small`` (spec 6.2: keep the centre point only). It is a real screw --
+    the count is 2 -- and one this view cannot be asked to point at.
+    """
+    db = Db(str(tmp_path / "tiny.sqlite"))
+    tax = S.build(db, views=(S.VIEW,), tiny_screw=True)
+    records = _of(_run(db, tax, tmp_path / "v.jsonl"), "V2")
+    counts = [r for r in records if "count" in r["answer"] and r["step"] == 1]
+    assert len(counts) == 1
+    assert counts[0]["answer"] == {"count": 2}
+    assert [s["op"] for s in counts[0]["rationale"]["steps"]] == [
+        "observe", "propagate_state", "conclude"
+    ]
+    assert counts[0]["rationale"]["steps"][0]["target"] == S.SCREW
+    assert counts[0]["rationale"]["steps"][1]["target"] == S.TINY_SCREW
+    # and the ordinal that would give the count away is kept out of V8
+    for record in _of(_read(tmp_path / "v.jsonl"), "V8"):
+        if record["step"] == 1 and record["answer"]["instance"].startswith("screw."):
+            assert record["answer_check"]["expression"] != "label"
+    db.close()
+
+
 # --------------------------------------------------------------------------- #
-# V4 -- feasibility and the failed attempt
+# the governing principle: demonstrated, blocked, permitted
 # --------------------------------------------------------------------------- #
-def test_v4_balances_its_positives_and_negatives(scene, tmp_path: Path):
+def test_v4_says_yes_only_to_what_the_log_demonstrated(scene, tmp_path: Path):
     db, tax = scene
-    per_frame: dict[int, list[dict]] = {}
-    for record in _of(_run(db, tax, tmp_path / "v.jsonl"), "V4"):
-        per_frame.setdefault(record["step"], []).append(record)
-    blocked_frames = 0
-    for step, group in per_frame.items():
-        feasible = [r for r in group if r["answer"]["feasible"]]
-        blocked = [r for r in group if not r["answer"]["feasible"]]
-        # two of each per frame, plus at most one real failed attempt
-        assert len(feasible) <= 2 and len(blocked) <= 3, step
-        assert feasible, step
-        blocked_frames += bool(blocked)
-        for record in blocked:
-            assert record["answer"]["blockers"]
-            assert record["negative"]
-    # the late frames have nothing left to block; most of the teardown does
-    assert blocked_frames >= len(per_frame) - 2
+    checker = Checker(db, tax, S.DESKTOP)
+    records = _of(_run(db, tax, tmp_path / "v.jsonl"), "V4")
+    yes = [r for r in records if r["answer"]["feasible"]]
+    no = [r for r in records if not r["answer"]["feasible"]]
+    assert yes and no
+    for record in yes:
+        assert record["truth_source"] == "demonstrated"
+        shown = checker.demonstrated(record["step"])
+        assert (shown[1].verb, shown[1].target) == (
+            record["answer_check"]["verb"], record["answer_check"]["target"])
+    assert {r["truth_source"] for r in no} <= {"graph_blocked", "failed_attempt"}
+    # ... and the two classes are balanced, so the majority baseline is ~50 %
+    assert abs(len(yes) - len(no)) <= 2
+
+
+def test_v5_is_a_bounded_set_and_never_claims_the_upper_bound_is_the_truth(
+    scene, tmp_path: Path
+):
+    db, tax = scene
+    checker = Checker(db, tax, S.DESKTOP)
+    records = _of(_run(db, tax, tmp_path / "v.jsonl"), "V5")
+    assert records
+    for record in records:
+        answer = record["answer"]
+        assert set(answer) == {"must_include", "must_not_include",
+                               "permitted_upper_bound"}
+        must = {(a["verb"], a["target"]) for a in answer["must_include"]}
+        must_not = {(a["verb"], a["target"]) for a in answer["must_not_include"]}
+        upper = {(a["verb"], a["target"]) for a in answer["permitted_upper_bound"]}
+        assert must == {(checker.demonstrated(record["step"])[1].verb,
+                         checker.demonstrated(record["step"])[1].target)}
+        assert must_not == checker.blocked(record["step"])
+        assert upper == checker.permitted(record["step"])
+        assert not must & must_not and must <= upper
+        assert record["answer_check"]["type"] == "bounded_set"
+        # the question may not promise a complete set of physical possibilities
+        for banned in ("every", "all possible", "physically possible", "exhaustive"):
+            assert banned not in record["question"].lower()
+
+
+def test_v6_grades_on_the_demonstrated_action_and_the_blocked_rate(
+    scene, tmp_path: Path
+):
+    db, tax = scene
+    checker = Checker(db, tax, S.DESKTOP)
+    raw = [r for r in _run(db, tax, tmp_path / "v.jsonl")
+           if r["prompt"]["task"] == "V6"]
+    assert raw
+    with_options = 0
+    for entry in raw:
+        record = flat(entry)
+        shown = checker.demonstrated(record["step"])
+        assert (record["answer"]["verb"], record["answer"]["target"]) == (
+            shown[1].verb, shown[1].target)
+        assert record["answer_check"]["metric"] == "match_rate+blocked_rate"
+        assert {(a["verb"], a["target"])
+                for a in record["answer_check"]["blocked_actions"]} == \
+            checker.blocked(record["step"])
+        options = entry["label"].get("options")
+        if options is None:
+            assert "options" not in entry["prompt"]
+            continue
+        with_options += 1
+        kinds = [o["kind"] for o in options]
+        assert kinds.count("demonstrated") == 1
+        assert kinds.count("graph_blocked") >= 2
+        # the prompt lists them without saying which is which
+        shown_options = entry["prompt"]["options"]
+        assert len(shown_options) == len(options)
+        assert all(set(o) == {"verb", "target_label"} for o in shown_options)
+    assert with_options
+
+
+def test_v16_valid_plans_are_logged_suffixes_and_errors_can_land_anywhere(
+    scene, tmp_path: Path
+):
+    db, tax = scene
+    checker = Checker(db, tax, S.DESKTOP)
+    records = _of(_run(db, tax, tmp_path / "v.jsonl"), "V16")
+    valid = [r for r in records if r["answer"]["valid"]]
+    invalid = [r for r in records if not r["answer"]["valid"]]
+    assert valid and invalid
+    assert abs(len(valid) - len(invalid)) <= 1     # ~1:1
+
+    for record in valid:
+        assert record["truth_source"] == "demonstrated"
+        wanted = [(i["verb"], i["target"]) for i in record["answer_check"]["plan"]]
+        logged = [(a.verb, a.target) for s in checker.log_steps()
+                  if s > record["step"] for a in checker.named(s)]
+        assert logged[:len(wanted)] == wanted
+    for record in invalid:
+        assert record["answer"]["violated_edge"]
+        assert record["truth_source"] == "graph_blocked"
+    indices = {r["answer"]["first_error_index"] for r in invalid}
+    assert indices and indices <= {0, 1, 2, 3}
+
+
+def test_v16_never_calls_a_harmless_reordering_an_error(scene, tmp_path: Path):
+    """Legality, not uniqueness: a rearrangement that violates nothing is unknown."""
+    db, tax = scene
+    checker = Checker(db, tax, S.DESKTOP)
+    for record in _run(db, tax, tmp_path / "v.jsonl"):
+        if record["prompt"]["task"] != "V16":
+            continue
+        checker.check(record)  # re-derives validity from the graph, not from us
+        if not record["label"]["answer"]["valid"]:
+            assert record["label"]["answer"]["violated_edge"] is not None
 
 
 def test_v4_explains_the_failed_attempt_with_the_edge_that_caused_it(
@@ -248,7 +415,7 @@ def test_v4_explains_the_failed_attempt_with_the_edge_that_caused_it(
 ):
     db, tax = scene
     records = _of(_run(db, tax, tmp_path / "v.jsonl"), "V4")
-    failed = [r for r in records if r.get("negative") == "failed_attempt"]
+    failed = [r for r in records if r.get("truth_source") == "failed_attempt"]
     assert len(failed) == 1
     record = failed[0]
     assert record["step"] == 5           # the frame before the attempt at step 6
@@ -263,50 +430,13 @@ def test_a_failed_attempt_the_graph_cannot_explain_is_not_a_ground_truth(
 ):
     """The three unexplained failures of the constraint report stay unexported."""
     db = Db(str(tmp_path / "unexplained.sqlite"))
-    tax = S.build(db)
-    db.add_relation(S.DESKTOP, "locked_by", S.RAM, S.LATCH, status="rejected")
+    tax = S.build(db, views=(S.VIEW,), verified_steps=())
     with db.conn:  # drop the rule edge that explains it, leaving nothing
         db.conn.execute("DELETE FROM relation WHERE desktop=? AND type='locked_by'",
                         (S.DESKTOP,))
     records = _of(_run(db, tax, tmp_path / "v.jsonl"), "V4")
-    assert not [r for r in records if r.get("negative") == "failed_attempt"]
+    assert not [r for r in records if r.get("truth_source") == "failed_attempt"]
     db.close()
-
-
-# --------------------------------------------------------------------------- #
-# V5 / V6 -- legality is the graph's
-# --------------------------------------------------------------------------- #
-def test_v5_is_the_graphs_whole_legal_set_and_holds_the_logged_next_action(
-    scene, tmp_path: Path
-):
-    db, tax = scene
-    checker = Checker(db, tax, S.DESKTOP)
-    for record in _of(_run(db, tax, tmp_path / "v.jsonl"), "V5"):
-        answer = {(a["verb"], a["target"]) for a in record["answer"]["actions"]}
-        assert answer == checker.legal(record["step"])
-        logged = record["answer_check"]["logged_next"]
-        if logged is not None:
-            assert tuple(logged) in answer
-
-
-def test_v6_answers_with_the_log_and_is_graded_on_membership(scene, tmp_path: Path):
-    db, tax = scene
-    checker = Checker(db, tax, S.DESKTOP)
-    records = _of(_run(db, tax, tmp_path / "v.jsonl"), "V6")
-    assert records
-    with_negative = 0
-    for record in records:
-        legal = checker.legal(record["step"])
-        assert (record["answer"]["verb"], record["answer"]["target"]) in legal
-        options = record["answer_check"]["options"]
-        assert len(options) >= 2
-        with_negative += any(not o["legal"] for o in options)
-        for option in options:
-            assert ((option["verb"], option["target"]) in legal) is option["legal"]
-    # the distractor the spec asks for: an action the graph forbids right now.
-    # Late in a teardown nothing is blocked any more, and inventing one would be
-    # inventing a constraint.
-    assert with_negative >= len(records) - 2
 
 
 def test_a_step_the_log_and_the_graph_disagree_about_is_never_ground_truth(
@@ -316,17 +446,81 @@ def test_a_step_the_log_and_the_graph_disagree_about_is_never_ground_truth(
     db = Db(str(tmp_path / "gap.sqlite"))
     tax = S.build(db, views=(S.VIEW,), verified_steps=(), skip_actions=(2,))
     summary = _export(db, tax, tmp_path / "v.jsonl")
-    records = _read(tmp_path / "v.jsonl")
+    records = [flat(r) for r in _read(tmp_path / "v.jsonl")]
 
     assert summary["illegal_steps"] == {
         S.DESKTOP: {5: [f"fastened_by({S.PSU}, {S.SCREW})"]}
     }
-    # step 4 is the frame whose "next action" is the illegal one
-    assert 4 not in {r["step"] for r in records if r["task"] in ("V5", "V6")}
+    graph_tasks = ("V4", "V5", "V6", "V16")
+    assert 4 not in {r["step"] for r in records if r["task"] in graph_tasks}
     assert 3 in {r["step"] for r in records if r["task"] == "V5"}
-    # ... and no plan may be built across it
-    assert not [r for r in records if r["task"] == "V16" and r["step"] < 5]
-    assert Checker(db, tax, S.DESKTOP).check_all(records) == len(records)
+    assert Checker(db, tax, S.DESKTOP).check_all(_read(tmp_path / "v.jsonl")) \
+        == len(records)
+    db.close()
+
+
+# --------------------------------------------------------------------------- #
+# desktops and logs a task cannot be asked of
+# --------------------------------------------------------------------------- #
+def test_a_desktop_with_no_graph_answers_no_affordance_question(tmp_path: Path):
+    db = Db(str(tmp_path / "nograph.sqlite"))
+    tax = S.build(db, views=(S.VIEW,), verified_steps=())
+    with db.conn:
+        db.conn.execute("DELETE FROM relation WHERE desktop=?", (S.DESKTOP,))
+    summary = _export(db, tax, tmp_path / "v.jsonl")
+    assert summary["excluded_desktops"] == {S.DESKTOP: "no_graph_version"}
+    assert set(summary["by_task"]) == {"V3", "V10"}
+    db.close()
+
+
+def test_a_desktop_that_is_mostly_drafts_answers_no_affordance_question(
+    tmp_path: Path
+):
+    db = Db(str(tmp_path / "drafts.sqlite"))
+    tax = S.build(db, views=(S.VIEW,), verified_steps=())
+    from tda.core.model import InstanceRec
+
+    for n in range(20):  # 8 real instances, 20 drafts
+        db.upsert_instance(InstanceRec(key=f"ls:Screw#{n}", desktop=S.DESKTOP,
+                                       cls="screw", attrs={"role": "psu"}))
+    summary = _export(db, tax, tmp_path / "v.jsonl")
+    assert summary["excluded_desktops"] == {S.DESKTOP: "draft_majority"}
+    assert not set(summary["by_task"]) & {"V4", "V5", "V6", "V16"}
+    db.close()
+
+
+def test_a_log_with_an_unresolved_target_answers_no_history_question(tmp_path: Path):
+    db = Db(str(tmp_path / "unresolved.sqlite"))
+    tax = S.build(db, views=(S.VIEW,), verified_steps=())
+    from tda.core.model import ActionRec
+
+    actions = list(db.actions(S.DESKTOP))
+    actions.append(ActionRec(S.DESKTOP, 7, 1, "?", "remove", tool="hand"))
+    db.replace_steps(S.DESKTOP, db.steps(S.DESKTOP), actions)
+    summary = _export(db, tax, tmp_path / "v.jsonl")
+    assert summary["v10_excluded"] == {S.DESKTOP: ["?"]}
+    assert "V10" not in summary["by_task"]
+    assert "V5" in summary["by_task"]  # the graph tasks are unaffected
+    db.close()
+
+
+def test_an_unknown_tool_is_never_a_graded_field(tmp_path: Path):
+    db = Db(str(tmp_path / "tool.sqlite"))
+    tax = S.build(db, views=(S.VIEW,), verified_steps=())
+    actions = list(db.actions(S.DESKTOP))
+    for action in actions:
+        if action.step == 5:
+            action.tool = "unknown"
+    db.replace_steps(S.DESKTOP, db.steps(S.DESKTOP), actions)
+    records = [flat(r) for r in _run(db, tax, tmp_path / "v.jsonl")]
+
+    v3 = next(r for r in records if r["task"] == "V3" and r["step"] == 5)
+    assert v3["answer"]["tool"] is None
+    assert "tool" not in v3["answer_check"]["fields"]
+    v6 = next(r for r in records if r["task"] == "V6" and r["answer_check"][
+        "reference_step"] == 5)
+    assert v6["answer"]["tool"] is None and "tool" not in v6["answer_check"]["fields"]
+    assert Checker(db, tax, S.DESKTOP).check_all(_read(tmp_path / "v.jsonl"))
     db.close()
 
 
@@ -340,8 +534,6 @@ def test_v10_reports_the_history_the_progress_and_the_remainder(scene, tmp_path:
     assert first["answer"]["done"] == [] and first["answer"]["progress_bin"] == "0-25"
     assert last["answer"]["remaining_actions"] == 0
     assert last["answer"]["progress_bin"] == "75-100"
-    # a set, sorted, because spec 8.2 grades V10 with set F1 -- a chassis
-    # reoriented seven times is one thing that happened
     assert [(a["verb"], a["target"]) for a in last["answer"]["done"]] == sorted([
         ("unscrew", S.SCREW), ("disconnect", S.PLUG), ("remove", S.PSU),
         ("open", S.LATCH), ("remove", S.RAM),
@@ -363,6 +555,19 @@ def test_v12_takes_its_no_change_from_dupli_and_leaves_failed_alone(
     assert 6 not in records  # the failed attempt: nothing changed, but a hand moved
 
 
+def test_a_step_flagged_dupli_counts_even_when_its_type_does_not_say_so(
+    scene, tmp_path: Path
+):
+    db, tax = scene
+    steps = db.steps(S.DESKTOP)
+    for rec in steps:
+        if rec.step == 3:
+            rec.step_type, rec.dupli = "normal", True
+    db.replace_steps(S.DESKTOP, steps, db.actions(S.DESKTOP))
+    records = {r["step"]: r for r in _of(_run(db, tax, tmp_path / "v.jsonl"), "V12")}
+    assert records[3]["answer"] == {"changed": False, "events": []}
+
+
 # --------------------------------------------------------------------------- #
 # V14 / V15 -- the metacognitive pair
 # --------------------------------------------------------------------------- #
@@ -378,13 +583,15 @@ def test_v14_abstains_exactly_where_the_view_cannot_decide(scene, tmp_path: Path
         seen = row["visibility"] in ("visible", "occluded_partial", "visible_tiny")
         assert record["answer"]["answerable"] is seen
         assert (record["answer"]["state"] is None) is not seen
-        terminal = record["rationale"]["steps"][-1]["op"]
-        assert terminal == ("conclude" if seen else "abstain")
+        assert record["rationale"]["steps"][-1]["op"] == (
+            "conclude" if seen else "abstain")
+    # exactly balanced by construction, per frame and therefore overall
     per_frame: dict[int, list[bool]] = {}
     for record in records:
         per_frame.setdefault(record["step"], []).append(record["answer"]["answerable"])
     for step, flags in per_frame.items():
-        assert sum(flags) <= 2 and len(flags) - sum(flags) <= 2, step
+        assert sum(flags) == len(flags) - sum(flags), step
+    assert sum(r["answer"]["answerable"] for r in records) * 2 == len(records)
 
 
 def test_v15_uses_no_geometry_and_writes_each_view_pair_once(scene, tmp_path: Path):
@@ -401,51 +608,81 @@ def test_v15_uses_no_geometry_and_writes_each_view_pair_once(scene, tmp_path: Pa
     }
     assert all(r["answer"]["best_view"] == S.OTHER for r in cross)
     assert {r["answer"]["same_moment"] for r in moments} == {True, False}
-    # the question is built from visibility alone: no homography, no transform
     for record in here:
         blob = json.dumps(record)
         for banned in ("homography", "transform", "projected", "T_k"):
             assert banned not in blob
 
 
-# --------------------------------------------------------------------------- #
-# V16 -- plan verification
-# --------------------------------------------------------------------------- #
-def test_v16_pairs_a_true_plan_with_a_swap_the_graph_catches(scene, tmp_path: Path):
-    db, tax = scene
-    records = _of(_run(db, tax, tmp_path / "v.jsonl"), "V16")
-    true = [r for r in records if r["answer"]["valid"]]
-    swapped = [r for r in records if not r["answer"]["valid"]]
-    assert true and swapped
-
-    for record in true:
-        assert record["answer"] == {"valid": True, "first_error_index": None,
-                                    "violated_edge": None}
-        assert "negative" not in record
-    for record in swapped:
-        assert record["answer"]["violated_edge"], record["id"]
-        assert record["answer"]["first_error_index"] is not None
-        assert record["negative"] == "swapped"
-        plan = record["answer_check"]["plan"]
-        assert 0 <= record["answer"]["first_error_index"] < len(plan)
-
-    # at step 1 the plan is unscrew / disconnect / remove PSU / open latch, so
-    # whichever adjacent swap the seed picks, what it breaks is a precondition
-    # of taking the PSU out
-    first = next(r for r in swapped if r["step"] == 1)
-    assert first["answer"]["violated_edge"] in (
-        f"fastened_by({S.PSU}, {S.SCREW})", f"connected_to({S.PSU}, {S.PLUG})",
-    )
-
-
-def test_v16_never_calls_a_harmless_reordering_an_error(scene, tmp_path: Path):
-    """Legality, not uniqueness: a swap that violates nothing is another legal plan."""
+def test_a_different_moment_negative_really_is_a_different_state(
+    scene, tmp_path: Path
+):
+    """Two steps apart is not enough: a dupli pair leaves the machine unchanged."""
     db, tax = scene
     checker = Checker(db, tax, S.DESKTOP)
-    for record in _of(_run(db, tax, tmp_path / "v.jsonl"), "V16"):
-        checker.check(record)  # re-derives validity from the graph, not from us
-        if not record["answer"]["valid"]:
-            assert record["answer"]["violated_edge"] is not None
+    negatives = [r for r in _of(_run(db, tax, tmp_path / "v.jsonl"), "V15")
+                 if r["answer_check"]["derive"] == "same_moment"
+                 and not r["answer"]["same_moment"]]
+    assert negatives
+    for record in negatives:
+        other = record["answer_check"]["other_step"]
+        assert checker.bare_state(record["step"]) != checker.bare_state(other)
+
+
+# --------------------------------------------------------------------------- #
+# the checker has to be able to fail
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("task,field,mutate", [
+    ("V12", "events", lambda a: a.__setitem__("events", [{"target": "x", "old": "a",
+                                                          "new": "b"}])),
+    ("V12", "changed", lambda a: a.__setitem__("changed", not a["changed"])),
+    ("V15", "same_moment", lambda a: a.__setitem__("same_moment",
+                                                   not a["same_moment"])),
+    ("V15", "best_view", lambda a: a.__setitem__("best_view", "rs")),
+    ("V4", "feasible", lambda a: a.__setitem__("feasible", not a["feasible"])),
+    ("V4", "blockers", lambda a: a.__setitem__("blockers", ["psu.01"])),
+    ("V5", "must_include", lambda a: a.__setitem__("must_include", [])),
+    ("V5", "must_not_include", lambda a: a["must_not_include"].pop()),
+    ("V6", "target", lambda a: a.__setitem__("target", "chassis.01")),
+    ("V10", "remaining_actions", lambda a: a.__setitem__("remaining_actions", 99)),
+    ("V10", "done", lambda a: a["done"].pop()),
+    ("V16", "valid", lambda a: a.__setitem__("valid", not a["valid"])),
+    ("V16", "first_error_index", lambda a: a.__setitem__("first_error_index", 9)),
+    ("V1", "components", lambda a: a["components"].pop()),
+    ("V2", "state", lambda a: a.__setitem__("state", "nonsense")),
+    ("V2", "count", lambda a: a.__setitem__("count", 99)),
+    ("V8", "bbox", lambda a: a.__setitem__("bbox", [0, 0, 1, 1])),
+    ("V14", "answerable", lambda a: a.__setitem__("answerable",
+                                                  not a["answerable"])),
+])
+def test_a_corrupted_answer_fails_the_checker(scene, tmp_path: Path, task, field,
+                                              mutate):
+    """The checker has to be able to fail, or it is decoration.
+
+    Every derivation in :mod:`vlm_checker` is re-computed from the database, so
+    changing a published answer must break it. A field the checker merely copied
+    out of the record would pass this test only by accident.
+    """
+    db, tax = scene
+    records = _run(db, tax, tmp_path / "v.jsonl")
+    checker = Checker(db, tax, S.DESKTOP)
+    mine = [r for r in records if r["prompt"]["task"] == task
+            and field in r["label"]["answer"]]
+    assert mine, f"no {task} record carries {field!r}"
+    hurt = 0
+    for record in mine:
+        answer = json.loads(json.dumps(record["label"]["answer"]))
+        try:
+            mutate(answer)
+        except (IndexError, KeyError):
+            continue
+        if answer == record["label"]["answer"]:
+            continue
+        record["label"]["answer"] = answer
+        with pytest.raises(CheckFailure):
+            checker.check(record)
+        hurt += 1
+    assert hurt, f"no {task} record could be corrupted on {field!r}"
 
 
 # --------------------------------------------------------------------------- #
@@ -457,11 +694,12 @@ def test_the_same_database_gives_a_byte_identical_file(scene, tmp_path: Path):
     _export(db, tax, a)
     _export(db, tax, b)
     assert a.read_bytes() == b.read_bytes()
+    assert manifest_path(str(a)).read_bytes() == manifest_path(str(b)).read_bytes()
 
 
 def test_the_order_of_the_records_is_frame_then_task(scene, tmp_path: Path):
     db, tax = scene
-    records = _run(db, tax, tmp_path / "v.jsonl")
+    records = [flat(r) for r in _run(db, tax, tmp_path / "v.jsonl")]
     steps = [r["step"] for r in records]
     assert steps == sorted(steps)
     for step in set(steps):
@@ -473,14 +711,13 @@ def test_the_tasks_argument_filters(scene, tmp_path: Path):
     db, tax = scene
     summary = _export(db, tax, tmp_path / "v.jsonl", tasks=("V4", "V5"))
     assert set(summary["by_task"]) == {"V4", "V5"}
-    assert summary["by_source"] == {"perception": 0,
-                                    "planning": summary["records"]}
+    assert summary["by_source"] == {"perception": 0, "planning": summary["records"]}
 
 
 def test_only_verified_keeps_the_confirmed_records(scene, tmp_path: Path):
     db, tax = scene
     records = _run(db, tax, tmp_path / "v.jsonl", only_verified=True)
-    assert records and {r["verified"] for r in records} == {True}
+    assert records and {r["label"]["verified"] for r in records} == {True}
     assert Checker(db, tax, S.DESKTOP).check_all(records) == len(records)
 
 
@@ -494,8 +731,8 @@ def test_the_export_refuses_a_view_with_a_standing_conflict(scene, tmp_path: Pat
         _export(db, tax, tmp_path / "v.jsonl")
     summary = _export(db, tax, tmp_path / "v.jsonl", allow_conflicts=True)
     assert summary["open_conflicts"] == 1
-    at_one = [r for r in _read(tmp_path / "v.jsonl") if r["step"] == 1]
-    assert at_one and not [r for r in at_one if r["verified"]]
+    at_one = [r for r in _read(tmp_path / "v.jsonl") if r["label"]["step"] == 1]
+    assert at_one and not [r for r in at_one if r["label"]["verified"]]
 
 
 def test_a_conflict_in_another_view_does_not_refuse_this_one(scene, tmp_path: Path):
@@ -508,25 +745,11 @@ def test_a_conflict_in_another_view_does_not_refuse_this_one(scene, tmp_path: Pa
                     encode_rle(S.rect(S.RECTS[S.PSU])), 400)
     records = _run(db, tax, tmp_path / "v.jsonl")
     assert records
-    # ... but the disputed frame answers no cross-view question
     cross = [r for r in _of(records, "V15")
              if r["answer_check"]["derive"] == "cross_view"]
     assert (4, S.RAM) not in {(r["step"], r["answer_check"]["instance"])
                               for r in cross}
     assert (7, S.LATCH) in {(r["step"], r["answer_check"]["instance"]) for r in cross}
-
-
-def test_a_step_flagged_dupli_counts_even_when_its_type_does_not_say_so(
-    scene, tmp_path: Path
-):
-    db, tax = scene
-    steps = db.steps(S.DESKTOP)
-    for rec in steps:
-        if rec.step == 3:
-            rec.step_type, rec.dupli = "normal", True
-    db.replace_steps(S.DESKTOP, steps, db.actions(S.DESKTOP))
-    records = {r["step"]: r for r in _of(_run(db, tax, tmp_path / "v.jsonl"), "V12")}
-    assert records[3]["answer"] == {"changed": False, "events": []}
 
 
 def test_an_answer_check_no_checker_can_execute_is_refused(scene, tmp_path: Path):
@@ -540,16 +763,3 @@ def test_an_answer_check_no_checker_can_execute_is_refused(scene, tmp_path: Path
     with pytest.raises(ValueError, match="not one a checker can execute"):
         vlm_tasks.record(ctx, "V1", "x", 1, [], "?", 0, {}, {"type": "vibes"},
                          {}, {"depth": 0, "steps": []}, False)
-
-
-# --------------------------------------------------------------------------- #
-# helpers
-# --------------------------------------------------------------------------- #
-def _frame_key(step: int, view: str = S.VIEW):
-    from tda.core.model import FrameKey
-
-    return FrameKey(S.DESKTOP, step, view)
-
-
-def _key(record: dict):
-    return _frame_key(record["step"], record["view"])

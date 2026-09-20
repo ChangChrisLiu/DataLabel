@@ -535,13 +535,15 @@ def cmd_export_vlm(args: argparse.Namespace) -> int:
 
 
 def _report_vlm(stats: dict, view: str) -> None:
-    """The per-task counts and the moments the graph refused to describe.
+    """The per-task counts and everything the export declined to answer.
 
-    ``illegal_steps`` is the answer to "why is V5 missing on that frame": the
-    logged action there breaks a hard constraint, so the graph and the log
-    contradict each other and no legal-action set may be published as ground
-    truth. It is the 18 lines of ``reports/constraints_report.md``, reported
-    where somebody making a release will see them.
+    Three silences, and a release run has to see all three. ``illegal_steps``:
+    the logged action there breaks a hard constraint, so the graph and the log
+    contradict each other and no affordance answer may be published as ground
+    truth (the 18 lines of ``reports/constraints_report.md``).
+    ``excluded_desktops``: no graph at all, so every answer would be "nothing is
+    blocked". ``v10_excluded``: the log names a target nobody resolved, and V10
+    is scored exhaustively, so an incomplete history is a wrong answer.
     """
     by_task = stats.get("by_task") or {}
     if by_task:
@@ -555,7 +557,17 @@ def _report_vlm(stats: dict, view: str) -> None:
     if illegal:
         listed = ", ".join(f"D{d}:{sorted(steps)}" for d, steps in sorted(illegal.items()))
         print(f"[export-vlm] {len(illegal)} desktop(s) have steps whose logged "
-              f"action the graph forbids; V5/V6/V16 say nothing there: {listed}")
+              f"action the graph forbids; V4/V5/V6/V16 say nothing there: {listed}")
+    excluded = stats.get("excluded_desktops") or {}
+    if excluded:
+        listed = ", ".join(f"D{d}:{why}" for d, why in sorted(excluded.items()))
+        print(f"[export-vlm] {len(excluded)} desktop(s) answer no affordance or "
+              f"planning question at all: {listed}")
+    no_v10 = stats.get("v10_excluded") or {}
+    if no_v10:
+        listed = ", ".join(f"D{d}:{len(t)}" for d, t in sorted(no_v10.items()))
+        print(f"[export-vlm] {len(no_v10)} desktop(s) have logged actions whose "
+              f"target is unresolved, so V10 is not asked of them: {listed}")
 
 
 def _add_export_vlm(sub) -> None:

@@ -3,26 +3,32 @@
 The point of this file is that it shares **no code** with the generator. It
 reads the database and the taxonomy -- the data -- and re-implements the spec
 from scratch: its own fold of the action log into a state, its own transcription
-of the spec-7.2 precondition table, its own notion of which verb may be applied
-to which class in which state. Nothing from ``tda.core.graph*``,
-``tda.core.states`` or ``tda.core.export.vlm*`` is imported, so a bug that lives
-in one of those modules cannot hide by being used on both sides of the
-assertion.
+of the precondition table, its own notion of which verb may be applied to which
+class in which state. Nothing from ``tda.core.graph*``, ``tda.core.states`` or
+``tda.core.export.vlm*`` is imported, so a bug that lives in one of those
+modules cannot hide by being used on both sides of the assertion.
 
 :class:`Checker` dispatches on the record's ``answer_check`` block, which is the
 contract: a question whose ``answer_check`` this file cannot execute is a
-question the export may not emit, and :meth:`Checker.check` says so.
+question the export may not emit, and :meth:`Checker.check` says so. Every
+derivation is a real one -- V12's events come from a state diff and V15's
+same-moment answer from comparing two folded states -- so corrupting a record
+makes this file fail, which ``test_vlm_tasks.py`` asserts directly.
 
-The two tables below are transcribed rather than imported, deliberately:
-
-* :data:`REQUIRED_STATES` is spec 7.2 verbatim;
-* :data:`GATES` is spec 7.2 **as amended** by the measurement recorded in
-  ``tda.core.graph_rules`` -- a screwed-down part does not move but you can
-  still pull the plug out of it. Changing the amendment has to be a deliberate
-  act in two files, which is what an independent checker is for.
+**The two tables below are transcribed, and one of them is not the spec's
+literal text.** :data:`REQUIRED_STATES` is spec 7.2 verbatim. :data:`GATES` is
+spec 7.2 **as amended by the implementation** (``tda.core.graph_rules.GATES``):
+the spec says every hard edge gates every verb, which across the 66 sheets
+produced 34 "displace psu.01 violates connected_to(...)" lines, every one of
+them describing correct work -- swinging a PSU aside is how you reach its plugs.
+The amendment distinguishes *moving the part* from *reaching it*, and the
+controller is amending the spec to match. Transcribing it here rather than
+importing it means a change to that table has to be a deliberate act in two
+files, which is what an independent checker is for.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable, Optional
 
 #: spec 7.2: the blocker must be in one of these states.
@@ -37,7 +43,8 @@ REQUIRED_STATES = {
 #: Every verb a hard constraint can stand in the way of (spec 7.2).
 GATED_VERBS = {"remove", "displace", "open", "unscrew", "disconnect", "release"}
 
-#: Which of those verbs each edge type actually gates (spec 7.2 as amended).
+#: Which of those verbs each edge type actually gates (spec 7.2 as amended --
+#: see the module docstring).
 GATES = {
     "fastened_by": {"remove", "displace", "open"},
     "locked_by": {"remove", "displace", "open"},
@@ -66,6 +73,8 @@ CABLE_PREFIX = "cable:"
 LS_PREFIX = "ls:"
 SKIP_STEP_TYPES = {"ignore"}
 ANSWERABLE = {"visible", "occluded_partial", "visible_tiny"}
+CHASSIS_CLASS = "chassis"
+UNGRADED_TOOLS = {None, "", "unknown"}
 
 
 class CheckFailure(AssertionError):
@@ -83,7 +92,7 @@ def _key(action) -> tuple:
 class Checker:
     """Re-derives the answers of one desktop from the database alone."""
 
-    def __init__(self, db, tax, desktop: int, *, views: Iterable[str] = ()):
+    def __init__(self, db, tax, desktop: int):
         self.db = db
         self.tax = tax
         self.desktop = int(desktop)
@@ -99,7 +108,7 @@ class Checker:
             and not str(row["target"]).startswith(LS_PREFIX)
             and not str(row["blocker"]).startswith(LS_PREFIX)
         ]
-        self.views = tuple(views)
+        self.manual = [e for e in db.events(desktop) if not e.auto]
         self._rows: dict[tuple[str, int], dict] = {}
         self._states: dict[int, dict] = {}
         self.checked = 0
@@ -121,6 +130,9 @@ class Checker:
 
     def exportable(self, step: int) -> bool:
         return self.step_type(step) not in SKIP_STEP_TYPES
+
+    def log_steps(self) -> list[int]:
+        return [s for s in sorted(self.steps) if self.exportable(s)]
 
     # -- the state machine, folded by hand --------------------------------- #
     def _effect(self, target: str, verb: str) -> Optional[tuple[str, str]]:
@@ -163,6 +175,12 @@ class Checker:
             slot[attr] = value
             if attr == "state" and value == REMOVED and slot["placement"] == IN_CHASSIS:
                 slot["placement"] = ON_BENCH
+        # a hand-written event corrects the derived log; it never replaces it
+        for event in sorted((e for e in self.manual if e.step <= step),
+                            key=lambda e: e.step):
+            slot = frame.get(event.target)
+            if slot is not None and event.attr in ("state", "placement"):
+                slot[event.attr] = event.new
         self._cascade(frame, removed_at)
         self._states[step] = frame
         return frame
@@ -196,6 +214,10 @@ class Checker:
                         slot["placement"] = ON_BENCH
                     slot["left_with"] = node
                     stack.append(child)
+
+    def bare_state(self, step: int) -> dict[str, str]:
+        """The folded state as ``key -> state``, for comparing two moments."""
+        return {k: v["state"] for k, v in self.state_at(step).items()}
 
     # -- the constraint graph ---------------------------------------------- #
     def _blocker_state(self, frame: dict[str, dict], blocker: str) -> Optional[str]:
@@ -236,38 +258,54 @@ class Checker:
                    else VERB_FROM_STATES.get(verb))
         return allowed is None or slot["state"] in allowed
 
-    def legal(self, step: int) -> set[tuple[str, str]]:
-        """The full legal-action set at the state after ``step``."""
-        frame = self.state_at(step)
-        out: set[tuple[str, str]] = set()
-        for key in self.instances:
-            for verb in self.tax.verbs:
-                if self.applies(key, verb, frame) and not self.unmet(verb, key, frame):
-                    out.add((verb, key))
+    def _candidates(self, frame: dict[str, dict]) -> list[tuple[str, str]]:
+        out = [(verb, key) for key in self.instances for verb in self.tax.verbs
+               if self.applies(key, verb, frame)]
         cables = {e["blocker"] for e in self.edges
                   if str(e["blocker"]).startswith(CABLE_PREFIX)}
         cables |= {k for k in frame if k.startswith(CABLE_PREFIX)}
         for key in cables:
             current = self._blocker_state(frame, key) or "routed"
-            if current in VERB_FROM_STATES["release"] and not self.unmet(
-                    "release", key, frame):
-                out.add(("release", key))
+            if current in VERB_FROM_STATES["release"]:
+                out.append(("release", key))
         return out
+
+    def permitted(self, step: int) -> set[tuple[str, str]]:
+        """What no recorded constraint forbids -- an upper bound, never a truth."""
+        frame = self.state_at(step)
+        return {(v, t) for v, t in self._candidates(frame)
+                if not self.unmet(v, t, frame)}
+
+    def blocked(self, step: int) -> set[tuple[str, str]]:
+        """What the graph certainly forbids at this state."""
+        frame = self.state_at(step)
+        return {(v, t) for v, t in self._candidates(frame)
+                if self.unmet(v, t, frame)}
 
     def successful_actions(self, step: int) -> list:
         return [a for a in self.actions
                 if a.step == step and a.result == "success"
                 and self.exportable(a.step)]
 
+    def named(self, step: int) -> list:
+        return [a for a in self.successful_actions(step)
+                if _cls_of(self.instances, a.target) is not None]
+
+    def demonstrated(self, after: int) -> Optional[tuple[int, Any]]:
+        for step in self.log_steps():
+            if step > after and self.named(step):
+                return step, self.named(step)[0]
+        return None
+
     # -- dispatch ----------------------------------------------------------- #
     def check(self, record: dict) -> None:
-        spec = record.get("answer_check")
+        self._check_common(record)
+        spec = record["label"].get("answer_check")
         if not isinstance(spec, dict) or "type" not in spec:
             _fail(record, "carries no answer_check block")
         handler = getattr(self, f"_check_{spec['type']}", None)
         if handler is None:
             _fail(record, f"answer_check type {spec['type']!r} has no checker")
-        self._check_common(record)
         handler(record, spec)
         self.checked += 1
         self.by_type[spec["type"]] = self.by_type.get(spec["type"], 0) + 1
@@ -279,25 +317,36 @@ class Checker:
 
     # -- the checks --------------------------------------------------------- #
     def _check_common(self, record: dict) -> None:
-        for field in ("id", "task", "desktop", "step", "view", "images", "question",
-                      "answer", "tier", "verified", "graph_version", "layer",
-                      "template_id", "model_family"):
-            if field not in record:
-                _fail(record, f"missing field {field!r}")
-        if record["desktop"] != self.desktop:
+        if set(record) != {"id", "prompt", "label"}:
+            _fail(record, f"a record is id/prompt/label, not {sorted(record)}")
+        prompt, label = record["prompt"], record["label"]
+        if set(prompt) - {"task", "images", "question", "options"}:
+            _fail(record, f"the prompt side carries {sorted(prompt)}")
+        for field in ("answer", "answer_check", "evidence", "rationale", "desktop",
+                      "step", "view", "layer", "template_id", "tier", "verified",
+                      "graph_version", "model_family"):
+            if field not in label:
+                _fail(record, f"missing label field {field!r}")
+        if label["desktop"] != self.desktop:
             _fail(record, "wrong desktop")
         if LS_PREFIX in repr(record):
             _fail(record, "a Label Studio draft reached the record")
-        if not self.exportable(int(record["step"])):
+        if not self.exportable(int(label["step"])):
             _fail(record, "emitted on a step nobody annotates")
-        for image in record["images"]:
-            if ":" in image or image.startswith("/"):
-                _fail(record, f"image path {image!r} is not dataset-relative")
+        for image in prompt["images"]:
+            if not re.fullmatch(r"img_[0-9a-f]{16}", str(image)):
+                _fail(record, f"image {image!r} is not an opaque id")
+
+    @staticmethod
+    def _answer(record: dict) -> dict:
+        return record["label"]["answer"]
 
     # V1, V8 -- a set of instances, each with a box
     def _check_boxes(self, record: dict, spec: dict) -> None:
-        rows = self.rows(record["view"], record["step"])
-        items = record["answer"][spec["field"]] if spec.get("field") else [record["answer"]]
+        label = record["label"]
+        rows = self.rows(label["view"], label["step"])
+        answer = self._answer(record)
+        items = answer[spec["field"]] if spec.get("field") else [answer]
         seen = set()
         for item in items:
             key = item[spec["id_field"]]
@@ -310,21 +359,27 @@ class Checker:
             if _iou(want, item[spec["box_field"]]) < 0.999:
                 _fail(record, f"{key}: box {item[spec['box_field']]} != {want}")
         if spec.get("exhaustive"):
+            dropped = set(spec.get("exclude_classes") or ())
             expect = {k for k, r in rows.items()
                       if r.get("visibility") in ANSWERABLE and _row_box(r) is not None
-                      and k in self.instances}
+                      and k in self.instances
+                      and self.instances[k].cls not in dropped}
             if seen != expect:
                 _fail(record, f"component set {sorted(seen)} != {sorted(expect)}")
 
-    # V2 states, V12, V14's answerable half, V15
+    # V2 states and counts, V3, V12, V14, V15
     def _check_exact(self, record: dict, spec: dict) -> None:
+        answer = self._answer(record)
         for field, expected in self._expected(record, spec).items():
-            if record["answer"].get(field) != expected:
-                _fail(record, f"{field}: {record['answer'].get(field)!r} != {expected!r}")
+            if field not in spec.get("fields", [field]):
+                continue
+            if answer.get(field) != expected:
+                _fail(record, f"{field}: {answer.get(field)!r} != {expected!r}")
 
     def _expected(self, record: dict, spec: dict) -> dict:
         kind = spec.get("derive")
-        step, view = int(record["step"]), record["view"]
+        label = record["label"]
+        step, view = int(label["step"]), label["view"]
         if kind == "instance_state":
             return {"state": self.state_at(step)[spec["instance"]]["state"]}
         if kind == "screw_count":
@@ -336,15 +391,28 @@ class Checker:
                     and frame[key]["state"] == state)
             return {"count": n}
         if kind == "action_slots":
-            actions = self.successful_actions(step)
+            actions = self.named(step)
             if not actions:
                 _fail(record, "a change question on a step with no action")
             first = actions[0]
-            return {"verb": first.verb, "target_instance": first.target,
-                    "target_class": _cls_of(self.instances, first.target),
-                    "tool": first.tool}
+            out = {"verb": first.verb, "target_instance": first.target,
+                   "target_class": _cls_of(self.instances, first.target)}
+            if first.tool not in UNGRADED_TOOLS:
+                out["tool"] = first.tool
+            elif "tool" in spec.get("fields", ()):
+                _fail(record, "an unknown tool must not be a graded field")
+            return out
         if kind == "changed":
-            return {"changed": bool(self.successful_actions(step))}
+            old, new = self.state_at(step - 1), self.state_at(step)
+            events = [{"target": key, "old": old[key]["state"], "new": new[key]["state"]}
+                      for key in sorted(old.keys() & new.keys())
+                      if old[key]["state"] != new[key]["state"]]
+            if spec.get("step_type") == "dupli" or (
+                    self.steps.get(step) is not None and self.steps[step].dupli):
+                if events:
+                    _fail(record, "a dupli step whose state actually moved")
+                return {"changed": False, "events": []}
+            return {"changed": bool(events), "events": events}
         if kind == "answerable":
             row = self.rows(view, step).get(spec["instance"])
             if row is None:
@@ -362,76 +430,158 @@ class Checker:
             return {"state": self.state_at(step)[spec["instance"]]["state"],
                     "best_view": spec["answer_view"]}
         if kind == "same_moment":
-            return {"same_moment": bool(spec["same_moment"])}
+            # derived, not copied: two folded states, compared
+            other = int(spec["other_step"])
+            return {"same_moment": self.bare_state(step) == self.bare_state(other)}
         _fail(record, f"unknown derivation {kind!r}")
         return {}
 
     # V4
     def _check_feasibility(self, record: dict, spec: dict) -> None:
-        step = int(record["step"])
-        frame = self.state_at(spec.get("state_after", step))
+        label = record["label"]
+        step = int(spec.get("state_after", label["step"]))
+        frame = self.state_at(step)
         verb, target = spec["verb"], spec["target"]
+        answer = self._answer(record)
         if not self.applies(target, verb, frame):
             _fail(record, f"{verb} {target} does not apply in this state at all")
         bad = self.unmet(verb, target, frame)
-        feasible = not bad
-        if bool(record["answer"]["feasible"]) != feasible:
-            _fail(record, f"feasible {record['answer']['feasible']} != {feasible}")
         blockers = sorted({e["blocker"] for e in bad})
-        if sorted(record["answer"].get("blockers") or []) != blockers:
-            _fail(record, f"blockers {record['answer'].get('blockers')} != {blockers}")
+        if sorted(answer.get("blockers") or []) != blockers:
+            _fail(record, f"blockers {answer.get('blockers')} != {blockers}")
+
+        source = spec.get("truth_source")
+        if source == "demonstrated":
+            # a "yes" is only ever the action the log went on to perform
+            shown = self.demonstrated(step)
+            if shown is None or (shown[1].verb, shown[1].target) != (verb, target):
+                _fail(record, f"{verb} {target} is not what the log demonstrates here")
+            if answer["feasible"] is not True:
+                _fail(record, "a demonstrated action must be feasible")
+            if bad:
+                _fail(record, "the graph forbids what the log demonstrates")
+        elif source in ("graph_blocked", "failed_attempt"):
+            if not bad:
+                _fail(record, "a negative whose blocker set is empty")
+            if answer["feasible"] is not False:
+                _fail(record, "a blocked action must not be feasible")
+            if source == "failed_attempt":
+                attempts = [a for a in self.actions
+                            if a.step == step + 1 and a.result != "success"
+                            and (a.verb, a.target) == (verb, target)]
+                if not attempts:
+                    _fail(record, "no failed attempt at the next step says this")
+        else:
+            _fail(record, f"unknown truth_source {source!r}")
 
     # V5
-    def _check_set(self, record: dict, spec: dict) -> None:
-        got = {(a["verb"], a["target"]) for a in record["answer"][spec["field"]]}
-        want = self.legal(int(record["step"]))
-        if got != want:
-            _fail(record, f"legal set differs: missing {sorted(want - got)}, "
-                          f"extra {sorted(got - want)}")
-        if spec.get("logged_next") is not None:
-            nxt = tuple(spec["logged_next"])
-            if nxt not in want:
-                _fail(record, f"the logged next action {nxt} is not legal here")
+    def _check_bounded_set(self, record: dict, spec: dict) -> None:
+        label = record["label"]
+        step = int(label["step"])
+        answer = self._answer(record)
+        shown = self.demonstrated(step)
+        if shown is None:
+            _fail(record, "a bounded set with nothing demonstrated after it")
+        nxt, action = shown
+        if int(spec["reference_step"]) != nxt:
+            _fail(record, f"reference step {spec['reference_step']} != {nxt}")
+        must = _pairs(answer["must_include"])
+        must_not = _pairs(answer["must_not_include"])
+        upper = _pairs(answer["permitted_upper_bound"])
+        if must != {(action.verb, action.target)}:
+            _fail(record, f"must_include {sorted(must)} is not the demonstrated action")
+        if must_not != self.blocked(step):
+            _fail(record, f"must_not_include differs: "
+                          f"missing {sorted(self.blocked(step) - must_not)}, "
+                          f"extra {sorted(must_not - self.blocked(step))}")
+        if upper != self.permitted(step):
+            _fail(record, f"upper bound differs: "
+                          f"missing {sorted(self.permitted(step) - upper)}, "
+                          f"extra {sorted(upper - self.permitted(step))}")
+        if must & must_not:
+            _fail(record, f"{sorted(must & must_not)} is both required and forbidden")
+        if not must <= upper:
+            _fail(record, "the demonstrated action is outside the upper bound")
 
     # V6
-    def _check_member_of(self, record: dict, spec: dict) -> None:
-        want = self.legal(int(record["step"]))
-        answer = (record["answer"]["verb"], record["answer"]["target"])
-        if answer not in want:
-            _fail(record, f"the reference answer {answer} is not in the legal set")
-        if tuple(spec["reference"]) != answer:
+    def _check_next_action(self, record: dict, spec: dict) -> None:
+        label = record["label"]
+        step = int(label["step"])
+        answer = self._answer(record)
+        shown = self.demonstrated(step)
+        if shown is None:
+            _fail(record, "a next-step question with nothing demonstrated after it")
+        nxt, action = shown
+        if int(spec["reference_step"]) != nxt:
+            _fail(record, f"reference step {spec['reference_step']} != {nxt}")
+        if (answer["verb"], answer["target"]) != (action.verb, action.target):
+            _fail(record, "the answer is not the action the log performed")
+        if tuple(spec["reference"]) != (action.verb, action.target):
             _fail(record, "the reference and the answer disagree")
-        for option in spec.get("options", ()):
+        if answer.get("tool") in UNGRADED_TOOLS and "tool" in spec.get("fields", ()):
+            _fail(record, "an unknown tool must not be a graded field")
+        blocked, permitted = self.blocked(step), self.permitted(step)
+        if _pairs(spec["blocked_actions"]) != blocked:
+            _fail(record, "the materialised blocked set is not the graph's")
+        if _pairs(spec["permitted_upper_bound"]) != permitted:
+            _fail(record, "the materialised upper bound is not the graph's")
+        options = label.get("options")
+        if options is None:
+            return
+        kinds: dict[str, int] = {}
+        for option in options:
             pair = (option["verb"], option["target"])
-            if bool(option.get("legal")) != (pair in want):
-                _fail(record, f"option {pair} is mislabelled")
+            kind = option["kind"]
+            kinds[kind] = kinds.get(kind, 0) + 1
+            if kind == "demonstrated" and pair != (action.verb, action.target):
+                _fail(record, f"option {pair} is not the demonstrated one")
+            if kind == "graph_blocked" and pair not in blocked:
+                _fail(record, f"option {pair} is not blocked")
+            if kind == "permitted_unknown" and (pair not in permitted
+                                                or pair == (action.verb, action.target)):
+                _fail(record, f"option {pair} is not a permitted distractor")
+        if kinds.get("demonstrated") != 1:
+            _fail(record, "an options list needs exactly one demonstrated action")
+        if kinds.get("graph_blocked", 0) < 2:
+            _fail(record, "an options list needs at least two blocked actions")
+        shown_options = record["prompt"].get("options") or []
+        if len(shown_options) != len(options):
+            _fail(record, "the prompt and the label list different options")
+        for prompt_option, option in zip(shown_options, options):
+            if prompt_option["verb"] != option["verb"]:
+                _fail(record, "the prompt options are in another order")
+            if "kind" in prompt_option or "target" in prompt_option:
+                _fail(record, "the prompt options give away which is which")
 
     # V10
-    def _named(self, step: int) -> list:
-        return [a for a in self.successful_actions(step)
-                if _cls_of(self.instances, a.target) is not None]
-
     def _check_history(self, record: dict, spec: dict) -> None:
-        step = int(record["step"])
-        log = [s for s in sorted(self.steps) if self.exportable(s)]
-        happened = [a for s in log if s <= step for a in self._named(s)]
+        label = record["label"]
+        step = int(label["step"])
+        answer = self._answer(record)
+        log = self.log_steps()
+        if any(_cls_of(self.instances, a.target) is None
+               for s in log for a in self.successful_actions(s)):
+            _fail(record, "an exhaustive history on a log with unresolved targets")
+        happened = [a for s in log if s <= step for a in self.named(s)]
         done = {(a.verb, a.target) for a in happened}
-        got = {(a["verb"], a["target"]) for a in record["answer"]["done"]}
+        got = _pairs(answer["done"])
         if got != done:
             _fail(record, f"history differs: missing {sorted(done - got)}, "
                           f"extra {sorted(got - done)}")
-        total = sum(len(self._named(s)) for s in log)
+        total = sum(len(self.named(s)) for s in log)
         remaining = total - len(happened)
-        if record["answer"]["remaining_actions"] != remaining:
-            _fail(record, f"remaining {record['answer']['remaining_actions']} != {remaining}")
+        if answer["remaining_actions"] != remaining:
+            _fail(record, f"remaining {answer['remaining_actions']} != {remaining}")
         share = 0.0 if not total else len(happened) / total
         want = spec["bins"][min(int(share * 4), 3)]
-        if record["answer"]["progress_bin"] != want:
-            _fail(record, f"bin {record['answer']['progress_bin']} != {want}")
+        if answer["progress_bin"] != want:
+            _fail(record, f"bin {answer['progress_bin']} != {want}")
 
     # V16
     def _check_plan(self, record: dict, spec: dict) -> None:
-        frame = {k: dict(v) for k, v in self.state_at(int(record["step"])).items()}
+        label = record["label"]
+        answer = self._answer(record)
+        frame = {k: dict(v) for k, v in self.state_at(int(label["step"])).items()}
         first_bad, violated = None, None
         for i, item in enumerate(spec["plan"]):
             verb, target = item["verb"], item["target"]
@@ -442,16 +592,22 @@ class Checker:
                 break
             self._apply(frame, target, verb)
         valid = first_bad is None
-        if bool(record["answer"]["valid"]) != valid:
-            _fail(record, f"valid {record['answer']['valid']} != {valid}")
-        if record["answer"].get("first_error_index") != first_bad:
-            _fail(record, f"first error {record['answer'].get('first_error_index')} "
-                          f"!= {first_bad}")
+        if bool(answer["valid"]) != valid:
+            _fail(record, f"valid {answer['valid']} != {valid}")
+        if answer.get("first_error_index") != first_bad:
+            _fail(record, f"first error {answer.get('first_error_index')} != {first_bad}")
         if valid:
+            # a valid plan must be one the log actually performed (demonstrated)
+            logged = [(a.verb, a.target) for s in self.log_steps()
+                      if s > int(label["step"]) for a in self.named(s)]
+            wanted = [(i["verb"], i["target"]) for i in spec["plan"]]
+            if logged[:len(wanted)] != wanted:
+                _fail(record, "a valid plan that the log never carried out")
             return
-        if record["answer"].get("violated_edge") != violated:
-            _fail(record, f"violated edge {record['answer'].get('violated_edge')} "
-                          f"!= {violated}")
+        if answer.get("violated_edge") != violated:
+            _fail(record, f"violated edge {answer.get('violated_edge')} != {violated}")
+        if violated is None:
+            _fail(record, "an invalid plan that violates no edge")
 
     def _apply(self, frame: dict[str, dict], target: str, verb: str) -> None:
         effect = self._effect(target, verb)
@@ -469,8 +625,69 @@ class Checker:
 
 
 # --------------------------------------------------------------------------- #
+# the prompt-side leak scan
+# --------------------------------------------------------------------------- #
+#: Words that only ever appear on the label side of a record.
+LEAK_WORDS = ("feasible", "blocker", "must_include", "must_not_include",
+              "permitted_upper_bound", "graph_version", "verified", "truth_source",
+              "answer_check", "occluded_full", "out_of_view", "in_chassis",
+              "on_bench", "graph_blocked", "demonstrated", LS_PREFIX)
+#: A frame's position in the teardown, which several tasks ask the model to infer.
+STEP_PATTERNS = (re.compile(r"\bs\d{3}\b"), re.compile(r"\bstep\s+\d+", re.I),
+                 re.compile(r"\bD\d{2}\b"))
+#: An instance key -- `psu.01`, `screw.motherboard.03` -- rather than its wording.
+INSTANCE_KEY = re.compile(r"\b[a-z_]+(?:\.[a-z_0-9]+)*\.\d{2,}\b")
+
+
+def prompt_strings(record: dict) -> list[str]:
+    """Every string a model would be shown."""
+    out = [str(record["prompt"].get("question") or "")]
+    out.extend(str(i) for i in record["prompt"].get("images") or [])
+    for option in record["prompt"].get("options") or []:
+        out.extend(str(v) for v in option.values())
+    return out
+
+
+def scan_prompt_leaks(records: Iterable[dict]) -> list[str]:
+    """One line per prompt that gives away part of its own -- or a sibling's -- label.
+
+    Three families, and every one of them was reachable before the prompt/label
+    split: a path or an id that spells the step, a label-side word, and a raw
+    instance key (which carries an ordinal, and an ordinal is most of the answer
+    to "how many of these are there?").
+    """
+    problems: list[str] = []
+    for record in records:
+        answer = json_dumps(record["label"]["answer"])
+        for text in prompt_strings(record):
+            for pattern in STEP_PATTERNS:
+                if pattern.search(text):
+                    problems.append(f"{record['id']}: prompt names a step/desktop: "
+                                    f"{text[:80]!r}")
+            for word in LEAK_WORDS:
+                if word in text:
+                    problems.append(f"{record['id']}: prompt uses the label word "
+                                    f"{word!r}")
+            for hit in INSTANCE_KEY.findall(text):
+                if hit in answer:
+                    problems.append(f"{record['id']}: prompt names {hit!r}, "
+                                    f"which is in its own answer")
+    return problems
+
+
+def json_dumps(value: Any) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=False)
+
+
+# --------------------------------------------------------------------------- #
 # small helpers
 # --------------------------------------------------------------------------- #
+def _pairs(items: Iterable[dict]) -> set[tuple[str, str]]:
+    return {(i["verb"], i["target"]) for i in items}
+
+
 def _cls_of(instances: dict, target: str) -> Optional[str]:
     if target.startswith(CABLE_PREFIX):
         return "cable"

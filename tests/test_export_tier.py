@@ -92,15 +92,15 @@ def test_one_unverified_row_takes_the_confirmation_off_the_frame(db, tax, tmp_pa
     """... and with it every perception question about that frame.
 
     V1 reads the truth table, so an unconfirmed frame has nothing to answer
-    with; V5 reads the state machine and the graph, so it still speaks -- and
-    says ``verified: false`` while keeping the view's ``gold`` tier, which is
-    the distinction this file exists for.
+    with; V10 reads the step log, so it still speaks -- and says
+    ``verified: false`` while keeping the view's ``gold`` tier, which is the
+    distinction this file exists for.
     """
     db.upsert_instance(InstanceRec(key="chassis.01", desktop=DESKTOP, cls="chassis"))
     db.put_compiled(FrameKey(DESKTOP, 1, VIEW), "chassis.01", encode_rle(PSU_MASK),
                     0.0, "visible", "in_chassis", "auto", "h9")
     out = tmp_path / "vlm.jsonl"
-    export_vlm(db, tax, [DESKTOP], VIEW, str(out), tasks=("V1", "V5"))
+    export_vlm(db, tax, [DESKTOP], VIEW, str(out), tasks=("V1", "V10"))
     first = [r for r in _records(out) if r["step"] == 1]
     assert first and not [r for r in first if r["task"] == "V1"]
     assert first[0]["verified"] is False

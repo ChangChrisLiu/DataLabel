@@ -1,18 +1,28 @@
 """The VLM question/answer export -- the P0 task set of spec 8.2.
 
-One JSON object per line::
+Two files per view. The JSONL, one record per line::
 
-    {"id", "task", "layer", "template_id", "desktop", "model_family",
-     "chassis_type", "step", "view", ("views",) "images", "question", "answer",
-     "answer_check", "evidence", "rationale", "tier", "verified",
-     "graph_version", ("negative",)}
+    {"id",
+     "prompt": {"task", "images", "question", ["options"]},
+     "label":  {"answer", "answer_check", "evidence", "rationale", "desktop",
+                "step", "view", ["views"], "layer", "template_id", "tier",
+                "verified", "graph_version", "model_family", "chassis_type",
+                ["options"], ["negative"], ["truth_source"]}}
+
+and, beside it, ``<name>.images_manifest.jsonl``, which maps each opaque image
+id back to its dataset-relative path.
+
+**Nothing on the prompt side may reveal an answer.** The images a prompt names
+are opaque ids -- a salted hash of desktop, view and step -- because
+``scan/D13/s017.png`` answers "how far along is this teardown?" before the model
+has looked at the picture, and half the P0 set asks exactly that. The prompt
+carries no step, no view, no desktop and no instance key; the manifest and the
+label side carry all of it.
 
 Twelve tasks -- ``V1 V2 V3 V4 V5 V6 V8 V10 V12 V14 V15 V16`` -- each generated
 by one function in :mod:`tda.core.export.vlm_tasks`, each carrying an
 ``answer_check`` block that says how an independent checker re-derives the
-answer. **A question whose answer cannot be checked by program is not emitted**,
-which is the whole reason this dataset renders its text from structured labels
-instead of asking a model to write it.
+answer. **A question whose answer cannot be checked by program is not emitted.**
 
 ``tier`` is the **view's** annotation standard (spec 8.1: scanner and OAK1 gold,
 OAK2 silver, RealSense bronze) and is the same for every record of one file;
@@ -23,18 +33,26 @@ Perception (V1, V2, V8, V12, V14, V15) is emitted **only from verified frames**
 and only about instances with a compiled row in this view; planning and history
 (V3, V4, V5, V6, V10, V16) come from the step log, the state machine and the
 constraint graph, so they exist for every desktop whose steps have been
-imported -- all 66 of them, with no pixel annotated yet.
+imported.
 
-Where the log and the graph contradict each other -- the 18 violations of
-``reports/constraints_report.md`` -- V5, V6 and V16 emit nothing about that
-moment and the summary reports the steps under ``illegal_steps``. A ground
-truth that argues with itself is worse than a gap.
+Three kinds of silence, all reported in the summary rather than guessed at:
+
+* ``illegal_steps`` -- the logged action contradicts the graph (the 18 lines of
+  ``reports/constraints_report.md``), so V4/V5/V6/V16 say nothing about the
+  moment before it;
+* ``excluded_desktops`` -- no graph version, no constraint edges, or an instance
+  table that is mostly unresolved Label Studio drafts: every affordance answer
+  would be "nothing is blocked", which is the most confidently wrong ground
+  truth this export could ship;
+* ``v10_excluded`` -- the log contains actions whose target nobody has resolved,
+  and V10's metric is exhaustive, so an incomplete history is a wrong answer
+  rather than a partial one.
 
 Answers come from the truth table and the state machine, never from the image,
 so every record is reproducible from the database: templates are chosen by a
-checksum of the record id rather than at random, hard negatives are drawn in a
-permutation seeded by desktop and step, and the file is written in a fixed
-frame/task order. Two exports of one database are byte-identical.
+checksum of the record id, hard negatives are drawn in a permutation seeded by
+desktop and step, and the file is written in a fixed frame/task order. Two
+exports of one database are byte-identical, whatever ``PYTHONHASHSEED`` says.
 
 Nothing in a record may depend on a train/val/test split -- there is none yet --
 so each record carries the desktop's ``model_family`` instead, which is what a
@@ -65,16 +83,22 @@ from tda.core.export.coco import (
 )
 from tda.core.export.vlm_tasks import (
     GENERATORS,
+    GRAPH_TASKS,
+    IMAGE_ID_SALT,
     PERCEPTION_TASKS,
     PLANNING_TASKS,
     TASKS,
     FrameData,
     TaskCtx,
     class_label,
+    exclusion_reason,
     illegal_steps,
     instance_label,
+    opaque_image_id,
     pointable_rows,
+    row_verified,
     slim_row,
+    unresolved_action_targets,
 )
 from tda.core.graph import constraint_edges, edges_from_db
 from tda.core.model import FrameKey
@@ -82,6 +106,7 @@ from tda.core.taxonomy import Taxonomy
 from tda.core.truth import TruthService
 
 __all__ = [
+    "GRAPH_TASKS",
     "PERCEPTION_TASKS",
     "PLANNING_TASKS",
     "TASKS",
@@ -89,6 +114,8 @@ __all__ = [
     "export_vlm",
     "graph_version_of",
     "instance_label",
+    "manifest_path",
+    "row_verified",
 ]
 
 
@@ -113,6 +140,17 @@ def graph_version_of(db: Db, desktop: int) -> Optional[str]:
     return None if value is None else str(value)
 
 
+def manifest_path(out_jsonl: str) -> Path:
+    """Where the image manifest of ``out_jsonl`` goes.
+
+    Named after the JSONL rather than a bare ``images_manifest.jsonl``: the CLI
+    writes one file per view into one directory, and a fixed name would have the
+    four views overwrite each other's manifest.
+    """
+    out = Path(out_jsonl)
+    return out.with_name(out.stem + ".images_manifest.jsonl")
+
+
 # --------------------------------------------------------------------------- #
 # loading one view
 # --------------------------------------------------------------------------- #
@@ -134,7 +172,8 @@ def _read_view(db: Db, ctx: DesktopCtx, desktop: int, view: str,
         for inst, r in compiled.items():
             slim[inst]["status"] = r.get("status")
         frames[step] = FrameData(
-            step=step, image=frame_file_name(row, key), verified=verified,
+            step=step, image=frame_file_name(row, key),
+            image_id=opaque_image_id(desktop, view, step), verified=verified,
             rows=slim, pointable=pointable_rows(ctx, slim, only_verified),
         )
         order.append(step)
@@ -172,6 +211,21 @@ def _other_views(db: Db, ctx: DesktopCtx, desktop: int, view: str,
     return out
 
 
+def _write_manifest(path: Path, images: dict[str, tuple[int, str, int, str]]) -> None:
+    """One line per frame a prompt referred to, plus a header naming the salt."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({"type": "header", "salt": IMAGE_ID_SALT,
+                             "algorithm": "sha256", "digest_chars": 16,
+                             "body": "<salt>|<desktop>|<view>|<step>"},
+                            ensure_ascii=False) + "\n")
+        for image_id in sorted(images):
+            desktop, view, step, rel = images[image_id]
+            fh.write(json.dumps({"image": image_id, "path": rel, "desktop": desktop,
+                                 "view": view, "step": step},
+                                ensure_ascii=False) + "\n")
+
+
 # --------------------------------------------------------------------------- #
 # export
 # --------------------------------------------------------------------------- #
@@ -200,18 +254,19 @@ def export_vlm(
     (:func:`tda.core.export.coco.conflicted_steps`), and with it the frames
     involved answer ``verified: false``, so ``only_verified`` drops them.
 
-    Returns ``{"path", "records", "by_task", "by_source", "desktops", "view",
-    "open_conflicts", "illegal_steps"}``, where ``illegal_steps`` maps
-    ``desktop -> {step: [edge, ...]}`` for every step whose logged action the
-    constraint graph says was impossible -- the moments V5/V6/V16 refused to
-    describe.
+    Returns ``{"path", "manifest", "records", "images", "by_task", "by_source",
+    "desktops", "view", "open_conflicts", "illegal_steps", "excluded_desktops",
+    "v10_excluded"}``.
     """
     wanted = [t for t in TASKS if t in set(tasks)]
     records: list[dict] = []
+    images: dict[str, tuple[int, str, int, str]] = {}
     tier = view_tier(view, tax)
     service = truth or TruthService(db, tax)
     open_conflicts = 0
     illegal: dict[int, dict[int, list[str]]] = {}
+    excluded: dict[int, str] = {}
+    v10_excluded: dict[int, list[str]] = {}
     needs_others = "V15" in wanted
 
     for desktop in desktops:
@@ -225,39 +280,61 @@ def export_vlm(
 
         frames, order = _read_view(db, ctx, desktop, view, disputed, only_verified)
         edges = constraint_edges(edges_from_db(db, desktop))
-        bad_steps = illegal_steps(ctx.instances, edges, ctx.actions, tax)
+        stamp = graph_version_of(db, desktop)
+        bad_steps = illegal_steps(ctx, edges, tax)
         if bad_steps:
             illegal[int(desktop)] = {int(k): sorted(set(v))
                                      for k, v in sorted(bad_steps.items())}
+        reason = exclusion_reason(ctx, edges, stamp)
+        if reason:
+            excluded[int(desktop)] = reason
+        unresolved = unresolved_action_targets(ctx)
+        if unresolved:
+            v10_excluded[int(desktop)] = unresolved
+
         tc = TaskCtx(
-            ctx=ctx, view=view, tier=tier, graph_version=graph_version_of(db, desktop),
+            ctx=ctx, view=view, tier=tier, graph_version=stamp,
             meta=db.get_desktop(desktop) or {}, edges=edges, frames=frames,
-            steps=order, illegal=bad_steps,
+            steps=order, illegal=bad_steps, excluded=reason,
             others=(_other_views(db, ctx, desktop, view, only_verified, service)
                     if needs_others else {}),
         )
         for step in order:
             for task in wanted:
+                if reason and task in GRAPH_TASKS:
+                    continue
                 for rec in GENERATORS[task](tc, step):
-                    if only_verified and not rec["verified"]:
+                    if only_verified and not rec["label"]["verified"]:
                         continue
                     records.append(rec)
+        for data in frames.values():
+            images[data.image_id] = (int(desktop), view, data.step, data.image)
+        for other, other_frames in tc.others.items():
+            for data in other_frames.values():
+                images[data.image_id] = (int(desktop), other, data.step, data.image)
 
     out = Path(out_jsonl)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8", newline="\n") as fh:
         for rec in records:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    # only the frames a record actually pointed at belong in the manifest
+    used = {image for rec in records for image in rec["prompt"]["images"]}
+    manifest = manifest_path(out_jsonl)
+    _write_manifest(manifest, {k: v for k, v in images.items() if k in used})
 
     by_task: dict[str, int] = {}
     for rec in records:
-        by_task[rec["task"]] = by_task.get(rec["task"], 0) + 1
+        task = rec["prompt"]["task"]
+        by_task[task] = by_task.get(task, 0) + 1
     by_source = {
         "perception": sum(n for t, n in by_task.items() if t in PERCEPTION_TASKS),
         "planning": sum(n for t, n in by_task.items() if t in PLANNING_TASKS),
     }
     return {
-        "path": str(out), "records": len(records), "by_task": by_task,
-        "by_source": by_source, "desktops": [int(d) for d in desktops],
-        "view": view, "open_conflicts": open_conflicts, "illegal_steps": illegal,
+        "path": str(out), "manifest": str(manifest), "records": len(records),
+        "images": len(used), "by_task": by_task, "by_source": by_source,
+        "desktops": [int(d) for d in desktops], "view": view,
+        "open_conflicts": open_conflicts, "illegal_steps": illegal,
+        "excluded_desktops": excluded, "v10_excluded": v10_excluded,
     }
