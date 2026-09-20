@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from tda.core import db_pose, pose_breaks
 from tda.core.db import Db
 from tda.core.db_backup import DEFAULT_KEEP
 from tda.core.db_status import VIEW_COUNTERS
@@ -331,51 +332,34 @@ def _seed_pose_segments(db: Db, desktop: int, n_steps: int) -> None:
             db.update_pose_segment(desktop, view, segments[-1]["seg"], end_step=n_steps)
 
 
-def _segment_ranges(n_steps: int, boundaries: Iterable[int]) -> list[tuple[int, int]]:
-    """Cut ``1..n_steps`` at every boundary; segment k+1 starts at its boundary."""
-    starts = [1] + [b for b in sorted(set(boundaries)) if 1 < b <= n_steps]
-    return [
-        (start, (starts[i + 1] - 1) if i + 1 < len(starts) else n_steps)
-        for i, start in enumerate(starts)
-    ]
-
-
-def _reference_step(old: Optional[dict], start: int, end: int) -> int:
-    """The segment's reference frame: the stored one while it is still inside it.
-
-    A new segment references its last step -- the most disassembled frame, which
-    spec 4.2 annotates first.
-    """
-    if old is None or old["ref_step"] is None:
-        return end
-    return old["ref_step"] if start <= old["ref_step"] <= end else end
-
-
-def _has_pose_geometry(row: dict) -> bool:
-    """Does this segment carry anything drawn against its reference frame?"""
-    return any(row.get(name) is not None for name in ("corners", "homography", "roi"))
-
-
 def split_pose_segments(db: Db, desktop: int) -> dict[str, int]:
-    """Re-cut every view's pose segments at the desktop's ``reorient`` steps.
+    """Re-cut every view's pose segments: ``reorient`` steps ∪ that view's breaks.
 
-    Flipping the chassis breaks the pose (spec 2.5), so the steps typed
-    ``reorient`` open a new segment: segment ``k+1`` starts *at* the reorient
-    step itself. The function is idempotent and is called by both ``load-index``
-    and ``import-logs``, because either order leaves the same segments behind:
-    it re-derives the whole segment list from the recorded steps every time.
+    Flipping the chassis breaks the pose in all four views at once (spec 2.5),
+    so a step typed ``reorient`` opens a new segment everywhere: segment ``k+1``
+    starts *at* the reorient step itself.  Since v1.5 a view also has breaks of
+    its **own** -- the camera was knocked, or the chassis slid, in front of one
+    lens -- which is why the boundary list is computed per view from the
+    ``accepted`` rows of ``pose_break``.  A reorient step that also carries a
+    manual break is one boundary, not an empty segment between two.
 
-    A segment's ``corners``/``homography``/``roi`` are drawn against its
-    ``ref_step``, so they survive only while that reference frame does. When a
-    new cut pushes the reference out of the segment, the stale geometry is
-    dropped and the loss is recorded in the desktop's ``pose_issues`` meta --
-    shapes anchored to that segment need a second look either way.
+    The function is idempotent and is called by both ``load-index`` and
+    ``import-logs``: it re-derives the whole boundary list from the recorded
+    steps and the stored breaks every time, so re-running either command over a
+    view a human has since cut by hand leaves that cut exactly where it is.
+
+    The rows are moved by :meth:`tda.core.db.Db.apply_recut`, one transaction
+    per view -- keyframes to the segment of their own anchor, the layer order
+    and both ROIs copied into every piece, the chassis corners kept only where
+    the reference step still is, frozen frames queued for a re-check.  What a
+    re-cut could not keep is recorded in the desktop's ``pose_issues`` meta.
 
     Returns ``{view: number of segments}`` for the views that have any.
     """
     reorients = [
         s.step for s in db.steps(desktop) if s.step_type == StepType.REORIENT.value
     ]
+    breaks = db.pose_breaks(desktop, status=pose_breaks.ACCEPTED)
     out: dict[str, int] = {}
     issues: list[str] = []
     for view in VIEWS:
@@ -383,34 +367,42 @@ def split_pose_segments(db: Db, desktop: int) -> dict[str, int]:
         ends = [s["end_step"] for s in segments if s["end_step"] is not None]
         if not ends:
             continue
-        existing = {s["seg"]: s for s in segments}
-        ranges = _segment_ranges(max(ends), reorients)
-        for seg, (start, end) in enumerate(ranges, start=1):
-            old = existing.get(seg)
-            ref = _reference_step(old, start, end)
-            if old is None:
-                db.set_pose_segment(desktop, view, seg, start, end, ref, None, None)
-                continue
-            db.update_pose_segment(
-                desktop, view, seg, start_step=start, end_step=end, ref_step=ref
-            )
-            if old["ref_step"] == ref:
-                continue
-            lost = _has_pose_geometry(old)
-            if lost:
-                db.clear_pose_geometry(desktop, view, seg)
-            # A segment that never had a reference step and carried nothing drawn
-            # against one lost nothing, so it has nothing to report: saying "the
-            # reference step moved from None to 42" only teaches the annotator to
-            # skim this list.
-            if lost or old["ref_step"] is not None:
-                issues.append(_ref_moved(view, seg, old, start, end, ref))
-        if len(existing) > len(ranges):
-            db.delete_pose_segments_from(desktop, view, len(ranges) + 1)
-        out[view] = len(ranges)
+        n_steps = max(ends)
+        bounds = pose_breaks.boundaries(
+            n_steps, reorients, [b["step"] for b in breaks if b["view"] == view])
+        result = db.apply_recut(desktop, view, bounds, n_steps,
+                                annotator="cli:split-pose-segments")
+        issues += _recut_issues(view, result)
+        out[view] = len(result["ranges"])
     if issues:
         add_desktop_issues(db, desktop, "pose_issues", issues)
     return out
+
+
+def _recut_issues(view: str, result: dict) -> list[str]:
+    """The audit lines of one view's re-cut: moved references, discarded rows."""
+    lines = [
+        _ref_moved(view, move["seg"], move["old"], move["start"], move["end"],
+                   move["ref_step"])
+        for move in result["ref_moves"]
+        # A segment that never had a reference step and carried nothing drawn
+        # against one lost nothing, so it has nothing to report: saying "the
+        # reference step moved from None to 42" only teaches the annotator to
+        # skim this list.
+        if move["dropped"] or move["old"].get("ref_step") is not None
+    ]
+    lines += [
+        f"{view} pose segment {d['pose_segment']}: merged back into segment "
+        f"{d['into']}, which kept its own {', '.join(sorted(d['row']))}; the "
+        f"discarded values are in the op log"
+        for d in result["discarded"]
+    ]
+    if result["uncarried"]:
+        lines.append(
+            f"{view}: {len(result['uncarried'])} carried keyframes had been edited "
+            f"and were kept when the break was removed; check their anchors"
+        )
+    return lines
 
 
 def _ref_moved(view: str, seg: int, old: dict, start: int, end: int, ref: int) -> str:
@@ -420,15 +412,19 @@ def _ref_moved(view: str, seg: int, old: dict, start: int, end: int, ref: int) -
     really moved, or geometry drawn against one that is gone either way. A
     segment with no previous reference is worded as what it is, rather than as
     a move "from None".
+
+    The two ROIs are **not** in that loss: they are rectangles in the view's own
+    image rather than geometry drawn against the reference frame, so a re-cut
+    copies them into every piece (:mod:`tda.core.db_pose`).
     """
-    lost = " the stored corners/homography/ROI were dropped;" if _has_pose_geometry(old) \
-        else ""
+    lost = " the stored corners/homography were dropped;" \
+        if db_pose._has_ref_geometry(old) else ""
     moved = (
         f"gave it reference step {ref}" if old["ref_step"] is None
         else f"moved the reference step from {old['ref_step']} to {ref}"
     )
     return (
-        f"{view} pose segment {seg}: a reorient moved the range to [{start}-{end}] and "
+        f"{view} pose segment {seg}: a new cut moved the range to [{start}-{end}] and "
         f"{moved};{lost} shapes anchored to it need re-checking"
     )
 

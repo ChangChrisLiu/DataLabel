@@ -82,6 +82,20 @@ def _has_ref_geometry(row: dict) -> bool:
     return any(row.get(name) is not None for name in ("corners", "homography"))
 
 
+def _needs_repair(rows: list[dict]) -> bool:
+    """Is a stored segment row inconsistent with itself?
+
+    A reference step outside the segment's own range (or missing) means the
+    shapes of that segment are drawn against a frame that is not in it. It used
+    to be repaired as a side effect of a cut always rewriting every row; now
+    that an unchanged cut writes nothing, it is a reason to write on its own.
+    """
+    return any(r.get("start_step") is None or r.get("end_step") is None
+               or r.get("ref_step") is None
+               or not (int(r["start_step"]) <= int(r["ref_step"]) <= int(r["end_step"]))
+               for r in rows)
+
+
 def _keeper_of(by_seg: dict, sources: list[int], start: int, end: int) -> Optional[int]:
     """Which of several merging segments gives the merged one its reference frame.
 
@@ -448,10 +462,13 @@ class PoseSegmentMixin:
         plan = recut_plan(old, [int(b) for b in new_bounds],
                           int(n_steps) if n_steps else 0)
         summary = _empty_recut(plan)
-        if not old or not plan.changed:
+        if not old or not (plan.changed or _needs_repair(rows)):
             # A view with no segments (nothing photographed it) and a view that
             # is already cut like this are the same answer: there is nothing to
-            # re-key, so nothing is written and nothing is queued.
+            # re-key, so nothing is written and nothing is queued. A stored row
+            # whose reference step is not inside its own range is the exception:
+            # the ranges may be right while the frame the shapes are drawn
+            # against is not, and that is repaired here as it always was.
             return summary
 
         old_starts = {start for _seg, start, _end in plan.old if start > 1}
@@ -470,6 +487,11 @@ class PoseSegmentMixin:
                                   for c in carried]
             summary["uncarried"] = self._drop_carried(desktop, view, gone)
             affected = plan.affected_steps()
+            for move in summary["ref_moves"]:
+                # dropping the corners changes the registration of every frame
+                # of that segment, whether or not its range moved
+                if move["dropped"]:
+                    affected.update(range(move["start"], move["end"] + 1))
             summary["rechecked"] = self.add_rechecks(
                 desktop, view,
                 [s for s in self.frozen_steps(desktop, view) if s in affected])
