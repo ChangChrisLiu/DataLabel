@@ -109,7 +109,16 @@ def main(argv=None) -> int:
     ap.add_argument("--before", action="store_true",
                     help="one reference frame, no union and no pad -- the way "
                          "it was measured before the review")
+    ap.add_argument("--combine", default=None,
+                    choices=("union", "trim", "median"),
+                    help="override how an OAK segment's measurements are "
+                         "combined, for a by-eye sweep")
     args = ap.parse_args(argv)
+
+    if args.combine is not None:
+        from tda.core import cache as cache_mod
+
+        cache_mod.OAK_COMBINE = args.combine
 
     conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row

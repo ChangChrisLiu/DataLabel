@@ -267,3 +267,73 @@ def test_a_view_with_no_detector_costs_no_colour_conversion():
     grey = np.full(HW, 120, np.uint8)
     assert measure_roi(grey, "rs") is None
     assert suggest_roi(grey, "rs") == full_frame(HW[1], HW[0])
+
+
+# --------------------------------------------------------------------------- #
+# how an OAK segment's measurements are combined (round 2)
+# --------------------------------------------------------------------------- #
+def test_the_median_needs_two_frames_to_agree_before_it_moves():
+    """One frame that grew into the bench does not drag the answer with it."""
+    from tda.core.cache import combine_boxes
+
+    good = [(1000, 300, 3000, 2000), (1020, 320, 2980, 1990)]
+    grew = (200, 100, 3900, 2900)
+
+    assert combine_boxes(good + [grew], "union") == (200, 100, 3900, 2900)
+    assert combine_boxes(good + [grew], "median") == (1000, 300, 3000, 2000)
+    assert combine_boxes(good + [grew], "trim") == (1000, 300, 3000, 2000)
+
+
+def test_the_median_still_recovers_a_frame_that_clipped():
+    """Two of three agreeing on a wider edge is enough to take it."""
+    from tda.core.cache import combine_boxes
+
+    boxes = [(1000, 300, 3000, 2000), (1000, 300, 2500, 2000),
+             (990, 290, 3010, 2010)]
+    assert combine_boxes(boxes, "median") == (1000, 300, 3000, 2000)
+
+
+def test_fewer_than_three_measurements_have_no_median():
+    from tda.core.cache import combine_boxes
+
+    two = [(10, 10, 20, 20), (12, 8, 30, 19)]
+    assert combine_boxes(two, "median") == (10, 8, 30, 20)      # the union
+    assert combine_boxes(two[:1], "median") == (10, 10, 20, 20)  # itself
+    with pytest.raises(ValueError):
+        combine_boxes([], "median")
+
+
+def test_the_scanner_still_unions_and_oak_does_not():
+    """The two views fail differently, so they are combined differently."""
+    from tda.core import cache as cache_mod
+
+    assert cache_mod.OAK_COMBINE == "median"
+    img = bench()
+    # big enough that the scanner's own area band accepts the union too
+    seen = [(210, 130, 700, 560), (180, 110, 730, 590), (220, 140, 690, 550)]
+    for view, wanted in (("scan", "union"), ("oak1", cache_mod.OAK_COMBINE)):
+        answers = iter(seen)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(cache_mod, "measure_roi", lambda i, v: next(answers))
+            got = cache_mod.suggest_roi_over([img, img, img], view)
+        tight = cache_mod.combine_boxes(seen, wanted)
+        if view == "scan":
+            assert got == tight
+        else:
+            assert got[0] <= tight[0] and got[2] >= tight[2]   # padded outwards
+
+
+def test_the_oak_margin_is_capped_in_pixels():
+    """12 % of a 2,500 px box is 300 px a side, which is bench, not a rail."""
+    from tda.core.cache import OAK_PAD_MAX_PX, OAK_ROI_PAD, _pad_oak
+
+    small = _pad_oak((1000, 800, 1600, 1300), 4032, 3040)
+    assert 1000 - small[0] == round(OAK_ROI_PAD * 600)      # under the cap
+
+    big = _pad_oak((600, 300, 3600, 2800), 4032, 3040)
+    assert 600 - big[0] == OAK_PAD_MAX_PX
+    assert big[1] == 300 - OAK_PAD_MAX_PX
+    assert big[2] == min(4032, 3600 + OAK_PAD_MAX_PX)
+
+    edge = _pad_oak((10, 10, 4020, 3030), 4032, 3040)
+    assert edge == (0, 0, 4032, 3040)                        # clamped
