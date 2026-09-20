@@ -416,6 +416,42 @@ def test_every_scene_is_reproduced_from_the_seed():
     assert first == [name for name, _ in scenes()]
 
 
+@pytest.mark.parametrize("name", list(BIG_SIZES))
+def test_a_full_size_row_is_written_through_the_real_truth_path(name: str):
+    """The windowed encode of a **compiled row**, on a canvas that is not tiny.
+
+    Everything else in the suite that exercises
+    :func:`tda.core.truth_conflicts.row_values` does it at 64x64, where a
+    window is a handful of pixels and the outside-the-window check has almost
+    nothing to look at.  The window ``row_values`` passes is the compiler's
+    own, on the canvas the annotator works at, and this is where a 12 MP
+    off-by-one would show: ``CHECK_ENCODE_WINDOW`` is on for the whole suite
+    (``tests/conftest.py``), so every one of these encodes is verified against
+    the mask it was given, and the run lengths are compared with the ones the
+    unwindowed encode produces.
+    """
+    from tda.core import masks as masks_mod
+    from tda.core.truth_conflicts import GEOM_MASK, row_values
+
+    assert masks_mod.CHECK_ENCODE_WINDOW is True, "tests/conftest.py sets this"
+    compiled = compile_scene(dict(big_scenes())[name])
+    assert compiled.key is not None
+
+    checked = 0
+    for instance, inst in sorted(compiled.instances.items()):
+        values = row_values(inst)
+        if inst.visible is None:
+            assert values.visible_rle is None
+            continue
+        assert values.geom_type == GEOM_MASK
+        assert inst.window is not None, f"{instance} was written without a window"
+        assert values.visible_rle == masks.encode_rle(inst.visible), instance
+        assert values.visible_rle["size"] == [inst.visible.shape[0],
+                                              inst.visible.shape[1]]
+        checked += 1
+    assert checked >= 2, f"only {checked} mask rows on {name}"
+
+
 if __name__ == "__main__":  # pragma: no cover - the regeneration entry point
     import sys
 

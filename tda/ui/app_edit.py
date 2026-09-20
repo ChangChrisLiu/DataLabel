@@ -264,6 +264,7 @@ class EditMixin:
         anyway, and cancelling says so at the moment it becomes true.
         """
         self._roi_dismissed.clear()
+        self._roi_awaiting = False
         self.roi_proposer.cancel()
 
     def _sync_editing_layer(self, repaint: bool = True) -> None:

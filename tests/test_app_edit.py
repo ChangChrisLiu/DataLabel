@@ -1161,3 +1161,91 @@ def test_committing_an_instance_clears_even_a_foreign_copy(qapp, tmp_path):
         assert second.sidecar.pending_for(key, instance) is None
     finally:
         close_window(second)
+
+
+# --------------------------------------------------------------------------- #
+# a measurement nobody is waiting for any more (round 2, S3)
+# --------------------------------------------------------------------------- #
+def _late_answer(win: MainWindow, box=(1, 1, 60, 60), segment=None) -> None:
+    """Deliver a proposal the way the worker's queued signal would."""
+    win._on_roi_proposed({"segment": segment if segment is not None
+                          else win._roi_segment_key(),
+                          "box": box, "ms": 1.0})
+
+
+def test_an_answer_in_flight_at_the_accept_never_comes_back(qapp, tmp_path):
+    """request -> drag -> Enter -> Shift+R -> the late answer lands.
+
+    Every other guard passes it: same segment, nothing dragged since the tool
+    was re-armed, the edit is open. Only the worker's own token says it is
+    stale, and only because ``accept_roi`` cancelled it.
+    """
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win.on_roi_box((9.0, 11.0, 44.0, 47.0))
+        win.act_commit()                       # Enter: the annotator's box
+        stored = tuple(win.roi())
+        assert stored == (9, 11, 44, 47)
+
+        win.act_edit_roi()                     # Shift+R: armed again
+        assert win.roi_editing is True
+        _late_answer(win)                      # ... and the old answer arrives
+
+        assert tuple(win.roi_draft) == stored, "a stale measurement was drawn"
+        win.act_commit()
+        assert tuple(win.roi()) == stored
+    finally:
+        close_window(win)
+
+
+def test_a_dismissal_cancels_the_measurement_too(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.act_clear_edit()                   # Esc: "not now"
+        assert win.roi_editing is False
+        assert win.roi_proposer.queued() == 0
+        _late_answer(win)
+        assert win.roi_editing is False        # nothing re-armed it
+        assert win.roi() is None
+    finally:
+        close_window(win)
+
+
+def test_an_answer_for_a_segment_whose_range_moved_is_rejected(qapp, tmp_path):
+    """The identity is the five-tuple, so a re-cut invalidates it (S2)."""
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        before = tuple(win.roi_draft) if win.roi_draft else None
+        key = win._roi_segment_key()
+        assert len(key) == 5 and key == win.roi_key()
+
+        moved = (key[0], key[1], key[2], key[3], (key[4] or 0) + 1)
+        _late_answer(win, box=(2, 2, 61, 61), segment=moved)
+
+        assert (tuple(win.roi_draft) if win.roi_draft else None) == before
+    finally:
+        close_window(win)
+
+
+def test_a_reset_leaves_no_measurement_that_can_land(qapp, tmp_path):
+    """What an S1 Apply or a pose re-cut does: the segments themselves moved."""
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win.act_commit()
+        win.reset_roi_proposals()
+        assert win.roi_proposer.queued() == 0
+        _late_answer(win)
+        assert win.roi_editing is False
+    finally:
+        close_window(win)
+
+
+def test_the_roi_worker_does_not_outlive_the_window(qapp, tmp_path):
+    win = open_window(tmp_path)
+    proposer = win.roi_proposer
+    win.wait_for_roi_proposal()
+    close_window(win)
+    assert proposer.is_running is False

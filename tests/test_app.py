@@ -948,3 +948,80 @@ def test_the_log_records_every_sam_prompt(window):
 
     window.act_cycle_candidate()
     assert "sam candidate" in log_text(window)
+
+
+# --------------------------------------------------------------------------- #
+# a held line delays the next one, it does not swallow it (round 2, Minor 2)
+# --------------------------------------------------------------------------- #
+def _quiet(win) -> None:
+    """Let the ROI measurement land and settle, so nothing else writes a line."""
+    win.wait_for_roi_proposal()
+    if win.roi_editing:
+        win.act_clear_edit()
+    QApplication.processEvents()
+
+
+def _wait_for_status(win, wanted: str, timeout: float = 5.0) -> str:
+    import time as _time
+
+    deadline = _time.perf_counter() + timeout
+    while _time.perf_counter() < deadline and win.status_message() != wanted:
+        QApplication.processEvents()
+        _time.sleep(0.01)
+    return win.status_message()
+
+
+def test_a_line_held_out_is_shown_when_the_hold_expires(window):
+    """The layout warning is held for four seconds and the ROI answers inside it.
+
+    Before this, "could not find the chassis, drag a box" -- the one line that
+    explains why no rectangle appeared -- was simply dropped.
+    """
+    _quiet(window)
+    window.report("the saved dock layout was reset", hold_ms=60)
+    window.report("could not find the chassis")
+
+    assert window.status_message() == "the saved dock layout was reset"
+    assert _wait_for_status(window, "could not find the chassis") == \
+        "could not find the chassis"
+
+
+def test_only_the_last_line_the_hold_turned_away_comes_back(window):
+    _quiet(window)
+    window.report("held", hold_ms=60)
+    window.report("first dropped")
+    window.report("second dropped")
+
+    assert _wait_for_status(window, "second dropped") == "second dropped"
+
+
+def test_a_line_shown_after_the_hold_is_not_overwritten_by_the_replay(window):
+    """Anything newer that got through clears what was waiting."""
+    import time as _time
+
+    _quiet(window)
+    window.report("held", hold_ms=40)
+    window.report("dropped")
+    _time.sleep(0.09)
+    window.report("newer, and it got through")
+    assert window.status_message() == "newer, and it got through"
+
+    QApplication.processEvents()
+    _time.sleep(0.05)
+    QApplication.processEvents()
+    assert window.status_message() == "newer, and it got through"
+
+
+def test_clearing_the_status_bar_drops_what_was_waiting(window):
+    """An empty text is a frame change, which every hint is about."""
+    import time as _time
+
+    _quiet(window)
+    window.report("held", hold_ms=40)
+    window.report("dropped")
+    window.report("")
+    assert window.status_message() == ""
+
+    _time.sleep(0.09)
+    QApplication.processEvents()
+    assert window.status_message() == ""

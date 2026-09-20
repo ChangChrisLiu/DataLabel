@@ -102,6 +102,7 @@ class RoiMixin:
         self.forget_draft_ghost()
         stored = self.roi()
         self._roi_dragged = False
+        self._roi_awaiting = stored is None
         self._roi_wanted = self._roi_segment_key()
         if stored is not None:
             self.roi_draft = tuple(int(v) for v in stored)
@@ -172,17 +173,30 @@ class RoiMixin:
     def _on_roi_proposed(self, payload: object) -> None:
         """A measurement came back: show it, unless it is no longer wanted.
 
-        Three ways it can be stale and all three are ordinary: the annotator
-        left the segment, accepted or cancelled the ROI edit, or dragged their
-        own rectangle while the worker was reading three 12 MP frames. A
+        Four ways it can be stale and all four are ordinary: the annotator left
+        the segment, accepted the rectangle, dismissed the proposal, or dragged
+        their own rectangle while the worker was reading three 12 MP frames. A
         rectangle a human drew is never replaced by one a detector measured.
+
+        ``_roi_awaiting`` is the one that catches the nastiest case, because
+        every other guard passes it: request, drag, ``Enter``, ``Shift+R``, and
+        *then* the old answer lands -- same segment, nothing dragged since the
+        tool was re-armed, the edit open. The tool was re-armed over a segment
+        that now **has** a rectangle, so it asked for nothing, so there is
+        nothing for an answer to be an answer to.
+        :meth:`tda.ui.app_roi_worker.RoiProposer.cancel` stops the worker
+        delivering it at all; this is the same thing said at the point of use,
+        where a payload that arrives by any other route is also turned away.
         """
         if not isinstance(payload, dict) or not self.roi_editing:
+            return
+        if not getattr(self, "_roi_awaiting", False):
             return
         if payload.get("segment") != getattr(self, "_roi_wanted", None):
             return
         if getattr(self, "_roi_dragged", False):
             return
+        self._roi_awaiting = False
         box = payload.get("box")
         image = self.session.image() if compat.is_open(self.session) else None
         if box is None or image is None:
@@ -301,6 +315,7 @@ class RoiMixin:
         # since, so every guard in _on_roi_proposed would let it through the
         # next time the tool is armed.
         self.roi_proposer.cancel()
+        self._roi_awaiting = False
         accepted = tuple(self.db.set_pose_segment_roi(
             int(key.desktop), str(key.view), int(segment), list(self.roi_draft),
             annotator=self.annotator, hw=hw,
@@ -327,6 +342,7 @@ class RoiMixin:
             return
         self.roi_editing = False
         self.roi_draft = self.roi()
+        self._roi_awaiting = False
         self.roi_proposer.cancel()   # nobody is waiting for it any more
         dismissed = self.roi_key()
         if dismissed is not None:
