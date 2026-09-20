@@ -86,6 +86,11 @@ class AssistMixin:
         self.roi_proposer.sigProposed.connect(self._on_roi_proposed)
         self.roi_proposer.sigFailed.connect(self.report_error)
         self.assist_result: Optional[dict] = None
+        #: What the comparison last asked for was *about* -- see
+        #: :meth:`_assist_subject`.  A frame re-announced for any other reason
+        #: (a commit, an undo, ``F5``) asks the same question again, and at
+        #: 12 MP the answer costs 130 ms to arrive at twice.
+        self._assist_asked: Optional[tuple] = None
         self._unexplained: dict[int, list[Box]] = {}
         #: Steps confirmed while the comparison had not landed (spec 4.4).
         self.unanalysed: set[int] = set()
@@ -190,9 +195,31 @@ class AssistMixin:
         self.set_sam_instance(getattr(self.session, "editing_instance", None))
         if not self.roi_editing:
             self.canvas.set_rubber_band(None)
+        if self._assist_subject() == self._assist_asked:
+            # The same two frames, inside the same ROI: the difference between
+            # them cannot have changed, so the comparison on hand (or the one
+            # on its way) is still the answer.  A **commit** arrives here --
+            # the session re-announces the frame -- and re-running a 12 MP
+            # comparison because an annotation changed put 130 ms of waiting
+            # into the ``Space`` that followed. What the annotation changes is
+            # which blobs are *explained*, and that is a re-split of blobs
+            # already in hand.
+            self.re_explain()
+            return
         self.assist_result = None
         self.heat_item.setVisible(False)
         self.request_assist()
+
+    def _assist_subject(self) -> Optional[tuple]:
+        """What a comparison would be *about*: the frame, its neighbour, the ROI.
+
+        Everything the difference map reads, and nothing the annotator can
+        change by drawing.  ``None`` when there is no frame to compare.
+        """
+        if not compat.is_open(self.session):
+            return None
+        return (self.session.current(), compat.task_neighbour(self.session),
+                self.roi())
 
     def request_assist(self) -> None:
         """Compare the open frame with its task-card neighbour, off the GUI thread.
@@ -209,6 +236,7 @@ class AssistMixin:
         neighbour = compat.task_neighbour(self.session)
         self.report_neighbour_gap(key, neighbour)
         previous = None if neighbour is None else self._neighbour_pixels(neighbour)
+        self._assist_asked = self._assist_subject()
         self.assist.request(key, image, previous, self.roi(), self.expected_now())
 
     def _neighbour_pixels(self, neighbour: int):

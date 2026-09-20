@@ -111,6 +111,59 @@ def test_the_comparison_is_against_the_task_card_neighbour(window):
     assert payload["key"].step == LAST_STEP - 2
 
 
+def test_a_commit_does_not_compare_the_same_two_frames_again(window):
+    """Drawing changes what is *explained*, never what the difference is.
+
+    A commit makes the session re-announce the frame, which used to throw the
+    comparison away and start it over -- a 12 MP difference map, on two frames
+    that had not changed, whose only effect was to make the ``Space`` that
+    followed wait 130 ms for it.  The blobs are re-split instead.
+    """
+    from app_scene import cell
+
+    window.session.goto(LAST_STEP - 2)
+    before = wait_for_assist(window)
+    asked: list = []
+    real = window.assist.request
+    window.assist.request = lambda *a, **k: (asked.append(a[0]), real(*a, **k))[1]
+
+    instance = str(window.session.task_card()[0]["instance"])
+    window.on_request_edit(instance)
+    window.set_editing_mask(cell(3), undoable=True)
+    window.act_commit()
+    if window.scope_bar.isVisible() or window.warn_bar.isVisible():
+        window.act_commit()
+    QApplication.processEvents()
+
+    assert window.session.editing_instance is None, "the commit was refused"
+    assert asked == [], f"the commit asked for {len(asked)} more comparison(s)"
+    assert window.assist_result is not None, "the commit threw the comparison away"
+    assert window.assist_result["key"] == before["key"]
+    assert window.assist_result["blobs"] == before["blobs"]
+
+    # ... and stepping to another frame does start a new one
+    window.act_clear_edit()
+    window.session.clear_edit()
+    window.session.goto(LAST_STEP - 3)
+    assert len(asked) == 1, "a real frame change did not start a comparison"
+
+
+def test_a_new_roi_starts_a_new_comparison(window):
+    """The ROI is what the difference map looks *inside*: a new one is a new answer."""
+    window.session.goto(LAST_STEP - 2)
+    wait_for_assist(window)
+    asked: list = []
+    real = window.assist.request
+    window.assist.request = lambda *a, **k: (asked.append(a[3]), real(*a, **k))[1]
+
+    window.start_roi_edit()
+    window.on_roi_box(4.0, 4.0, 40.0, 40.0)
+    window.accept_roi()
+    QApplication.processEvents()
+    assert asked and asked[-1] is not None
+    assert tuple(int(v) for v in asked[-1]) == tuple(int(v) for v in window.roi())
+
+
 def test_the_neighbour_is_read_by_the_worker_when_the_gui_has_not_got_it(window):
     """A timeline click must not decode 12 MP to hand a worker an array.
 
