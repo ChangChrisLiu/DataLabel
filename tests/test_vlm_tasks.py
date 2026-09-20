@@ -152,16 +152,38 @@ def test_the_prompt_side_shows_the_model_nothing_it_must_infer(scene, tmp_path: 
             assert "scan" not in image and "D07" not in image
 
 
+def test_the_record_id_is_opaque_and_the_readable_one_is_label_side(
+    scene, tmp_path: Path
+):
+    """Every harness logs record ids, and the readable one spells the teardown."""
+    from tda.core.export.vlm_tasks import opaque_record_id
+
+    db, tax = scene
+    records = _run(db, tax, tmp_path / "v.jsonl")
+    assert len({r["id"] for r in records}) == len(records)
+    for record in records:
+        readable = record["label"]["readable_id"]
+        assert record["id"] == opaque_record_id(readable)
+        assert record["id"].startswith("rec_") and len(record["id"]) == 20
+        for banned in ("D07", "scan", "s001", S.PSU):
+            assert banned not in record["id"]
+        # V15's two halves are `V15-...` and `V15m-...`, so the task is a prefix
+        assert readable.startswith(record["prompt"]["task"])
+
+
 def test_a_planted_leak_is_caught(scene, tmp_path: Path):
     """The scan has to be able to fail, or it is decoration."""
     db, tax = scene
     records = _run(db, tax, tmp_path / "v.jsonl")
     records[0]["prompt"]["question"] += " (frame s003 of this teardown)"
     records[1]["prompt"]["question"] += f" -- is {S.PSU} feasible?"
+    records[2]["prompt"]["question"] += " look at the oak1 view"
+    records[3]["id"] = records[3]["label"]["readable_id"]  # the un-hashed id
     problems = scan_prompt_leaks(records)
-    assert len(problems) >= 2
-    assert any("step/desktop" in p for p in problems)
+    assert len(problems) >= 4
+    assert any("step/desktop/view" in p for p in problems)
     assert any("label word" in p for p in problems)
+    assert any(p.startswith(records[3]["label"]["readable_id"]) for p in problems)
 
 
 def test_the_manifest_maps_every_opaque_id_back(scene, tmp_path: Path):
@@ -361,8 +383,12 @@ def test_v6_grades_on_the_demonstrated_action_and_the_blocked_rate(
             checker.blocked(record["step"])
         options = entry["label"].get("options")
         if options is None:
+            # late in a teardown nothing is certainly blocked, so the question
+            # is open-ended rather than a choice between unknowns -- and says so
             assert "options" not in entry["prompt"]
+            assert record["answer_check"]["options_kind"] == "open"
             continue
+        assert record["answer_check"]["options_kind"] == "listed"
         with_options += 1
         kinds = [o["kind"] for o in options]
         assert kinds.count("demonstrated") == 1
@@ -473,9 +499,14 @@ def test_a_desktop_with_no_graph_answers_no_affordance_question(tmp_path: Path):
     db.close()
 
 
-def test_a_desktop_that_is_mostly_drafts_answers_no_affordance_question(
-    tmp_path: Path
-):
+def test_a_desktop_that_is_mostly_drafts_is_not_excluded_for_that(tmp_path: Path):
+    """``ls:*`` rows are reference geometry in a parallel table, not missing parts.
+
+    Five real desktops (D13, D18, D19, D24, D33) carry more drafts than resolved
+    instances and 41-49 hard edges each. Counting drafts says nothing about
+    whether the identities are settled, and `DesktopCtx` has already dropped
+    them by the time any question is asked.
+    """
     db = Db(str(tmp_path / "drafts.sqlite"))
     tax = S.build(db, views=(S.VIEW,), verified_steps=())
     from tda.core.model import InstanceRec
@@ -484,7 +515,22 @@ def test_a_desktop_that_is_mostly_drafts_answers_no_affordance_question(
         db.upsert_instance(InstanceRec(key=f"ls:Screw#{n}", desktop=S.DESKTOP,
                                        cls="screw", attrs={"role": "psu"}))
     summary = _export(db, tax, tmp_path / "v.jsonl")
-    assert summary["excluded_desktops"] == {S.DESKTOP: "draft_majority"}
+    assert summary["excluded_desktops"] == {}
+    assert {"V4", "V5", "V6", "V16"} <= set(summary["by_task"])
+    assert "ls:" not in (tmp_path / "v.jsonl").read_text(encoding="utf-8")
+    db.close()
+
+
+def test_a_desktop_whose_edges_are_all_rejected_answers_no_affordance_question(
+    tmp_path: Path
+):
+    db = Db(str(tmp_path / "rejected.sqlite"))
+    tax = S.build(db, views=(S.VIEW,), verified_steps=())
+    with db.conn:
+        db.conn.execute("UPDATE relation SET status='rejected' WHERE desktop=?",
+                        (S.DESKTOP,))
+    summary = _export(db, tax, tmp_path / "v.jsonl")
+    assert summary["excluded_desktops"] == {S.DESKTOP: "no_constraint_edges"}
     assert not set(summary["by_task"]) & {"V4", "V5", "V6", "V16"}
     db.close()
 

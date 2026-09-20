@@ -82,7 +82,8 @@ class CheckFailure(AssertionError):
 
 
 def _fail(record: dict, message: str) -> None:
-    raise CheckFailure(f"{record.get('id')}: {message}")
+    named = (record.get("label") or {}).get("readable_id") or record.get("id")
+    raise CheckFailure(f"{named}: {message}")
 
 
 def _key(action) -> tuple:
@@ -331,11 +332,14 @@ class Checker:
         prompt, label = record["prompt"], record["label"]
         if set(prompt) - {"task", "images", "question", "options"}:
             _fail(record, f"the prompt side carries {sorted(prompt)}")
-        for field in ("answer", "answer_check", "evidence", "rationale", "desktop",
-                      "step", "view", "layer", "template_id", "tier", "verified",
-                      "graph_version", "model_family"):
+        for field in ("readable_id", "answer", "answer_check", "evidence",
+                      "rationale", "desktop", "step", "view", "layer",
+                      "template_id", "tier", "verified", "graph_version",
+                      "model_family"):
             if field not in label:
                 _fail(record, f"missing label field {field!r}")
+        if not re.fullmatch(r"rec_[0-9a-f]{16}", str(record["id"])):
+            _fail(record, f"the record id {record['id']!r} is not opaque")
         if label["desktop"] != self.desktop:
             _fail(record, "wrong desktop")
         if LS_PREFIX in repr(record):
@@ -647,16 +651,24 @@ LEAK_WORDS = ("feasible", "blocker", "must_include", "must_not_include",
               "permitted_upper_bound", "graph_version", "verified", "truth_source",
               "answer_check", "occluded_full", "out_of_view", "in_chassis",
               "on_bench", "graph_blocked", "demonstrated", LS_PREFIX)
-#: A frame's position in the teardown, which several tasks ask the model to infer.
+#: A frame's position in the teardown, which several tasks ask the model to
+#: infer, and the machine it belongs to, which tells it which teardown to recall.
 STEP_PATTERNS = (re.compile(r"\bs\d{3}\b"), re.compile(r"\bstep\s+\d+", re.I),
-                 re.compile(r"\bD\d{2}\b"))
+                 re.compile(r"\bD\d+\b"),
+                 re.compile(r"\b(scan|oak1|oak2|rs)\b", re.I))
 #: An instance key -- `psu.01`, `screw.motherboard.03` -- rather than its wording.
 INSTANCE_KEY = re.compile(r"\b[a-z_]+(?:\.[a-z_0-9]+)*\.\d{2,}\b")
 
 
 def prompt_strings(record: dict) -> list[str]:
-    """Every string a model would be shown."""
-    out = [str(record["prompt"].get("question") or "")]
+    """Every string a model would be shown -- and the id a harness would print.
+
+    The record id is not on the prompt side, but every harness logs it, and
+    ``V4-D07-scan-s001-demonstrated-remove-psu.01`` would hand over the desktop,
+    the view, the step and the answer's own target. It is hashed for that
+    reason, and it is scanned here for the same one.
+    """
+    out = [str(record.get("id") or ""), str(record["prompt"].get("question") or "")]
     out.extend(str(i) for i in record["prompt"].get("images") or [])
     for option in record["prompt"].get("options") or []:
         out.extend(str(v) for v in option.values())
@@ -667,26 +679,26 @@ def scan_prompt_leaks(records: Iterable[dict]) -> list[str]:
     """One line per prompt that gives away part of its own -- or a sibling's -- label.
 
     Three families, and every one of them was reachable before the prompt/label
-    split: a path or an id that spells the step, a label-side word, and a raw
-    instance key (which carries an ordinal, and an ordinal is most of the answer
-    to "how many of these are there?").
+    split: a path or an id that spells the step, the desktop or the view; a
+    label-side word; and a raw instance key (which carries an ordinal, and an
+    ordinal is most of the answer to "how many of these are there?").
     """
     problems: list[str] = []
     for record in records:
         answer = json_dumps(record["label"]["answer"])
+        named = record["label"].get("readable_id") or record.get("id")
         for text in prompt_strings(record):
             for pattern in STEP_PATTERNS:
                 if pattern.search(text):
-                    problems.append(f"{record['id']}: prompt names a step/desktop: "
+                    problems.append(f"{named}: prompt names a step/desktop/view: "
                                     f"{text[:80]!r}")
             for word in LEAK_WORDS:
                 if word in text:
-                    problems.append(f"{record['id']}: prompt uses the label word "
-                                    f"{word!r}")
+                    problems.append(f"{named}: prompt uses the label word {word!r}")
             for hit in INSTANCE_KEY.findall(text):
                 if hit in answer:
-                    problems.append(f"{record['id']}: prompt names {hit!r}, "
-                                    f"which is in its own answer")
+                    problems.append(f"{named}: prompt names {hit!r}, which is in "
+                                    f"its own answer")
     return problems
 
 

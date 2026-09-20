@@ -244,6 +244,19 @@ def opaque_image_id(desktop: int, view: str, step: int,
     return "img_" + hashlib.sha256(body).hexdigest()[:16]
 
 
+def opaque_record_id(readable: str, salt: str = IMAGE_ID_SALT) -> str:
+    """The record's own id, with the teardown hashed out of it.
+
+    ``V4-D07-scan-s001-demonstrated-remove-psu.01`` names the desktop, the view,
+    the step and the answer's own target. It is not on the prompt side, but a
+    harness that prints record ids -- and they all do, in logs and in error
+    messages -- would hand a model everything the opaque image ids were there to
+    withhold. The readable form stays on the label side as ``readable_id``.
+    """
+    return "rec_" + hashlib.sha256(f"{salt}|{readable}".encode("utf-8")
+                                   ).hexdigest()[:16]
+
+
 # --------------------------------------------------------------------------- #
 # per-frame and per-desktop context
 # --------------------------------------------------------------------------- #
@@ -627,17 +640,21 @@ def exclusion_reason(ctx: DesktopCtx, edges: list[Edge],
 
     A desktop with no graph is not a desktop whose affordance questions are
     easy; it is one whose answers would all be "nothing is blocked", which is
-    the most confidently wrong ground truth this export could ship. Likewise a
-    desktop whose identities are mostly unresolved Label Studio drafts: the real
-    instance table is a minority of what the machine has, so "every action that
-    is blocked" is a statement about a third of the parts.
+    the most confidently wrong ground truth this export could ship. That is the
+    whole test: no version stamp, or no **active** edge behind it.
+
+    A desktop carrying more Label Studio drafts than resolved instances used to
+    be refused here too. It is not a reason: ``ls:*`` rows are reference
+    geometry somebody traced in a parallel table, they are already out of
+    :attr:`~tda.core.export.coco.DesktopCtx.instances`, and the five desktops it
+    caught (D13, D18, D19, D24, D33) carry 41-49 hard edges each and a complete
+    instance table. Draft count says nothing about whether the identities are
+    settled.
     """
     if graph_version is None:
         return "no_graph_version"
     if not active_edges(edges):
         return "no_constraint_edges"
-    if len(ctx.drafts) > len(ctx.instances):
-        return "draft_majority"
     return None
 
 
@@ -708,6 +725,7 @@ def record(tc: TaskCtx, task: str, rec_id: str, step: int,
         prompt["options"] = [{"verb": o["verb"], "target_label": o["target_label"]}
                              for o in options]
     label: dict[str, Any] = {
+        "readable_id": rec_id,
         "answer": answer,
         "answer_check": check,
         "evidence": evid,
@@ -731,7 +749,7 @@ def record(tc: TaskCtx, task: str, rec_id: str, step: int,
         label["negative"] = negative
     if truth_source:
         label["truth_source"] = truth_source
-    return {"id": rec_id, "prompt": prompt, "label": label}
+    return {"id": opaque_record_id(rec_id), "prompt": prompt, "label": label}
 
 
 def frame_id(desktop: int, view: str, step: int) -> str:
@@ -1160,6 +1178,9 @@ def gen_v6(tc: TaskCtx, step: int) -> Iterator[dict]:
     unknown = stable_order(sorted(permitted - {(action.verb, action.target)}),
                            seed + "|unknown",
                            lambda it: f"{it[0]}|{it[1]}")[:V6_UNKNOWN_OPTIONS]
+    # a frame late in a teardown has nothing left that is certainly blocked, and
+    # a multiple choice whose wrong answers are only *unknown* is not one -- so
+    # the question is asked open-ended instead of being dropped, and says so
     options: Optional[list[dict]] = None
     if len(chosen_blocked) >= V6_BLOCKED_OPTIONS:
         listed = [{"verb": action.verb, "target": action.target, "kind": DEMONSTRATED}]
@@ -1187,6 +1208,7 @@ def gen_v6(tc: TaskCtx, step: int) -> Iterator[dict]:
         {"type": "next_action", "reference": [action.verb, action.target],
          "reference_step": nxt, "fields": fields,
          "metric": "match_rate+blocked_rate",
+         "options_kind": "listed" if options is not None else "open",
          "blocked_actions": _actions_json(blocked),
          "permitted_upper_bound": _actions_json(sorted(permitted))},
         evidence({action.target: frame.pointable[action.target][1]}

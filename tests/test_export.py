@@ -342,7 +342,7 @@ def test_the_vlm_export_asks_about_the_latch_only_while_it_is_there(
     out = tmp_path / "vlm.jsonl"
     export_vlm(board_db, tax, [DESKTOP], VIEW, str(out), only_verified=False)
     states = {(r["step"], r["answer"]["state"]) for r in _records(out)
-              if r["task"] == "V2" and r["id"].endswith(f"state-{LATCH}")}
+              if r["task"] == "V2" and r["readable_id"].endswith(f"state-{LATCH}")}
     assert states == {(1, "closed"), (2, "open")}
 
 

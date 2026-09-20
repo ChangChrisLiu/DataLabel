@@ -313,6 +313,15 @@ def export_vlm(
             for data in other_frames.values():
                 images[data.image_id] = (int(desktop), other, data.step, data.image)
 
+    # the id is a 64-bit hash of the readable one, so a collision is a thing
+    # that will not happen -- and would silently ship two records under one name
+    seen: dict[str, str] = {}
+    for rec in records:
+        other = seen.setdefault(rec["id"], rec["label"]["readable_id"])
+        if other != rec["label"]["readable_id"]:
+            raise RuntimeError(f"record id {rec['id']} collides: {other} and "
+                               f"{rec['label']['readable_id']}")
+
     out = Path(out_jsonl)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8", newline="\n") as fh:
