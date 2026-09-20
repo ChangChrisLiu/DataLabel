@@ -1,8 +1,10 @@
-"""Where the chassis is in a scanner frame: two strategies and one referee.
+"""Where the chassis is in a frame: the strategies and the referee.
 
 :func:`tda.core.cache.suggest_roi` is the entry point; this module holds the
-measuring.  A scanner frame is a white board framed by orange tape with one
-desktop on it, photographed from above, and the chassis is found twice:
+measuring.  There are two kinds of picture and they are measured differently.
+
+A **scanner** frame is a white board framed by orange tape with one desktop on
+it, photographed from above, and the chassis is found twice:
 
 * :func:`scan_chassis_candidates` -- the largest **dark** objects inside the
   tape square.  That is what a black or dark-grey machine is, and it is what the
@@ -19,6 +21,18 @@ merges into it, and the second- or third-largest region is then the machine.
 :func:`box_plausibility` is the referee -- area, aspect and how solidly the
 component fills its own bounding box -- and it judges both strategies on the
 same scale, so "which of these is a chassis" is one question asked once.
+
+An **OAK** frame (4032x3040, both cameras) is a different picture of the same
+workbench: the machine sits inside a yellow tape square that covers roughly a
+quarter to a half of the frame, and around it are the bench, the lab floor, the
+operator in dark clothes and the robot rig.  :func:`oak_chassis_box` is that
+frame's answer -- the tape square at OAK spans (:data:`OAK_TAPE_MIN_SPAN_FRAC`),
+then whatever on the board is **not the board**, measured on a downscale
+(:data:`OAK_WORK_SIDE`) because a 12 MP colour conversion costs more than the
+box is worth.  Both dark and light machines are found by one stage, because
+"differs from a white bench" does not care which; the operator is excluded not
+by being bright but by standing **off the board**, which is the only gate that
+holds when they are wearing black.
 
 Every box is the component's **axis-aligned** bounding box, padded by
 :data:`ROI_PAD_FRAC`.  A ``minAreaRect`` is tempting and wrong here: the ROI
@@ -43,6 +57,16 @@ __all__ = [
     "Candidate",
     "DARK_MAX",
     "DARK_MIN_AREA_FRAC",
+    "OAK_BOARD_GROW",
+    "OAK_MAX_AREA_FRAC",
+    "OAK_MAX_ASPECT",
+    "OAK_MIN_AREA_FRAC",
+    "OAK_MIN_ASPECT",
+    "OAK_MIN_DIST",
+    "OAK_MIN_RECTANGULARITY",
+    "OAK_OPEN_FRAC",
+    "OAK_TAPE_MIN_SPAN_FRAC",
+    "OAK_WORK_SIDE",
     "ROI_MAX_AREA_FRAC",
     "ROI_MAX_ASPECT",
     "ROI_MIN_AREA_FRAC",
@@ -57,6 +81,9 @@ __all__ = [
     "best_candidate",
     "board_mask",
     "box_plausibility",
+    "oak_board_mask",
+    "oak_chassis_box",
+    "oak_chassis_candidates",
     "pad_box",
     "scan_bed_box",
     "scan_bed_candidates",
@@ -121,6 +148,56 @@ DARK_MIN_RECTANGULARITY = 0.18
 #: The default for a caller that does not say which strategy it is judging.
 ROI_MIN_RECTANGULARITY = DARK_MIN_RECTANGULARITY
 
+# --- the OAK bench -------------------------------------------------------
+#: The tape square frames the *machine* in an OAK frame rather than the frame,
+#: so it spans far less of the picture than on the scanner. Measured over the
+#: 24 frames of ``experiments/roi_oak_eval.py``: 0.33-0.72 of the width on oak1
+#: and 0.30-0.50 on oak2, so a quarter is the floor that still rejects a yellow
+#: label, a roll of tape on the bench or the wooden block in the oak2 frames.
+OAK_TAPE_MIN_SPAN_FRAC = 0.25
+#: The square is the region the detector looks in, with no margin around it.
+#:
+#: The machine does overhang the square, mostly at the edge nearest the camera,
+#: and the box therefore clips 30-50 px off the chassis there on D24, D29 and
+#: D34. Letting a region be followed off the square was tried at 1.04, 1.07 and
+#: 1.12 -- searching the margin outright, and following only a region that was
+#: already mostly on the square -- and both are worse over the 50 real frames:
+#: the margin reaches the aluminium extrusion at the bench edge and the operator
+#: beyond it, the machine's region merges with them, and the box grows from 46 %
+#: of the frame to 70 % (D29 oak1) or is refused for being too big (D24 oak1
+#: step 1, D36 oak1 steps 1 and 18, all of which have a good tight answer at
+#: 1.0). Proposals over the 50 frames: **25 at 1.0**, 23 at 1.04, 24 at 1.07,
+#: and the ones at 1.0 are the tighter boxes. A few clipped pixels the annotator
+#: drags out beat a box that has swallowed the bench.
+OAK_BOARD_GROW = 1.0
+#: CIE-Lab distance at which a pixel stops being bench. Higher than the
+#: scanner's: the OAK frames carry glare, shadow gradients and the pencil marks
+#: on the board, none of which is a machine.
+OAK_MIN_DIST = 26.0
+#: Opening radius as a fraction of the short side: it breaks the thin bridge a
+#: cable, a hand or a strip of shadow makes between the machine and something
+#: else on the board.
+OAK_OPEN_FRAC = 0.016
+#: The machine covers this much of an OAK frame, or the proposal is refused.
+#: The plan asked for 8-70 %; 8 % turned out to be exactly the oak2 figure for
+#: a small-form-factor Dell (D13 step 1 measures 8.3 %), so the floor sits
+#: below it -- a band whose edge is a real answer rejects that answer on the
+#: next machine. The ceiling is what stops "the whole bench" and "the whole
+#: frame" (D63, D64) being offered as a crop.
+OAK_MIN_AREA_FRAC = 0.05
+OAK_MAX_AREA_FRAC = 0.70
+#: Aspect is width/height. An OAK camera looks at the bench from the side, so a
+#: machine is more foreshortened than on the scanner and the band is wider.
+OAK_MIN_ASPECT = 0.4
+OAK_MAX_ASPECT = 2.6
+#: How solidly the component fills its own box. A machine seen from the side is
+#: a filled quadrilateral; this rejects an L of shadow or a run of cable.
+OAK_MIN_RECTANGULARITY = 0.45
+#: Long side the detector measures on. A 12 MP BGR->Lab conversion alone costs
+#: ~0.2 s and the box is confirmed by a human anyway, so the whole measurement
+#: is made here and scaled back up -- 4 px of quantisation on the original.
+OAK_WORK_SIDE = 1024
+
 #: One strategy's answer: the padded box and how solidly the component filled
 #: its own bounding box (see :data:`ROI_MIN_RECTANGULARITY`).
 Candidate = tuple[tuple[int, int, int, int], float]
@@ -141,7 +218,12 @@ def pad_box(box: tuple[int, int, int, int], width: int, height: int,
 
 def box_plausibility(box: tuple[int, int, int, int], rectangularity: float,
                      width: int, height: int,
-                     min_fill: float = ROI_MIN_RECTANGULARITY) -> Optional[float]:
+                     min_fill: float = ROI_MIN_RECTANGULARITY,
+                     area_band: tuple[float, float] = (ROI_MIN_AREA_FRAC,
+                                                       ROI_MAX_AREA_FRAC),
+                     aspect_band: tuple[float, float] = (ROI_MIN_ASPECT,
+                                                         ROI_MAX_ASPECT),
+                     ) -> Optional[float]:
     """Is this box a chassis at all, and how convincingly? ``None`` when it is not.
 
     Three questions, all about shape rather than about colour: does the box
@@ -150,22 +232,26 @@ def box_plausibility(box: tuple[int, int, int, int], rectangularity: float,
     rectangularity, which is what tells a chassis from a sprawl that happens to
     span the same corners -- and ``min_fill`` is per strategy, see
     :data:`BED_MIN_RECTANGULARITY`.
+
+    ``area_band`` and ``aspect_band`` default to the scanner's; an OAK frame
+    looks at the bench from the side, so it brings its own (:data:`OAK_MIN_AREA_FRAC`).
     """
     x0, y0, x1, y1 = box
     area = float((x1 - x0) * (y1 - y0))
     if area <= 0:
         return None
     frac = area / float(max(width * height, 1))
-    if not ROI_MIN_AREA_FRAC <= frac <= ROI_MAX_AREA_FRAC:
+    if not area_band[0] <= frac <= area_band[1]:
         return None
     aspect = (x1 - x0) / float(max(y1 - y0, 1))
-    if not ROI_MIN_ASPECT <= aspect <= ROI_MAX_ASPECT:
+    if not aspect_band[0] <= aspect <= aspect_band[1]:
         return None
     return rectangularity if rectangularity >= min_fill else None
 
 
 def best_candidate(candidates: list[Candidate], width: int, height: int,
-                   min_fill: float = ROI_MIN_RECTANGULARITY) -> Optional[Candidate]:
+                   min_fill: float = ROI_MIN_RECTANGULARITY,
+                   **bands) -> Optional[Candidate]:
     """The most convincing plausible candidate, or ``None`` when none is.
 
     "Most convincing", not "biggest": a hand or a tool lying against the chassis
@@ -175,7 +261,8 @@ def best_candidate(candidates: list[Candidate], width: int, height: int,
     scored = [
         (score, candidate)
         for candidate in candidates
-        for score in (box_plausibility(*candidate, width, height, min_fill),)
+        for score in (box_plausibility(*candidate, width, height, min_fill,
+                                       **bands),)
         if score is not None
     ]
     return max(scored, key=lambda pair: pair[0])[1] if scored else None
@@ -216,8 +303,9 @@ def _candidates(mask: np.ndarray, min_area: float, width: int, height: int,
 # --------------------------------------------------------------------------- #
 # the board
 # --------------------------------------------------------------------------- #
-def board_mask(bgr: np.ndarray) -> Optional[np.ndarray]:
-    """The scan bed inside the yellow tape square, or None when there is none.
+def board_mask(bgr: np.ndarray,
+               min_span_frac: float = TAPE_MIN_SPAN_FRAC) -> Optional[np.ndarray]:
+    """The board inside the yellow tape square, or None when there is none.
 
     The board is framed by a yellow tape square. Small gaps in the tape (and the
     loose corner scraps) are bridged by a dilation, the filled convex hull of
@@ -225,6 +313,12 @@ def board_mask(bgr: np.ndarray) -> Optional[np.ndarray]:
     removed from it. Nine of the 66 machines cover enough of the tape that no
     square is found at all; for them this is ``None`` and every stage that needs
     a board has to say so rather than guess one.
+
+    ``min_span_frac`` is how much of the frame the square has to cover before it
+    counts as one. On the scanner the tape frames the *picture*, so half the
+    frame is the right floor; an OAK camera stands back far enough that the same
+    square covers a third of the picture, which is what
+    :data:`OAK_TAPE_MIN_SPAN_FRAC` is for.
     """
     height, width = bgr.shape[:2]
     small_k = _odd(min(height, width) * 0.005)
@@ -238,8 +332,8 @@ def board_mask(bgr: np.ndarray) -> Optional[np.ndarray]:
     label, labels, stats = _largest_component(bridged)
     if label is None or stats[label, cv2.CC_STAT_AREA] < TAPE_MIN_AREA_FRAC * height * width:
         return None
-    if (stats[label, cv2.CC_STAT_WIDTH] < TAPE_MIN_SPAN_FRAC * width
-            or stats[label, cv2.CC_STAT_HEIGHT] < TAPE_MIN_SPAN_FRAC * height):
+    if (stats[label, cv2.CC_STAT_WIDTH] < min_span_frac * width
+            or stats[label, cv2.CC_STAT_HEIGHT] < min_span_frac * height):
         return None  # not a square framing the board
 
     contours, _ = cv2.findContours((labels == label).astype(np.uint8),
@@ -332,3 +426,140 @@ def scan_bed_box(bgr: np.ndarray) -> Optional[Candidate]:
     height, width = bgr.shape[:2]
     return best_candidate(scan_bed_candidates(bgr), width, height,
                           BED_MIN_RECTANGULARITY)
+
+
+# --------------------------------------------------------------------------- #
+# the OAK bench
+# --------------------------------------------------------------------------- #
+def _downscaled(bgr: np.ndarray, side: int) -> tuple[np.ndarray, float]:
+    """``(image, scale)`` where ``scale`` takes a measurement back to full size."""
+    height, width = bgr.shape[:2]
+    longest = max(height, width)
+    if longest <= side:
+        return bgr, 1.0
+    factor = side / float(longest)
+    small = cv2.resize(bgr, (max(1, int(round(width * factor))),
+                             max(1, int(round(height * factor)))),
+                       interpolation=cv2.INTER_AREA)
+    return small, longest / float(max(small.shape[:2]))
+
+
+def oak_board_mask(bgr: np.ndarray, grow: float = 1.0) -> Optional[np.ndarray]:
+    """The bench inside the tape square of an OAK frame, or ``None``.
+
+    Two differences from the scanner's :func:`board_mask`, both because the
+    machine is *inside* the square here rather than the square being the frame:
+
+    * the square only has to span :data:`OAK_TAPE_MIN_SPAN_FRAC` of the picture;
+    * the region is the **rotated bounding rectangle** of the visible tape, not
+      its convex hull. A machine standing on the square hides one or two of its
+      corners, and the convex hull of the remaining L is a *triangle* -- on the
+      real D29, D34 and D64 that triangle cut the board diagonally and left
+      half the machine outside the only region the detector may look in. Two
+      full sides of a rectangle determine it, so the fitted rectangle recovers
+      the whole square from the same L.
+
+    The rectangle is the tape's own, so it leans with the bench; the tape band
+    itself is removed from it, as on the scanner. ``grow`` scales it about its
+    own centre, which is how :func:`oak_chassis_candidates` asks for the margin
+    a machine may overhang into (:data:`OAK_BOARD_GROW`).
+    """
+    height, width = bgr.shape[:2]
+    small_k = _odd(min(height, width) * 0.005)
+    bridge_k = _odd(min(height, width) * 0.02)
+
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    yellow = cv2.inRange(hsv, YELLOW_LO, YELLOW_HI)
+    yellow = cv2.morphologyEx(yellow, cv2.MORPH_CLOSE,
+                              np.ones((small_k, small_k), np.uint8))
+    bridged = cv2.dilate(yellow, np.ones((bridge_k, bridge_k), np.uint8))
+
+    label, labels, stats = _largest_component(bridged)
+    if label is None or stats[label, cv2.CC_STAT_AREA] < TAPE_MIN_AREA_FRAC * height * width:
+        return None
+    if (stats[label, cv2.CC_STAT_WIDTH] < OAK_TAPE_MIN_SPAN_FRAC * width
+            or stats[label, cv2.CC_STAT_HEIGHT] < OAK_TAPE_MIN_SPAN_FRAC * height):
+        return None  # a label, a roll of tape, one strip: not a square
+
+    contours, _ = cv2.findContours((labels == label).astype(np.uint8),
+                                   cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    centre, size, angle = cv2.minAreaRect(np.vstack(contours))
+    scaled = (centre, (size[0] * float(grow), size[1] * float(grow)), angle)
+    board = np.zeros((height, width), np.uint8)
+    cv2.fillConvexPoly(board, np.int32(np.round(cv2.boxPoints(scaled))), 255)
+    board = cv2.erode(board, np.ones((bridge_k, bridge_k), np.uint8))  # undo the bridging
+    board[yellow > 0] = 0  # the tape band is not part of the inner region
+    return board
+
+
+def oak_chassis_candidates(bgr: np.ndarray) -> list[Candidate]:
+    """The largest things on the OAK bench that are not the bench, biggest first.
+
+    "Not the bench" rather than "dark": the machines in this dataset run from a
+    black Dell small-form-factor to a bare silver Apple G4, and half of every
+    open chassis is bright drive cage and PSU label anyway, so a luminance
+    threshold returns a piece of the machine instead of the machine. The bench
+    is a white board with a known colour, taken as the **median** of the board
+    region (robust: the machine is well under half of it), and the distance is
+    measured in CIE-Lab so a silver chassis is as visible as a black one.
+
+    Everything that makes this safe is the board. The lab floor, the operator --
+    who wears black and can be the largest dark region in an oak2 frame -- the
+    robot rig and the parts trolley are all *outside* the tape square, so they
+    are not candidates at any threshold. Without a square there is no board and
+    therefore no candidate at all, which is the honest answer for the frames
+    where the machine covers the tape (D63, D64).
+
+    An opening breaks the thin bridge a cable, a shadow or a hand makes between
+    the machine and something else on the board, and the top
+    :data:`TOP_COMPONENTS` are offered because it does not always.
+
+    Nothing off the square is looked at, not even by following a region that
+    starts on it: see :data:`OAK_BOARD_GROW` for what that costs and what it
+    saves.
+    """
+    height, width = bgr.shape[:2]
+    board = oak_board_mask(bgr, OAK_BOARD_GROW)
+    if board is None:
+        return []
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    bench = np.median(lab[board > 0], axis=0)
+    foreground = (np.linalg.norm(lab - bench, axis=2) >= OAK_MIN_DIST).astype(np.uint8)
+    foreground[board == 0] = 0
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    foreground[cv2.inRange(hsv, YELLOW_LO, YELLOW_HI) > 0] = 0  # the tape is not a part
+
+    small_k = _odd(min(height, width) * 0.005)
+    open_k = _odd(min(height, width) * OAK_OPEN_FRAC)
+    foreground = cv2.morphologyEx(
+        foreground, cv2.MORPH_CLOSE, np.ones((small_k, small_k), np.uint8)
+    )
+    foreground = cv2.morphologyEx(
+        foreground, cv2.MORPH_OPEN, np.ones((open_k, open_k), np.uint8)
+    )
+    return _candidates(foreground, OAK_MIN_AREA_FRAC * height * width, width, height)
+
+
+def oak_chassis_box(bgr: np.ndarray) -> Optional[Candidate]:
+    """The machine on an OAK bench, in **original** pixels, or ``None``.
+
+    Measured on a downscale (:data:`OAK_WORK_SIDE`) and scaled back: a 12 MP
+    colour conversion costs about a fifth of a second and the ROI is confirmed
+    by a human, so 4 px of quantisation is not worth 10x the time.
+    """
+    small, scale = _downscaled(bgr, OAK_WORK_SIDE)
+    height, width = small.shape[:2]
+    found = best_candidate(
+        oak_chassis_candidates(small), width, height, OAK_MIN_RECTANGULARITY,
+        area_band=(OAK_MIN_AREA_FRAC, OAK_MAX_AREA_FRAC),
+        aspect_band=(OAK_MIN_ASPECT, OAK_MAX_ASPECT),
+    )
+    if found is None:
+        return None
+    (x0, y0, x1, y1), fill = found
+    full_h, full_w = bgr.shape[:2]
+    box = (max(0, int(round(x0 * scale))), max(0, int(round(y0 * scale))),
+           min(full_w, int(round(x1 * scale))), min(full_h, int(round(y1 * scale))))
+    return (box, fill)

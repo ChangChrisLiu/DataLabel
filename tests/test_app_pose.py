@@ -360,6 +360,9 @@ def test_the_piece_that_lost_its_roi_asks_for_one_again(window: MainWindow):
     window.render_frame()
     assert window.db.pose_segment_for(window.session.current())["roi"] is None
     assert window.roi_editing is True             # the proposal is on screen
+    # the rectangle itself is measured on a worker (task B3): the tool arms
+    # immediately, the box arrives a moment later
+    assert window.wait_for_roi_proposal() is True
     assert window.roi_draft is not None
 
 

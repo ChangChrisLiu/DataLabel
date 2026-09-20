@@ -65,6 +65,7 @@ def window(qapp, tmp_path):
     QApplication.processEvents()
     win.set_mode(A.MODE_ANNOTATE)
     if win.roi_editing:            # the first frame of a machine offers an ROI
+        win.wait_for_roi_proposal()   # measured on a worker (task B3)
         win.act_commit()
     # A frame where the cooler and its four screws are still in the chassis and
     # on the task card, so an adopted draft is one an annotator could commit.

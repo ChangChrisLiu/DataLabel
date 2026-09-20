@@ -182,6 +182,9 @@ class SessionLike(Protocol):
     def steps(self) -> list[int]:
         """Logical steps of the open desktop/view, ascending."""
 
+    def available_steps(self) -> list[int]:
+        """The steps of :meth:`steps` that have an image to annotate on."""
+
     def frame_status(self, step: int) -> str:
         """One of :data:`FRAME_STATUSES`."""
 

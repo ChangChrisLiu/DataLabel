@@ -481,3 +481,115 @@ def test_rle_counts_of_nothing_is_none():
     assert M.rle_counts(None) is None
     assert M.rle_counts({}) is None
     assert M.rle_counts({"size": [4, 4]}) is None
+
+
+# --------------------------------------------------------------------------
+# the windowed encode and the decode memo (task B3: 12 MP speed)
+# --------------------------------------------------------------------------
+def _cases():
+    """Masks whose windowed encode must match their plain one, with windows."""
+    hw = (37, 53)
+    yield np.zeros(hw, bool), (0, 0, 0, 0)
+    yield np.zeros(hw, bool), (5, 5, 9, 9)
+    full = np.ones(hw, bool)
+    yield full, (0, 0, hw[1], hw[0])
+    block = np.zeros(hw, bool)
+    block[4:11, 6:20] = True
+    yield block, (6, 4, 20, 11)          # exactly its bounding box
+    yield block, (2, 1, 33, 28)          # a looser window
+    edge = np.zeros(hw, bool)
+    edge[:3, -4:] = True
+    yield edge, (hw[1] - 4, 0, hw[1], 3)
+    rng = np.random.default_rng(7)
+    for _ in range(12):
+        mask = np.zeros(hw, bool)
+        y0, x0 = rng.integers(0, 20, 2)
+        mask[y0:y0 + rng.integers(1, 15), x0:x0 + rng.integers(1, 25)] = True
+        found = M.bbox(mask)
+        yield mask, ((0, 0, 0, 0) if found is None else found)
+
+
+def test_a_windowed_encode_is_the_same_bytes_as_a_plain_one():
+    for mask, window in _cases():
+        assert M.encode_rle(mask, window) == M.encode_rle(mask), window
+
+
+def test_the_encode_scratch_canvas_is_left_empty_between_calls():
+    """Two encodes in a row through the same buffer must not bleed into each other."""
+    hw = (24, 31)
+    first, second = np.zeros(hw, bool), np.zeros(hw, bool)
+    first[2:9, 3:14] = True
+    second[15:20, 20:28] = True
+    M.encode_rle(first, (3, 2, 14, 9))
+    assert M.encode_rle(second, (20, 15, 28, 20)) == M.encode_rle(second)
+    assert M.encode_rle(np.zeros(hw, bool), (0, 0, 31, 24)) == M.encode_rle(
+        np.zeros(hw, bool)
+    )
+
+
+def test_the_decode_memo_answers_with_the_masks_own_bounding_box():
+    mask = np.zeros((40, 60), bool)
+    mask[7:19, 11:33] = True
+    rle = M.encode_rle(mask)
+
+    cropped, box = M.decode_rle_shared(rle)
+    assert box == (11, 7, 33, 19)
+    assert np.array_equal(cropped, M.decode_rle(rle)[7:19, 11:33])
+
+    again, again_box = M.decode_rle_shared(dict(rle))  # a different dict, same content
+    assert again is cropped and again_box == box
+
+
+def test_the_decode_memo_hands_back_a_mask_nobody_can_scribble_on():
+    rle = M.encode_rle(_square((32, 32), 4, 4, 6))
+    cropped, _box = M.decode_rle_shared(rle)
+    with pytest.raises(ValueError):
+        cropped[0, 0] = False
+
+
+def test_an_empty_mask_decodes_to_an_empty_box():
+    cropped, box = M.decode_rle_shared(M.encode_rle(np.zeros((16, 16), bool)))
+    assert box == (0, 0, 0, 0) and cropped.size == 0
+
+
+def test_the_decode_memo_stays_inside_its_byte_budget(monkeypatch):
+    M.clear_decode_cache()
+    monkeypatch.setattr(M, "DECODE_CACHE_BYTES", 4096)
+    for index in range(40):
+        mask = np.zeros((80, 80), bool)
+        mask[index:index + 30, index:index + 30] = True
+        M.decode_rle_shared(M.encode_rle(mask))
+    stats = M.decode_cache_stats()
+    assert stats["bytes"] <= 4096 + 900, stats
+    M.clear_decode_cache()
+    assert M.decode_cache_stats() == {"entries": 0, "bytes": 0}
+
+
+def test_a_window_that_does_not_hold_the_mask_is_refused_under_the_check():
+    """The check the test suite runs with: a wrong window must not pass quietly."""
+    mask = np.zeros((20, 20), bool)
+    mask[2:6, 2:6] = True
+    mask[15, 15] = True
+
+    assert M.CHECK_ENCODE_WINDOW is True, "tests/conftest.py should have set this"
+    with pytest.raises(ValueError, match="pixels outside it"):
+        M.encode_rle(mask, (2, 2, 6, 6))
+    assert M.encode_rle(mask, M.bbox(mask)) == M.encode_rle(mask)
+
+
+def test_the_check_can_be_switched_off(monkeypatch):
+    """Off, the same call is the fast path and simply truncates -- as documented."""
+    monkeypatch.setattr(M, "CHECK_ENCODE_WINDOW", False)
+    mask = np.zeros((20, 20), bool)
+    mask[2:6, 2:6] = True
+    mask[15, 15] = True
+    inside = np.zeros((20, 20), bool)
+    inside[2:6, 2:6] = True
+
+    assert M.encode_rle(mask, (2, 2, 6, 6)) == M.encode_rle(inside)
+
+
+def test_encode_rle_boxed_is_encode_rle():
+    for mask, _window in _cases():
+        assert M.encode_rle_boxed(mask) == M.encode_rle(mask)
+    assert M.encode_rle_boxed(np.zeros((8, 9), bool)) == M.encode_rle(np.zeros((8, 9), bool))

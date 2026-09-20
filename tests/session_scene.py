@@ -146,7 +146,7 @@ def chassis_instances(session: AnnotationSession, step: int) -> list[str]:
 
 
 def seed_shapes(session: AnnotationSession, step: int, skip=(), grid: int = 8,
-                anchor: int = LAST_STEP) -> list[str]:
+                anchor: int = LAST_STEP, refresh: bool = True) -> list[str]:
     """Give every chassis instance of ``step`` its own rectangle, cheaply.
 
     Written straight to the database (one refresh at the end) rather than
@@ -154,6 +154,12 @@ def seed_shapes(session: AnnotationSession, step: int, skip=(), grid: int = 8,
     pay for one refresh sweep per instance.  The anchor is the last logical step
     of the scene, which selects the keyframe for every step where the instance
     is still in the chassis.  Returns the instances it drew, bottom-up.
+
+    ``refresh=False`` leaves the truth table alone and only bumps the session's
+    edit epoch, so the frames are compiled when they are visited.  At 64x64 the
+    sweep at the end costs nothing; on the 12 MP scene the OAK budgets are
+    measured on it is forty frames of pixel work -- over two minutes -- for rows
+    the benchmark then measures the cost of writing anyway.
     """
     db = session.db
     hw = (session.db.get_frame(FrameKey(DESKTOP, step, VIEW))["aux"]["hw"])
@@ -170,7 +176,10 @@ def seed_shapes(session: AnnotationSession, step: int, skip=(), grid: int = 8,
         )
         order.append((key, "main"))
     db.set_zorder(ZOrderRec(DESKTOP, VIEW, 1, order))
-    session.refresh_all()
+    if refresh:
+        session.refresh_all()
+    else:
+        session._invalidate()
     return keys
 
 

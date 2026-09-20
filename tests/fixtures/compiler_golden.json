@@ -1,0 +1,5700 @@
+{
+ "00-64x64": {
+  "input_hash": "18889ee9a6a7a67f8a5745c1eae5a077ee9391f6",
+  "instances": {
+   "i00": {
+    "amodal": "31fa35c222f4bd5501dc149dc9ca8a7c459fb217",
+    "box": [
+     17.0,
+     3.0,
+     43.0,
+     64.0
+    ],
+    "keyframe_id": 100,
+    "occlusion_ratio": 0.445344129555,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "11c6078be648ef9fa7e3e8a21f2cab97370b65a1"
+   },
+   "i01": {
+    "amodal": "1dd696a13f017d69ddd296503a1ceedfa2203cfe",
+    "box": [
+     0.0,
+     8.0,
+     62.0,
+     64.0
+    ],
+    "keyframe_id": 101,
+    "occlusion_ratio": 0.343457943925,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "12dd23eb0e70cf74de3f0bd0bc2eb487358758cd"
+   },
+   "i02": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i03": {
+    "amodal": "98e94b9b83fa311b90248daac5524b4c3cd540a1",
+    "box": null,
+    "keyframe_id": 103,
+    "occlusion_ratio": 1.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i04": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i05": {
+    "amodal": "3349d7c2a1f8599954655c6f8f34908c421051ee",
+    "box": [
+     29.0,
+     2.0,
+     54.0,
+     31.0
+    ],
+    "keyframe_id": 105,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "3349d7c2a1f8599954655c6f8f34908c421051ee"
+   },
+   "i06": {
+    "amodal": "96b8ff287bd3297c77bd9bf1b0dd1def852ecb9f",
+    "box": [
+     3.0,
+     11.0,
+     21.0,
+     19.0
+    ],
+    "keyframe_id": 106,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "96b8ff287bd3297c77bd9bf1b0dd1def852ecb9f"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i01",
+     "p1"
+    ],
+    [
+     "i01",
+     "p2"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i05",
+     "p0"
+    ],
+    [
+     "i00",
+     "p1"
+    ],
+    [
+     "i06",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i03",
+    "i01",
+    "i00",
+    "i05",
+    "i06"
+   ]
+  },
+  "problems": [
+   "missing_shape:i02",
+   "missing_shape:i04"
+  ]
+ },
+ "01-48x96": {
+  "input_hash": "b9c40fa076c0e442d8a74af03cc13c8753d7be0c",
+  "instances": {
+   "i00": {
+    "amodal": "913c186f6a72dc8a0c70b6b0c836d3bbea396080",
+    "box": [
+     41.0,
+     28.0,
+     89.0,
+     48.0
+    ],
+    "keyframe_id": 110,
+    "occlusion_ratio": 0.114130434783,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "6fa67975083cad32985e31e075aa2a52359740ef"
+   },
+   "i01": {
+    "amodal": "198c02d238d490f19bdbd4f62c80113358fd323a",
+    "box": [
+     21.0,
+     28.0,
+     30.0,
+     30.0
+    ],
+    "keyframe_id": 111,
+    "occlusion_ratio": 0.961194029851,
+    "placement": "in_chassis",
+    "visibility": "occluded_full",
+    "visible": "d16c5c421ee393f0c5794673f28e250184ff9c05"
+   },
+   "i02": {
+    "amodal": "5eedb8aa6b249ebeea0510193c31455d3ece99c2",
+    "box": [
+     7.0,
+     16.0,
+     49.0,
+     30.0
+    ],
+    "keyframe_id": 112,
+    "occlusion_ratio": 0.617161716172,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "01d960da89bbba1307abe55a4dea841a0d4a53b5"
+   },
+   "i03": {
+    "amodal": "6f8c360eab4a6753083f3b7bec62a8ca677e0c59",
+    "box": [
+     3.0,
+     5.0,
+     35.0,
+     29.0
+    ],
+    "keyframe_id": 113,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "6f8c360eab4a6753083f3b7bec62a8ca677e0c59"
+   },
+   "i04": {
+    "amodal": "557122bfdb85e4f66020f372e19b300ce0832312",
+    "box": null,
+    "keyframe_id": 114,
+    "occlusion_ratio": 1.0,
+    "placement": "in_chassis",
+    "visibility": "occluded_full",
+    "visible": "afb40f20c7f94360d6ec97037674cf8799bc8f78"
+   },
+   "i05": {
+    "amodal": "afb40f20c7f94360d6ec97037674cf8799bc8f78",
+    "box": null,
+    "keyframe_id": 115,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "afb40f20c7f94360d6ec97037674cf8799bc8f78"
+   },
+   "i06": {
+    "amodal": "31a7b3ec898b939d76f3117ff0beddb77afc6d0a",
+    "box": [
+     51.0,
+     25.0,
+     70.0,
+     35.0
+    ],
+    "keyframe_id": 116,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "31a7b3ec898b939d76f3117ff0beddb77afc6d0a"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i06",
+     "p0"
+    ],
+    [
+     "i05",
+     "p0"
+    ],
+    [
+     "i04",
+     "p1"
+    ],
+    [
+     "i03",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i02",
+    "i04",
+    "i01",
+    "i00",
+    "i06",
+    "i05",
+    "i03"
+   ]
+  },
+  "problems": [
+   "empty_visible:i04",
+   "empty_visible:i05"
+  ]
+ },
+ "02-96x48": {
+  "input_hash": "3897b6ef0c7e6944f3ab32cc1c29524a0ef4d19e",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     30.0,
+     71.0,
+     48.0,
+     86.0
+    ],
+    "keyframe_id": 120,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "a242c746ed593147879cfdcdfccc719b5f9e68c4",
+    "box": [
+     12.0,
+     6.0,
+     15.0,
+     33.0
+    ],
+    "keyframe_id": 121,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "a242c746ed593147879cfdcdfccc719b5f9e68c4"
+   },
+   "i02": {
+    "amodal": "afb40f20c7f94360d6ec97037674cf8799bc8f78",
+    "box": null,
+    "keyframe_id": 122,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "afb40f20c7f94360d6ec97037674cf8799bc8f78"
+   },
+   "i03": {
+    "amodal": "e6c8018ca4285119b61ebfde1aeeb9a46af4c61c",
+    "box": [
+     25.0,
+     45.0,
+     44.0,
+     87.0
+    ],
+    "keyframe_id": 123,
+    "occlusion_ratio": 0.065162907268,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "27ec3cb18dea71092dce5af35b6d514d2a35eda4"
+   },
+   "i04": {
+    "amodal": "afa0d4e96a2c69e757bd7b9aaac8524bd8f7a17e",
+    "box": [
+     0.0,
+     27.0,
+     48.0,
+     80.0
+    ],
+    "keyframe_id": 124,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "afa0d4e96a2c69e757bd7b9aaac8524bd8f7a17e"
+   },
+   "i05": {
+    "amodal": "b05282e31e871e54ffdc04b240f09dfd5e77c578",
+    "box": [
+     6.0,
+     43.0,
+     16.0,
+     53.0
+    ],
+    "keyframe_id": 125,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "b05282e31e871e54ffdc04b240f09dfd5e77c578"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i05",
+     "p0"
+    ],
+    [
+     "i04",
+     "p2"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i04",
+     "p1"
+    ],
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i02",
+    "i05",
+    "i04",
+    "i03",
+    "i01"
+   ]
+  },
+  "problems": [
+   "empty_visible:i02",
+   "zorder_missing:i01/p0"
+  ]
+ },
+ "03-37x53": {
+  "input_hash": "d2598cc1a5a088b0dfb2032ee8282e3615b8efbb",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     28.0,
+     30.0,
+     49.0,
+     37.0
+    ],
+    "keyframe_id": 130,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "4118567ede367985e2e17988c342bb481e95bb5e",
+    "box": [
+     23.0,
+     8.0,
+     29.0,
+     21.0
+    ],
+    "keyframe_id": 131,
+    "occlusion_ratio": 0.817307692308,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "3511083539b4012fdc4f419cfce0783f0e65892d"
+   },
+   "i02": {
+    "amodal": "d9dfd0ee5f08c4dadcf0fcc83f710639ebe9f831",
+    "box": [
+     4.0,
+     12.0,
+     23.0,
+     20.0
+    ],
+    "keyframe_id": 132,
+    "occlusion_ratio": 0.173913043478,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "95c34db9493ae994e732acd790eb4f3c70a2df1b"
+   },
+   "i03": {
+    "amodal": "57d14af25b2745b8e0b351719edd3d48cc2da4a9",
+    "box": [
+     18.0,
+     20.0,
+     53.0,
+     37.0
+    ],
+    "keyframe_id": 133,
+    "occlusion_ratio": 0.622983870968,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "65727eedf714ca56644a0c2d1409628e248bbc77"
+   },
+   "i04": {
+    "amodal": "0c6fe581d0e2ce4adc3f46ace8f7c1d2d9870a02",
+    "box": [
+     25.0,
+     0.0,
+     46.0,
+     18.0
+    ],
+    "keyframe_id": 134,
+    "occlusion_ratio": 0.179894179894,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "2b0a25bf50412250fae9e8bf827a8a2eeb873c51"
+   },
+   "i05": {
+    "amodal": "b1ab33570974a52e588e15ed19bda45883b132de",
+    "box": null,
+    "keyframe_id": 135,
+    "occlusion_ratio": 1.0,
+    "placement": "in_chassis",
+    "visibility": "occluded_full",
+    "visible": "a92ea21d967e0e9466741b55fb06b3f1be56619f"
+   },
+   "i06": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "out_of_view",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i03",
+     "p1"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i05",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i03",
+    "i02",
+    "i01",
+    "i04",
+    "i05"
+   ]
+  },
+  "problems": [
+   "bench_missing:i06",
+   "empty_visible:i05",
+   "zorder_missing:i05/p0"
+  ]
+ },
+ "04-64x64": {
+  "input_hash": "d6d99dca7e519510b1139f724a22ce028d495c1c",
+  "instances": {
+   "i00": {
+    "amodal": "0ee668a9b4ee25cbd995f6436eab6864e9236146",
+    "box": [
+     0.0,
+     8.0,
+     10.0,
+     34.0
+    ],
+    "keyframe_id": 140,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "0ee668a9b4ee25cbd995f6436eab6864e9236146"
+   },
+   "i01": {
+    "amodal": "c3bdd084b5a0065460b2598ec49ebd04bd88b2e7",
+    "box": [
+     21.0,
+     2.0,
+     64.0,
+     64.0
+    ],
+    "keyframe_id": 141,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "c3bdd084b5a0065460b2598ec49ebd04bd88b2e7"
+   },
+   "i02": {
+    "amodal": "f3c258fb138f347b39288f9ef06b2b2fd203322c",
+    "box": [
+     41.0,
+     3.0,
+     50.0,
+     23.0
+    ],
+    "keyframe_id": 142,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "f3c258fb138f347b39288f9ef06b2b2fd203322c"
+   },
+   "i03": {
+    "amodal": "a272dd9c6cdcfbbf61a3052f436da65ef0324416",
+    "box": [
+     11.0,
+     58.0,
+     19.0,
+     64.0
+    ],
+    "keyframe_id": 143,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "a272dd9c6cdcfbbf61a3052f436da65ef0324416"
+   },
+   "i04": {
+    "amodal": "8b8117710a09e313a97f4d0a25f71e887f352cc2",
+    "box": null,
+    "keyframe_id": 144,
+    "occlusion_ratio": 1.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i01",
+     "p2"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i02",
+     "p2"
+    ],
+    [
+     "i01",
+     "p1"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i02",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i04",
+    "i01",
+    "i03",
+    "i02",
+    "i00"
+   ]
+  },
+  "problems": []
+ },
+ "05-48x96": {
+  "input_hash": "fce1bb287a093ec7862a77290ababc71685df2d1",
+  "instances": {
+   "i00": {
+    "amodal": "8c2eddb5f1d8c71bf64acf7f00f93973b2d08a60",
+    "box": [
+     75.0,
+     23.0,
+     96.0,
+     28.0
+    ],
+    "keyframe_id": 150,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "8c2eddb5f1d8c71bf64acf7f00f93973b2d08a60"
+   },
+   "i01": {
+    "amodal": "62837b06a56d7ea25b80426ddfff9b5b4235981d",
+    "box": [
+     59.0,
+     26.0,
+     96.0,
+     48.0
+    ],
+    "keyframe_id": 151,
+    "occlusion_ratio": 0.315789473684,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "e458a38d2b315a21f6fdac4704b7d0b192a7d8b5"
+   },
+   "i02": {
+    "amodal": "068f61b0d693330630e0a0de64c7b32704e2096c",
+    "box": [
+     10.0,
+     6.0,
+     66.0,
+     48.0
+    ],
+    "keyframe_id": 152,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "068f61b0d693330630e0a0de64c7b32704e2096c"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p1"
+    ],
+    [
+     "i01",
+     "p2"
+    ],
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i02",
+    "i00"
+   ]
+  },
+  "problems": [
+   "zorder_cycle:i01,i02"
+  ]
+ },
+ "06-96x48": {
+  "input_hash": "e98dd7392f81b7903966b5f1d5c559e9c300dc73",
+  "instances": {
+   "i00": {
+    "amodal": "67468fce57704a7a22a59f80b56952d0bc5ffc3c",
+    "box": [
+     6.0,
+     11.0,
+     17.0,
+     28.0
+    ],
+    "keyframe_id": 160,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "67468fce57704a7a22a59f80b56952d0bc5ffc3c"
+   },
+   "i01": {
+    "amodal": "afb40f20c7f94360d6ec97037674cf8799bc8f78",
+    "box": null,
+    "keyframe_id": 161,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "afb40f20c7f94360d6ec97037674cf8799bc8f78"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i00"
+   ]
+  },
+  "problems": [
+   "empty_visible:i01"
+  ]
+ },
+ "07-37x53": {
+  "input_hash": "72d389a64cca75fbcaafad8c312f99305f0610a4",
+  "instances": {
+   "i00": {
+    "amodal": "7262a6616d198a38bf96b635110bd0f6a28b05c2",
+    "box": [
+     49.0,
+     18.0,
+     53.0,
+     25.0
+    ],
+    "keyframe_id": 170,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "7262a6616d198a38bf96b635110bd0f6a28b05c2"
+   },
+   "i01": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i02": {
+    "amodal": "622a7078929393d94dea2f6b5919ee70f5c94adc",
+    "box": [
+     30.0,
+     0.0,
+     51.0,
+     27.0
+    ],
+    "keyframe_id": 172,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "motion_blur",
+    "visible": "622a7078929393d94dea2f6b5919ee70f5c94adc"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i02",
+    "i00"
+   ]
+  },
+  "problems": [
+   "bench_missing:i01",
+   "zorder_missing:i00/p0"
+  ]
+ },
+ "08-64x64": {
+  "input_hash": "b35b0c16d99753a8b8dbb9a10b9152b5dc88355d",
+  "instances": {
+   "i00": {
+    "amodal": "2abf5148c47c543969d450f9c9e09cf6677d49a9",
+    "box": [
+     2.0,
+     60.0,
+     25.0,
+     64.0
+    ],
+    "keyframe_id": 180,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "2abf5148c47c543969d450f9c9e09cf6677d49a9"
+   },
+   "i01": {
+    "amodal": "7d2044ab33f2cf40395e09024ac6db9d04a5e1e7",
+    "box": [
+     15.0,
+     30.0,
+     39.0,
+     43.0
+    ],
+    "keyframe_id": 181,
+    "occlusion_ratio": 0.320512820513,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "3a57641d6308886d592d4e3ea221a28df0d27aad"
+   },
+   "i02": {
+    "amodal": "69fb550e4897df97ec4269e6b534ec4e250a8bab",
+    "box": [
+     6.0,
+     21.0,
+     56.0,
+     56.0
+    ],
+    "keyframe_id": 182,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "69fb550e4897df97ec4269e6b534ec4e250a8bab"
+   },
+   "i03": {
+    "amodal": null,
+    "box": [
+     57.0,
+     36.0,
+     64.0,
+     64.0
+    ],
+    "keyframe_id": 183,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i00",
+    "i02"
+   ]
+  },
+  "problems": [
+   "zorder_missing:i02/p0",
+   "zorder_missing:i02/p1"
+  ]
+ },
+ "09-48x96": {
+  "input_hash": "1ee2603e3cabad10eed9204b6c68f0ffe8daf5af",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     64.62745726297689,
+     7.851498008900624,
+     76.76841979922428,
+     28.455002395015406
+    ],
+    "keyframe_id": 190,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "1446d9c73e9aa4c6022c42c37c732bef19c4d818",
+    "box": [
+     30.0,
+     6.0,
+     46.0,
+     27.0
+    ],
+    "keyframe_id": 191,
+    "occlusion_ratio": 0.053191489362,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "56d4f5683d61f7d35e6d1584240f59b67a9648e4"
+   },
+   "i02": {
+    "amodal": "98c70169674ed0dd3ffe723ff7ca9382d1b249fb",
+    "box": [
+     6.0,
+     25.0,
+     96.0,
+     45.0
+    ],
+    "keyframe_id": 192,
+    "occlusion_ratio": 0.151006711409,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "a7bba462d645c426c080f244d424a2824cfcabd7"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i02",
+     "p2"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i02"
+   ]
+  },
+  "problems": []
+ },
+ "10-96x48": {
+  "input_hash": "0034e83d7e8079756bcbef5dab51b311e44e1a0d",
+  "instances": {
+   "i00": {
+    "amodal": "716a08acfe74e56978d65bb934ac8510a5305a5f",
+    "box": [
+     10.0,
+     2.0,
+     31.0,
+     88.0
+    ],
+    "keyframe_id": 200,
+    "occlusion_ratio": 0.041666666667,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "2ebdb1d9252250f79040674d75cb7f1402d79137"
+   },
+   "i01": {
+    "amodal": "afb40f20c7f94360d6ec97037674cf8799bc8f78",
+    "box": null,
+    "keyframe_id": 201,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "afb40f20c7f94360d6ec97037674cf8799bc8f78"
+   },
+   "i02": {
+    "amodal": "31d1e4e0b969cdea252c88654e7ec944f1f37dea",
+    "box": [
+     35.0,
+     87.0,
+     48.0,
+     95.0
+    ],
+    "keyframe_id": 202,
+    "occlusion_ratio": 0.201923076923,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "bacdeaf16d93f1c1ca33a6319905973fea4407f0"
+   },
+   "i03": {
+    "amodal": null,
+    "box": [
+     19.0,
+     68.0,
+     27.0,
+     95.0
+    ],
+    "keyframe_id": 203,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i04": {
+    "amodal": "8b683fa3579e27b290829463780e23e19caf6bb1",
+    "box": [
+     10.0,
+     12.0,
+     24.0,
+     56.0
+    ],
+    "keyframe_id": 204,
+    "occlusion_ratio": 0.602272727273,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "aa0dcff9707165c6486363d669605bfeab3c62ec"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i00",
+     "p2"
+    ],
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i00",
+     "p1"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i02",
+    "i00",
+    "i04"
+   ]
+  },
+  "problems": [
+   "empty_visible:i01",
+   "zorder_cycle:i00,i01"
+  ]
+ },
+ "11-37x53": {
+  "input_hash": "84d71c494a9f5328c7922234722f2442dcaabb8a",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     0.0,
+     33.0,
+     3.0,
+     37.0
+    ],
+    "keyframe_id": 210,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "motion_blur",
+    "visible": null
+   }
+  },
+  "layers": {},
+  "painted": {},
+  "problems": []
+ },
+ "12-64x64": {
+  "input_hash": "e220146eec07280050b4e0129087c5a4b12c5247",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     38.0,
+     24.0,
+     51.0,
+     28.0
+    ],
+    "keyframe_id": 220,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "478444e57c01980cbd18d2fa2e7162e348d79b79",
+    "box": [
+     41.0,
+     20.0,
+     51.0,
+     28.0
+    ],
+    "keyframe_id": 221,
+    "occlusion_ratio": 0.6,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "bc2397756e5dea462dbabc2467e8661198ab8da9"
+   },
+   "i02": {
+    "amodal": "ff03f3fdbd8addb508be10c6598dc6a4828757d4",
+    "box": [
+     8.0,
+     0.0,
+     23.0,
+     16.0
+    ],
+    "keyframe_id": 222,
+    "occlusion_ratio": 0.058333333333,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "d13a2b9f6a514586e44340eba0c53a176eacc01b"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i02"
+   ]
+  },
+  "problems": []
+ },
+ "13-48x96": {
+  "input_hash": "36a02fc844904ce143c686fe06603cd7695d755b",
+  "instances": {
+   "i00": {
+    "amodal": "afb40f20c7f94360d6ec97037674cf8799bc8f78",
+    "box": [
+     32.0,
+     33.0,
+     52.0,
+     48.0
+    ],
+    "keyframe_id": 230,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "a37feb153c73636fd3ce345ce522332f80a0a957"
+   },
+   "i01": {
+    "amodal": "c202d25c930b7880b1bb4bfb2e938e2cccc4effd",
+    "box": [
+     14.0,
+     8.0,
+     88.0,
+     36.0
+    ],
+    "keyframe_id": 231,
+    "occlusion_ratio": 0.283891547049,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "542ca4b9503c0da4ea20aa536b2862812c84f7e5"
+   },
+   "i02": {
+    "amodal": "4143ecaac3860dbf2364a9e92a92ed498177b5ba",
+    "box": [
+     81.0,
+     6.0,
+     96.0,
+     39.0
+    ],
+    "keyframe_id": 232,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "4143ecaac3860dbf2364a9e92a92ed498177b5ba"
+   },
+   "i03": {
+    "amodal": "70af476833f1a86393b0851769ada30172ba400a",
+    "box": [
+     33.0,
+     37.0,
+     57.0,
+     48.0
+    ],
+    "keyframe_id": 233,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "70af476833f1a86393b0851769ada30172ba400a"
+   },
+   "i04": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i05": {
+    "amodal": "2060d59fa52ba1ba119f8b56e9ee77e2ab94f020",
+    "box": null,
+    "keyframe_id": 235,
+    "occlusion_ratio": 1.0,
+    "placement": "in_chassis",
+    "visibility": "occluded_full",
+    "visible": "afb40f20c7f94360d6ec97037674cf8799bc8f78"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i05",
+     "p0"
+    ],
+    [
+     "i01",
+     "p2"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i01",
+     "p1"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i03",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00",
+    "i05",
+    "i01",
+    "i02",
+    "i03"
+   ]
+  },
+  "problems": [
+   "empty_visible:i05",
+   "missing_shape:i04",
+   "zorder_missing:i02/p0",
+   "zorder_missing:i02/p1",
+   "zorder_missing:i03/p0"
+  ]
+ },
+ "14-96x48": {
+  "input_hash": "03a2afc59eb11b8b2e9f2a8598b3cb5c311d127e",
+  "instances": {
+   "i00": {
+    "amodal": "4c2bf18959003ec33a52c99e3ba5b775d13fbf2b",
+    "box": [
+     8.0,
+     0.0,
+     25.0,
+     96.0
+    ],
+    "keyframe_id": 240,
+    "occlusion_ratio": 0.037593984962,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "e4a2d46c09a92c6be0cd1d19bac9250aee761e15"
+   },
+   "i01": {
+    "amodal": "e7f28674d04546567623f79a952d4bc9341e5f4e",
+    "box": [
+     1.0,
+     37.0,
+     25.0,
+     56.0
+    ],
+    "keyframe_id": 241,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "e7f28674d04546567623f79a952d4bc9341e5f4e"
+   },
+   "i02": {
+    "amodal": "75c129e49e61bbc647d6e1b407887023e5f75b80",
+    "box": [
+     28.0,
+     66.0,
+     31.0,
+     67.0
+    ],
+    "keyframe_id": 242,
+    "occlusion_ratio": 0.966666666667,
+    "placement": "in_chassis",
+    "visibility": "occluded_full",
+    "visible": "b6255a89184abcecb1ec662a8f013d2ba52a9fe2"
+   },
+   "i03": {
+    "amodal": "c29d0bf3cb5b235837c9eabc146984837bc8c274",
+    "box": [
+     41.0,
+     29.0,
+     48.0,
+     57.0
+    ],
+    "keyframe_id": 243,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "c29d0bf3cb5b235837c9eabc146984837bc8c274"
+   },
+   "i04": {
+    "amodal": "9386e87b93db2b0980b46e01a73d8f3f4c528e40",
+    "box": [
+     3.0,
+     43.0,
+     48.0,
+     96.0
+    ],
+    "keyframe_id": 244,
+    "occlusion_ratio": 0.109017496635,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "274465d3199c9349938982ee2b89be820b8df57c"
+   },
+   "i05": {
+    "amodal": "2cd0f58911bf2a018ad77e33bc2d9d9e0937a517",
+    "box": [
+     38.0,
+     22.0,
+     41.0,
+     39.0
+    ],
+    "keyframe_id": 245,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "2cd0f58911bf2a018ad77e33bc2d9d9e0937a517"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i04",
+     "p2"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i00",
+     "p1"
+    ],
+    [
+     "i04",
+     "p1"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i05",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i04",
+    "i02",
+    "i03",
+    "i00",
+    "i01",
+    "i05"
+   ]
+  },
+  "problems": [
+   "zorder_missing:i01/p0",
+   "zorder_missing:i05/p0"
+  ]
+ },
+ "15-37x53": {
+  "input_hash": "903904f17a62c7332f580a3bbc65c4b066f9fbc8",
+  "instances": {
+   "i00": {
+    "amodal": "b64fe3bc796503a6c4184c9788a6f98ea775a95c",
+    "box": [
+     1.0,
+     10.0,
+     53.0,
+     24.0
+    ],
+    "keyframe_id": 250,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "b64fe3bc796503a6c4184c9788a6f98ea775a95c"
+   },
+   "i01": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i02": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i03": {
+    "amodal": "bdf1663bd9eca16396a446faf57b4b65645e6f6a",
+    "box": [
+     6.0,
+     24.0,
+     18.0,
+     33.0
+    ],
+    "keyframe_id": 253,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "bdf1663bd9eca16396a446faf57b4b65645e6f6a"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p1"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i03",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00",
+    "i03"
+   ]
+  },
+  "problems": [
+   "missing_shape:i01",
+   "missing_shape:i02"
+  ]
+ },
+ "16-64x64": {
+  "input_hash": "579dbcae1b9e13792f5dbf49d98726d7cf5caa0a",
+  "instances": {
+   "i00": {
+    "amodal": "01be96958a3283e629969dcf94ef872d88794ed7",
+    "box": [
+     53.0,
+     11.0,
+     64.0,
+     22.0
+    ],
+    "keyframe_id": 260,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "01be96958a3283e629969dcf94ef872d88794ed7"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00"
+   ]
+  },
+  "problems": []
+ },
+ "17-48x96": {
+  "input_hash": "10ad34b8f95473ecd81d81a97ae7c25ae3ca0da8",
+  "instances": {
+   "i00": {
+    "amodal": "5a67b49a3e6ce1e36d9910d690a087296b2ff9a8",
+    "box": [
+     24.0,
+     16.0,
+     96.0,
+     48.0
+    ],
+    "keyframe_id": 270,
+    "occlusion_ratio": 0.00328407225,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "742f023a60c11f9e3d1444993fab5d1e3242a8a6"
+   },
+   "i01": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i02": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i03": {
+    "amodal": "c89045a040686b5b1d112c2e86b9fd4fb7f26b99",
+    "box": [
+     78.0,
+     21.0,
+     81.0,
+     43.0
+    ],
+    "keyframe_id": 273,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "c89045a040686b5b1d112c2e86b9fd4fb7f26b99"
+   },
+   "i04": {
+    "amodal": null,
+    "box": [
+     91.0,
+     5.0,
+     96.0,
+     13.0
+    ],
+    "keyframe_id": 274,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i05": {
+    "amodal": "df88d32a8c4a85aba9905a8ff3bebfd5301e861e",
+    "box": [
+     23.0,
+     37.0,
+     26.0,
+     48.0
+    ],
+    "keyframe_id": 275,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "df88d32a8c4a85aba9905a8ff3bebfd5301e861e"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i00",
+     "p1"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i05",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i03",
+    "i00",
+    "i05"
+   ]
+  },
+  "problems": [
+   "missing_shape:i01",
+   "missing_shape:i02",
+   "zorder_missing:i05/p0"
+  ]
+ },
+ "18-96x48": {
+  "input_hash": "dc566c55492d3436c983c041495bd10ab25080d7",
+  "instances": {
+   "i00": {
+    "amodal": "27decf2e881713651b92a4a05f2d0e7c0faf8025",
+    "box": [
+     8.0,
+     9.0,
+     26.0,
+     31.0
+    ],
+    "keyframe_id": 280,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "27decf2e881713651b92a4a05f2d0e7c0faf8025"
+   },
+   "i01": {
+    "amodal": "91976c2b84650728476624718258bdeec1f8042f",
+    "box": [
+     5.0,
+     17.0,
+     17.0,
+     61.0
+    ],
+    "keyframe_id": 281,
+    "occlusion_ratio": 0.238636363636,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "035425db5f54341322d97583fd05374edbb5e1c7"
+   },
+   "i02": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i03": {
+    "amodal": "d812d1a9fea4877d176f6f543b6762fdbc3722a6",
+    "box": [
+     19.0,
+     43.0,
+     42.0,
+     96.0
+    ],
+    "keyframe_id": 283,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "d812d1a9fea4877d176f6f543b6762fdbc3722a6"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i03",
+     "p1"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i03",
+    "i01",
+    "i00"
+   ]
+  },
+  "problems": [
+   "bench_missing:i02"
+  ]
+ },
+ "19-37x53": {
+  "input_hash": "6ece99ee85731d327a484456a7df7d41e35bc2bf",
+  "instances": {
+   "i00": {
+    "amodal": "c7335ae3b963ab9a49d3dcddeef536e230d71630",
+    "box": [
+     33.0,
+     15.0,
+     43.0,
+     33.0
+    ],
+    "keyframe_id": 290,
+    "occlusion_ratio": 0.661111111111,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "c433d4a2f8f6ee9b0a2d4fb837756e89b06b72fb"
+   },
+   "i01": {
+    "amodal": "03cc23ac9f06ae78a56ea0d5f49084789691a846",
+    "box": [
+     1.0,
+     21.0,
+     31.0,
+     31.0
+    ],
+    "keyframe_id": 291,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "03cc23ac9f06ae78a56ea0d5f49084789691a846"
+   },
+   "i02": {
+    "amodal": null,
+    "box": [
+     31.0,
+     1.0,
+     53.0,
+     11.0
+    ],
+    "keyframe_id": 292,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i03": {
+    "amodal": "d9bba2d98ac1c72c333520ee37af33ca105f4d4a",
+    "box": [
+     0.0,
+     1.0,
+     52.0,
+     32.0
+    ],
+    "keyframe_id": 293,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "d9bba2d98ac1c72c333520ee37af33ca105f4d4a"
+   },
+   "i04": {
+    "amodal": "e8dc9b801db6b180011fc9cdb3b92e677ab92af6",
+    "box": [
+     4.0,
+     27.0,
+     29.0,
+     37.0
+    ],
+    "keyframe_id": 294,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "motion_blur",
+    "visible": "c40ab35f34c7a44081ca862316e7515c8e431015"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p2"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i01",
+     "p1"
+    ],
+    [
+     "i03",
+     "p2"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i03",
+     "p1"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i03",
+    "i00",
+    "i04"
+   ]
+  },
+  "problems": []
+ },
+ "20-64x64": {
+  "input_hash": "c45b9777b0704bc71f125ab93d54ddd18df79571",
+  "instances": {
+   "i00": {
+    "amodal": "e757b163941c59b339b8d7061246e7397ec5ce07",
+    "box": [
+     35.0,
+     35.0,
+     49.0,
+     56.0
+    ],
+    "keyframe_id": 300,
+    "occlusion_ratio": 0.396103896104,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "ad8db9b563772571d30a993b6d4c605b64a8c89c"
+   },
+   "i01": {
+    "amodal": "ee51ad79ceb1677c9b3012ab56bd7d9d3c0f5885",
+    "box": [
+     60.0,
+     59.0,
+     64.0,
+     64.0
+    ],
+    "keyframe_id": 301,
+    "occlusion_ratio": 0.818181818182,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "e78833e611dc967f088213710aad6eb7fa48d9eb"
+   },
+   "i02": {
+    "amodal": "024b3b86b25e51c647dbfe2fca040824c442166e",
+    "box": [
+     40.0,
+     44.0,
+     60.0,
+     64.0
+    ],
+    "keyframe_id": 302,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "024b3b86b25e51c647dbfe2fca040824c442166e"
+   },
+   "i03": {
+    "amodal": "9be512ae05d1e940a5ad2d92c129b1b262181dca",
+    "box": [
+     25.0,
+     50.0,
+     40.0,
+     61.0
+    ],
+    "keyframe_id": 303,
+    "occlusion_ratio": 0.415584415584,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "be7b14f67e9b0ea2eb9bc188393bea3833219c67"
+   },
+   "i04": {
+    "amodal": "057f900128ee733a47fad8ef0124c8c75188c40c",
+    "box": [
+     33.0,
+     27.0,
+     60.0,
+     35.0
+    ],
+    "keyframe_id": 304,
+    "occlusion_ratio": 0.486111111111,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "d0854eead229b0dac2f66686bd11fb9ac5569d28"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i00",
+     "p1"
+    ],
+    [
+     "i02",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i04",
+    "i01",
+    "i03",
+    "i00",
+    "i02"
+   ]
+  },
+  "problems": []
+ },
+ "21-48x96": {
+  "input_hash": "25789ee22564f66e82b42f2267bc23faf3d6f8d7",
+  "instances": {
+   "i00": {
+    "amodal": "6c0634aaaf28af0817488586dd741d915d5aaa82",
+    "box": [
+     91.0,
+     31.0,
+     96.0,
+     48.0
+    ],
+    "keyframe_id": 310,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "6c0634aaaf28af0817488586dd741d915d5aaa82"
+   },
+   "i01": {
+    "amodal": "5b2476971e9a00fbe1b1a55fab059b817ee51bf7",
+    "box": [
+     0.0,
+     1.0,
+     37.0,
+     46.0
+    ],
+    "keyframe_id": 311,
+    "occlusion_ratio": 0.24006116208,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "66cc6bffbc589646ec3d778d2c71b871c91f302c"
+   },
+   "i02": {
+    "amodal": "b0e40fc71ca9730972924ea9c4930a8a1c3a3f9c",
+    "box": [
+     59.0,
+     25.0,
+     96.0,
+     34.0
+    ],
+    "keyframe_id": 312,
+    "occlusion_ratio": 0.198198198198,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "14f141cfbb307a10e87c5f6e8633562bac9fa411"
+   },
+   "i03": {
+    "amodal": "0b89956e1dd2e8f01135e2d078cfe99168c43801",
+    "box": [
+     10.0,
+     10.0,
+     96.0,
+     48.0
+    ],
+    "keyframe_id": 313,
+    "occlusion_ratio": 0.25406504065,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "4e6c8da5003eef21f233f615956d13bf77fb3284"
+   },
+   "i04": {
+    "amodal": "ec97a1ae70f65fa5c001859af9323e1c2206f5a3",
+    "box": [
+     39.0,
+     29.0,
+     58.0,
+     41.0
+    ],
+    "keyframe_id": 314,
+    "occlusion_ratio": 0.380434782609,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "aacc463fe6e210935fb6a82fb9f6492cc790819e"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i04",
+     "p1"
+    ],
+    [
+     "i03",
+     "p2"
+    ],
+    [
+     "i01",
+     "p1"
+    ],
+    [
+     "i03",
+     "p1"
+    ],
+    [
+     "i01",
+     "p2"
+    ],
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i04",
+    "i03",
+    "i02",
+    "i00"
+   ]
+  },
+  "problems": [
+   "shape_size_mismatch:i02/p0",
+   "zorder_missing:i02/p1"
+  ]
+ },
+ "22-96x48": {
+  "input_hash": "cacf9ccefe1892eaa8514c0ff9343d21e5585791",
+  "instances": {
+   "i00": {
+    "amodal": "afb40f20c7f94360d6ec97037674cf8799bc8f78",
+    "box": null,
+    "keyframe_id": 320,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "afb40f20c7f94360d6ec97037674cf8799bc8f78"
+   }
+  },
+  "layers": {},
+  "painted": {},
+  "problems": [
+   "empty_visible:i00",
+   "shape_size_mismatch:i00/p0"
+  ]
+ },
+ "23-37x53": {
+  "input_hash": "b1eaf4acdfec76799ca29ebbd115a6c5402d554a",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "9b7359f9d17c7311fc1b75bddac224e04efed703",
+    "box": [
+     9.0,
+     24.0,
+     22.0,
+     30.0
+    ],
+    "keyframe_id": 331,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "9b7359f9d17c7311fc1b75bddac224e04efed703"
+   },
+   "i02": {
+    "amodal": "880518889c0f613279504faefcf1f7e6ffe704fe",
+    "box": [
+     27.0,
+     32.0,
+     43.0,
+     37.0
+    ],
+    "keyframe_id": 332,
+    "occlusion_ratio": 0.238095238095,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "e332fae48323faff01b9013baf1fe6782ae0934e"
+   },
+   "i03": {
+    "amodal": "efa1153cb00b7fc65691358e320ddf329b697388",
+    "box": [
+     44.0,
+     17.0,
+     53.0,
+     27.0
+    ],
+    "keyframe_id": 333,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "efa1153cb00b7fc65691358e320ddf329b697388"
+   },
+   "i04": {
+    "amodal": "96a077007eee8e7fcdab109f3751a05dd4bb29d0",
+    "box": [
+     28.0,
+     0.0,
+     49.0,
+     6.0
+    ],
+    "keyframe_id": 334,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "96a077007eee8e7fcdab109f3751a05dd4bb29d0"
+   },
+   "i05": {
+    "amodal": "dae22cd91bc531bf94ba4403294fe8e7759317a9",
+    "box": [
+     43.0,
+     31.0,
+     53.0,
+     37.0
+    ],
+    "keyframe_id": 335,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "dae22cd91bc531bf94ba4403294fe8e7759317a9"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i05",
+     "p0"
+    ],
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i02",
+    "i03",
+    "i05",
+    "i04",
+    "i01"
+   ]
+  },
+  "problems": [
+   "bench_missing:i00"
+  ]
+ },
+ "24-64x64": {
+  "input_hash": "49d6a37e83300890e9c61d4f4975c4e98a48bb11",
+  "instances": {
+   "i00": {
+    "amodal": "8b71eb82ded3e92dd7c5e1813f56033b906bd07f",
+    "box": [
+     39.0,
+     40.0,
+     48.0,
+     49.0
+    ],
+    "keyframe_id": 340,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "93bc510b88398f1b3eef13bbec5ecd7e550b25ab"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00"
+   ]
+  },
+  "problems": []
+ },
+ "25-48x96": {
+  "input_hash": "7e7c63146bc578df22caa2fd837917b4315349d9",
+  "instances": {
+   "i00": {
+    "amodal": "2d5017e3f34c0e8bc4921a2c6c2971372e061f47",
+    "box": [
+     16.0,
+     9.0,
+     41.0,
+     28.0
+    ],
+    "keyframe_id": 350,
+    "occlusion_ratio": 0.110859728507,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "4a0ead2e8451de1f4e09d65eb566d88fa9ee1584"
+   },
+   "i01": {
+    "amodal": "98821c2dceb48112e8260c5127e9ead40cd698e5",
+    "box": [
+     55.0,
+     22.0,
+     72.0,
+     39.0
+    ],
+    "keyframe_id": 351,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "98821c2dceb48112e8260c5127e9ead40cd698e5"
+   },
+   "i02": {
+    "amodal": "12bc16ae658180785939a2b38df0fbce9e686418",
+    "box": [
+     19.0,
+     4.0,
+     89.0,
+     45.0
+    ],
+    "keyframe_id": 352,
+    "occlusion_ratio": 0.023346303502,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "6b72f82482ce8f6b665c605b9f3f8980decd7065"
+   },
+   "i03": {
+    "amodal": null,
+    "box": [
+     23.727288396292334,
+     12.046247573071216,
+     62.01367022545773,
+     35.04875627224228
+    ],
+    "keyframe_id": 353,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i02",
+     "p2"
+    ],
+    [
+     "i02",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i02",
+    "i00",
+    "i01"
+   ]
+  },
+  "problems": []
+ },
+ "26-96x48": {
+  "input_hash": "b059048509c4175c6c83a1c95b78cd8930894abb",
+  "instances": {
+   "i00": {
+    "amodal": "afb40f20c7f94360d6ec97037674cf8799bc8f78",
+    "box": [
+     13.0,
+     80.0,
+     19.0,
+     96.0
+    ],
+    "keyframe_id": 360,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "3b046ae7318d2f683e3fc96449856f85b62ab27f"
+   },
+   "i01": {
+    "amodal": "b55ac23c48b5a7d8d40751e6af72ea10b9e1195d",
+    "box": [
+     11.0,
+     4.0,
+     43.0,
+     93.0
+    ],
+    "keyframe_id": 361,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "b55ac23c48b5a7d8d40751e6af72ea10b9e1195d"
+   },
+   "i02": {
+    "amodal": "a64dea0542c426cc879d4bbc4511384e93543113",
+    "box": [
+     29.0,
+     26.0,
+     46.0,
+     70.0
+    ],
+    "keyframe_id": 362,
+    "occlusion_ratio": 0.038575667656,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "ae641262e3f504efaa0528a318d7080b502b9a1b"
+   },
+   "i03": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "out_of_view",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i01",
+     "p1"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i01",
+     "p2"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i02",
+    "i01",
+    "i00"
+   ]
+  },
+  "problems": [
+   "bench_missing:i03"
+  ]
+ },
+ "27-37x53": {
+  "input_hash": "94597346904b55f820f675f30dc9f8d04e1369e2",
+  "instances": {
+   "i00": {
+    "amodal": "e2785431b7991470c57ca415afb348acb897768f",
+    "box": [
+     9.0,
+     1.0,
+     42.0,
+     26.0
+    ],
+    "keyframe_id": 370,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "e2785431b7991470c57ca415afb348acb897768f"
+   },
+   "i01": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i02": {
+    "amodal": "410029e1a33cd35e67d22299cb1a25bb295bdcce",
+    "box": [
+     36.0,
+     16.0,
+     42.0,
+     21.0
+    ],
+    "keyframe_id": 372,
+    "occlusion_ratio": 0.375,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "3f8d03eb6b4c8ba3c4cb72ecd22b135b68e1a298"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i00",
+     "p2"
+    ],
+    [
+     "i00",
+     "p1"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i02",
+    "i00"
+   ]
+  },
+  "problems": [
+   "missing_shape:i01",
+   "shape_size_mismatch:i00/p0"
+  ]
+ },
+ "28-64x64": {
+  "input_hash": "0d858590d50b39c102353538fb81527eebf567be",
+  "instances": {
+   "i00": {
+    "amodal": "34a1336c7a779dc3d33875c800addb143185744c",
+    "box": [
+     7.0,
+     26.0,
+     64.0,
+     64.0
+    ],
+    "keyframe_id": 380,
+    "occlusion_ratio": 0.202247191011,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "f8ed0d31013e43a8c5884a6babf83cd8a5d7a4ee"
+   },
+   "i01": {
+    "amodal": null,
+    "box": [
+     0.0,
+     58.0,
+     20.0,
+     64.0
+    ],
+    "keyframe_id": 381,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i02": {
+    "amodal": "dc4c3695d064c7ad8baae3655223d6654edc0312",
+    "box": [
+     0.0,
+     23.0,
+     43.0,
+     64.0
+    ],
+    "keyframe_id": 382,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "dc4c3695d064c7ad8baae3655223d6654edc0312"
+   },
+   "i03": {
+    "amodal": "c009970d07d635785a803c754af16e117d23412a",
+    "box": [
+     36.0,
+     33.0,
+     64.0,
+     64.0
+    ],
+    "keyframe_id": 383,
+    "occlusion_ratio": 0.220064724919,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "a2fbe7f71065b7aa922f45f2e0f1057a69b7588b"
+   },
+   "i04": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "occluded_full",
+    "visible": null
+   },
+   "i05": {
+    "amodal": "9af40ca439c0cb3d6cb6448e30eb3192e46fba20",
+    "box": [
+     48.0,
+     37.0,
+     54.0,
+     56.0
+    ],
+    "keyframe_id": 385,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "9af40ca439c0cb3d6cb6448e30eb3192e46fba20"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i03",
+     "p1"
+    ],
+    [
+     "i00",
+     "p1"
+    ],
+    [
+     "i00",
+     "p2"
+    ],
+    [
+     "i05",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i02",
+     "p2"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i03",
+    "i00",
+    "i05",
+    "i02"
+   ]
+  },
+  "problems": [
+   "missing_shape:i04"
+  ]
+ },
+ "29-48x96": {
+  "input_hash": "17581a698f2a5ba08c739c915a8795c60c1a7152",
+  "instances": {
+   "i00": {
+    "amodal": "6425a72f571cbf645168dd9a446dec2dcf4cfe89",
+    "box": [
+     17.0,
+     22.0,
+     96.0,
+     48.0
+    ],
+    "keyframe_id": 390,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "6425a72f571cbf645168dd9a446dec2dcf4cfe89"
+   },
+   "i01": {
+    "amodal": "bbaa62b65344d816b16031d6af3fc326470a0672",
+    "box": [
+     35.0,
+     8.0,
+     78.0,
+     24.0
+    ],
+    "keyframe_id": 391,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "bbaa62b65344d816b16031d6af3fc326470a0672"
+   },
+   "i02": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i00",
+     "p1"
+    ],
+    [
+     "i00",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i00"
+   ]
+  },
+  "problems": [
+   "missing_shape:i02"
+  ]
+ },
+ "30-96x48": {
+  "input_hash": "89773ec6ef58cfa23fc3846187566bfc6c5b8cb3",
+  "instances": {
+   "i00": {
+    "amodal": "3c221c12683c59986633dca1f85d67c8c0515513",
+    "box": [
+     23.0,
+     18.0,
+     41.0,
+     28.0
+    ],
+    "keyframe_id": 400,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "3c221c12683c59986633dca1f85d67c8c0515513"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00"
+   ]
+  },
+  "problems": []
+ },
+ "31-37x53": {
+  "input_hash": "22dc5868d91b139be2a54073cf48213ec55f00ae",
+  "instances": {
+   "i00": {
+    "amodal": "306d983fd18d058543cd2de28fc979201d0b566a",
+    "box": [
+     36.0,
+     23.0,
+     49.0,
+     36.0
+    ],
+    "keyframe_id": 410,
+    "occlusion_ratio": 0.011695906433,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "237544aa437d0b7ca3523495b4eac88184fba073"
+   },
+   "i01": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i02": {
+    "amodal": "210e00d85b977872d5a815a56adf61b6f13098ae",
+    "box": [
+     27.0,
+     8.0,
+     42.0,
+     35.0
+    ],
+    "keyframe_id": 412,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "210e00d85b977872d5a815a56adf61b6f13098ae"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00",
+    "i02"
+   ]
+  },
+  "problems": [
+   "missing_shape:i01"
+  ]
+ },
+ "32-64x64": {
+  "input_hash": "138ee1a8610ce6f0fbb1d47573fe1919df880f47",
+  "instances": {
+   "i00": {
+    "amodal": "b76b903be90fbf0cf26fd50a2013d693fcb6fba1",
+    "box": null,
+    "keyframe_id": 420,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "b76b903be90fbf0cf26fd50a2013d693fcb6fba1"
+   },
+   "i01": {
+    "amodal": "2ed9689fb51f49fcb89a40ea0ece9c296b25d1fc",
+    "box": [
+     25.0,
+     21.0,
+     44.0,
+     45.0
+    ],
+    "keyframe_id": 421,
+    "occlusion_ratio": 0.093150684932,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "50f527615106df81f88f1e3023999914bc9928ae"
+   },
+   "i02": {
+    "amodal": "617aa7b5eb5c681c75640d1301ef563d224f0b0e",
+    "box": [
+     40.0,
+     7.0,
+     45.0,
+     23.0
+    ],
+    "keyframe_id": 422,
+    "occlusion_ratio": 0.310344827586,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "daa039ea69a5b76a2b6d3496207114e771aa8268"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00",
+    "i02",
+    "i01"
+   ]
+  },
+  "problems": [
+   "empty_visible:i00"
+  ]
+ },
+ "33-48x96": {
+  "input_hash": "3f11b9b8f28f2ce0d6270df3734e38b1f786cdd9",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     55.0,
+     9.0,
+     66.0,
+     22.0
+    ],
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "occluded_full",
+    "visible": "6b58a41c334772ac1c62fcbf74233f61199aea85"
+   },
+   "i01": {
+    "amodal": "442eea3b61b858c286e50f163dafcac703dd2e07",
+    "box": [
+     38.0,
+     23.0,
+     81.0,
+     39.0
+    ],
+    "keyframe_id": 431,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "442eea3b61b858c286e50f163dafcac703dd2e07"
+   },
+   "i02": {
+    "amodal": "cf88f6b58f9bf22a8e8e60d6d72b5ada3e61438f",
+    "box": [
+     89.0,
+     28.0,
+     96.0,
+     40.0
+    ],
+    "keyframe_id": 432,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "cf88f6b58f9bf22a8e8e60d6d72b5ada3e61438f"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i02",
+    "i01"
+   ]
+  },
+  "problems": [
+   "missing_shape:i00"
+  ]
+ },
+ "34-96x48": {
+  "input_hash": "967a342cd3b036344ed21931f82badfab61fe306",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     19.0,
+     92.0,
+     42.0,
+     96.0
+    ],
+    "keyframe_id": 440,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "829de335948c7f8265f94c7b086bc0a6d572c4b2",
+    "box": [
+     0.0,
+     43.0,
+     48.0,
+     96.0
+    ],
+    "keyframe_id": 441,
+    "occlusion_ratio": 0.106951871658,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "e5c7e0c3a5bdcfda3ef5d506db463f63867c7ea9"
+   },
+   "i02": {
+    "amodal": "a52c5da1ac15b3ba524a59b23fe7cfc93d0bfe35",
+    "box": [
+     2.0,
+     9.0,
+     28.0,
+     49.0
+    ],
+    "keyframe_id": 442,
+    "occlusion_ratio": 0.2,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "4cad791dc87ebab609c85fdea6b430db2d60de39"
+   },
+   "i03": {
+    "amodal": "b8fb637181f69f242ef82710fcf86c0da741de9a",
+    "box": [
+     2.0,
+     89.0,
+     20.0,
+     96.0
+    ],
+    "keyframe_id": 443,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "b8fb637181f69f242ef82710fcf86c0da741de9a"
+   },
+   "i04": {
+    "amodal": "f18cf0a044d92d2c8c6d2c8c0153e0335297f264",
+    "box": [
+     16.0,
+     9.0,
+     43.0,
+     57.0
+    ],
+    "keyframe_id": 444,
+    "occlusion_ratio": 0.033277870216,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "288a6c65444831461e6071623ce27daf84589f6c"
+   },
+   "i05": {
+    "amodal": "7bd5f32fcbde4f41d947540bd4686a6cfca96420",
+    "box": [
+     15.0,
+     55.0,
+     25.0,
+     96.0
+    ],
+    "keyframe_id": 445,
+    "occlusion_ratio": 0.134146341463,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "2673d199692b16ea14d132d9a1a722d70c0965f8"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i04",
+     "p1"
+    ],
+    [
+     "i01",
+     "p1"
+    ],
+    [
+     "i05",
+     "p1"
+    ],
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i01",
+     "p2"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i03",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i04",
+    "i02",
+    "i01",
+    "i05",
+    "i03"
+   ]
+  },
+  "problems": [
+   "shape_size_mismatch:i05/p0",
+   "zorder_missing:i03/p0"
+  ]
+ },
+ "35-37x53": {
+  "input_hash": "fd5bd1624c1d4892b82b5ac884d83afd07d20b8c",
+  "instances": {
+   "i00": {
+    "amodal": "6c415d24c9f5f51325e3b0fe075bf767e05a2618",
+    "box": [
+     0.0,
+     22.0,
+     8.0,
+     37.0
+    ],
+    "keyframe_id": 450,
+    "occlusion_ratio": 0.266666666667,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "018d32564d2d91bb18c4dc90c57e75193cf4d8b8"
+   },
+   "i01": {
+    "amodal": "db3f32cefe7cde1878705597d9dbcae17d4e88f2",
+    "box": [
+     4.0,
+     11.0,
+     9.0,
+     30.0
+    ],
+    "keyframe_id": 451,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "db3f32cefe7cde1878705597d9dbcae17d4e88f2"
+   },
+   "i02": {
+    "amodal": "111120e05f6b33cf3d6ee4121a81f0dcf4f6d4e7",
+    "box": [
+     18.0,
+     14.0,
+     44.0,
+     24.0
+    ],
+    "keyframe_id": 452,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "f06b2202cddbaaccf4508ec98b02debe6a5f4ba8"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00",
+    "i02",
+    "i01"
+   ]
+  },
+  "problems": [
+   "zorder_cycle:i01,i02"
+  ]
+ },
+ "36-64x64": {
+  "input_hash": "4de259174ca98d1458407e26cae300bd2e499c0b",
+  "instances": {
+   "i00": {
+    "amodal": "d49cbebdc919e6fea8ef9bbfe104aaf5ef3de472",
+    "box": [
+     52.0,
+     14.0,
+     64.0,
+     30.0
+    ],
+    "keyframe_id": 460,
+    "occlusion_ratio": 0.438596491228,
+    "placement": "in_chassis",
+    "visibility": "occluded_full",
+    "visible": "a6bc8a3c981829653abf00cf60701475bf928e2d"
+   },
+   "i01": {
+    "amodal": "f3ee2b677985f7d74dbe53805187f4aaf7576759",
+    "box": [
+     49.0,
+     33.0,
+     52.0,
+     39.0
+    ],
+    "keyframe_id": 461,
+    "occlusion_ratio": 0.875,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "743beb889a99d66a7b5615ba880d27b2b13143c2"
+   },
+   "i02": {
+    "amodal": "c3677f5bf158440af0bcde2a8356376f542dcdec",
+    "box": [
+     42.0,
+     21.0,
+     49.0,
+     53.0
+    ],
+    "keyframe_id": 462,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "c3677f5bf158440af0bcde2a8356376f542dcdec"
+   },
+   "i03": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i00",
+    "i02"
+   ]
+  },
+  "problems": [
+   "missing_shape:i03"
+  ]
+ },
+ "37-48x96": {
+  "input_hash": "a67080d26fb92d7a96a3d5dd14e2d189223c39cb",
+  "instances": {
+   "i00": {
+    "amodal": "a81b001124430172ff210ba8e3142a336ecd2de3",
+    "box": [
+     50.0,
+     9.0,
+     96.0,
+     48.0
+    ],
+    "keyframe_id": 470,
+    "occlusion_ratio": 0.084699453552,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "887d35ad9e4dcad8f114720cd3f7cc9a68ae822f"
+   },
+   "i01": {
+    "amodal": "46ee44d25c1f19c7da91cfdb04b56045031147fc",
+    "box": [
+     9.0,
+     25.0,
+     52.0,
+     43.0
+    ],
+    "keyframe_id": 471,
+    "occlusion_ratio": 0.643410852713,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "f5d26abfad115f6bd9bcae9f79df5898025579a7"
+   },
+   "i02": {
+    "amodal": "f60679097bc441fafd951e3a445c71072b5ad46c",
+    "box": [
+     65.0,
+     21.0,
+     96.0,
+     41.0
+    ],
+    "keyframe_id": 472,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "f60679097bc441fafd951e3a445c71072b5ad46c"
+   },
+   "i03": {
+    "amodal": null,
+    "box": [
+     20.0,
+     8.0,
+     38.0,
+     20.0
+    ],
+    "keyframe_id": 473,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i04": {
+    "amodal": "e6502d812e135f7cfcda3f3b33b8087be63c4131",
+    "box": [
+     17.0,
+     42.0,
+     50.0,
+     46.0
+    ],
+    "keyframe_id": 474,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "e6502d812e135f7cfcda3f3b33b8087be63c4131"
+   },
+   "i05": {
+    "amodal": "fff358608ae3ec924a112f27ca779e517e8d8c90",
+    "box": [
+     43.0,
+     0.0,
+     85.0,
+     9.0
+    ],
+    "keyframe_id": 475,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "fff358608ae3ec924a112f27ca779e517e8d8c90"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i00",
+     "p1"
+    ],
+    [
+     "i00",
+     "p2"
+    ],
+    [
+     "i05",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i04",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i02",
+    "i00",
+    "i05",
+    "i01",
+    "i04"
+   ]
+  },
+  "problems": [
+   "zorder_missing:i04/p0"
+  ]
+ },
+ "38-96x48": {
+  "input_hash": "db6d56de053276c81058d46860b1c8384deb4d87",
+  "instances": {
+   "i00": {
+    "amodal": "437f679281a92894f32edbc533cb9a9926523f97",
+    "box": [
+     25.0,
+     9.0,
+     48.0,
+     96.0
+    ],
+    "keyframe_id": 480,
+    "occlusion_ratio": 0.262697022767,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "c1e872826cc0457453fb436a2cb68dac8f3ca7d1"
+   },
+   "i01": {
+    "amodal": "f9d466ff8856f579a4c7525a51bbfa0b210c8f9b",
+    "box": [
+     20.0,
+     87.0,
+     28.0,
+     96.0
+    ],
+    "keyframe_id": 481,
+    "occlusion_ratio": 0.862857142857,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "a5e957c9211148c874668291e570eb990a25e822"
+   },
+   "i02": {
+    "amodal": "9e582d8624a41b9a9f9cbfe3e81e6e2e162ef676",
+    "box": [
+     28.0,
+     70.0,
+     43.0,
+     89.0
+    ],
+    "keyframe_id": 482,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "9e582d8624a41b9a9f9cbfe3e81e6e2e162ef676"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p2"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i00",
+     "p1"
+    ],
+    [
+     "i02",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00",
+    "i01",
+    "i02"
+   ]
+  },
+  "problems": [
+   "shape_size_mismatch:i00/p0"
+  ]
+ },
+ "39-37x53": {
+  "input_hash": "39ee50128cae0370f2fd2ec1623309534a061943",
+  "instances": {
+   "i00": {
+    "amodal": "6782f0a1803518b4084f113fa49419fcac443005",
+    "box": [
+     13.0,
+     17.0,
+     32.0,
+     25.0
+    ],
+    "keyframe_id": 490,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "6782f0a1803518b4084f113fa49419fcac443005"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00"
+   ]
+  },
+  "problems": [
+   "zorder_missing:i00/p0"
+  ]
+ },
+ "40-64x64": {
+  "input_hash": "00b782e9f4ba0f6a50d3067cc84ce3ea0bb5c4e7",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     7.317630192797878,
+     58.63562445322037,
+     25.248840574480504,
+     75.47464512875204
+    ],
+    "keyframe_id": 500,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "308bbb84bb4c70324ca9773bc6a9d8851270a98d",
+    "box": [
+     22.0,
+     0.0,
+     63.0,
+     44.0
+    ],
+    "keyframe_id": 501,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "308bbb84bb4c70324ca9773bc6a9d8851270a98d"
+   },
+   "i02": {
+    "amodal": "d46ae00d31feea0c7f4193ee89a9f9fb9b0e1977",
+    "box": [
+     29.0,
+     32.0,
+     45.0,
+     60.0
+    ],
+    "keyframe_id": 502,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "d46ae00d31feea0c7f4193ee89a9f9fb9b0e1977"
+   },
+   "i03": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i01",
+     "p2"
+    ],
+    [
+     "i01",
+     "p1"
+    ],
+    [
+     "i01",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i02",
+    "i01"
+   ]
+  },
+  "problems": [
+   "missing_shape:i03"
+  ]
+ },
+ "41-48x96": {
+  "input_hash": "9ff0834e7b9950136057502fe776e4fb70dcd80b",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "19121f1c2db0792addafc3d9f5821e6a3b41cd38",
+    "box": [
+     10.0,
+     3.0,
+     88.0,
+     28.0
+    ],
+    "keyframe_id": 511,
+    "occlusion_ratio": 0.128395061728,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "2f91ad98a734645b6fb0fadb2a07cff1baaa20f2"
+   },
+   "i02": {
+    "amodal": "d7ca99415e3bfbd216e9b47e85aede62801f49dc",
+    "box": [
+     75.0,
+     40.0,
+     86.0,
+     48.0
+    ],
+    "keyframe_id": 512,
+    "occlusion_ratio": 0.207207207207,
+    "placement": "in_chassis",
+    "visibility": "motion_blur",
+    "visible": "61c46fd30dbc2f9b8ab08d3c90af683c221a97c7"
+   },
+   "i03": {
+    "amodal": null,
+    "box": [
+     85.535834615714,
+     -15.586194479791768,
+     94.39891327431403,
+     6.991780629365831
+    ],
+    "keyframe_id": 513,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i04": {
+    "amodal": "480a335d890bae46fa2620eb0a09c970a0d5de20",
+    "box": [
+     84.0,
+     0.0,
+     94.0,
+     5.0
+    ],
+    "keyframe_id": 514,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "480a335d890bae46fa2620eb0a09c970a0d5de20"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i01",
+     "p1"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i04",
+    "i01",
+    "i02"
+   ]
+  },
+  "problems": [
+   "missing_shape:i00",
+   "zorder_missing:i02/p0"
+  ]
+ },
+ "42-96x48": {
+  "input_hash": "33b92d7253d8b1ff26e8363bd04243e39041221f",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     29.296951004927017,
+     77.19974509970635,
+     35.99272888719349,
+     81.61401831360637
+    ],
+    "keyframe_id": 520,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "45ef13156a815753012cfc2b380bdf1c5aff8da7",
+    "box": [
+     28.0,
+     2.0,
+     38.0,
+     41.0
+    ],
+    "keyframe_id": 521,
+    "occlusion_ratio": 0.077669902913,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "2bd183596c18c529e90cd86cd60efb68a57bde72"
+   },
+   "i02": {
+    "amodal": "643b3b7520966790ef3e8e2a59062b8f68ade476",
+    "box": null,
+    "keyframe_id": 522,
+    "occlusion_ratio": 1.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i03": {
+    "amodal": "7c1d392c978ff99d923cea457a9ffd309938d9f8",
+    "box": [
+     17.0,
+     0.0,
+     45.0,
+     45.0
+    ],
+    "keyframe_id": 523,
+    "occlusion_ratio": 0.238365493757,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "b3be7eaf6b615c9bc72a9c3a30d5c5ba57c05b35"
+   },
+   "i04": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i05": {
+    "amodal": "ec549915a701fa8bb610708ed940b5cff58964d4",
+    "box": [
+     26.0,
+     55.0,
+     37.0,
+     75.0
+    ],
+    "keyframe_id": 525,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "ec549915a701fa8bb610708ed940b5cff58964d4"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i03",
+     "p1"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i05",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i02",
+     "p2"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i03",
+    "i01",
+    "i02",
+    "i05"
+   ]
+  },
+  "problems": [
+   "missing_shape:i04"
+  ]
+ },
+ "43-37x53": {
+  "input_hash": "1a257fd6db4ea4f2429b41ce2dd55e6c5350b288",
+  "instances": {
+   "i00": {
+    "amodal": "caf70ef269dd705061ba9df0ff0efbb44491bb51",
+    "box": null,
+    "keyframe_id": 530,
+    "occlusion_ratio": 1.0,
+    "placement": "in_chassis",
+    "visibility": "occluded_full",
+    "visible": "a92ea21d967e0e9466741b55fb06b3f1be56619f"
+   },
+   "i01": {
+    "amodal": "651d4b4197295611ea14e1a9fc771111a6c8af5c",
+    "box": [
+     26.0,
+     26.0,
+     44.0,
+     34.0
+    ],
+    "keyframe_id": 531,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "651d4b4197295611ea14e1a9fc771111a6c8af5c"
+   },
+   "i02": {
+    "amodal": null,
+    "box": [
+     6.0,
+     7.0,
+     21.0,
+     19.0
+    ],
+    "keyframe_id": 532,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i01",
+     "p1"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00",
+    "i01"
+   ]
+  },
+  "problems": [
+   "empty_visible:i00",
+   "zorder_missing:i01/p0",
+   "zorder_missing:i01/p1"
+  ]
+ },
+ "44-64x64": {
+  "input_hash": "41987800697760c59d76250a420b58669ea60e08",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "b76b903be90fbf0cf26fd50a2013d693fcb6fba1",
+    "box": null,
+    "keyframe_id": 541,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "b76b903be90fbf0cf26fd50a2013d693fcb6fba1"
+   },
+   "i02": {
+    "amodal": null,
+    "box": [
+     48.0,
+     22.0,
+     64.0,
+     44.0
+    ],
+    "keyframe_id": 542,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i03": {
+    "amodal": "c75774c98fab23048e40a84ff3462a7e26852a56",
+    "box": [
+     10.0,
+     4.0,
+     64.0,
+     63.0
+    ],
+    "keyframe_id": 543,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "motion_blur",
+    "visible": "c75774c98fab23048e40a84ff3462a7e26852a56"
+   },
+   "i04": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i05": {
+    "amodal": "38e79426f9431822f645d79c8f7cfc1963d15894",
+    "box": [
+     31.0,
+     31.0,
+     47.0,
+     35.0
+    ],
+    "keyframe_id": 545,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "38e79426f9431822f645d79c8f7cfc1963d15894"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i03",
+     "p1"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i05",
+     "p0"
+    ],
+    [
+     "i03",
+     "p2"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i03",
+    "i01",
+    "i05"
+   ]
+  },
+  "problems": [
+   "empty_visible:i01",
+   "missing_shape:i00",
+   "missing_shape:i04"
+  ]
+ },
+ "45-48x96": {
+  "input_hash": "c1f817fb4c508e820ae4d5212813d96590aabe3b",
+  "instances": {
+   "i00": {
+    "amodal": "8c029f92882b927b4cf9f93ffa09ad963900d6cc",
+    "box": [
+     75.0,
+     37.0,
+     87.0,
+     42.0
+    ],
+    "keyframe_id": 550,
+    "occlusion_ratio": 0.607843137255,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "a5500313c0098aa623cf7b9f6e9cf1c77909fb7b"
+   },
+   "i01": {
+    "amodal": "9b534e5fb9d0b2970d86de66d00a5bf54ad7c8d2",
+    "box": [
+     23.0,
+     0.0,
+     96.0,
+     31.0
+    ],
+    "keyframe_id": 551,
+    "occlusion_ratio": 0.11974789916,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "647511a9a9d145b455a29d9f8512ba56804ed9d0"
+   },
+   "i02": {
+    "amodal": "cae2e7aaddeefa4ff339f65b188c42751c324980",
+    "box": [
+     7.0,
+     3.0,
+     96.0,
+     43.0
+    ],
+    "keyframe_id": 552,
+    "occlusion_ratio": 0.568501920615,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "7a6731719eeff26e891bb391be5d78cef9c13e65"
+   },
+   "i03": {
+    "amodal": "5b1ea826924772a179c81951cdb6b5c5eb9167e4",
+    "box": [
+     72.0,
+     27.0,
+     80.0,
+     31.0
+    ],
+    "keyframe_id": 553,
+    "occlusion_ratio": 0.802469135802,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "0d74b75a319a0b320e4ed9b2302f272dbbae8035"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i02",
+     "p2"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i01",
+     "p1"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00",
+    "i03",
+    "i02",
+    "i01"
+   ]
+  },
+  "problems": []
+ },
+ "46-96x48": {
+  "input_hash": "23604a624fc302a3521365d998fa0aa89547ef9b",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     40.0,
+     5.0,
+     48.0,
+     18.0
+    ],
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "083811c6f077d7bec1fcfc8316edf4529952860a"
+   }
+  },
+  "layers": {},
+  "painted": {},
+  "problems": [
+   "missing_shape:i00"
+  ]
+ },
+ "47-37x53": {
+  "input_hash": "15c3d2914e28c300e081c70931ba1e488b72c150",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     12.0,
+     20.0,
+     21.0,
+     29.0
+    ],
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "8ff14a401469fd7ed73be6f6a54bdac72584fb48"
+   },
+   "i01": {
+    "amodal": "b0c27c5e74a6689ba99a22e4c43a488fe933b8c9",
+    "box": [
+     1.0,
+     4.0,
+     53.0,
+     27.0
+    ],
+    "keyframe_id": 571,
+    "occlusion_ratio": 0.022222222222,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "b9a7495f2990c3ebf9e482598088ad49673b494a"
+   },
+   "i02": {
+    "amodal": "f5101814a02de4292c8cd7b6999f923a9615026c",
+    "box": [
+     17.0,
+     16.0,
+     22.0,
+     19.0
+    ],
+    "keyframe_id": 572,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "f5101814a02de4292c8cd7b6999f923a9615026c"
+   },
+   "i03": {
+    "amodal": "f2e5f826cbd65fb0ff031cb56e57d7ff9bd34820",
+    "box": [
+     13.0,
+     25.0,
+     18.0,
+     37.0
+    ],
+    "keyframe_id": 573,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "f2e5f826cbd65fb0ff031cb56e57d7ff9bd34820"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p1"
+    ],
+    [
+     "i01",
+     "p2"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i03",
+    "i02"
+   ]
+  },
+  "problems": [
+   "missing_shape:i00"
+  ]
+ },
+ "48-64x64": {
+  "input_hash": "173c0c2cf89d81739e0ae748ae5a3316f3cae206",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     26.0,
+     5.0,
+     38.0,
+     17.0
+    ],
+    "keyframe_id": 580,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "3617194dfef3296b0a2de0ca14f8646d1baeb977",
+    "box": [
+     20.0,
+     5.0,
+     64.0,
+     41.0
+    ],
+    "keyframe_id": 581,
+    "occlusion_ratio": 0.128491620112,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "c6ef8eddc7e62ec4d9d27446cb7adbcc32e9ab6c"
+   },
+   "i02": {
+    "amodal": "f752a5994e8e0fd1edfa546227d4577b327d5485",
+    "box": [
+     6.0,
+     0.0,
+     58.0,
+     22.0
+    ],
+    "keyframe_id": 582,
+    "occlusion_ratio": 0.094086021505,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "9c5e25b14a1ae95d2c028ce1c9143c76b388c73a"
+   },
+   "i03": {
+    "amodal": "80c81481595771caf313881e6ea8fe83a6e5d7dd",
+    "box": null,
+    "keyframe_id": 583,
+    "occlusion_ratio": 1.0,
+    "placement": "in_chassis",
+    "visibility": "occluded_full",
+    "visible": "b76b903be90fbf0cf26fd50a2013d693fcb6fba1"
+   },
+   "i04": {
+    "amodal": "b76b903be90fbf0cf26fd50a2013d693fcb6fba1",
+    "box": null,
+    "keyframe_id": 584,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "b76b903be90fbf0cf26fd50a2013d693fcb6fba1"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i01",
+     "p2"
+    ],
+    [
+     "i01",
+     "p1"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i03",
+    "i04",
+    "i02"
+   ]
+  },
+  "problems": [
+   "empty_visible:i03",
+   "zorder_missing:i02/p0",
+   "zorder_missing:i02/p1"
+  ]
+ },
+ "49-48x96": {
+  "input_hash": "74263923b9d0e2bf7e26c3f8889c9812a145362a",
+  "instances": {
+   "i00": {
+    "amodal": "f6a326b7477bf03b125bc13852d263d7ab4b03b4",
+    "box": [
+     13.0,
+     21.0,
+     71.0,
+     48.0
+    ],
+    "keyframe_id": 590,
+    "occlusion_ratio": 0.169425511198,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "996ecbf269c260cb7bc5618aa74556c0cc39f840"
+   },
+   "i01": {
+    "amodal": null,
+    "box": [
+     22.0,
+     8.0,
+     59.0,
+     22.0
+    ],
+    "keyframe_id": 591,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i02": {
+    "amodal": "3878c4acd0d16ba53c66a8cc5b042cd452c4ff73",
+    "box": [
+     31.0,
+     0.0,
+     96.0,
+     21.0
+    ],
+    "keyframe_id": 592,
+    "occlusion_ratio": 0.183381088825,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "0b5f43b0fb15f1c7d26a6ee9a17a4cdba1da293c"
+   },
+   "i03": {
+    "amodal": "e4693fc2b5833f42686921f804d8f883a68ab5bd",
+    "box": [
+     33.0,
+     40.0,
+     54.0,
+     48.0
+    ],
+    "keyframe_id": 593,
+    "occlusion_ratio": 0.193939393939,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "7d36033da95ba8c434b3a239f420827ae27ef8e9"
+   },
+   "i04": {
+    "amodal": "47a2a441273378ef434cbbd41b431eded0eb4a14",
+    "box": [
+     45.0,
+     33.0,
+     87.0,
+     42.0
+    ],
+    "keyframe_id": 594,
+    "occlusion_ratio": 0.02380952381,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "feb2cf7d93731ecc944d86f7c5b8155d59e06a7a"
+   },
+   "i05": {
+    "amodal": "552f5c00444e9d38dd7d1b455351e87545564fd8",
+    "box": [
+     48.0,
+     29.0,
+     82.0,
+     47.0
+    ],
+    "keyframe_id": 595,
+    "occlusion_ratio": 0.680952380952,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "e08b0c637340b9df42ba18cb2e1a2347589c6c99"
+   },
+   "i06": {
+    "amodal": "e06e0758b0fd57177d0e711e7e7d690e4cfa6220",
+    "box": [
+     37.0,
+     1.0,
+     96.0,
+     19.0
+    ],
+    "keyframe_id": 596,
+    "occlusion_ratio": 0.123417721519,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "cf67117cdc09fae88405f9744860129ebd37b67f"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i03",
+     "p1"
+    ],
+    [
+     "i05",
+     "p0"
+    ],
+    [
+     "i03",
+     "p2"
+    ],
+    [
+     "i00",
+     "p1"
+    ],
+    [
+     "i06",
+     "p0"
+    ],
+    [
+     "i00",
+     "p2"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i02",
+     "p2"
+    ],
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i06",
+     "p1"
+    ],
+    [
+     "i03",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i03",
+    "i05",
+    "i00",
+    "i06",
+    "i02",
+    "i04"
+   ]
+  },
+  "problems": []
+ },
+ "50-96x48": {
+  "input_hash": "36b4c4291da57063b7d4d3c196b229e0a1163bb6",
+  "instances": {
+   "i00": {
+    "amodal": "ca5769fc0cb3e6184fd06720d78f00b491715d07",
+    "box": [
+     9.0,
+     8.0,
+     48.0,
+     96.0
+    ],
+    "keyframe_id": 600,
+    "occlusion_ratio": 0.332547169811,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "41d5c02ac3c58669c7f5a99e2e2de62403533dd6"
+   },
+   "i01": {
+    "amodal": null,
+    "box": [
+     38.0,
+     64.0,
+     48.0,
+     94.0
+    ],
+    "keyframe_id": 601,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i02": {
+    "amodal": "d46586e5d358d9d61d067bcd0c68ded07a141286",
+    "box": [
+     19.0,
+     26.0,
+     42.0,
+     65.0
+    ],
+    "keyframe_id": 602,
+    "occlusion_ratio": 0.511705685619,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "1cc3aa3c0bbffc64e6578b6c4a05b38c76525361"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p1"
+    ],
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i00",
+     "p2"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00",
+    "i02"
+   ]
+  },
+  "problems": [
+   "shape_size_mismatch:i02/p0"
+  ]
+ },
+ "51-37x53": {
+  "input_hash": "f7320a4e04b8d43235be99f46d4b98528c87f738",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "ab3c0b9b0d6b1ab18c591294b69f2926fea97fb8",
+    "box": [
+     35.0,
+     0.0,
+     39.0,
+     7.0
+    ],
+    "keyframe_id": 611,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "ab3c0b9b0d6b1ab18c591294b69f2926fea97fb8"
+   },
+   "i02": {
+    "amodal": null,
+    "box": [
+     48.130743287639234,
+     9.526655787264321,
+     52.91557389923395,
+     19.752590239929244
+    ],
+    "keyframe_id": 612,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i03": {
+    "amodal": "a92ea21d967e0e9466741b55fb06b3f1be56619f",
+    "box": null,
+    "keyframe_id": 613,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "a92ea21d967e0e9466741b55fb06b3f1be56619f"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i03",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i03"
+   ]
+  },
+  "problems": [
+   "empty_visible:i03",
+   "missing_shape:i00"
+  ]
+ },
+ "52-64x64": {
+  "input_hash": "73b5319a0727590dd7115e14392ab18345c4ea2a",
+  "instances": {
+   "i00": {
+    "amodal": "9d0991cc738c61ba7acf19a7e14083c6984477e1",
+    "box": [
+     50.0,
+     49.0,
+     64.0,
+     64.0
+    ],
+    "keyframe_id": 620,
+    "occlusion_ratio": 0.095238095238,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "a46c10d9b1af4c4de92d281f60dc49592ae68c9f"
+   },
+   "i01": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i02": {
+    "amodal": "c35a7f31cd833ecedbebff0d3a0149b0551a26fe",
+    "box": [
+     0.0,
+     22.0,
+     54.0,
+     54.0
+    ],
+    "keyframe_id": 622,
+    "occlusion_ratio": 0.099356025759,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "d4c477640ad1973e61e1ab75ed031251df098ac1"
+   },
+   "i03": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "out_of_view",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i02",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00",
+    "i02"
+   ]
+  },
+  "problems": [
+   "bench_missing:i03",
+   "missing_shape:i01"
+  ]
+ },
+ "53-48x96": {
+  "input_hash": "6743147b30f8f245873c602b0f5fd450ed93105d",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     28.058756758216347,
+     22.61854341861639,
+     48.5402892019059,
+     32.41255668580696
+    ],
+    "keyframe_id": 630,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "b21b7aa521e75a973659fca03b03e5c938cdb7ae",
+    "box": [
+     64.0,
+     15.0,
+     74.0,
+     35.0
+    ],
+    "keyframe_id": 631,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "b21b7aa521e75a973659fca03b03e5c938cdb7ae"
+   },
+   "i02": {
+    "amodal": null,
+    "box": [
+     76.0,
+     36.0,
+     96.0,
+     48.0
+    ],
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "79352ef97ba9c0abb8812dd7e8f32703cdb5c5e1"
+   },
+   "i03": {
+    "amodal": "56b42714a9ff3be8feccccb841b79b67814683fb",
+    "box": [
+     80.0,
+     21.0,
+     96.0,
+     28.0
+    ],
+    "keyframe_id": 633,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "56b42714a9ff3be8feccccb841b79b67814683fb"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i03",
+     "p1"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i03",
+    "i01"
+   ]
+  },
+  "problems": [
+   "missing_shape:i02",
+   "zorder_missing:i01/p0"
+  ]
+ },
+ "54-96x48": {
+  "input_hash": "ae69447bb1fd3ec3fb6e93455c4f516cd13b0f3e",
+  "instances": {
+   "i00": {
+    "amodal": "ad640c5fefa2d1ecbfc3e07177377b1cc4cf21aa",
+    "box": [
+     9.0,
+     59.0,
+     18.0,
+     79.0
+    ],
+    "keyframe_id": 640,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "ad640c5fefa2d1ecbfc3e07177377b1cc4cf21aa"
+   },
+   "i01": {
+    "amodal": "051d3a66d261e01ee2eacbd44697ee24d00eac5f",
+    "box": [
+     27.0,
+     18.0,
+     35.0,
+     45.0
+    ],
+    "keyframe_id": 641,
+    "occlusion_ratio": 0.375,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "a4426e0019c85a4fdcbac120bcfbac7ed85d51cf"
+   },
+   "i02": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i03": {
+    "amodal": "911438545d782c216bab986891efe99416547b2e",
+    "box": [
+     10.0,
+     23.0,
+     27.0,
+     79.0
+    ],
+    "keyframe_id": 643,
+    "occlusion_ratio": 0.565377532228,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "658dad40c7f6d97a5f7b0b61b394bb05ec687366"
+   },
+   "i04": {
+    "amodal": "94dfc5e724b4a0902b03d0e0d54c7a997a2a8be6",
+    "box": [
+     3.0,
+     85.0,
+     8.0,
+     91.0
+    ],
+    "keyframe_id": 644,
+    "occlusion_ratio": 0.944444444444,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "04c443cd813ac68ea7a417b03853f8e6e93c7840"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i03",
+     "p1"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i01",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i04",
+    "i03",
+    "i00",
+    "i01"
+   ]
+  },
+  "problems": [
+   "missing_shape:i02",
+   "zorder_missing:i00/p0",
+   "zorder_missing:i01/p0"
+  ]
+ },
+ "55-37x53": {
+  "input_hash": "8d6a6fa11d2374b9308ff59b2e891531c8520723",
+  "instances": {
+   "i00": {
+    "amodal": "b38b9e0a2eeb064a38d7946d724a139897fdd572",
+    "box": [
+     0.0,
+     27.0,
+     28.0,
+     37.0
+    ],
+    "keyframe_id": 650,
+    "occlusion_ratio": 0.184210526316,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "c3373d2635606aa1b21f1728cbdbf4f5ead2686b"
+   },
+   "i01": {
+    "amodal": "ecb67cb907fac9ddb227fe9d4776f112e27c0d2f",
+    "box": [
+     21.0,
+     30.0,
+     36.0,
+     36.0
+    ],
+    "keyframe_id": 651,
+    "occlusion_ratio": 0.210526315789,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "56a0699a51ce666e4d806b004b7a831514e6d2da"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i00",
+     "p1"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i00",
+    "i01"
+   ]
+  },
+  "problems": []
+ },
+ "56-64x64": {
+  "input_hash": "e996567134bcd031d20a34ff887df0aa1e4b78d9",
+  "instances": {
+   "i00": {
+    "amodal": "b76b903be90fbf0cf26fd50a2013d693fcb6fba1",
+    "box": null,
+    "keyframe_id": 660,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "b76b903be90fbf0cf26fd50a2013d693fcb6fba1"
+   },
+   "i01": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i02": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i03": {
+    "amodal": "fbda6806c688d560371129f793602e3e78c95c31",
+    "box": [
+     36.0,
+     33.0,
+     51.0,
+     36.0
+    ],
+    "keyframe_id": 663,
+    "occlusion_ratio": 0.94578313253,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "83be885ab04bd0bf1ada0e2288ba608be6423dd0"
+   },
+   "i04": {
+    "amodal": "49c26a0527074cec2e3bbfa7cbd6bc65188671e4",
+    "box": [
+     32.0,
+     26.0,
+     64.0,
+     64.0
+    ],
+    "keyframe_id": 664,
+    "occlusion_ratio": 0.015730337079,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "03d42de02c7ee9c545a71084589a383d5e404183"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i03",
+     "p2"
+    ],
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i04",
+     "p2"
+    ],
+    [
+     "i03",
+     "p1"
+    ],
+    [
+     "i04",
+     "p1"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i03",
+    "i04",
+    "i00"
+   ]
+  },
+  "problems": [
+   "bench_missing:i01",
+   "empty_visible:i00",
+   "missing_shape:i02"
+  ]
+ },
+ "57-48x96": {
+  "input_hash": "31ea52744f87e7c59b213d3cd4e484d37975faed",
+  "instances": {
+   "i00": {
+    "amodal": "2fc3a8879e68ec314921d3530a4970552791d67d",
+    "box": [
+     2.0,
+     6.0,
+     59.0,
+     31.0
+    ],
+    "keyframe_id": 670,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "2fc3a8879e68ec314921d3530a4970552791d67d"
+   },
+   "i01": {
+    "amodal": "8f62cb43a88e6f314539510b8f96cb14308addbd",
+    "box": [
+     0.0,
+     4.0,
+     46.0,
+     41.0
+    ],
+    "keyframe_id": 671,
+    "occlusion_ratio": 0.14405360134,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "53ad8de251201344aaf887023374d553950b7af8"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i01",
+     "p2"
+    ],
+    [
+     "i01",
+     "p1"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i00",
+     "p1"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i01",
+    "i00"
+   ]
+  },
+  "problems": []
+ },
+ "58-96x48": {
+  "input_hash": "b670e68a489214d03f04ae43cb45df1a863fd930",
+  "instances": {
+   "i00": {
+    "amodal": null,
+    "box": [
+     27.0,
+     12.0,
+     42.0,
+     29.0
+    ],
+    "keyframe_id": 680,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i01": {
+    "amodal": "b32495b2897333944dbd8a9b54fcade77e155425",
+    "box": [
+     34.0,
+     58.0,
+     48.0,
+     79.0
+    ],
+    "keyframe_id": 681,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "b32495b2897333944dbd8a9b54fcade77e155425"
+   },
+   "i02": {
+    "amodal": "f3db386cb5026b1bf0bf83e02a45d5bbd45c9f9e",
+    "box": [
+     27.0,
+     10.0,
+     48.0,
+     96.0
+    ],
+    "keyframe_id": 682,
+    "occlusion_ratio": 0.14047151277,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "9f0d1e3bf1b6c834767b108bd5de13334b92584f"
+   },
+   "i03": {
+    "amodal": "47c8026e70169dac5b9f0f4a07e3b67d60ace783",
+    "box": [
+     8.0,
+     0.0,
+     14.0,
+     19.0
+    ],
+    "keyframe_id": 683,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "visible_tiny",
+    "visible": "47c8026e70169dac5b9f0f4a07e3b67d60ace783"
+   },
+   "i04": {
+    "amodal": "9754dd6bfdb67692495ffb40d9a296d00e477657",
+    "box": [
+     3.0,
+     7.0,
+     32.0,
+     96.0
+    ],
+    "keyframe_id": 684,
+    "occlusion_ratio": 0.187744458931,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "e5961bef34693e439ffa02ebc784fba651f4c072"
+   },
+   "i05": {
+    "amodal": "388e5da98143268a723917e37dc2eac797e62b03",
+    "box": [
+     2.0,
+     57.0,
+     33.0,
+     86.0
+    ],
+    "keyframe_id": 685,
+    "occlusion_ratio": 0.567779960707,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "f143b5316d703e64d60e3ddd248a2dc87ec84359"
+   },
+   "i06": {
+    "amodal": "ed594450e79f96899589718b1c0240ba5a5dc92c",
+    "box": [
+     5.0,
+     37.0,
+     25.0,
+     71.0
+    ],
+    "keyframe_id": 686,
+    "occlusion_ratio": 0.249649368864,
+    "placement": "in_chassis",
+    "visibility": "occluded_full",
+    "visible": "4df5fd108483e0b8b06c5237ca93c960fdc18b2c"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i03",
+     "p0"
+    ],
+    [
+     "i04",
+     "p0"
+    ],
+    [
+     "i06",
+     "p0"
+    ],
+    [
+     "i05",
+     "p0"
+    ],
+    [
+     "i06",
+     "p1"
+    ],
+    [
+     "i02",
+     "p2"
+    ],
+    [
+     "i05",
+     "p1"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i02",
+     "p1"
+    ],
+    [
+     "i01",
+     "p0"
+    ],
+    [
+     "i04",
+     "p1"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i03",
+    "i04",
+    "i06",
+    "i05",
+    "i02",
+    "i01"
+   ]
+  },
+  "problems": [
+   "zorder_missing:i01/p0"
+  ]
+ },
+ "59-37x53": {
+  "input_hash": "b2bd4fc10c28d334fc978615cc9f20ecfd648c30",
+  "instances": {
+   "i00": {
+    "amodal": "1d85c02609053e6371171c3b9b863ac3c3bd1e45",
+    "box": [
+     36.0,
+     8.0,
+     53.0,
+     12.0
+    ],
+    "keyframe_id": 690,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "1d85c02609053e6371171c3b9b863ac3c3bd1e45"
+   },
+   "i01": {
+    "amodal": null,
+    "box": [
+     13.0,
+     26.0,
+     25.0,
+     37.0
+    ],
+    "keyframe_id": 691,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   },
+   "i02": {
+    "amodal": "cbcef9188a4be65335b62423bd7c0b03dcad4ab1",
+    "box": [
+     25.0,
+     2.0,
+     48.0,
+     14.0
+    ],
+    "keyframe_id": 692,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "motion_blur",
+    "visible": "21d109180dc0562fa7fdc545d80f7c9432391825"
+   },
+   "i03": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "i04": {
+    "amodal": "a92ea21d967e0e9466741b55fb06b3f1be56619f",
+    "box": null,
+    "keyframe_id": 694,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "a92ea21d967e0e9466741b55fb06b3f1be56619f"
+   },
+   "i05": {
+    "amodal": "5201420a94f773efc9779cbcd1e5f562a92ed50e",
+    "box": [
+     51.0,
+     32.0,
+     53.0,
+     33.0
+    ],
+    "keyframe_id": 695,
+    "occlusion_ratio": 0.8,
+    "placement": "in_chassis",
+    "visibility": "too_small",
+    "visible": "78dd09a09cab72d251bd1ea4db15b8cf10f2b19c"
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "i05",
+     "p0"
+    ],
+    [
+     "i02",
+     "p0"
+    ],
+    [
+     "i00",
+     "p0"
+    ],
+    [
+     "i04",
+     "p0"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "i05",
+    "i02",
+    "i00",
+    "i04"
+   ]
+  },
+  "problems": [
+   "empty_visible:i04",
+   "missing_shape:i03"
+  ]
+ },
+ "oak-3040x4032": {
+  "input_hash": "df2c9be1d2f63b1dab64ecc668d00bf5584b5e2b",
+  "instances": {
+   "board": {
+    "amodal": "293f776d1aab98faebe0401e2f5187fc4b86b6a0",
+    "box": [
+     1512.0,
+     1140.0,
+     2520.0,
+     1900.0
+    ],
+    "keyframe_id": 902,
+    "occlusion_ratio": 0.750003344906,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "463a88adcf60da6847a40dc4d9e5b88d73b55e8b"
+   },
+   "bracket": {
+    "amodal": "bef48f625793fb1dcf487a00d7acd385cc642372",
+    "box": [
+     1715.0,
+     505.0,
+     2252.0,
+     2606.0
+    ],
+    "keyframe_id": 903,
+    "occlusion_ratio": 0.114181043663,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "9d5b92c032f0bf547fffd695ddf9f9864eff026b"
+   },
+   "cover": {
+    "amodal": "96b9b2c7d073101a5c55f58c0c31b5be15040714",
+    "box": [
+     0.0,
+     0.0,
+     3523.0,
+     2725.0
+    ],
+    "keyframe_id": 901,
+    "occlusion_ratio": 0.465530323226,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "fd720d1861d8281e57303d3abbec2fa5856f375e"
+   },
+   "gone": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "screw": {
+    "amodal": null,
+    "box": [
+     13.857676078478946,
+     4.238184060319195,
+     62.80801239975467,
+     53.18852038159492
+    ],
+    "keyframe_id": 904,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "cover",
+     "a"
+    ],
+    [
+     "cover",
+     "b"
+    ],
+    [
+     "board",
+     "main"
+    ],
+    [
+     "bracket",
+     "main"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "cover",
+    "board",
+    "bracket"
+   ]
+  },
+  "problems": [
+   "missing_shape:gone",
+   "zorder_missing:bracket/main"
+  ]
+ },
+ "scanner-1600x1600": {
+  "input_hash": "66324a24d548843442ab8e47a2df63196e11c076",
+  "instances": {
+   "board": {
+    "amodal": "f7ca50915498375f917ef198f9a0410e1c4d753f",
+    "box": [
+     600.0,
+     600.0,
+     1000.0,
+     1000.0
+    ],
+    "keyframe_id": 902,
+    "occlusion_ratio": 0.75,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "6e9c4ec4d9e3066832511e4bd376e3b0c917fc45"
+   },
+   "bracket": {
+    "amodal": "3a7b96813230c33578f944e5323590cac1729939",
+    "box": [
+     676.0,
+     259.0,
+     894.0,
+     1364.0
+    ],
+    "keyframe_id": 903,
+    "occlusion_ratio": 0.117905586998,
+    "placement": "in_chassis",
+    "visibility": "visible",
+    "visible": "50fc3a3844e4992330168bd1011b7552b529ea0f"
+   },
+   "cover": {
+    "amodal": "8590d8896072c2a9b804185631095c8e2084b5fc",
+    "box": [
+     0.0,
+     0.0,
+     1399.0,
+     1423.0
+    ],
+    "keyframe_id": 901,
+    "occlusion_ratio": 0.465719625161,
+    "placement": "in_chassis",
+    "visibility": "occluded_partial",
+    "visible": "8b42540bf08c8f4f75c8ed4ca8f3cbf31ad240a3"
+   },
+   "gone": {
+    "amodal": null,
+    "box": null,
+    "keyframe_id": null,
+    "occlusion_ratio": 0.0,
+    "placement": "in_chassis",
+    "visibility": "out_of_view",
+    "visible": null
+   },
+   "screw": {
+    "amodal": null,
+    "box": [
+     13.857676078478946,
+     4.238184060319195,
+     62.80801239975467,
+     53.18852038159492
+    ],
+    "keyframe_id": 904,
+    "occlusion_ratio": 0.0,
+    "placement": "on_bench",
+    "visibility": "visible",
+    "visible": null
+   }
+  },
+  "layers": {
+   "in_chassis": [
+    [
+     "cover",
+     "a"
+    ],
+    [
+     "cover",
+     "b"
+    ],
+    [
+     "board",
+     "main"
+    ],
+    [
+     "bracket",
+     "main"
+    ]
+   ]
+  },
+  "painted": {
+   "in_chassis": [
+    "cover",
+    "board",
+    "bracket"
+   ]
+  },
+  "problems": [
+   "missing_shape:gone",
+   "zorder_missing:bracket/main"
+  ]
+ }
+}

@@ -33,7 +33,19 @@ from typing import Any, Callable, Iterable, Optional
 import cv2
 import numpy as np
 
-from tda.core.cache_roi_detect import (  # re-exported: suggest_roi's two strategies
+from tda.core.cache_roi_detect import (  # re-exported: suggest_roi's strategies
+    OAK_MAX_AREA_FRAC,
+    OAK_MAX_ASPECT,
+    OAK_MIN_AREA_FRAC,
+    OAK_MIN_ASPECT,
+    ROI_MAX_AREA_FRAC,
+    ROI_MAX_ASPECT,
+    ROI_MIN_AREA_FRAC,
+    ROI_MIN_ASPECT,
+    box_plausibility,
+    oak_chassis_box,
+    oak_chassis_candidates,
+    pad_box,
     scan_bed_box,
     scan_bed_candidates,
     scan_chassis_box,
@@ -47,8 +59,45 @@ from tda.core.model import FrameKey
 __all__ = [
     "DbRoiLookup", "build_cache", "build_thumbs", "burst_metrics", "cache_path",
     "cached_image_path", "choose_scan_image", "configured_cache_dir", "full_frame",
-    "scan_bed_candidates", "scan_chassis_candidates", "suggest_roi", "thumb_path",
+    "measure_roi", "oak_chassis_candidates", "roi_bands", "scan_bed_candidates",
+    "scan_chassis_candidates", "suggest_roi", "suggest_roi_over", "thumb_path",
+    "OAK_ROI_PAD", "ROI_SAMPLE_FRAMES",
 ]
+
+#: How many frames of a pose segment its ROI proposal is measured on: the
+#: first, the middle and the last that have an image. Three is what a segment
+#: of any length can give -- the shortest real one is two steps -- and it is the
+#: point where the union stops growing: a fourth frame adds nothing the first,
+#: middle and last have not already seen, because the machine does not move.
+ROI_SAMPLE_FRAMES = 3
+
+#: How an OAK segment's per-frame measurements become one rectangle:
+#: ``"median"`` (per edge), ``"trim"`` (union without the outsized one) or
+#: ``"union"``. See :func:`combine_boxes` for why the scanner and OAK differ
+#: and ``task-B3-report.md`` for the by-eye numbers the choice was made on.
+OAK_COMBINE = "median"
+
+#: ``"trim"`` drops a box this much bigger than the median of the measurements.
+OAK_OUTLIER_AREA = 1.5
+
+#: The most an OAK box is grown on any one side, in pixels of the original.
+#:
+#: The margin exists for one measured thing: the machine leans out over the
+#: tape square towards the camera and the detector may only look inside the
+#: square, so the box clips the near rail by 100-200 px at full size. Twelve
+#: per cent of a small box is about that; twelve per cent of a box that is
+#: already 2,500 px wide is 300 px per side, which is not recovering a rail, it
+#: is taking in bench -- and it made whether D24 and D29 oak1 ended at 46 % or
+#: 70 % of the frame turn on which side of the area ceiling the padded box
+#: happened to land.
+OAK_PAD_MAX_PX = 200
+
+#: OAK only: how much an accepted box is grown after the gate has judged it.
+#: The machine leans out over the tape square towards the camera and the
+#: detector may only look inside the square, so the box clips the near rail by
+#: 100-200 px at full size; 12 % of the box covers that on every real frame
+#: measured without reaching the bench's edge.
+OAK_ROI_PAD = 0.12
 
 # --- burst metrics -------------------------------------------------------
 DOWNSCALE = 8  # metrics are computed on a 1/8 copy (1600^2 -> 200^2) for speed
@@ -223,7 +272,14 @@ def suggest_roi(img: np.ndarray, view: str) -> tuple[int, int, int, int]:
     benefit.  The bed stage is the answer for a light or silver machine, where
     the dark one measures something that is not a chassis at all.
 
-    Any other view, and a scanner frame where neither strategy convinces, gets
+    An **OAK** frame is measured by :func:`tda.core.cache_roi_detect.oak_chassis_box`
+    instead: the same bench seen from the side, where the tape square covers a
+    third of the picture rather than framing it and the rest is floor, operator
+    and robot rig.  It is one stage, not two -- "what on the board is not the
+    board" finds a black Dell and a bare silver G4 alike -- and it is measured
+    on a downscale.
+
+    Any other view, and a frame where no strategy convinces, gets
     the **whole frame**: not a crop at all.  It used to be the central 70 % box,
     on the theory that some crop beats none -- and on all four tape-less real
     desktops that were looked at (D46, D47, D63, D66) it cut the machine in half,
@@ -235,12 +291,167 @@ def suggest_roi(img: np.ndarray, view: str) -> tuple[int, int, int, int]:
     if img is None or getattr(img, "size", 0) == 0:
         raise ValueError("suggest_roi() needs a non-empty image")
     height, width = img.shape[:2]
+    found = measure_roi(img, view)
+    return found if found is not None else full_frame(width, height)
+
+
+def measure_roi(img: np.ndarray, view: str) -> Optional[tuple[int, int, int, int]]:
+    """:func:`suggest_roi` without the fallback: the box, or ``None``.
+
+    The difference matters to :func:`suggest_roi_over`, which has to tell "this
+    frame found nothing" (skip it) from "this frame says the chassis fills the
+    picture" (a box that happens to be the whole frame, which the area gate
+    would reject anyway). A view with no detector at all answers ``None`` here
+    **without** converting the image first: a greyscale RealSense frame used to
+    pay for a colour conversion on the way to a fallback that never looks at it.
+    """
+    if view != "scan" and not str(view).startswith("oak"):
+        return None
+    bgr = img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     if view == "scan":
-        bgr = img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         for found in (scan_chassis_box(bgr), scan_bed_box(bgr)):
             if found is not None:
                 return found[0]
-    return full_frame(width, height)
+        return None
+    found = oak_chassis_box(bgr)
+    return None if found is None else found[0]
+
+
+def _box_area(box) -> float:
+    return max(0.0, float(box[2] - box[0])) * max(0.0, float(box[3] - box[1]))
+
+
+def combine_boxes(boxes: list, how: str) -> tuple[int, int, int, int]:
+    """Several measurements of one segment's chassis, as one rectangle.
+
+    ``"union"`` -- the smallest box holding all of them. Right where a
+    measurement can only ever be too *small*, which is the scanner: its failure
+    is clipping, so unioning three frames recovers what any one of them cut.
+
+    ``"trim"`` -- the union of the boxes that are not far bigger than the
+    others (:data:`OAK_OUTLIER_AREA`), i.e. the union with the one frame that
+    grew into the bench left out.
+
+    ``"median"`` -- each edge independently the median of the measurements.
+    Two frames have no median, so they union; one is itself. This is the
+    variant that survives a measurement being wrong in *either* direction,
+    which on an OAK frame it can be: the detector sees the machine against a
+    bench, and a shadow or an arm at the bench's edge grows the box as readily
+    as a dark floor shrinks it.
+    """
+    if not boxes:
+        raise ValueError("combine_boxes() needs at least one box")
+    if how == "median" and len(boxes) >= 3:
+        edges = [sorted(float(box[i]) for box in boxes) for i in range(4)]
+        middle = len(boxes) // 2
+        found = tuple(int(round(edge[middle])) for edge in edges)
+        return found  # type: ignore[return-value]
+    wanted = list(boxes)
+    if how == "trim" and len(boxes) >= 2:
+        areas = sorted(_box_area(box) for box in boxes)
+        median = (areas[len(areas) // 2] if len(areas) % 2
+                  else 0.5 * (areas[len(areas) // 2 - 1] + areas[len(areas) // 2]))
+        kept = [box for box in boxes if _box_area(box) <= OAK_OUTLIER_AREA * median]
+        wanted = kept or boxes
+    return (min(b[0] for b in wanted), min(b[1] for b in wanted),
+            max(b[2] for b in wanted), max(b[3] for b in wanted))
+
+
+def roi_bands(view: str) -> tuple[tuple[float, float], tuple[float, float]]:
+    """``(area, aspect)`` bounds a whole-segment box is judged by, per view."""
+    if str(view).startswith("oak"):
+        return ((OAK_MIN_AREA_FRAC, OAK_MAX_AREA_FRAC),
+                (OAK_MIN_ASPECT, OAK_MAX_ASPECT))
+    return ((ROI_MIN_AREA_FRAC, ROI_MAX_AREA_FRAC),
+            (ROI_MIN_ASPECT, ROI_MAX_ASPECT))
+
+
+def suggest_roi_over(images: Iterable[np.ndarray],
+                     view: str) -> tuple[int, int, int, int]:
+    """The chassis ROI of a whole **pose segment**, from several of its frames.
+
+    Inside a pose segment the machine does not move -- that is what a pose
+    segment *is* (spec 2.5) -- so every frame of it is a measurement of the same
+    rectangle, and the union of those measurements is a better one than any of
+    them. It is strictly better in the direction that matters: a per-frame box
+    can only be too *small*, because segmentation clips where contrast fails,
+    and by the late steps the chassis is nearly empty and its dark floor reads
+    as bench. Three measurements of the first, middle and last frame (the caller
+    picks them, :data:`ROI_SAMPLE_FRAMES`) cover both ends of that.
+
+    Measured on the real scanner frames of twelve desktops: a single reference
+    frame held the whole machine on 8 of 24, the union on 20 of 24, and the two
+    boxes that were plausible-looking and *wrong* -- D61 step 39 at 45 % of the
+    chassis, D29 step 47 cutting its top quarter -- are right.
+
+    Frames that found nothing are skipped, not counted against it; with nothing
+    found at all the answer is the whole frame, i.e. "no proposal", exactly as
+    before.
+
+    How the measurements are combined is **per view** (:func:`combine_boxes`).
+    The scanner unions them, because its failure is clipping and nothing else.
+    An OAK frame is different and the real data says so: on D36 oak1 step 1
+    measures ``(839, 264, 3355, 2445)`` and step 22 ``(992, 791, 3622, 3040)``
+    of the same, unmoved machine, so one of the two has grown into the bench --
+    the camera looks across the bench rather than down at a lit board, and a
+    shadow or an arm at its edge inflates a box as readily as a dark floor
+    shrinks it. Unioning that with a good box gave 2.6x the area of the right
+    answer on D13 oak1. So OAK takes the **per-edge median** instead
+    (:data:`OAK_COMBINE`), which needs a measurement to be wrong the same way on
+    two frames out of three before it moves the answer.
+
+    The combined box is then judged by the same area and aspect bounds one
+    frame's box is judged by (:func:`roi_bands`).
+
+    On an OAK view the accepted box is finally grown by :data:`OAK_ROI_PAD` of
+    its own size, while that keeps it inside the area ceiling. The camera looks
+    at the bench from the side and the machine leans out over the tape square
+    towards it, and the detector may only look inside the square, so the box
+    reliably clips the near rail; the gate has already judged the tight box, so
+    this cannot let a bad one through.
+    """
+    boxes: list[tuple[int, int, int, int]] = []
+    hw: Optional[tuple[int, int]] = None
+    for img in images:
+        if img is None or getattr(img, "size", 0) == 0:
+            continue
+        hw = (int(img.shape[0]), int(img.shape[1]))
+        found = measure_roi(img, view)
+        if found is not None:
+            boxes.append(tuple(int(v) for v in found))  # type: ignore[arg-type]
+    if hw is None:
+        raise ValueError("suggest_roi_over() needs at least one non-empty image")
+    height, width = hw
+    whole = full_frame(width, height)
+    if not boxes:
+        return whole
+
+    is_oak = str(view).startswith("oak")
+    combined = combine_boxes(boxes, OAK_COMBINE if is_oak else "union")
+    area_band, aspect_band = roi_bands(view)
+    # rectangularity is not a question a combined box can answer -- there is no
+    # one component behind it -- so the referee is asked about area and aspect
+    if box_plausibility(combined, 1.0, width, height, 0.0,
+                        area_band=area_band, aspect_band=aspect_band) is None:
+        return whole
+    if is_oak:
+        padded = _pad_oak(combined, width, height)
+        area = (padded[2] - padded[0]) * (padded[3] - padded[1])
+        if area <= area_band[1] * width * height:
+            combined = padded
+        # ... and otherwise the tight box stands. On a box that already covers
+        # most of the picture the margin only takes in more bench, and on the
+        # real D36 and D34 oak1 it turned 68 % of the frame into 86 %.
+    return combined
+
+
+def _pad_oak(box, width: int, height: int) -> tuple[int, int, int, int]:
+    """Grow ``box`` by :data:`OAK_ROI_PAD` of itself, at most :data:`OAK_PAD_MAX_PX`."""
+    x0, y0, x1, y1 = (int(v) for v in box)
+    grow_x = int(round(min(OAK_ROI_PAD * (x1 - x0), OAK_PAD_MAX_PX)))
+    grow_y = int(round(min(OAK_ROI_PAD * (y1 - y0), OAK_PAD_MAX_PX)))
+    return (max(0, x0 - grow_x), max(0, y0 - grow_y),
+            min(width, x1 + grow_x), min(height, y1 + grow_y))
 
 
 # ---------------------------------------------------------------------------

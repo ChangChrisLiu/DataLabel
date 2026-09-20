@@ -10,20 +10,42 @@ from __future__ import annotations
 
 from typing import Optional
 
+import cv2
+import numpy as np
 from PySide6.QtCore import Qt
 
-from tda.core.cache import suggest_roi
+from tda.core.cache import ROI_SAMPLE_FRAMES, suggest_roi, suggest_roi_over
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 from tda.ui import session_api as api
 
-__all__ = ["RoiMixin"]
+__all__ = ["RoiMixin", "as_bgr"]
 
 #: What :meth:`SessionLike.instance_rows` calls a part lying in the staging area.
 ON_BENCH = "on_bench"
 #: Shown when the detector returns the whole frame, which means "not found".
 NO_CHASSIS_FOUND = ("未能自动找到机箱：请拖一个框 / could not find the chassis: "
                     "drag a box around it (Enter stores it)")
+#: Shown when Enter arrives before the segment has been measured.
+ROI_STILL_MEASURING = ("还在找机箱，稍等或直接拖框 / still looking for the chassis "
+                       "-- wait a moment, or drag a box yourself")
+
+
+def as_bgr(rgb: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    """The session hands out **RGB**; :mod:`tda.core.cache` measures **BGR**.
+
+    The two channel orders had never been reconciled, and the detector was fed
+    the session's array as it came. It is a colour detector: the yellow tape
+    square read as BGR is a cyan blob, ``inRange`` finds no square, and the
+    stage that needs one returns nothing. On the scanner that was invisible --
+    the second stage, "whatever is not the scan bed", does not look at hue and
+    carried every frame -- and on an OAK frame, where the tape square *is* the
+    region the detector may look in, it meant every proposal was the whole
+    frame, which is what the controller measured as ``roi: []``.
+    """
+    if rgb is None or getattr(rgb, "ndim", 0) != 3 or rgb.shape[2] != 3:
+        return rgb
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
 
 class RoiMixin:
@@ -55,14 +77,23 @@ class RoiMixin:
     def start_roi_edit(self) -> None:
         """Propose a rectangle and let the annotator drag it (``Enter`` accepts).
 
-        The proposal is measured on the pose segment's **reference frame** --
-        its first available step, the fully assembled machine -- and shown on
-        whatever frame is open.  Measuring the frame that happened to be open
-        meant measuring the *last* step: an empty chassis with a bright
-        interior, where both scanner strategies give up and return the whole
-        frame.  A whole-frame "ROI" then let the difference map pick scan-bed
-        artefacts at the edge, and on 7 of 13 real frames one of those became
-        the SAM prompt box.
+        The proposal is measured on **three frames of the pose segment** -- its
+        first, its middle and its last that have an image -- and what they agree
+        on is what is offered (:func:`tda.core.cache.suggest_roi_over`). Inside
+        a pose segment the machine does not move, so all three are measurements
+        of the same rectangle. On the scanner a per-frame box can only be too
+        small -- segmentation clips where contrast fails, which by the late
+        steps is most of an emptied chassis -- so the three are unioned. On an
+        OAK view a box can also be too *big*, the tape square having let the
+        bench in, so each edge is the median of the three instead. Measuring the
+        frame that happened to be open was worse still -- that is the *last*
+        step, a bright empty box where both scanner strategies give up.
+
+        It is **asynchronous**. Three decodes and three detections are 165 ms on
+        a 12 MP OAK segment and 465 ms on a scanner one, which is not something
+        to spend before the first paint, so the tool is armed at once and the
+        rectangle arrives when :meth:`_on_roi_proposed` is called -- unless the
+        annotator has already dragged one, which always wins.
         """
         image = self.session.image()
         if image is None:
@@ -72,48 +103,158 @@ class RoiMixin:
         # claiming the same two keys.
         self.forget_draft_ghost()
         stored = self.roi()
+        self._roi_dragged = False
+        self._roi_awaiting = stored is None
+        self._roi_wanted = self._roi_segment_key()
         if stored is not None:
             self.roi_draft = tuple(int(v) for v in stored)
         else:
-            reference, scale = self._roi_reference_image(image)
-            box = suggest_roi(reference, self.session.view)
-            self.roi_draft = self._scaled_box(box, scale, image.shape[:2])
+            self.roi_draft = None
         self.roi_editing = True
         # Arm the tool first: detaching a SAM tool clears the rubber band, so
         # painting the draft before the swap would erase it again.
         self._attach_tool()
         self.canvas.set_rubber_band(self.roi_draft)
-        if stored is None and self._is_whole_frame(self.roi_draft):
-            self.report(NO_CHASSIS_FOUND)
-        else:
+        if stored is not None:
             self.report("拖动框选机箱范围，Enter 确认 / "
                         "drag the chassis box, Enter to accept")
+            return
+        self.report("正在寻找机箱…可直接拖框 / looking for the chassis -- "
+                    "drag a box any time")
+        self.roi_proposer.request(self._roi_wanted, self.session.view,
+                                  self._roi_sample_paths())
 
-    def _roi_reference_image(self, fallback):
-        """``(image, scale)`` the ROI is measured on: the segment's first step.
+    def _roi_segment_key(self) -> Optional[tuple]:
+        """What a pending proposal is *about*, so a stale one can be dropped.
 
-        Full resolution, which is what the detector's thresholds were
-        calibrated on -- measuring the cached thumbnail instead was tried and
-        moved the proposal by 180 px on the real D13, which is more dragging
-        for the annotator than the 0.4 s it saves.  The cost is paid once per
-        pose segment, on the one frame where no ROI is stored yet; the
-        ``scale`` is kept in the signature so a future cheaper source can be
-        slotted in without touching the caller.
+        The same five-tuple a dismissal is remembered by
+        (:meth:`~tda.ui.app_edit.EditMixin.roi_key`): desktop, view, segment
+        number **and the segment's step range**. The range is what makes it
+        self-invalidating -- a pose re-cut renumbers segments and moves their
+        ranges, so a measurement taken for "segment 2 of D13 oak1" before the
+        cut is not an answer about the segment 2 that exists after it, and an
+        identity that stopped at the number would have drawn it anyway.
+        """
+        return self.roi_key()
+
+    def _roi_sample_steps(self) -> list[int]:
+        """The segment's first, middle and last annotatable steps.
+
+        Both ends matter and for opposite reasons: the first frame holds the
+        whole machine, which is the box; the last holds an empty chassis whose
+        dark floor reads as bench, which is where a single-frame measurement
+        clips. The middle is the tie-breaker when one of the two is spoiled by
+        a hand or an arm over the bench.
         """
         if not compat.is_open(self.session):
-            return fallback, 1.0
+            return []
         row = self.db.pose_segment_for(self.session.current()) or {}
-        steps = sorted(int(s) for s in self.session.steps())
+        # the steps this view can actually be measured on: a step flagged
+        # `missing` is in `steps()` (the state machine runs through it) but has
+        # no image, and sampling one silently leaves the union a frame short --
+        # on the real D61 the scanner's last step is exactly that
+        steps = sorted(int(s) for s in self.session.available_steps())
         start, end = row.get("start_step"), row.get("end_step")
         if start is not None:
             steps = [s for s in steps if s >= int(start)]
         if end is not None:
             steps = [s for s in steps if s <= int(end)]
-        for step in steps:
+        if len(steps) <= ROI_SAMPLE_FRAMES:
+            return steps
+        return [steps[0], steps[len(steps) // 2], steps[-1]]
+
+    def _roi_sample_paths(self) -> list[str]:
+        """Where those frames' pixels are; the worker reads them itself."""
+        out: list[str] = []
+        for step in self._roi_sample_steps():
+            found = self.session.image_path(step)
+            if found:
+                out.append(str(found))
+        return out
+
+    def _on_roi_proposed(self, payload: object) -> None:
+        """A measurement came back: show it, unless it is no longer wanted.
+
+        Four ways it can be stale and all four are ordinary: the annotator left
+        the segment, accepted the rectangle, dismissed the proposal, or dragged
+        their own rectangle while the worker was reading three 12 MP frames. A
+        rectangle a human drew is never replaced by one a detector measured.
+
+        ``_roi_awaiting`` is the one that catches the nastiest case, because
+        every other guard passes it: request, drag, ``Enter``, ``Shift+R``, and
+        *then* the old answer lands -- same segment, nothing dragged since the
+        tool was re-armed, the edit open. The tool was re-armed over a segment
+        that now **has** a rectangle, so it asked for nothing, so there is
+        nothing for an answer to be an answer to.
+        :meth:`tda.ui.app_roi_worker.RoiProposer.cancel` stops the worker
+        delivering it at all; this is the same thing said at the point of use,
+        where a payload that arrives by any other route is also turned away.
+        """
+        if not isinstance(payload, dict) or not self.roi_editing:
+            return
+        if not getattr(self, "_roi_awaiting", False):
+            return
+        if payload.get("segment") != getattr(self, "_roi_wanted", None):
+            return
+        if getattr(self, "_roi_dragged", False):
+            return
+        self._roi_awaiting = False
+        box = payload.get("box")
+        image = self.session.image() if compat.is_open(self.session) else None
+        if box is None or image is None:
+            self.report(NO_CHASSIS_FOUND)
+            return
+        self.roi_draft = self._scaled_box(box, 1.0, image.shape[:2])
+        self.canvas.set_rubber_band(self.roi_draft)
+        if self._is_whole_frame(self.roi_draft):
+            self.report(NO_CHASSIS_FOUND)
+        else:
+            self.report("拖动框选机箱范围，Enter 确认 / "
+                        "drag the chassis box, Enter to accept")
+
+    def wait_for_roi_proposal(self, timeout: float = 20.0) -> bool:
+        """Block until the pending measurement has been delivered (tests, smoke).
+
+        The annotator never waits for this -- that is the point of it being on a
+        worker -- but a test that wants to look at the rectangle, and the smoke
+        run that reports it, have to.
+        """
+        from PySide6.QtWidgets import QApplication
+
+        drained = self.roi_proposer.wait(timeout)
+        QApplication.processEvents()
+        return drained
+
+    def _roi_reference_image(self, fallback):
+        """``(image, scale)`` a synchronous proposal would be measured on.
+
+        Kept for :meth:`propose_roi_now`, the path with no event loop behind it.
+        """
+        if not compat.is_open(self.session):
+            return fallback, 1.0
+        for step in self._roi_sample_steps():
             image = self.session.image_at(step)
             if image is not None:
                 return image, 1.0
         return fallback, 1.0
+
+    def propose_roi_now(self) -> Optional[tuple]:
+        """The segment's proposal, measured here and now on the GUI thread.
+
+        The synchronous answer, for a caller with no event loop to deliver the
+        asynchronous one. It reads the same frames through the session's image
+        cache, so it also has to undo the session's channel order -- which is
+        the one thing :func:`tda.ui.app_roi_worker.measure_paths` never has to
+        do, since ``cv2.imread`` already gives BGR.
+        """
+        images = []
+        for step in self._roi_sample_steps():
+            found = self.session.image_at(step)
+            if found is not None:
+                images.append(as_bgr(found))
+        if not images:
+            return None
+        return tuple(int(v) for v in suggest_roi_over(images, self.session.view))
 
     @staticmethod
     def _scaled_box(box, scale: float, hw) -> tuple:
@@ -137,6 +278,8 @@ class RoiMixin:
         from tda.core.db_pose import clean_roi
 
         hw = None if self.overlay is None else self.overlay.hw
+        # whatever the worker comes back with, a rectangle a human dragged wins
+        self._roi_dragged = True
         try:
             self.roi_draft = tuple(clean_roi(list(box), hw))  # type: ignore[arg-type]
         except ValueError as refused:
@@ -156,6 +299,12 @@ class RoiMixin:
         """
         key = self.session.current()
         segment = self._pose_segment(key)
+        if self.roi_draft is None and self.roi_proposer.pending():
+            # Enter before the measurement landed: the annotator means "take the
+            # box", and there will be one in a moment. Cancelling the ROI edit
+            # here instead would look like Enter did nothing at all.
+            self.report(ROI_STILL_MEASURING)
+            return
         if self.roi_draft is None or segment is None:
             self.cancel_roi_edit()
             return
@@ -163,6 +312,12 @@ class RoiMixin:
             self.report(NO_CHASSIS_FOUND)
             return
         hw = None if self.overlay is None else self.overlay.hw
+        # There is a rectangle now, and it is the annotator's. A measurement
+        # still in flight is about the same segment and nothing has been dragged
+        # since, so every guard in _on_roi_proposed would let it through the
+        # next time the tool is armed.
+        self.roi_proposer.cancel()
+        self._roi_awaiting = False
         accepted = tuple(self.db.set_pose_segment_roi(
             int(key.desktop), str(key.view), int(segment), list(self.roi_draft),
             annotator=self.annotator, hw=hw,
@@ -189,6 +344,8 @@ class RoiMixin:
             return
         self.roi_editing = False
         self.roi_draft = self.roi()
+        self._roi_awaiting = False
+        self.roi_proposer.cancel()   # nobody is waiting for it any more
         dismissed = self.roi_key()
         if dismissed is not None:
             self._roi_dismissed.add(dismissed)

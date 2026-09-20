@@ -28,6 +28,7 @@ from tda.ui.app_diff import (
     expected_payload,
     heat_rgba,
 )
+from tda.ui.app_roi_worker import RoiProposer
 
 __all__ = ["ASSIST_CONFIRM_WAIT", "AssistMixin"]
 
@@ -78,6 +79,12 @@ class AssistMixin:
         self.assist = AssistController(self)
         self.assist.sigBlobs.connect(self._on_blobs)
         self.assist.sigFailed.connect(self.report_error)
+        # the chassis ROI is measured on three frames of the pose segment, which
+        # is three decodes and three detections: not something to spend before
+        # the first paint (tda/ui/app_roi_worker.py)
+        self.roi_proposer = RoiProposer(self)
+        self.roi_proposer.sigProposed.connect(self._on_roi_proposed)
+        self.roi_proposer.sigFailed.connect(self.report_error)
         self.assist_result: Optional[dict] = None
         self._unexplained: dict[int, list[Box]] = {}
         #: Steps confirmed while the comparison had not landed (spec 4.4).
@@ -535,3 +542,4 @@ class AssistMixin:
         if loader is not None and loader.is_alive():
             loader.join(30.0)       # a half-built SamQueue must not outlive us
         self.assist.shutdown()
+        self.roi_proposer.shutdown()

@@ -276,7 +276,10 @@ class EditSidecar:
             "step": int(key.step),
             "view": str(key.view),
             "instance": str(instance),
-            "rle": masks.encode_rle(np.asarray(mask, dtype=bool)),
+            # the layer is a full canvas and this runs on every
+            # can_leave_edit, i.e. on every step: 35 ms at 12 MP, 31 of
+            # them transposing empty pixels
+            "rle": masks.encode_rle_boxed(np.asarray(mask, dtype=bool)),
             "adopted": [dict(entry) for entry in (adopted or [])],
         }
         target = self._file(key, instance)

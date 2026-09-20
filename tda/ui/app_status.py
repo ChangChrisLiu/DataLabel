@@ -150,16 +150,45 @@ class StatusMixin:
         since the frame change, so the one message they needed was the one they
         never saw.  Clearing (an empty text) always wins -- that is a frame
         change, which every hint is about.
+
+        A line the hold turns away is **not thrown away**: the last one is kept
+        and shown when the hold expires, so a held warning delays the other
+        message instead of swallowing it.  That matters for one pair in
+        particular -- the layout-reset warning is held for four seconds and the
+        chassis ROI answers inside that window, and "could not find the chassis,
+        drag a box" is the one line telling the annotator why no rectangle
+        appeared.  Any newer ``report`` replaces what is waiting, so only the
+        most recent held-out line ever surfaces, and never on top of something
+        newer.
         """
         import time as _time
 
         now = _time.monotonic()
         if text and hold_ms <= 0 and now < getattr(self, "_hint_until", 0.0):
+            self._held_out = str(text)
+            self._arm_held_out(self._hint_until - now)
             return
+        self._held_out = ""
         self._hint_until = (now + hold_ms / 1000.0) if text and hold_ms > 0 else 0.0
         self._message = str(text)
         self.hint_label.setToolTip(self._message)
         self._paint_hint()
+
+    def _arm_held_out(self, seconds: float) -> None:
+        """Ask to be woken when the hold ends, once, not once per dropped line."""
+        from PySide6.QtCore import QTimer
+
+        if getattr(self, "_held_out_armed", False):
+            return
+        self._held_out_armed = True
+        QTimer.singleShot(max(1, int(seconds * 1000) + 20), self._show_held_out)
+
+    def _show_held_out(self) -> None:
+        """Put the last held-out line up, if nothing newer has been said since."""
+        self._held_out_armed = False
+        waiting, self._held_out = getattr(self, "_held_out", ""), ""
+        if waiting:
+            self.report(waiting)
 
     def _paint_hint(self) -> None:
         """Put as much of the message on screen as the bar is wide."""

@@ -256,8 +256,16 @@ class EditMixin:
         Called by whatever re-opens the session on the same frame after a
         structural edit -- a pose re-cut, an S1 Apply -- so the annotator is
         asked about the pieces that came out of it.
+
+        A measurement in flight is abandoned with them. It was taken for a
+        segment whose range has just moved, so it is an answer about something
+        that no longer exists; the five-tuple in
+        :meth:`~tda.ui.app_roi.RoiMixin._roi_segment_key` would reject it
+        anyway, and cancelling says so at the moment it becomes true.
         """
         self._roi_dismissed.clear()
+        self._roi_awaiting = False
+        self.roi_proposer.cancel()
 
     def _sync_editing_layer(self, repaint: bool = True) -> None:
         """Keep the overlay's edit layer in step with the session's.

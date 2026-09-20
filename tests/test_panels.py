@@ -149,6 +149,9 @@ class StubSession(QObject):
     def steps(self) -> list[int]:
         return list(self._steps)
 
+    def available_steps(self) -> list[int]:
+        return list(self._steps)
+
     def frame_status(self, step: int) -> str:
         return self._status[step]
 

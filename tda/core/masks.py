@@ -11,11 +11,23 @@ Conventions used across ``tda``:
   about the image origin, with ``theta`` in **radians**, y pointing down.
 
 This module is consumed by the layer compiler, the truth table and the
-canvas overlay; everything here is deterministic and side-effect free except
-:func:`paste`, which writes into its destination in place.
+canvas overlay.  Everything here is deterministic -- the same arguments always
+give the same answer -- but three things are not side-effect free:
+
+* :func:`paste` writes into its destination in place;
+* :func:`decode_rle_shared` keeps a bounded, content-keyed memo of decoded
+  shapes (:data:`DECODE_CACHE_BYTES`, emptied by :func:`clear_decode_cache`);
+* :func:`encode_rle` with a ``window`` builds the run lengths in a scratch
+  canvas this thread keeps, and puts it back to empty afterwards.
+
+None of the three can change an answer; they only decide how much work it
+takes to arrive at it.
 """
 from __future__ import annotations
 
+import os
+import threading
+from collections import OrderedDict
 from typing import Iterable, Optional, Sequence
 
 import cv2
@@ -26,8 +38,14 @@ from pycocotools import mask as coco_mask
 from tda.core.model import Similarity
 
 __all__ = [
+    "CHECK_ENCODE_WINDOW",
+    "DECODE_CACHE_BYTES",
+    "clear_decode_cache",
+    "decode_cache_stats",
     "encode_rle",
+    "encode_rle_boxed",
     "decode_rle",
+    "decode_rle_shared",
     "rle_area",
     "rle_bbox",
     "rle_bbox_xywh",
@@ -92,14 +110,114 @@ def _boundary(mask_u8: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def encode_rle(mask: np.ndarray) -> dict:
-    """Encode a boolean mask as a COCO RLE dict with ``str`` counts."""
-    m = np.asfortranarray(_as_bool(mask).astype(np.uint8))
-    rle = coco_mask.encode(m)
+#: One reusable Fortran-ordered scratch canvas per thread, for the windowed
+#: encode below. Per thread because the truth sweeper encodes on its own one.
+_scratch = threading.local()
+
+
+#: Check every ``encode_rle(mask, window)`` call's promise that the mask really
+#: is empty outside its window.
+#:
+#: A window that does not contain the mask silently truncates stored geometry,
+#: which is the one way this optimisation could lose an annotation, and the
+#: check is four ``any`` passes over the bands outside the window -- cheap
+#: enough for a test run, not free enough for a 12 MP commit. So it is **on in
+#: the test suite** (``tests/conftest.py`` sets it, which makes every call site
+#: in the codebase guarded on every run) and off in the annotator, and
+#: ``TDA_CHECK_ENCODE_WINDOW=1`` turns it on anywhere else.
+CHECK_ENCODE_WINDOW = os.environ.get("TDA_CHECK_ENCODE_WINDOW", "") not in ("", "0")
+
+
+def _refuse_pixels_outside(arr: np.ndarray, window: Box) -> None:
+    """Raise when ``arr`` has a set pixel outside ``window`` (:data:`CHECK_ENCODE_WINDOW`)."""
+    x0, y0, x1, y1 = window
+    height, width = arr.shape
+    x0, y0 = max(0, min(x0, width)), max(0, min(y0, height))
+    x1, y1 = max(x0, min(x1, width)), max(y0, min(y1, height))
+    for band in (arr[:y0, :], arr[y1:, :], arr[y0:y1, :x0], arr[y0:y1, x1:]):
+        if band.size and band.any():
+            raise ValueError(
+                f"encode_rle was given the window {tuple(window)!r}, but the "
+                f"mask has pixels outside it: the run lengths would be missing "
+                f"them. Only a caller that produced the mask may pass a window."
+            )
+
+
+def _encode_buffer(hw: HW) -> np.ndarray:
+    buffer = getattr(_scratch, "buffer", None)
+    if buffer is None or buffer.shape != tuple(hw):
+        buffer = np.zeros((int(hw[0]), int(hw[1])), dtype=np.uint8, order="F")
+        _scratch.buffer = buffer
+    return buffer
+
+
+def encode_rle(mask: np.ndarray, window: Optional[Box] = None) -> dict:
+    """Encode a boolean mask as a COCO RLE dict with ``str`` counts.
+
+    Two copies used to happen on the way in and both are gone; the bytes that
+    come out are the same ones, which
+    :mod:`tests.test_compiler_golden` pins.
+
+    * ``.view(np.uint8)`` instead of ``.astype(np.uint8)``. A NumPy ``bool_``
+      **is** one byte holding 0 or 1, so reinterpreting it costs nothing, while
+      the cast copied the whole canvas -- 3 ms per instance at 12 MP. It is a
+      reinterpretation, so it relies on the bytes really being 0/1; every mask
+      in ``tda`` is produced either by a NumPy operation or by
+      :func:`decode_rle`, and both guarantee that.
+    * the caller is expected to hand over a **Fortran-ordered** mask.
+      ``coco_mask.encode`` reads column-major, so a C-ordered array has to be
+      transposed into a new buffer first -- 39 ms per instance at 12 MP, which
+      was the single most expensive thing a commit did. :func:`decode_rle`
+      returns Fortran order and :func:`tda.core.compiler.compile_frame` builds
+      its canvases in it, so the copy below is skipped on everything the truth
+      table stores. A C-ordered mask still works; it just pays for the
+      transpose.
+
+    ``window`` is the caller **promising** that ``mask`` is empty outside
+    ``(x0, y0, x1, y1)`` -- which the compiler knows, because a shape is only
+    ever painted inside its own bounding box. The run lengths are then built in
+    a scratch canvas this thread keeps, so the encode reads memory that is
+    already resident instead of faulting in a freshly allocated 12 MB one:
+    5.6 ms per instance becomes 2.7 ms, and at forty instances that is a tenth
+    of the commit budget. The answer is the same either way -- but a window that
+    does not contain the mask silently truncates it, so only a caller that
+    produced the mask may pass one.
+    """
+    arr = _as_bool(mask)
+    if window is None or arr.size == 0:
+        rle = coco_mask.encode(np.asfortranarray(arr.view(np.uint8)))
+    else:
+        if CHECK_ENCODE_WINDOW:
+            _refuse_pixels_outside(arr, window)
+        x0, y0, x1, y1 = (int(v) for v in window)
+        buffer = _encode_buffer(arr.shape)
+        try:
+            if x1 > x0 and y1 > y0:
+                buffer[y0:y1, x0:x1] = arr[y0:y1, x0:x1].view(np.uint8)
+            rle = coco_mask.encode(buffer)
+        finally:
+            # the canvas is reused, so it goes back to empty whatever happened:
+            # a half-written buffer would poison every later encode
+            if x1 > x0 and y1 > y0:
+                buffer[y0:y1, x0:x1] = 0
     return {
         "size": [int(rle["size"][0]), int(rle["size"][1])],
         "counts": rle["counts"].decode("ascii"),
     }
+
+
+def encode_rle_boxed(mask: np.ndarray) -> dict:
+    """:func:`encode_rle` with the window measured off the mask itself.
+
+    For a caller holding a full-canvas mask that does not know where its pixels
+    are -- the editing layer, the crash sidecar, an undo record, an occluder, a
+    frame override. Measuring the box is two ``any`` reductions (0.5 ms at
+    12 MP) and it saves transposing and scanning the whole canvas (40 ms), so
+    it pays for itself by eighty to one on an OAK frame and costs nothing
+    measurable on a scanner one. The bytes out are :func:`encode_rle`'s.
+    """
+    arr = _as_bool(mask)
+    return encode_rle(arr, bbox(arr))
 
 
 def rle_counts(rle: Optional[dict]) -> Optional[str]:
@@ -222,13 +340,103 @@ def rle_iou(a: Optional[dict], b: Optional[dict]) -> float:
 
 
 def decode_rle(rle: dict) -> np.ndarray:
-    """Decode a COCO RLE dict (``str`` or ``bytes`` counts) to a bool mask."""
+    """Decode a COCO RLE dict (``str`` or ``bytes`` counts) to a bool mask.
+
+    The result is **Fortran-ordered**, because that is what pycocotools writes
+    and what :func:`encode_rle` wants back; nothing re-orders it on the way.
+
+    ``.view(bool)`` rather than ``.astype(bool)``: pycocotools fills the buffer
+    with 0 and 1 only, a ``bool_`` is one byte, and the cast was a second pass
+    over the whole canvas -- 5 ms per instance at 12 MP.
+    """
     counts = rle["counts"]
     if isinstance(counts, str):
         counts = counts.encode("ascii")
     h, w = int(rle["size"][0]), int(rle["size"][1])
     decoded = coco_mask.decode({"size": [h, w], "counts": counts})
-    return decoded.astype(bool)
+    return decoded.view(bool)
+
+
+# ---------------------------------------------------------------------------
+# the decode memo
+# ---------------------------------------------------------------------------
+#: How many bytes of decoded shapes :func:`decode_rle_shared` keeps.
+#:
+#: What is kept is each shape **cropped to its own bounding box**, which is what
+#: makes the memo affordable: a part of an OAK frame decodes to a 12 MB canvas
+#: whatever its size, and forty of those would be 500 MB, while the same forty
+#: cropped are a few tens of MB. The working set is exactly one frame's shapes
+#: -- the compiler decodes the same forty keyframes every time the annotator
+#: commits, confirms or walks to the next frame, and at 12 MP that decode was
+#: 0.4 s of every one of those gestures.
+DECODE_CACHE_BYTES = 128 * 1024 * 1024
+
+_decoded: "OrderedDict[tuple, tuple[np.ndarray, Box]]" = OrderedDict()
+_decoded_bytes = 0
+_decode_lock = threading.Lock()
+
+
+def decode_rle_shared(rle: dict) -> tuple[np.ndarray, Box]:
+    """``(mask inside its own bounding box, that box)`` -- shared, **read-only**.
+
+    The same pixels :func:`decode_rle` produces, with the empty margin left off:
+    ``decode_rle(rle)[y0:y1, x0:x1]`` for the returned ``(x0, y0, x1, y1)``, and
+    that box is read off the run lengths (:func:`rle_bbox_xywh`) rather than
+    measured, so nothing scans the canvas to find it. An RLE with no pixels set
+    gives an empty array and ``(0, 0, 0, 0)``.
+
+    Memoised, and it cannot go stale: the key *is* the content (the ``counts``
+    string and the size), so a re-traced shape is a different key rather than a
+    stale entry. The array is shared and therefore marked non-writeable, which
+    turns "somebody painted into a decoded mask" from a corruption of every
+    later answer into a ``ValueError`` on the line that did it; a caller that
+    needs to write takes its own copy.
+
+    Two threads asking for the same shape at once both decode it and one of the
+    two entries is dropped, which costs a decode and is otherwise harmless --
+    worth not holding the lock across the decode, since that is the expensive
+    part.
+    """
+    global _decoded_bytes
+
+    size = rle.get("size")
+    key = (rle_counts(rle), None if size is None else (int(size[0]), int(size[1])))
+    with _decode_lock:
+        hit = _decoded.get(key)
+        if hit is not None:
+            _decoded.move_to_end(key)
+            return hit
+
+    x, y, width, height = rle_bbox_xywh(rle)
+    box: Box = ((int(x), int(y), int(x + width), int(y + height))
+                if width > 0 and height > 0 else (0, 0, 0, 0))
+    full = decode_rle(rle)
+    mask = np.asfortranarray(full[box[1]:box[3], box[0]:box[2]])
+    mask.flags.writeable = False
+    found = (mask, box)
+    with _decode_lock:
+        if key not in _decoded:
+            _decoded[key] = found
+            _decoded_bytes += mask.nbytes
+        while len(_decoded) > 1 and _decoded_bytes > DECODE_CACHE_BYTES:
+            _key, (dropped, _box) = _decoded.popitem(last=False)
+            _decoded_bytes -= dropped.nbytes
+    return found
+
+
+def decode_cache_stats() -> dict:
+    """``{"entries", "bytes"}`` of the memo (tests and memory reporting)."""
+    with _decode_lock:
+        return {"entries": len(_decoded), "bytes": _decoded_bytes}
+
+
+def clear_decode_cache() -> None:
+    """Forget every memoised shape. Only ever costs time, never an answer."""
+    global _decoded_bytes
+
+    with _decode_lock:
+        _decoded.clear()
+        _decoded_bytes = 0
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +681,15 @@ def labelmap_from_masks(
     a later (higher) instance both overwrites the ones below it and carries a
     larger id.  0 is the background.  Keys of ``order`` without a mask, and
     masks without a place in ``order``, are ignored.
+
+    Each instance is painted **inside its own bounding box**, which is measured
+    here rather than taken on trust.  A boolean-mask assignment walks every
+    element of the canvas it is given, so at 12 MP a Fortran-ordered instance
+    mask -- which is what the compiler now produces, because that is what the
+    run lengths are stored in -- cost 24 ms, and forty of them a second of the
+    GUI thread on every frame change.  Measuring the box costs 0.5 ms and the
+    assignment inside it 0.07 ms.  An empty mask is skipped, but it still takes
+    its id: the ids are the paint order and a caller reads ``id2key`` by them.
     """
     h, w = int(hw[0]), int(hw[1])
     painted = [key for key in order if key in masks]
@@ -489,6 +706,10 @@ def labelmap_from_masks(
             raise ValueError(
                 f"mask {key!r} has shape {m.shape!r}, expected {(h, w)!r}"
             )
-        labelmap[m] = idx
         id2key[idx] = key
+        window = bbox(m)
+        if window is None:
+            continue
+        x0, y0, x1, y1 = window
+        labelmap[y0:y1, x0:x1][m[y0:y1, x0:x1]] = idx
     return labelmap, id2key

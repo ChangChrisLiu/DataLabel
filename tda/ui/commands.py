@@ -76,8 +76,9 @@ def edit_editing_mask_op(
     flag somebody set when the ghost was accepted and nobody cleared when it was
     undone.
     """
-    rle_before = _masks.encode_rle(before)
-    rle_after = _masks.encode_rle(after)
+    # two full-canvas encodes per recorded stroke, on the GUI thread
+    rle_before = _masks.encode_rle_boxed(before)
+    rle_after = _masks.encode_rle_boxed(after)
     payload = {"instance": instance, "rle_before": rle_before, "rle_after": rle_after}
     if adopted:
         payload["adopted"] = dict(adopted)

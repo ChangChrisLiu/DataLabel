@@ -10,6 +10,17 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# Every windowed encode checks its own promise for the whole test session.
+#
+# ``masks.encode_rle(mask, window)`` trusts the caller that the mask is empty
+# outside the window, and a window that is wrong would truncate stored geometry
+# without saying anything. Turning the check on here makes every call site in
+# the codebase -- present and future -- guarded on every run, at four ``any``
+# passes per call, while the annotator still pays nothing.
+from tda.core import masks as _masks  # noqa: E402
+
+_masks.CHECK_ENCODE_WINDOW = True
+
 
 @pytest.fixture
 def tmp_db_path(tmp_path: Path) -> str:
