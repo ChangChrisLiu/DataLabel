@@ -35,6 +35,7 @@ from tda.core.model import (
     ZOrderRec,
 )
 from tda.core.taxonomy import Taxonomy, load_taxonomy
+from tda.core.truth import TruthService
 
 DESKTOP = 7
 VIEW = "scan"
@@ -58,10 +59,10 @@ RECTS = {
     CHASSIS: (0, 0, 64, 64),
     BOARD: (4, 4, 44, 44),
     PSU: (46, 4, 62, 30),
-    SCREW: (47, 5, 51, 9),
-    PLUG: (40, 8, 46, 14),
-    RAM: (8, 8, 14, 36),
-    LATCH: (8, 36, 14, 40),
+    SCREW: (48, 6, 62, 20),
+    PLUG: (34, 8, 40, 14),   # 6 px: `visible_tiny`, so V8 has a point case
+    RAM: (8, 6, 20, 28),
+    LATCH: (6, 30, 20, 44),
 }
 
 #: The staging area both views can see, so a removed part keeps a box row.
@@ -176,9 +177,10 @@ def build(db: Db, *, views=VIEWS, verified_steps=STEPS) -> Taxonomy:
             )
         for kf in _keyframes(view):
             db.add_keyframe(kf)
+        # bottom-up: the chassis is behind everything, the small parts in front
         db.set_zorder(ZOrderRec(DESKTOP, view, 1, [
-            (LATCH, "main"), (RAM, "main"), (SCREW, "main"), (PLUG, "main"),
-            (PSU, "main"), (BOARD, "main"), (CHASSIS, "main"),
+            (CHASSIS, "main"), (BOARD, "main"), (PSU, "main"), (PLUG, "main"),
+            (RAM, "main"), (LATCH, "main"), (SCREW, "main"),
         ]))
         db.set_pose_segment(DESKTOP, view, 1, 1, LAST_STEP, 1, None, None)
         db.set_pose_segment_bench_roi(DESKTOP, view, 1, BENCH_ROI)
@@ -188,4 +190,21 @@ def build(db: Db, *, views=VIEWS, verified_steps=STEPS) -> Taxonomy:
                 FrameOverride(FrameKey(DESKTOP, step, view), instance, None, visibility)
             )
     edges_to_db(db, DESKTOP, propose_edges(db.instances(DESKTOP), tax))
+    freeze(db, tax, views=views, steps=verified_steps)
     return tax
+
+
+def freeze(db: Db, tax: Taxonomy, *, views=VIEWS, steps=STEPS) -> None:
+    """Compile and confirm the wanted frames, the way pressing Space does.
+
+    Setting ``review_status`` by hand is not enough and must not be: the truth
+    service demotes a confirmed frame the moment its instance set changes, so a
+    frame "verified" with nothing compiled under it comes back as
+    ``needs_review``. The perception tasks then correctly emit nothing, which is
+    a fine rule and a useless fixture.
+    """
+    service = TruthService(db, tax)
+    for view in views:
+        service.refresh_range(DESKTOP, view, STEPS)
+        for step in steps:
+            service.verify_frame(FrameKey(DESKTOP, step, view), "tester")

@@ -49,7 +49,7 @@ def test_every_p0_task_is_emitted_and_re_derivable(scene, tmp_path: Path):
     db, tax = scene
     records = _run(db, tax, tmp_path / "v.jsonl")
     tasks = {r["task"] for r in records}
-    assert tasks == set(TASKS) - {"V15"}, sorted(tasks)  # V15 needs a second view
+    assert tasks == set(TASKS), sorted(tasks)
 
     checker = Checker(db, tax, S.DESKTOP)
     assert checker.check_all(records) == len(records)

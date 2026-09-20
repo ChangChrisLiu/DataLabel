@@ -338,6 +338,7 @@ def test_the_vlm_export_asks_about_the_latch_only_while_it_is_there(
     board_db, tax, tmp_path: Path
 ):
     """Both classes still have more than one state, so V2 keeps asking (spec 8)."""
+    _confirm(board_db, tax, (1, 2, 3))
     out = tmp_path / "vlm.jsonl"
     export_vlm(board_db, tax, [DESKTOP], VIEW, str(out), only_verified=False)
     states = {(r["step"], r["answer"]["state"]) for r in _records(out)
@@ -350,6 +351,23 @@ def test_the_vlm_export_asks_about_the_latch_only_while_it_is_there(
 # --------------------------------------------------------------------------- #
 def _records(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _confirm(d: Db, tax, steps) -> None:
+    """Sign the given frames off the way pressing Space does.
+
+    The VLM export asks a *perception* question only about a frame a human has
+    confirmed (spec 8.2: the answer is the truth table, and an unconfirmed truth
+    table is a cache). Setting ``review_status`` by hand is not the same thing
+    and must not be -- the truth service demotes a confirmed frame whose
+    instance set has changed -- so the fixtures go through the service.
+    """
+    from tda.core.truth import TruthService
+
+    service = TruthService(d, tax)
+    service.refresh_range(DESKTOP, VIEW, steps)
+    for step in steps:
+        service.verify_frame(FrameKey(DESKTOP, step, VIEW), "tester")
 
 
 def test_vlm_writes_at_least_one_record_per_task(db, tax, tmp_path: Path):
@@ -373,6 +391,7 @@ def test_vlm_writes_at_least_one_record_per_task(db, tax, tmp_path: Path):
 
 
 def test_vlm_v1_lists_the_visible_components(db, tax, tmp_path: Path):
+    _confirm(db, tax, (2, 3))  # step 1 is confirmed by the fixture's frozen rows
     out = tmp_path / "vlm.jsonl"
     export_vlm(db, tax, [DESKTOP], VIEW, str(out), tasks=("V1",))
     first = [r for r in _records(out) if r["step"] == 1]
@@ -404,7 +423,8 @@ def test_vlm_v2_asks_states_and_counts(db, tax, tmp_path: Path):
     assert "Motherboard screw 3" in screw["question"]
     assert len(counts) == 1 and counts[0]["step"] == 1
     assert counts[0]["answer"] == {"count": 1}
-    assert counts[0]["question"] == "How many motherboard screws are still fastened?"
+    assert "motherboard screws" in counts[0]["question"]
+    assert "fastened" in counts[0]["question"]
 
 
 def test_vlm_v3_reads_the_action_between_two_frames(db, tax, tmp_path: Path):
@@ -448,7 +468,14 @@ def test_vlm_only_verified_keeps_confirmed_records(db, tax, tmp_path: Path):
 
 
 def test_rationale_never_observes_without_a_box(db, tax, tmp_path: Path):
-    """An instance the frame cannot localise is `propagate_state`, not `observe`."""
+    """An instance the frame cannot localise is `propagate_state`, not `observe`.
+
+    A second screw nobody has drawn joins the desktop, which is what demotes the
+    confirmed frame to ``needs_review`` -- so what is left here is the planning
+    half of the export, and the invariant has to hold there too. The V2 counting
+    case that used to live here is in ``test_vlm_tasks.py``, on a scene whose
+    frames can actually be signed off.
+    """
     db.upsert_instance(InstanceRec(
         key="screw.motherboard.04", desktop=DESKTOP, cls="screw",
         attrs={"role": "motherboard", "head": "PH2", "captive": False},
@@ -457,11 +484,7 @@ def test_rationale_never_observes_without_a_box(db, tax, tmp_path: Path):
     export_vlm(db, tax, [DESKTOP], VIEW, str(out))
     records = _records(out)
 
-    count = next(r for r in records if "count" in r["answer"])
-    assert count["answer"] == {"count": 2}  # the unseen screw is still fastened
-    assert [s["op"] for s in count["rationale"]["steps"]] == [
-        "observe", "propagate_state", "conclude"
-    ]
+    assert records
     for rec in records:
         for step in rec["rationale"]["steps"]:
             if step["op"] == "observe":

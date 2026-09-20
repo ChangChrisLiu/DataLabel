@@ -494,7 +494,7 @@ def _add_refresh_flags(p) -> None:
 
 
 def cmd_export_vlm(args: argparse.Namespace) -> int:
-    """Write the V1/V2/V3 question set of one view as JSONL."""
+    """Write the P0 question set of spec 8.2 for one view as JSONL."""
     from tda.core.export.vlm import TASKS, export_vlm
 
     with session(args, lock=True) as (paths, db):
@@ -507,6 +507,11 @@ def cmd_export_vlm(args: argparse.Namespace) -> int:
         if targets is None:
             return EXIT_ERROR
         tasks = [t.strip() for t in str(args.tasks).split(",") if t.strip()] or list(TASKS)
+        unknown = [t for t in tasks if t not in TASKS]
+        if unknown:
+            print(f"[export-vlm] not a task: {', '.join(unknown)}; "
+                  f"the P0 set is {','.join(TASKS)}")
+            return EXIT_ERROR
         worst = EXIT_OK
         for view in views:
             out = targets[view]
@@ -519,23 +524,51 @@ def cmd_export_vlm(args: argparse.Namespace) -> int:
                 allow_conflicts=bool(args.allow_conflicts), tasks=tasks,
                 only_verified=bool(args.only_verified), truth=truth,
             )
+            _report_vlm(stats, view)
             if not _count(stats, "records"):
                 worst = max(worst, _nothing_exported("export-vlm", view, out,
                                                      bool(args.only_verified)))
                 continue
-            print(f"[export-vlm] {_count(stats, 'records')} records "
-                  f"({stats.get('by_task', {})}) -> {out}")
+            # the total goes last and stays short: it is the line a script reads
+            print(f"[export-vlm] {_count(stats, 'records')} records -> {out}")
         return worst
 
 
+def _report_vlm(stats: dict, view: str) -> None:
+    """The per-task counts and the moments the graph refused to describe.
+
+    ``illegal_steps`` is the answer to "why is V5 missing on that frame": the
+    logged action there breaks a hard constraint, so the graph and the log
+    contradict each other and no legal-action set may be published as ground
+    truth. It is the 18 lines of ``reports/constraints_report.md``, reported
+    where somebody making a release will see them.
+    """
+    by_task = stats.get("by_task") or {}
+    if by_task:
+        print(f"[export-vlm] {view}: "
+              + " ".join(f"{task}={n}" for task, n in sorted(by_task.items())))
+        source = stats.get("by_source") or {}
+        if source:
+            print(f"[export-vlm] {view}: "
+                  + " ".join(f"{k}={v}" for k, v in sorted(source.items())))
+    illegal = stats.get("illegal_steps") or {}
+    if illegal:
+        listed = ", ".join(f"D{d}:{sorted(steps)}" for d, steps in sorted(illegal.items()))
+        print(f"[export-vlm] {len(illegal)} desktop(s) have steps whose logged "
+              f"action the graph forbids; V5/V6/V16 say nothing there: {listed}")
+
+
 def _add_export_vlm(sub) -> None:
+    from tda.core.export.vlm_tasks import TASKS
+
     p = sub.add_parser("export-vlm", help="compiled truth -> one VLM JSONL per view")
     p.add_argument("--desktops", default=None, help="e.g. 13 or 1-20")
     _add_view_flags(p)
     p.add_argument("--out", default=None,
                    help="one output file; only with a single view (without it each "
                         "view is written to <cache_dir>/vlm_<view>.jsonl)")
-    p.add_argument("--tasks", default="V1,V2,V3")
+    p.add_argument("--tasks", default=",".join(TASKS),
+                   help=f"comma-separated task ids; the P0 set is {','.join(TASKS)}")
     p.add_argument("--only-verified", dest="only_verified", action="store_true",
                    default=False, help="ask only about confirmed rows")
     p.add_argument("--no-only-verified", dest="only_verified", action="store_false")
