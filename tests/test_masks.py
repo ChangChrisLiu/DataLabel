@@ -71,6 +71,22 @@ def test_decode_rle_accepts_bytes_counts():
     assert np.array_equal(M.decode_rle(as_bytes), mask)
 
 
+def test_rle_iou_matches_the_decoded_answer():
+    a = _square((64, 64), 10, 10, 30)
+    b = _shift(a, 5, 5)
+    assert M.rle_iou(M.encode_rle(a), M.encode_rle(a)) == pytest.approx(1.0)
+    assert M.rle_iou(M.encode_rle(a), M.encode_rle(b)) == pytest.approx(_iou(a, b))
+
+
+def test_rle_iou_of_a_missing_empty_or_differently_sized_mask_is_zero():
+    """Two sizes are two frames, so they overlap in nothing (never an error)."""
+    a = M.encode_rle(_square((64, 64), 10, 10, 30))
+    assert M.rle_iou(a, None) == 0.0
+    assert M.rle_iou(None, a) == 0.0
+    assert M.rle_iou(a, M.encode_rle(np.zeros((64, 64), dtype=bool))) == 0.0
+    assert M.rle_iou(a, M.encode_rle(_square((32, 32), 2, 2, 10))) == 0.0
+
+
 # --------------------------------------------------------------------------
 # bbox / min_side / area
 # --------------------------------------------------------------------------

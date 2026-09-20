@@ -30,6 +30,7 @@ __all__ = [
     "rle_area",
     "rle_bbox_xywh",
     "rle_counts",
+    "rle_iou",
     "bbox",
     "min_side",
     "rle_min_side",
@@ -137,6 +138,24 @@ def rle_area(rle: dict) -> int:
 def rle_bbox_xywh(rle: dict) -> list[float]:
     """COCO ``[x, y, w, h]`` straight off the run lengths (``[0, 0, 0, 0]`` if empty)."""
     return [float(v) for v in coco_mask.toBbox(_coco_rle(rle))]
+
+
+def rle_iou(a: Optional[dict], b: Optional[dict]) -> float:
+    """Intersection over union of two RLEs, straight off the run lengths.
+
+    Neither mask is decoded, which is the point: ranking a frame's draft
+    polygons against what the annotator is drawing means comparing a handful of
+    stored RLEs, and at 4032x3040 each decode is a 12 MB array nobody would
+    keep. Masks of different sizes are different frames, so their overlap is
+    ``0.0`` rather than an error -- the caller that cares about the mismatch
+    (:func:`tda.core.ls_adopt.drafts_for`) refuses them by size first.
+    """
+    if not a or not b:
+        return 0.0
+    if [int(v) for v in a["size"]] != [int(v) for v in b["size"]]:
+        return 0.0
+    out = np.asarray(coco_mask.iou([_coco_rle(a)], [_coco_rle(b)], [0]), dtype=float)
+    return float(out.reshape(-1)[0]) if out.size else 0.0
 
 
 def decode_rle(rle: dict) -> np.ndarray:
