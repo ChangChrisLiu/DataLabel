@@ -42,14 +42,9 @@ from tda.core.graph import (
     is_provisional,
 )
 from tda.core.graph_edit import (
-    DECISIONS,
-    MANUAL,
-    OVERRIDE,
-    RULE,
     GraphEditError,
     Violation,
     add_manual_edge,
-    editable,
     remove_manual_edge,
     set_rule_decision,
     violations_of,
@@ -60,7 +55,7 @@ from tda.ui.steps_values import EditError
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, fine for typing
     from tda.ui.steps_model import StepTableData
 
-__all__ = ["ANNOTATOR", "OP_KIND", "OP_VIEW", "RelationsData", "SOURCES", "edge_sort_key"]
+__all__ = ["ANNOTATOR", "OP_KIND", "OP_VIEW", "RelationsData", "edge_sort_key"]
 
 #: ``op_log.kind`` of the row an ``Apply`` with staged edges writes.
 OP_KIND = "relations"
@@ -68,9 +63,6 @@ OP_KIND = "relations"
 OP_VIEW = "-"
 #: ``op_log.annotator`` when the window did not say who is editing.
 ANNOTATOR = "ui:relations"
-
-#: Display order of the source badge, most authoritative first.
-SOURCES = (MANUAL, OVERRIDE, RULE)
 
 
 def edge_sort_key(edge: Edge) -> tuple:
@@ -218,8 +210,3 @@ class RelationsData:
     @classmethod
     def _by_triple(cls, edges: list[Edge]) -> dict[tuple[str, str, str], Edge]:
         return {cls._triple(e): e for e in edges}
-
-
-#: Re-exported so the panel needs one import.
-DECISION_VALUES = DECISIONS
-EDITABLE = editable
