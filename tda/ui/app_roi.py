@@ -134,7 +134,12 @@ class RoiMixin:
         if not compat.is_open(self.session):
             return []
         row = self.db.pose_segment_for(self.session.current()) or {}
-        steps = sorted(int(s) for s in self.session.steps())
+        # the steps this view can actually be measured on: a step flagged
+        # `missing` is in `steps()` (the state machine runs through it) but has
+        # no image, and sampling one silently leaves the union a frame short --
+        # on the real D61 the scanner's last step is exactly that
+        steps = sorted(int(s) for s in getattr(self.session, "_available", None)
+                       or self.session.steps())
         start, end = row.get("start_step"), row.get("end_step")
         if start is not None:
             steps = [s for s in steps if s >= int(start)]

@@ -11,11 +11,21 @@ Conventions used across ``tda``:
   about the image origin, with ``theta`` in **radians**, y pointing down.
 
 This module is consumed by the layer compiler, the truth table and the
-canvas overlay; everything here is deterministic and side-effect free except
-:func:`paste`, which writes into its destination in place.
+canvas overlay.  Everything here is deterministic -- the same arguments always
+give the same answer -- but three things are not side-effect free:
+
+* :func:`paste` writes into its destination in place;
+* :func:`decode_rle_shared` keeps a bounded, content-keyed memo of decoded
+  shapes (:data:`DECODE_CACHE_BYTES`, emptied by :func:`clear_decode_cache`);
+* :func:`encode_rle` with a ``window`` builds the run lengths in a scratch
+  canvas this thread keeps, and puts it back to empty afterwards.
+
+None of the three can change an answer; they only decide how much work it
+takes to arrive at it.
 """
 from __future__ import annotations
 
+import os
 import threading
 from collections import OrderedDict
 from typing import Iterable, Optional, Sequence
@@ -27,10 +37,12 @@ from pycocotools import mask as coco_mask
 from tda.core.model import Similarity
 
 __all__ = [
+    "CHECK_ENCODE_WINDOW",
     "DECODE_CACHE_BYTES",
     "clear_decode_cache",
     "decode_cache_stats",
     "encode_rle",
+    "encode_rle_boxed",
     "decode_rle",
     "decode_rle_shared",
     "rle_area",
@@ -98,6 +110,34 @@ def _boundary(mask_u8: np.ndarray) -> np.ndarray:
 _scratch = threading.local()
 
 
+#: Check every ``encode_rle(mask, window)`` call's promise that the mask really
+#: is empty outside its window.
+#:
+#: A window that does not contain the mask silently truncates stored geometry,
+#: which is the one way this optimisation could lose an annotation, and the
+#: check is four ``any`` passes over the bands outside the window -- cheap
+#: enough for a test run, not free enough for a 12 MP commit. So it is **on in
+#: the test suite** (``tests/conftest.py`` sets it, which makes every call site
+#: in the codebase guarded on every run) and off in the annotator, and
+#: ``TDA_CHECK_ENCODE_WINDOW=1`` turns it on anywhere else.
+CHECK_ENCODE_WINDOW = os.environ.get("TDA_CHECK_ENCODE_WINDOW", "") not in ("", "0")
+
+
+def _refuse_pixels_outside(arr: np.ndarray, window: Box) -> None:
+    """Raise when ``arr`` has a set pixel outside ``window`` (:data:`CHECK_ENCODE_WINDOW`)."""
+    x0, y0, x1, y1 = window
+    height, width = arr.shape
+    x0, y0 = max(0, min(x0, width)), max(0, min(y0, height))
+    x1, y1 = max(x0, min(x1, width)), max(y0, min(y1, height))
+    for band in (arr[:y0, :], arr[y1:, :], arr[y0:y1, :x0], arr[y0:y1, x1:]):
+        if band.size and band.any():
+            raise ValueError(
+                f"encode_rle was given the window {tuple(window)!r}, but the "
+                f"mask has pixels outside it: the run lengths would be missing "
+                f"them. Only a caller that produced the mask may pass a window."
+            )
+
+
 def _encode_buffer(hw: HW) -> np.ndarray:
     buffer = getattr(_scratch, "buffer", None)
     if buffer is None or buffer.shape != tuple(hw):
@@ -142,6 +182,8 @@ def encode_rle(mask: np.ndarray, window: Optional[Box] = None) -> dict:
     if window is None or arr.size == 0:
         rle = coco_mask.encode(np.asfortranarray(arr.view(np.uint8)))
     else:
+        if CHECK_ENCODE_WINDOW:
+            _refuse_pixels_outside(arr, window)
         x0, y0, x1, y1 = (int(v) for v in window)
         buffer = _encode_buffer(arr.shape)
         try:
@@ -157,6 +199,20 @@ def encode_rle(mask: np.ndarray, window: Optional[Box] = None) -> dict:
         "size": [int(rle["size"][0]), int(rle["size"][1])],
         "counts": rle["counts"].decode("ascii"),
     }
+
+
+def encode_rle_boxed(mask: np.ndarray) -> dict:
+    """:func:`encode_rle` with the window measured off the mask itself.
+
+    For a caller holding a full-canvas mask that does not know where its pixels
+    are -- the editing layer, the crash sidecar, an undo record, an occluder, a
+    frame override. Measuring the box is two ``any`` reductions (0.5 ms at
+    12 MP) and it saves transposing and scanning the whole canvas (40 ms), so
+    it pays for itself by eighty to one on an OAK frame and costs nothing
+    measurable on a scanner one. The bytes out are :func:`encode_rle`'s.
+    """
+    arr = _as_bool(mask)
+    return encode_rle(arr, bbox(arr))
 
 
 def rle_counts(rle: Optional[dict]) -> Optional[str]:

@@ -360,7 +360,14 @@ def suggest_roi_over(images: Iterable[np.ndarray],
                         area_band=area_band, aspect_band=aspect_band) is None:
         return whole
     if str(view).startswith("oak"):
-        union = pad_box(union, width, height, OAK_ROI_PAD)
+        padded = pad_box(union, width, height, OAK_ROI_PAD)
+        area = (padded[2] - padded[0]) * (padded[3] - padded[1])
+        if area <= area_band[1] * width * height:
+            union = padded
+        # ... and otherwise the tight box stands. The margin exists to recover
+        # the 100-200 px of near rail a small box clips; on a box that already
+        # covers most of the picture it only takes in more bench, and on the
+        # real D36 and D34 oak1 it turned 68 % of the frame into 86 %.
     return union
 
 
