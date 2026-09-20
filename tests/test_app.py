@@ -1187,6 +1187,7 @@ def test_a_shortcut_that_went_into_a_text_field_says_so(window):
     from tda.ui.app_keys import KEY_SWALLOWED
 
     _answer_roi(window)
+    window.act_tool("eraser")
     field = QLineEdit(window)
     field.setFocus()
     assert window._focus_widget() is field
@@ -1194,7 +1195,13 @@ def test_a_shortcut_that_went_into_a_text_field_says_so(window):
                       Qt.KeyboardModifier.NoModifier, "b")
     assert window.handle_key(event) is False, "the field must keep its letter"
     assert window.status_message() == KEY_SWALLOWED
-    assert window._tool_name != "brush" or True   # the tool did not change
+    assert window._tool_name == "eraser", "the key must not also switch the tool"
+
+    # A key that is *not* bound in this mode is an ordinary letter: no line.
+    window.report("")
+    assert window.handle_key(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Z,
+                                       Qt.KeyboardModifier.NoModifier, "z")) is False
+    assert window.status_message() == ""
     field.deleteLater()
 
 
