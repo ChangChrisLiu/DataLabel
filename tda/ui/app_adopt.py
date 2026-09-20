@@ -95,8 +95,10 @@ class AdoptMixin:
         #: the candidates are; only the status line uses them.
         self._draft_used: set[str] = set()
         #: Adoptions a crash-restored layer brought back, which the undo stack
-        #: cannot know about: ``(key, instance) -> [adopted note, ...]``.
-        self._restored_adoptions: dict[tuple, list[dict]] = {}
+        #: cannot know about: ``(edit id, [adopted note, ...])``.  Keyed by the
+        #: **edit** Restore started, so discarding that edit takes them with it
+        #: -- there is nothing to clear and therefore nothing to forget.
+        self._restored_adoptions: tuple[Optional[int], list[dict]] = (None, [])
 
     # ------------------------------------------------------------------ state
     def showing_draft_ghost(self) -> bool:
@@ -341,6 +343,12 @@ class AdoptMixin:
         Every other way of saying "write it" -- ``Alt+Enter``, ``Ctrl+K``,
         ``Space``, the task card's four buttons -- would commit the layer
         *under* the preview, which is not what the annotator is looking at.
+
+        One deliberate exception, and it does not come through here: the close
+        dialog's **Save** (:meth:`~tda.ui.app_commit.CommitMixin.commit_with_suggested_scope`).
+        There is no non-modal conversation left to have at that point, and the
+        thing worth saving is the layer the annotator built, not an offer they
+        never accepted -- so it writes the layer and the ghost simply goes.
         """
         if not self.showing_draft_ghost():
             return False
@@ -379,17 +387,26 @@ class AdoptMixin:
 
     # ----------------------------------------------------------- provenance
     def pending_adoptions(self, key, instance: Optional[str]) -> list[dict]:
-        """Adoptions applied to this ``(frame, instance)`` layer right now.
+        """Adoptions applied to **the edit that is open right now**.
 
-        The undo stack's applied strokes, plus whatever a crash-restored layer
-        brought back with it.  No pixel check here: this is what the sidecar
-        carries, and the sidecar's job is to lose nothing.
+        The undo stack's applied strokes of this edit, plus whatever a
+        crash-restored layer brought into it.  No pixel check here: this is
+        what the sidecar carries, and the sidecar's job is to lose nothing.
+
+        The filter is the ``edit_id``, not the frame and the instance.  The
+        history is per view and is not cleared between edits, so "same frame,
+        same instance" also matched *the last time this shape was drawn* --
+        and a hand-drawn re-trace of an adopted shape was filed as draft reuse.
         """
-        if instance is None:
+        edit_id = getattr(self.session, "editing_id", None)
+        if instance is None or edit_id is None:
             return []
         frame = [int(key.desktop), int(key.step), str(key.view)]
-        out = list(self._restored_adoptions.get(self._adopt_id(key, instance), []))
+        restored_id, restored = self._restored_adoptions
+        out = [dict(note) for note in restored] if restored_id == edit_id else []
         for note in compat.adoptions_in_history(self.session):
+            if note.get("edit_id") != edit_id:
+                continue
             if str(note.get("instance")) != str(instance):
                 continue
             if list(note.get("frame") or []) != frame:
@@ -429,24 +446,22 @@ class AdoptMixin:
                 out[identity] = entry
         return [out[k] for k in sorted(out, key=lambda k: (-out[k]["overlap_px"], k[0]))]
 
-    def _adopt_id(self, key, instance: str) -> tuple:
-        return (int(key.desktop), str(key.view), int(key.step), str(instance))
-
     def note_restored_adoptions(self, key, instance: str, entries) -> None:
         """Take the adoption list of a crash-restored layer back (spec 4.6).
 
         A crash loses the undo history, so without this the recovered layer
-        would be committed as work nobody can trace to a draft.
+        would be committed as work nobody can trace to a draft.  The list is
+        filed under the **edit** ``Restore`` has just begun: discard that edit
+        with ``Esc`` and it stops applying, because the next edit has another
+        id -- no cleanup to remember, and none to forget.
         """
-        identity = self._adopt_id(key, instance)
+        edit_id = getattr(self.session, "editing_id", None)
         kept = [dict(entry) for entry in (entries or []) if entry.get("adopted_from")]
         for entry in kept:
             entry.setdefault("instance", str(instance))
             entry.setdefault("frame", [int(key.desktop), int(key.step), str(key.view)])
-        if kept:
-            self._restored_adoptions[identity] = kept
-        else:
-            self._restored_adoptions.pop(identity, None)
+            entry["edit_id"] = edit_id
+        self._restored_adoptions = (edit_id, kept) if kept else (None, [])
 
     def adopted_draft_keys(self, instance: Optional[str] = None) -> set[str]:
         """Draft keys this view's op log already records as adopted.
@@ -457,28 +472,30 @@ class AdoptMixin:
         out is the *quiet* duplicate: two instances of one view taking their
         pixels from one old polygon with nothing on screen saying so.
 
-        Asked as a query over the whole view (narrowed to the rows that carry
-        an adoption at all, and to one instance when the caller names it),
-        because "the last two hundred operations" stops being the answer on the
-        second day of a machine.
+        Asked as a query over the whole view, because "the last two hundred
+        operations" stops being the answer on the second day of a machine.  The
+        SQL narrows to the rows that mention an adoption at all -- a JSON *key*,
+        so the pattern cannot be broken by a separator's whitespace -- and the
+        payloads are then parsed rather than pattern-matched, which is also how
+        ``instance`` is compared.
         """
         used: set[str] = set()
         if not compat.is_open(self.session):
             return used
-        sql = ("SELECT payload_json FROM op_log WHERE desktop=? AND view=? "
-               "AND kind='commit_keyframe' AND payload_json LIKE '%\"adopted_from\"%'")
-        args: list = [int(self.session.desktop), str(self.session.view)]
-        if instance is not None:
-            sql += " AND payload_json LIKE ?"
-            args.append(f'%"instance": "{instance}"%')
         try:
-            rows = self.db.conn.execute(sql, tuple(args)).fetchall()
+            rows = self.db.conn.execute(
+                "SELECT payload_json FROM op_log WHERE desktop=? AND view=? "
+                "AND kind='commit_keyframe' AND payload_json LIKE '%\"adopted_from\"%'",
+                (int(self.session.desktop), str(self.session.view)),
+            ).fetchall()
         except Exception:  # noqa: BLE001 - a note, never a reason to fail Shift+A
             return used
         for row in rows:
             try:
                 payload = json.loads(row[0] or "{}")
             except ValueError:
+                continue
+            if instance is not None and str(payload.get("instance")) != str(instance):
                 continue
             for entry in payload.get("adopted") or ():
                 if entry.get("adopted_from"):

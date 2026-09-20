@@ -102,6 +102,17 @@ class CommitMixin:
         """The instance being drawn, or ``None``."""
         return self.layer.instance
 
+    @property
+    def editing_id(self) -> Optional[int]:
+        """Identity of the edit being made, or ``None`` when none is open.
+
+        One ``begin_edit`` to the ``clear_edit``/commit that ends it.  The undo
+        history is per view and outlives every edit in it, so this is what
+        tells "the pixels I am about to commit" from "the pixels I committed
+        here an hour ago".
+        """
+        return self.layer.edit_id
+
     def editing_mask(self) -> Optional[np.ndarray]:
         """The editing layer as the session last saw it, or ``None``.
 

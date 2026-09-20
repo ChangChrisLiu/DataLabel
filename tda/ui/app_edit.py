@@ -230,9 +230,16 @@ class EditMixin:
         made the next click refine a layer their result no longer had anything
         to do with.  A draft ghost, and the note saying the layer came from a
         draft, describe the same vanished layer and go with them.
+
+        The **area warning** goes too, and this is the place that catches the
+        one an undo or a redo would otherwise leave standing: it is an offer
+        about a specific mask ("press Enter again and I will write these 2,116
+        pixels"), and ``Ctrl+Z`` back to a hundred of them made the next Enter
+        commit a hundred pixels while logging an override of two thousand.
         """
         self.reset_sam_prompt()
         self.forget_draft_ghost()
+        self._invalidate_area_warning()
         if self.overlay is None:
             return
         instance = getattr(self.session, "editing_instance", None)

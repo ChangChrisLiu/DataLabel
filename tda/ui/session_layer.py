@@ -12,6 +12,7 @@ crosses the boundary is copied.
 """
 from __future__ import annotations
 
+import itertools
 from typing import Optional
 
 import numpy as np
@@ -24,8 +25,18 @@ __all__ = ["EditingLayer"]
 class EditingLayer:
     """One instance's mask under the cursor, plus the shape it started from."""
 
+    #: Hands out :attr:`edit_id`; a plain counter, unique within a run.
+    _next_id = itertools.count(1)
+
     def __init__(self) -> None:
         self.instance: Optional[str] = None
+        #: Identity of the *edit* -- one ``begin`` to the ``clear`` or commit
+        #: that ends it.  Two edits of the same instance on the same frame are
+        #: two different pieces of work, and things that describe one of them
+        #: (which Label Studio draft it was built from, spec 3.1 初稿引用) must
+        #: not survive into the next: the undo history outlives both, so
+        #: "same frame, same instance" was never enough to tell them apart.
+        self.edit_id: Optional[int] = None
         self._mask: Optional[np.ndarray] = None
         self._before: Optional[np.ndarray] = None
 
@@ -41,9 +52,11 @@ class EditingLayer:
                       else np.array(amodal, dtype=bool, copy=True))
         self._before = self._mask.copy()
         self.instance = instance
+        self.edit_id = next(self._next_id)
 
     def clear(self) -> None:
         self.instance = None
+        self.edit_id = None
         self._mask = None
         self._before = None
 
@@ -85,11 +98,16 @@ class EditingLayer:
         """The undoable record of one brush or eraser stroke (spec 4.6).
 
         ``adopted`` travels with a stroke that came from a Label Studio draft,
-        so the commit can read its provenance off the history itself.
+        so the commit can read its provenance off the history itself.  It is
+        stamped with :attr:`edit_id` **here** rather than by the caller: the
+        note has to name the edit that is open at the moment the stroke lands,
+        and this is the only place that knows both.
         """
         if self.instance is None:
             raise RuntimeError("a stroke needs an instance; call begin_edit() first")
         self.set(after)
+        if adopted:
+            adopted = dict(adopted) | {"edit_id": self.edit_id}
         return edit_editing_mask_op(self.instance, before, after, adopted)
 
     def apply_stroke(self, payload: dict, mask: np.ndarray) -> None:

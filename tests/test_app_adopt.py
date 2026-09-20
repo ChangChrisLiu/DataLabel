@@ -500,6 +500,133 @@ def test_the_sidecar_carries_the_adoption_across_a_crash(window):
     assert [e["adopted_from"] for e in entries] == [draft]
 
 
+# --------------------------------------------------------------------------- #
+# round 2 R1: provenance belongs to ONE edit
+# --------------------------------------------------------------------------- #
+def test_the_next_edit_of_the_same_shape_claims_nothing(window):
+    """Adopt, commit, re-open the same instance here, redraw by hand: not reuse."""
+    seed_cooler_draft(window)
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.act_commit()                       # the ghost
+    window.act_commit()                       # the adopted commit
+    assert adopted_entries(last_op(window))
+
+    window.on_request_edit(COOLER)             # a new edit of the same shape
+    window.set_editing_mask(rect(20, 20, 31, 31), undoable=True)
+    window.act_commit()
+
+    assert adopted_entries(last_op(window)) == []
+    written = window.db.keyframes(DESKTOP, VIEW, COOLER)[0]
+    assert written.source == "manual" and written.draft_id is None
+
+
+def test_undoing_that_second_commit_puts_the_draft_reference_back(window):
+    draft = seed_cooler_draft(window)
+    edit_the_cooler(window)
+    window.act_adopt_draft()
+    window.act_commit()
+    window.act_commit()
+    window.on_request_edit(COOLER)
+    window.set_editing_mask(rect(20, 20, 31, 31), undoable=True)
+    window.act_commit()
+
+    window.act_undo()
+
+    written = window.db.keyframes(DESKTOP, VIEW, COOLER)[0]
+    assert written.source == "ls_adopted"
+    assert written.draft_id == draft_id_of(window, draft)
+    window.act_redo()
+    written = window.db.keyframes(DESKTOP, VIEW, COOLER)[0]
+    assert written.source == "manual" and written.draft_id is None
+
+
+def test_a_discarded_restore_takes_its_provenance_with_it(window):
+    """Restore, Esc, draw by hand, commit: the recovered draft is not in it."""
+    draft = seed_cooler_draft(window)
+    key = window.session.current()
+    note = {"adopted_from": draft, "adopted_step": key.step,
+            "keyframe_id": draft_id_of(window, draft)}
+    window.sidecar.save(key, COOLER, rect(20, 20, 30, 30), adopted=[note])
+    window._offer_restore(key, COOLER)
+    window.restore_pending()
+    window.act_clear_edit()                    # Esc: the recovered layer goes
+
+    window.on_request_edit(COOLER)
+    window.set_editing_mask(rect(20, 20, 31, 31), undoable=True)
+    window.act_commit()
+
+    assert adopted_entries(last_op(window)) == []
+
+
+def test_a_restored_layer_that_is_committed_still_carries_its_drafts(window):
+    draft = seed_cooler_draft(window)
+    key = window.session.current()
+    note = {"adopted_from": draft, "adopted_step": key.step,
+            "keyframe_id": draft_id_of(window, draft)}
+    window.sidecar.save(key, COOLER, rect(20, 20, 30, 30), adopted=[note])
+    window._offer_restore(key, COOLER)
+    window.restore_pending()
+
+    window.act_commit()
+
+    assert [e["adopted_from"] for e in adopted_entries(last_op(window))] == [draft]
+
+
+def test_every_edit_of_the_layer_gets_its_own_identity(window):
+    edit_the_cooler(window)
+    first = window.session.editing_id
+    assert first is not None
+    window.on_request_edit(SCREWS[0])
+    assert window.session.editing_id not in (None, first)
+    window.act_clear_edit()
+    assert window.session.editing_id is None
+
+
+# --------------------------------------------------------------------------- #
+# round 2 R2: an undo takes back the area warning too
+# --------------------------------------------------------------------------- #
+def committed_area(win, instance: str = COOLER) -> int:
+    kf = win.db.keyframes(DESKTOP, VIEW, instance)[0]
+    return int(masks.rle_area(kf.parts[0].rle))
+
+
+def test_an_undo_takes_back_the_pending_area_warning(window):
+    """Warn on 2,116 px, undo to 100, and the commit must be about 100."""
+    edit_the_cooler(window)
+    window.set_editing_mask(rect(20, 20, 30, 30), undoable=True)     # 100 px
+    window.set_editing_mask(rect(6, 6, 52, 52), undoable=True)       # 2,116 px
+    window.act_commit()
+    assert window._pending_warning is not None
+
+    window.act_undo()                                                # back to 100
+
+    assert window._pending_warning is None
+    assert not window.warn_bar.isVisible()
+    window.act_commit()
+    payload = last_op(window)
+    assert "area_warning_overridden" not in payload
+    assert committed_area(window) == 100
+
+
+def test_a_redo_makes_the_warning_ask_again_about_the_new_mask(window):
+    edit_the_cooler(window)
+    window.set_editing_mask(rect(20, 20, 30, 30), undoable=True)
+    window.set_editing_mask(rect(6, 6, 52, 52), undoable=True)
+    window.act_commit()                       # warns about 2,116
+    window.act_undo()                         # 100, warning gone
+    window.act_redo()                         # 2,116 again
+
+    assert window._pending_warning is None    # it has to be asked afresh
+    window.act_commit()
+    assert window._pending_warning is not None
+    window.act_commit()                       # answer it
+
+    payload = last_op(window)
+    assert payload["area_warning_overridden"] is True
+    assert payload["area_px"] == 2116 == committed_area(window)
+
+
 def test_adopting_and_committing_never_touches_the_draft(window):
     seed_cooler_draft(window)
     edit_the_cooler(window)
@@ -684,6 +811,10 @@ def test_the_already_adopted_note_is_not_capped_at_the_last_ops(window):
         window.db.log_op(DESKTOP, VIEW, "set_zorder", {"noise": True},
                          {"noise": True}, "tester")
     assert window.adopted_draft_keys() == {draft}
+    # narrowed to one instance, and by the *parsed* payload rather than by how
+    # its JSON happens to be spaced
+    assert window.adopted_draft_keys(instance=COOLER) == {draft}
+    assert window.adopted_draft_keys(instance=SCREWS[0]) == set()
 
 
 # --------------------------------------------------------------------------- #

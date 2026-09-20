@@ -302,16 +302,13 @@ def _commit_shape(db: Db, truth: TruthService, key: FrameKey, instance: str,
                     "changed": True})
 
 
-def _stamp_source(kf: ShapeKeyframe, source: Optional[str],
-                  draft_id: Optional[int]) -> None:
-    """Point a written keyframe at the draft it came from, when there is one.
+def _stamp_source(kf: ShapeKeyframe, source: str, draft_id: Optional[int]) -> None:
+    """Say where the pixels this commit writes came from -- every time.
 
-    Only when there is: a commit that adopted nothing leaves ``source`` and
-    ``draft_id`` alone, so re-tracing an adopted shape by hand does not quietly
-    rewrite the row's history in either direction.
+    Including "from nobody but the annotator", which is what makes the pair
+    honest: the row describes the commit that last wrote it, not the first one
+    that ever did.
     """
-    if source is None:
-        return
     kf.source = source
     kf.draft_id = draft_id
 
@@ -448,22 +445,30 @@ def _cannot_split(chosen: Optional[ShapeKeyframe], step: int, direction: str) ->
 #: shape is the annotator's work on a real instance key and must survive all of
 #: them.
 SOURCE_ADOPTED = "ls_adopted"
+#: ``ShapeKeyframe.source`` of a shape the annotator drew themselves.
+SOURCE_MANUAL = "manual"
 
 
-def _adoption(extra: Optional[dict]) -> tuple[Optional[str], Optional[int]]:
-    """``(source, draft_id)`` for a commit that says it adopted a draft.
+def _adoption(extra: Optional[dict]) -> tuple[str, Optional[int]]:
+    """``(source, draft_id)`` of the commit that is about to write the shape.
 
     Spec 3.1 gives a keyframe a 来源 and a 初稿引用, and a shape that started as
     somebody's old polygon should say so in its own row rather than only in the
     op log.  The draft with the **largest overlap** is the one the row points
     at: a mask can be built from two drafts, but ``draft_id`` is one column.
-    Neither value takes part in ``input_hash`` (:func:`tda.core.compiler_visibility.input_hash`
-    hashes a keyframe as id + version + content digest), so this cannot move a
-    compiled row on its own.
+
+    Both fields describe the **last** commit that wrote the row, so a later
+    hand-drawn commit takes them back to ``manual``/``NULL``.  Leaving them
+    alone instead made ``ls_adopted`` permanent: a shape re-traced from
+    scratch months later still pointed at a draft it no longer had a pixel in
+    common with.  Neither value takes part in ``input_hash``
+    (:func:`tda.core.compiler_visibility.input_hash` hashes a keyframe as
+    id + version + content digest), so this cannot move a compiled row on its
+    own, and both travel in the undo payload so a Ctrl+Z restores them exactly.
     """
     entries = [e for e in ((extra or {}).get("adopted") or []) if isinstance(e, dict)]
     if not entries:
-        return (None, None)
+        return (SOURCE_MANUAL, None)
     best = max(entries, key=lambda e: int(e.get("overlap_px") or 0))
     draft_id = best.get("keyframe_id")
     return (SOURCE_ADOPTED, None if draft_id is None else int(draft_id))
