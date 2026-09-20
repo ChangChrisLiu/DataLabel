@@ -78,7 +78,7 @@ class AssistMixin:
 
         self.assist = AssistController(self)
         self.assist.sigBlobs.connect(self._on_blobs)
-        self.assist.sigFailed.connect(self.report_error)
+        self.assist.sigFailed.connect(self._on_assist_failed)
         # the chassis ROI is measured on three frames of the pose segment, which
         # is three decodes and three detections: not something to spend before
         # the first paint (tda/ui/app_roi_worker.py)
@@ -328,10 +328,27 @@ class AssistMixin:
 
     # --------------------------------------------------------------- results
     @S.guard
+    def _on_assist_failed(self, text: str) -> None:
+        """The comparison raised on the worker: say so, and do not call it asked.
+
+        ``_assist_asked`` is what stops a commit asking the same question
+        twice; a question that *raised* has not been answered, so the stamp
+        comes off and the next re-announcement -- a commit, ``F5`` -- asks
+        again, which is what main did with no stamp at all.
+        """
+        self._assist_asked = None
+        self.report_error(text)
+
+    @S.guard
     def _on_blobs(self, payload: object) -> None:
         """A comparison came back on the GUI thread."""
         self.assist_result = payload if isinstance(payload, dict) else None
-        if self.assist_result is None or not compat.is_open(self.session):
+        if self.assist_result is None:
+            # No comparison to be had -- no neighbour, or one that could not be
+            # read. Not an answer, so it is not remembered as one.
+            self._assist_asked = None
+            return
+        if not compat.is_open(self.session):
             return
         if self.assist_result.get("key") != self.session.current():
             self.assist_result = None

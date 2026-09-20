@@ -253,6 +253,55 @@ def test_the_heat_map_survives_a_commit_while_d_is_on(window):
     assert window.heat_item.isVisible() is True
 
 
+def test_a_comparison_that_came_back_empty_is_tried_again(window):
+    """"Asked and answered" is not the same as "asked".
+
+    The window remembers what it asked about so that a commit does not ask the
+    same question twice.  A comparison that came back with *no answer* -- an
+    unreadable neighbour, a read that raised on the worker -- has not been
+    answered, and on main the next commit or ``F5`` tried it again.
+    """
+    _stand_on_a_card_item(window)
+    step = window.session.current().step
+    asked: list = []
+    real = window.assist.request
+    window.assist.request = lambda *a, **k: (asked.append(a[0]), real(*a, **k))[1]
+
+    window._neighbour_pixels = lambda _n: "does/not/exist.png"
+    window.session.goto(step - 1)
+    assert window.assist.wait(5.0)
+    QApplication.processEvents()
+    assert len(asked) == 1
+    assert window.assist_result is None, "an unreadable neighbour gave an answer"
+
+    # F5 re-announces the same frame: the question is still unanswered
+    del window._neighbour_pixels
+    window.act_refresh_all()
+    QApplication.processEvents()
+    assert len(asked) == 2, "the unanswered comparison was never tried again"
+    assert window.assist.wait(5.0)
+    QApplication.processEvents()
+    assert window.assist_result is not None, "the retry produced no answer"
+
+    # ... and now that it *is* answered, a re-announcement asks nothing more
+    _re_announce(window)
+    assert len(asked) == 2
+
+
+def test_a_comparison_that_failed_on_the_worker_is_tried_again(window):
+    """A raised comparison is an unanswered one, and it says so twice."""
+    _stand_on_a_card_item(window)
+    errors: list = []
+    window.assist.sigFailed.connect(errors.append)
+    window._assist_asked = window._assist_subject()
+    window.assist_result = None
+
+    window.assist.sigFailed.emit("boom")
+    QApplication.processEvents()
+    assert errors == ["boom"]
+    assert window._assist_asked is None, "a failure left the question stamped"
+
+
 def test_a_new_roi_starts_a_new_comparison(window):
     """The ROI is what the difference map looks *inside*: a new one is a new answer."""
     window.session.goto(LAST_STEP - 2)
