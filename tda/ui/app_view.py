@@ -44,30 +44,35 @@ NO_TOOL_ZH = "只看不改"
 NO_TOOL_EN = "read-only"
 
 
-#: Added to the tooltip when the ring is too big (or too small) to be drawn as
-#: a cursor, so the badge's ``r=<n>`` is the only thing saying how big it is.
-NO_RING_NOTE = "（光标为十字：笔刷比光标能画的还大 / crosshair: the ring is off-scale）"
+#: The ring is drawn, but at the minimum size rather than the stroke's: the
+#: shape still says "brush", the size does not (round 2, I2).
+RING_SMALL_NOTE = "（光标未按比例 / cursor not to scale）"
+#: No ring could be made at all -- the stroke is wider than a cursor may be --
+#: so the cursor is a crosshair and this number is the only size on screen.
+RING_LARGE_NOTE = "（笔刷太大，光标画不出 / brush too large for a cursor）"
+#: How :func:`tool_label_text` is told which of the two applies.
+RING_NOTES = {"small": RING_SMALL_NOTE, "large": RING_LARGE_NOTE}
 
 
 def tool_label_text(name: str, radius=None, armed: bool = True,
-                    ring: bool = True) -> tuple[str, str]:
+                    scale: str = "") -> tuple[str, str]:
     """``(what the status bar shows, what its tooltip says)`` for one tool.
 
     ``工具：SAM 框选 X`` rather than ``sam_box``: the annotator reads Chinese,
     the key is what they press to get back to it, and both used to be missing.
-    ``r=<n>`` is always shown for a tool that has a radius -- when the ring is
-    off-scale (``ring=False``) the cursor is a crosshair and this number is the
-    only place the brush's size appears at all.
+    ``r=<n>`` is always shown for a tool that has a radius, and ``scale``
+    (``""``, ``"small"``, ``"large"``) adds the clause that says the cursor is
+    not the size of the stroke -- so the number is never the only warning and
+    the cursor is never quietly lying.
     """
     if not armed:
         return (f"工具：{NO_TOOL_ZH} / {NO_TOOL_EN}", NO_TOOL_EN)
     zh, en = TOOL_LABELS.get(name, (name, name))
     key = A.tool_key(name)
     suffix = "" if radius is None else f" r={int(radius)}"
-    shown = f"工具：{zh}{(' ' + key) if key else ''}{suffix}"
-    tip = f"{en}{(' (' + key + ')') if key else ''}{suffix}"
-    if radius is not None and not ring:
-        tip = f"{tip} {NO_RING_NOTE}"
+    note = RING_NOTES.get(scale, "") if radius is not None else ""
+    shown = f"工具：{zh}{(' ' + key) if key else ''}{suffix}{note}"
+    tip = f"{en}{(' (' + key + ')') if key else ''}{suffix}{note}"
     return (shown, tip)
 
 
@@ -251,6 +256,8 @@ class ToolsMixin:
 
     @S.guard
     def act_fit_roi(self) -> None:
+        # ``F`` is the annotator asking for the move a mid-edit store put off.
+        self._roi_fit_pending = False
         roi = self.roi()
         self.canvas.zoom_to(roi) if roi is not None else self.canvas.fit_image()
         self.update_status()

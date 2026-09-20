@@ -1146,10 +1146,43 @@ def test_a_brush_too_big_for_a_ring_still_shows_its_size(window):
     window.update_status()
 
     assert window.canvas.cursor_diameter() > CURSOR_MAX_PX
+    assert window.canvas.ring_scale() == "large"
     assert window.canvas.cursor_is_ring() is False
     assert window.canvas.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
     assert "r=96" in window.tool_label.text(), window.tool_label.text()
-    assert "十字" in window.tool_label.toolTip()
+    assert "光标画不出" in window.tool_label.text()
+
+
+def test_at_fit_to_frame_zoom_the_brush_still_has_its_own_shape(window):
+    """Round 2, I2: at 27 % every tool used to show the same crosshair."""
+    from tda.ui.canvas.view import CURSOR_MIN_PX
+
+    _answer_roi(window)
+    window.act_tool("brush")
+    window.brush.set_radius(8)
+    window.canvas.set_zoom(0.27)
+    window.sync_tool_cursor()
+    window.update_status()
+
+    assert window.canvas.cursor_diameter() < CURSOR_MIN_PX
+    assert window.canvas.ring_scale() == "small"
+    assert window.canvas.cursor_is_ring() is True, "the brush lost its shape"
+    shape = window.canvas.viewport().cursor().shape()
+    assert shape != Qt.CursorShape.CrossCursor, "brush and SAM look identical"
+    assert "r=8" in window.tool_label.text()
+    assert "光标未按比例" in window.tool_label.text()
+
+    brush_pixmap = window.canvas.viewport().cursor().pixmap()
+    window.act_tool("eraser")
+    window.sync_tool_cursor()
+    eraser_shape = window.canvas.viewport().cursor().shape()
+    assert eraser_shape != Qt.CursorShape.CrossCursor
+    assert (window.canvas.viewport().cursor().pixmap().toImage()
+            != brush_pixmap.toImage()), "the eraser looks like the brush"
+
+    window.act_tool("sam_box")
+    window.sync_tool_cursor()
+    assert window.canvas.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
 
 
 def test_the_brush_and_the_eraser_do_not_look_alike(window):
@@ -1215,12 +1248,25 @@ def test_a_shortcut_that_went_into_a_text_field_says_so(window):
     assert window.status_message() == KEY_SWALLOWED
     assert window._tool_name == "eraser", "the key must not also switch the tool"
 
+    # Round 2, M4: once per focus episode, not once per keystroke -- typing a
+    # sentence into a note must not rewrite the status line on every letter.
+    window.report("something the annotator is reading")
+    assert window.handle_key(event) is False
+    assert window.status_message() == "something the annotator is reading"
+
     # A key that is *not* bound in this mode is an ordinary letter: no line.
     window.report("")
     assert window.handle_key(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Z,
                                        Qt.KeyboardModifier.NoModifier, "z")) is False
     assert window.status_message() == ""
+
+    # ... and moving the focus away and back asks again.
+    other = QLineEdit(window)
+    other.setFocus()
+    assert window.handle_key(event) is False
+    assert window.status_message() == KEY_SWALLOWED
     field.deleteLater()
+    other.deleteLater()
 
 
 # --------------------------------------------------------------------------- #

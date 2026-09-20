@@ -446,6 +446,205 @@ def test_dragging_a_handle_resizes_the_proposal_rather_than_replacing_it(qapp, t
         close_window(win)
 
 
+# --------------------------------------------------------------------------- #
+# a refused proposal must not wedge the window (round 2, C1 / M2 / M3 / I1)
+# --------------------------------------------------------------------------- #
+WHOLE_FRAME = (0, 0, 64, 64)
+
+
+def _open_edit_with_pixels(win: MainWindow) -> str:
+    instance = first_task_instance(win)
+    win.on_request_edit(instance)
+    win.act_tool("brush")
+    paint(win)
+    assert win.has_uncommitted_edit(), "the test needs uncommitted pixels"
+    return instance
+
+
+def test_confirming_a_refused_proposal_leaves_enter_with_the_edit(qapp, tmp_path):
+    """C1: the whole-frame "not found" used to leave Enter aimed at nothing."""
+    from tda.ui.app_roi import NO_CHASSIS_FOUND
+
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win._roi_proposal[win.roi_key()] = WHOLE_FRAME   # what "not found" is
+        win.act_clear_edit()                             # Esc: skipped
+        win.refresh_roi_bar()
+        assert not _shown(win, "accept"), "a button that will refuse is offered"
+        assert "整幅图不作为 ROI" in _roi_bar_text(win)
+
+        _open_edit_with_pixels(win)
+        before = (win.roi_editing, win._tool_name, win.active_tool)
+
+        win.act_accept_roi_proposal()                    # the button anyway
+
+        assert (win.roi_editing, win._tool_name, win.active_tool) == before
+        assert win.roi() is None
+        assert NO_CHASSIS_FOUND in win.status_message()
+        assert win.canvas.roi_rect() is None
+
+        win.act_commit()                                 # Enter still commits
+        assert win.session.editing_instance is None, "the edit could not be committed"
+    finally:
+        close_window(win)
+
+
+def test_a_failed_roi_write_leaves_the_window_exactly_as_it_was(qapp, tmp_path,
+                                                                monkeypatch):
+    """``db.set_pose_segment_roi`` can raise; the window may not be left armed."""
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        offered = tuple(win.roi_draft)
+        assert win.roi_editing is True
+
+        def boom(*_a, **_k):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(win.db, "set_pose_segment_roi", boom)
+        win.act_commit()                                 # Enter on the rectangle
+
+        assert win.roi_editing is True, "the rectangle must still be answerable"
+        assert win.active_tool is win.roi_tool
+        assert tuple(win.roi_draft) == offered
+        assert win.roi() is None
+        assert "disk full" in win.last_error_message()
+        assert _shown(win, "save"), "the bar still offers the two answers"
+    finally:
+        close_window(win)
+
+
+def test_a_rectangle_too_small_for_a_chassis_is_refused(qapp, tmp_path):
+    from tda.ui.app_roi import roi_min_side
+
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        floor = roi_min_side(win.overlay.hw)
+        assert floor > 0
+        win.roi_draft = (10, 10, 10 + floor - 1, 10 + floor + 4)
+        win.act_commit()
+
+        assert win.roi() is None, "a sliver was stored as the chassis range"
+        assert "太小" in win.status_message()
+        assert win.roi_editing is True
+    finally:
+        close_window(win)
+
+
+def test_storing_the_roi_mid_edit_does_not_move_the_view(qapp, tmp_path):
+    """M2: no edit is lost, but the canvas may not jump under a half-drawn mask."""
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        offered = tuple(win.roi_draft)
+        win.act_clear_edit()                    # Esc, so the reminder is up
+        _open_edit_with_pixels(win)
+        win.canvas.set_zoom(3.0)
+        QApplication.processEvents()
+        zoom = win.canvas.zoom_factor()
+
+        win._roi_proposal[win.roi_key()] = offered
+        win.act_accept_roi_proposal()
+
+        assert tuple(win.roi()) == offered, "the rectangle was not stored"
+        assert abs(win.canvas.zoom_factor() - zoom) < 1e-6, "the view moved mid-edit"
+        assert win._roi_fit_pending is True
+        assert "F" in win.status_message()
+
+        win.act_fit_roi()                       # F: the annotator asks for it
+        assert win.canvas.zoom_factor() != zoom
+        assert win._roi_fit_pending is False
+    finally:
+        close_window(win)
+
+
+def test_the_deferred_fit_lands_on_the_next_frame_change(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        offered = tuple(win.roi_draft)
+        win.act_clear_edit()
+        _open_edit_with_pixels(win)
+        win.canvas.set_zoom(3.0)
+        QApplication.processEvents()
+        win._roi_proposal[win.roi_key()] = offered
+        win.act_accept_roi_proposal()
+        assert win._roi_fit_pending is True
+
+        win.act_clear_edit()                    # drop the edit
+        win.act_step(-1)
+        QApplication.processEvents()
+
+        assert win._roi_fit_pending is False
+    finally:
+        close_window(win)
+
+
+def test_the_unanswered_reminder_survives_a_trip_to_another_view(qapp, tmp_path):
+    """I1: a glance at another view used to answer the question by accident."""
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win.act_clear_edit()                    # Esc: skipped, not answered
+        here = win.roi_key()
+        assert win.roi_unanswered() is True
+
+        win.act_set_view("oak1")
+        QApplication.processEvents()
+        assert win.session.view == "oak1", "the scene has no second view to visit"
+        win.act_set_view(VIEW)
+        QApplication.processEvents()
+
+        assert win.roi_key() == here
+        assert win.roi_unanswered() is True, "the reminder was lost"
+        assert "ROI 未确认" in _roi_bar_text(win)
+        assert win.roi_editing is False, "it must be the reminder, not the rectangle"
+        assert win.roi_label.text().startswith("ROI 未确认")
+    finally:
+        close_window(win)
+
+
+def test_confirming_with_no_proposal_in_hand_re_measures(qapp, tmp_path):
+    """I1: a reopened session has the reminder but no rectangle to confirm."""
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win.act_clear_edit()
+        key = win.roi_key()
+        win._roi_proposal.pop(key, None)        # what a restart looks like
+        win.refresh_roi_bar()
+        assert _shown(win, "accept"), "with nothing in hand the button re-measures"
+
+        win.act_accept_roi_proposal()
+        assert win._roi_accept_when_measured == key
+        assert win.wait_for_roi_proposal() is True
+        QApplication.processEvents()
+
+        assert win.roi() is not None, "the re-measured rectangle was not stored"
+        assert win.roi_unanswered() is False
+        assert _roi_bar_text(win) == ""
+    finally:
+        close_window(win)
+
+
+def test_a_recut_asks_about_the_pieces_again(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win.act_clear_edit()
+        assert win.roi_unanswered() is True
+        win.reset_roi_proposals()
+        assert win.roi_unanswered() is False
+        assert win._roi_proposal == {}
+        win.render_frame()
+        QApplication.processEvents()
+        assert win.roi_editing is True, "the re-cut piece must be asked about"
+    finally:
+        close_window(win)
+
+
 def test_fit_roi_zooms_to_the_stored_rectangle(window):
     window.act_commit()                       # store the proposed ROI
     window.canvas.set_zoom(1.0)

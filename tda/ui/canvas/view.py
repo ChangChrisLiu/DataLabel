@@ -47,12 +47,17 @@ Rect = tuple[int, int, int, int]
 
 #: Largest ring a circle cursor is drawn at, in screen pixels.  Above this the
 #: platform's cursor would be scaled down (Windows) or refused, so the cursor
-#: falls back to a crosshair and the status bar's ``r<n>`` is what says how big
+#: falls back to a crosshair and the status bar's ``r=<n>`` is what says how big
 #: the brush is.  A radius that big is a fill, not a stroke.
 CURSOR_MAX_PX = 128
-#: Below this the ring is smaller than the hole in the middle of it and the
-#: annotator cannot aim; a crosshair is more honest.
-CURSOR_MIN_PX = 7
+#: Smallest ring that is still a ring rather than a blob.  Below it the brush
+#: family keeps its **shape** -- a ring this size with a centre dot -- rather
+#: than falling back to the crosshair every other tool uses: at 27 % zoom (the
+#: fit-to-frame the annotator works at before an ROI is stored) a default r=8
+#: brush is 5 px across, and a crosshair there made the brush, the eraser, SAM
+#: and the box tools all look identical (round 2, I2).  The badge says
+#: ``光标未按比例`` so the scale is not being claimed.
+CURSOR_MIN_PX = 9
 
 
 class ToolCursor:
@@ -76,10 +81,15 @@ class ToolCursor:
         self.radius = max(0, int(radius))
         self.dashed = bool(dashed)
 
-    def key(self, zoom: float, dpr: float) -> tuple:
-        """Cache key: two specs with this key produce the same cursor."""
-        return (self.kind, self.rgb, self.radius, self.dashed,
-                round(float(zoom), 4), round(float(dpr), 3))
+    def key(self, diameter: int, dpr: float) -> tuple:
+        """Cache key: two specs with this key produce the same cursor.
+
+        Keyed on the **drawn diameter**, not on (radius, zoom): the ring only
+        depends on how many screen pixels it ends up being, so a wheel spin
+        that lands on a size already drawn costs nothing.
+        """
+        return (self.kind, self.rgb, int(diameter), self.dashed,
+                round(float(dpr), 3))
 
     def __eq__(self, other: object) -> bool:  # noqa: D105
         return isinstance(other, ToolCursor) and (
@@ -606,17 +616,29 @@ class ImageCanvas(QGraphicsView):
             return 0
         return int(round((2 * spec.radius + 1) * self.zoom_factor()))
 
-    def cursor_is_ring(self) -> bool:
-        """Is the ring actually being drawn, or did it fall back to a crosshair?
+    def ring_scale(self) -> str:
+        """How faithful the ring under the mouse is: ``""``, ``"small"``, ``"large"``.
 
-        Outside :data:`CURSOR_MIN_PX`..:data:`CURSOR_MAX_PX` the cursor cannot
-        say how big the brush is, so the status badge's ``r=<n>`` becomes the
-        only thing that can -- which is why the window asks.
+        ``""`` means the ring is the size of the stroke. ``"small"`` means a
+        minimum-size ring is drawn instead (the shape is still the brush's, the
+        size is not to scale); ``"large"`` means no ring could be made at all
+        and the cursor is a crosshair. The badge says which, so the cursor is
+        never quietly claiming a size it does not have.
         """
         spec = self._tool_cursor
         if spec is None or spec.kind != "circle":
+            return ""
+        diameter = self.cursor_diameter()
+        if diameter > CURSOR_MAX_PX:
+            return "large"
+        return "small" if diameter < CURSOR_MIN_PX else ""
+
+    def cursor_is_ring(self) -> bool:
+        """Is a ring drawn at all (to scale or not)?"""
+        spec = self._tool_cursor
+        if spec is None or spec.kind != "circle":
             return False
-        return CURSOR_MIN_PX <= self.cursor_diameter() <= CURSOR_MAX_PX
+        return self.cursor_diameter() <= CURSOR_MAX_PX
 
     def _apply_tool_cursor(self) -> None:
         """Put the spec on the viewport, building (and caching) the pixmap."""
@@ -626,12 +648,16 @@ class ImageCanvas(QGraphicsView):
             return
         if spec.kind == "circle":
             diameter = self.cursor_diameter()
-            if not CURSOR_MIN_PX <= diameter <= CURSOR_MAX_PX:
-                # Too small to aim with, or bigger than the platform will draw.
+            if diameter > CURSOR_MAX_PX:
+                # Bigger than the platform will draw as a cursor at all.
                 self.viewport().setCursor(Qt.CursorShape.CrossCursor)
                 return
+            # Below the minimum the ring is drawn at the minimum rather than
+            # abandoned: the brush family must never look like the crosshair
+            # tools, whatever the zoom (round 2, I2).
+            diameter = max(CURSOR_MIN_PX, diameter)
             dpr = float(self.devicePixelRatioF() or 1.0)
-            key = spec.key(self.zoom_factor(), dpr)
+            key = spec.key(diameter, dpr)
             cursor = self._cursor_cache.get(key)
             if cursor is None:
                 if len(self._cursor_cache) > 64:

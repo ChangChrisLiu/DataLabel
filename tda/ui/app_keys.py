@@ -78,10 +78,12 @@ class KeysMixin:
         if A.blocks_shortcuts(focus):
             if (event.type() == QEvent.Type.KeyPress
                     and not event.isAutoRepeat()
+                    and self._warn_swallowed_once(focus)
                     and A.action_for(event.key(), event.modifiers(),
                                      self.mode) is not None):
                 self.report(KEY_SWALLOWED)
             return False
+        self._swallow_warned = None
         if A.navigates_a_list(focus, event.key()):
             return False
         action = A.action_for(event.key(), event.modifiers(), self.mode)
@@ -100,6 +102,19 @@ class KeysMixin:
             self.dispatch(action, pressed)
         elif pressed:
             self.dispatch(action)
+        return True
+
+    def _warn_swallowed_once(self, focus) -> bool:
+        """``True`` the first time this focus episode swallows a shortcut.
+
+        Once per episode, not once per keystroke: typing a sentence into a note
+        field would otherwise rewrite the status line on every letter and push
+        whatever was there off the screen (round 2, M4). The memory is the
+        focused widget itself, so moving the focus away and back asks again.
+        """
+        if getattr(self, "_swallow_warned", None) is focus:
+            return False
+        self._swallow_warned = focus
         return True
 
     def _shortcut_context_ok(self) -> bool:

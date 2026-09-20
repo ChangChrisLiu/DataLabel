@@ -113,15 +113,29 @@ class RoiBoxTool(BoxDragTool):
         return self.GRAB_PX / zoom
 
     def hit(self, x: float, y: float) -> Optional[str]:
-        """Which part of the rectangle is under ``(x, y)``: a handle, or inside."""
+        """Which part of the rectangle is under ``(x, y)``: a handle, or inside.
+
+        The grab radius is capped at a third of each side and the **nearest**
+        handle wins, not the first in the list. On a rectangle narrower than
+        the tolerance every point used to be within reach of ``nw``, so a
+        rectangle too small to resize was also one you could not move (round 2,
+        M3) -- and moving is exactly what you want when it is that small.
+        """
         if self.rect is None:
             return None
         x0, y0, x1, y1 = self.rect
         near = self._tolerance()
+        near_x = min(near, max(1e-6, (x1 - x0) / 3.0))
+        near_y = min(near, max(1e-6, (y1 - y0) / 3.0))
+        best, best_d = None, None
         for name, fx, fy in getattr(type(self.canvas), "HANDLES", ()):
             hx, hy = x0 + (x1 - x0) * fx, y0 + (y1 - y0) * fy
-            if abs(x - hx) <= near and abs(y - hy) <= near:
-                return name
+            if abs(x - hx) <= near_x and abs(y - hy) <= near_y:
+                distance = (x - hx) ** 2 + (y - hy) ** 2
+                if best_d is None or distance < best_d:
+                    best, best_d = name, distance
+        if best is not None:
+            return best
         if x0 <= x <= x1 and y0 <= y <= y1:
             return "inside"
         return None

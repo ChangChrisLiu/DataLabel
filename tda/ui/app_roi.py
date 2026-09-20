@@ -51,6 +51,33 @@ ROI_NONE_STORED = ("好，这一段不用 ROI / no ROI for this pose segment: th
 #: Said when "确认建议框" is pressed before anything has been measured.
 ROI_NO_PROPOSAL = ("还没有可确认的框：按 Shift+R 自己画一个 / nothing measured "
                    "yet -- press Shift+R and drag one")
+#: Said when "确认建议框" has to go and measure the segment again first.
+ROI_REMEASURING = ("正在重新测量机箱范围，量到就存 / re-measuring the chassis "
+                   "range; it will be stored when it lands")
+#: Appended to the bar when the offered rectangle is one that will not be
+#: stored, so that a button that is going to refuse says so before it is
+#: pressed rather than after (round 2, C1).
+ROI_BAR_UNUSABLE = ("自动框没找到机箱：整幅图不作为 ROI，请按 Shift+R 自己画 / "
+                    "the detector found no chassis; a whole-frame rectangle is "
+                    "never stored -- draw one with Shift+R。")
+#: Refused: too small to be a chassis.  The floor is the ruled 64 px / 5 % of
+#: the frame's shorter side, capped at half of it so that a small frame (the
+#: 64x64 test scene, a thumbnail) still has usable rectangles at all.
+ROI_TOO_SMALL = ("这个框太小了，不像机箱（短边至少 {floor} 像素）/ that rectangle "
+                 "is too small for a chassis: the shorter side must be at "
+                 "least {floor} px")
+#: Said when the ROI is stored while pixels are uncommitted: storing is safe,
+#: moving the view under a half-drawn mask is not (round 2, M2).
+ROI_FIT_DEFERRED = ("ROI 已存 {roi}；画面等这次编辑结束再缩放（或按 F）/ ROI "
+                    "stored; the view will fit it after this edit, or press F")
+
+
+def roi_min_side(hw: Optional[tuple]) -> int:
+    """Smallest side a stored chassis rectangle may have, in image pixels."""
+    if not hw:
+        return 0
+    short = float(min(int(hw[0]), int(hw[1])))
+    return int(min(max(64.0, 0.05 * short), short / 2.0))
 
 
 def as_bgr(rgb: Optional[np.ndarray]) -> Optional[np.ndarray]:
@@ -136,8 +163,10 @@ class RoiMixin:
             self.roi_draft = tuple(int(v) for v in stored)
         else:
             self.roi_draft = None
-            self._roi_pending = self._roi_wanted
-        self._roi_proposal = self.roi_draft
+            if self._roi_wanted is not None:
+                self._roi_pending.add(self._roi_wanted)
+        if self.roi_draft is not None and self._roi_wanted is not None:
+            self._roi_proposal[self._roi_wanted] = self.roi_draft
         self.roi_editing = True
         # Arm the tool first: detaching a SAM tool clears the rubber band, so
         # painting the draft before the swap would erase it again.
@@ -225,7 +254,13 @@ class RoiMixin:
         delivering it at all; this is the same thing said at the point of use,
         where a payload that arrives by any other route is also turned away.
         """
-        if not isinstance(payload, dict) or not self.roi_editing:
+        if not isinstance(payload, dict):
+            return
+        wanted = getattr(self, "_roi_accept_when_measured", None)
+        if wanted is not None and payload.get("segment") == wanted:
+            self._on_roi_measured_for_accept(wanted, payload)
+            return
+        if not self.roi_editing:
             return
         if not getattr(self, "_roi_awaiting", False):
             return
@@ -240,13 +275,42 @@ class RoiMixin:
             self.report(NO_CHASSIS_FOUND)
             return
         self.roi_draft = self._scaled_box(box, 1.0, image.shape[:2])
-        self._roi_proposal = self.roi_draft
+        self._remember_proposal(self.roi_draft)
         self._show_roi_rect()
+        self.refresh_roi_bar()
         if self._is_whole_frame(self.roi_draft):
             self.report(NO_CHASSIS_FOUND)
         else:
             self.report("拖动边或角调整机箱范围，Enter 保存 / "
                         "drag an edge or a corner, Enter to save")
+
+    def _remember_proposal(self, box) -> None:
+        """Keep one rectangle against the segment it was offered for."""
+        wanted = getattr(self, "_roi_wanted", None) or self.roi_key()
+        if wanted is not None and box is not None:
+            self._roi_proposal[wanted] = tuple(int(v) for v in box)
+
+    @S.guard
+    def _on_roi_measured_for_accept(self, wanted, payload: dict) -> None:
+        """A measurement asked for by ``确认建议框`` came back (round 2, I1)."""
+        self._roi_accept_when_measured = None
+        if wanted != self.roi_key():
+            return                      # the annotator walked away meanwhile
+        box = payload.get("box")
+        image = self.session.image() if compat.is_open(self.session) else None
+        if box is not None and image is not None:
+            box = self._scaled_box(box, 1.0, image.shape[:2])
+            self._roi_proposal[wanted] = box
+        refusal = self.roi_refusal(box)
+        if refusal:
+            self.refresh_roi_bar()
+            self.report(refusal)
+            return
+        segment = self._pose_segment(self.session.current())
+        if segment is None:
+            self.report(ROI_NO_PROPOSAL)
+            return
+        self.store_roi(box, segment, self.session.current())
 
     def wait_for_roi_proposal(self, timeout: float = 20.0) -> bool:
         """Block until the pending measurement has been delivered (tests, smoke).
@@ -308,6 +372,26 @@ class RoiMixin:
         x0, y0, x1, y1 = (int(v) for v in box)
         return x0 <= 0 and y0 <= 0 and x1 >= int(hw[1]) and y1 >= int(hw[0])
 
+    def roi_refusal(self, box) -> str:
+        """Why this rectangle will not be stored, or ``""``.
+
+        Asked **before** anything is armed or written, so that every caller --
+        ``Enter`` on the rectangle, the ``确认建议框`` button, and the button's
+        own visibility -- agrees about what is storable. A button that refuses
+        after it has switched the window into rectangle mode is how ``Enter``
+        came to be routed at a rectangle nobody could see (round 2, C1).
+        """
+        if box is None:
+            return ROI_NO_PROPOSAL
+        if self._is_whole_frame(box):
+            return NO_CHASSIS_FOUND
+        hw = None if self.overlay is None else self.overlay.hw
+        floor = roi_min_side(hw)
+        x0, y0, x1, y1 = (float(v) for v in box)
+        if floor and min(x1 - x0, y1 - y0) < floor:
+            return ROI_TOO_SMALL.format(floor=floor)
+        return ""
+
     # ------------------------------------------------------- the ROI on screen
     def _show_roi_rect(self) -> None:
         """Put the rectangle (or the stored one) on the canvas and in the tool."""
@@ -319,40 +403,59 @@ class RoiMixin:
         self.canvas.set_roi(self.roi(), editing=False)
 
     def roi_unanswered(self) -> bool:
-        """Is this segment's ROI question still open (ruling U-ROI-3)?"""
-        pending = getattr(self, "_roi_pending", None)
-        return pending is not None and pending == self.roi_key()
+        """Is this segment's ROI question still open (ruling U-ROI-3)?
+
+        Per **segment key**, and it lives until the question is *answered* --
+        a stored rectangle, ``确认建议框`` or ``不用 ROI`` -- or until
+        :meth:`reset_roi_proposals`. Skipping with ``Esc`` only ends the
+        rectangle mode, and leaving for another view and coming back must find
+        the reminder where it was (round 2, I1).
+        """
+        key = self.roi_key()
+        return key is not None and key in getattr(self, "_roi_pending", ())
+
+    def roi_proposal_for_segment(self):
+        """The rectangle on offer for the open segment, or ``None``."""
+        return self._roi_proposal.get(self.roi_key())
 
     def refresh_roi_bar(self) -> None:
         """Show the right half of the ROI question, or nothing at all."""
         buttons = self._roi_buttons
+        offered = (self.roi_draft if self.roi_editing
+                   else self.roi_proposal_for_segment())
+        # A whole-frame "not found" is not something ``确认建议框`` will store,
+        # so the bar says so instead of letting the button refuse afterwards.
+        unusable = offered is not None and bool(self.roi_refusal(offered))
         if self.roi_editing:
             for name in ("save", "skip"):
                 buttons[name].setVisible(True)
             for name in ("accept", "redraw", "none"):
                 buttons[name].setVisible(False)
-            self.roi_bar.show_text(ROI_BAR_EDITING)
+            self.roi_bar.show_text(
+                ROI_BAR_EDITING + (ROI_BAR_UNUSABLE if unusable else ""))
             return
         if self.roi_unanswered():
             buttons["save"].setVisible(False)
             buttons["skip"].setVisible(False)
-            buttons["accept"].setVisible(self._roi_proposal is not None)
+            # Hidden only when there *is* an offer and it would be refused;
+            # with none at all the button re-measures (round 2, I1).
+            buttons["accept"].setVisible(not unusable)
             buttons["redraw"].setVisible(True)
             buttons["none"].setVisible(True)
-            self.roi_bar.show_text(ROI_BAR_PENDING)
+            self.roi_bar.show_text(
+                ROI_BAR_PENDING + (ROI_BAR_UNUSABLE if unusable else ""))
             return
         self.roi_bar.hide()
 
     def on_frame_changed_roi(self) -> None:
-        """Keep the rectangle, the bar and the status label with the frame."""
-        if not self.roi_unanswered():
-            # A different segment: whatever was being offered was about the
-            # one being left, and a proposal is not carried across.
-            if not self.roi_editing:
-                self._roi_pending = None
-                self._roi_proposal = None
+        """Keep the rectangle, the bar and the status label with the frame.
+
+        Nothing is forgotten here: the unanswered set and the offers are per
+        segment key and outlive every frame, view and desktop change.
+        """
         self._show_roi_rect()
         self.refresh_roi_bar()
+        self.fit_pending_roi()
 
     @S.guard
     def on_roi_preview(self, box: object) -> None:
@@ -381,8 +484,12 @@ class RoiMixin:
             self.report(f"that rectangle is not usable: {refused}")
             self._show_roi_rect()
             return
-        self._roi_proposal = self.roi_draft
+        self._remember_proposal(self.roi_draft)
         self._show_roi_rect()
+        self.refresh_roi_bar()
+        refusal = self.roi_refusal(self.roi_draft)
+        if refusal:
+            self.report(refusal)
 
     @S.guard
     def accept_roi(self) -> None:
@@ -404,50 +511,122 @@ class RoiMixin:
         if self.roi_draft is None or segment is None:
             self.cancel_roi_edit()
             return
-        if self._is_whole_frame(self.roi_draft):
-            self.report(NO_CHASSIS_FOUND)
+        refusal = self.roi_refusal(self.roi_draft)
+        if refusal:
+            # The rectangle stays on screen and so does everything about it:
+            # the annotator drags a better one or presses Esc.
+            self.report(refusal)
             return
-        hw = None if self.overlay is None else self.overlay.hw
         # There is a rectangle now, and it is the annotator's. A measurement
         # still in flight is about the same segment and nothing has been dragged
         # since, so every guard in _on_roi_proposed would let it through the
         # next time the tool is armed.
         self.roi_proposer.cancel()
         self._roi_awaiting = False
-        accepted = tuple(self.db.set_pose_segment_roi(
-            int(key.desktop), str(key.view), int(segment), list(self.roi_draft),
-            annotator=self.annotator, hw=hw,
-        ))
+        self.store_roi(self.roi_draft, segment, key)
+
+    def store_roi(self, box, segment: int, key) -> bool:
+        """Write one rectangle onto the pose segment; ``True`` when it landed.
+
+        **Every** exit leaves :attr:`roi_editing`, the armed tool and the bar
+        consistent with what actually happened. A refusal or a failed write
+        used to return with ``roi_editing`` left standing from the caller, so
+        ``Enter`` was routed at a rectangle that was not on screen and the open
+        edit could not be committed at all until ``Esc`` (round 2, C1).
+        """
+        hw = None if self.overlay is None else self.overlay.hw
+        try:
+            accepted = tuple(self.db.set_pose_segment_roi(
+                int(key.desktop), str(key.view), int(segment), list(box),
+                annotator=self.annotator, hw=hw,
+            ))
+        except Exception as exc:  # noqa: BLE001 - a write that failed is news
+            self.logger.exception("the ROI could not be stored: %s", exc)
+            self.report_error(f"ROI 没能存下：{exc} / the ROI could not be stored")
+            return False
+        answered = self.roi_key()
         self.roi_draft = accepted
         self.roi_editing = False
+        self._roi_accept_when_measured = None
         # The question is answered: the reminder never comes back for it.
-        answered = self.roi_key()
-        self._roi_pending = None
-        self._roi_proposal = accepted
-        if answered is not None:
-            self._roi_dismissed.discard(answered)
+        self._roi_pending.discard(answered)
+        self._roi_proposal[answered] = accepted
+        self._roi_dismissed.discard(answered)
         self.canvas.set_rubber_band(None)
         self._attach_tool()
         self._show_roi_rect()
         self.refresh_roi_bar()
-        self.canvas.zoom_to(accepted)
         self.logger.info("roi accepted segment=%s roi=%s", answered, accepted)
         self.update_status()
         self.request_assist()
-        self.report(f"ROI stored: {accepted}")
+        if self.has_uncommitted_edit():
+            # Storing loses nothing, but moving the view under a half-drawn
+            # mask does: the fit waits for the next frame change or ``F``.
+            self._roi_fit_pending = True
+            self.report(ROI_FIT_DEFERRED.format(roi=accepted))
+        else:
+            self.canvas.zoom_to(accepted)
+            self.report(f"ROI stored: {accepted}")
+        return True
+
+    def fit_pending_roi(self) -> None:
+        """Do the zoom :meth:`store_roi` put off, once it is safe (round 2, M2)."""
+        if not getattr(self, "_roi_fit_pending", False):
+            return
+        if self.has_uncommitted_edit():
+            return
+        self._roi_fit_pending = False
+        roi = self.roi()
+        if roi is not None:
+            self.canvas.zoom_to(roi)
+            self.update_status()
 
     @S.guard
     def act_accept_roi_proposal(self) -> None:
-        """``确认建议框``: store the offered rectangle exactly as it stands."""
+        """``确认建议框``: store the offered rectangle exactly as it stands.
+
+        It never *arms* the rectangle to do it. Arming first and delegating to
+        :meth:`accept_roi` meant that a refused proposal -- the detector's
+        whole-frame "not found" is the common one -- left the window in
+        rectangle mode with no rectangle drawn (round 2, C1).
+        """
         if self.roi_editing:
             self.accept_roi()
             return
-        if self._roi_proposal is None:
+        wanted = self.roi_key()
+        box = self._roi_proposal.get(wanted)
+        if box is None:
+            self._remeasure_for_accept(wanted)
+            return
+        refusal = self.roi_refusal(box)
+        if refusal:
+            self.report(refusal)
+            return
+        segment = self._pose_segment(self.session.current())
+        if segment is None:
             self.report(ROI_NO_PROPOSAL)
             return
-        self.roi_editing = True
-        self.roi_draft = tuple(int(v) for v in self._roi_proposal)
-        self.accept_roi()
+        self.roi_proposer.cancel()
+        self._roi_awaiting = False
+        self.store_roi(box, segment, self.session.current())
+
+    def _remeasure_for_accept(self, wanted) -> None:
+        """No proposal in hand (a reopened session): go and measure one.
+
+        The alternative was to hide the button, which leaves the annotator with
+        a reminder they cannot answer without drawing the rectangle themselves.
+        """
+        if wanted is None or not compat.is_open(self.session):
+            self.report(ROI_NO_PROPOSAL)
+            return
+        paths = self._roi_sample_paths()
+        if not paths:
+            self.report(ROI_NO_PROPOSAL)
+            return
+        self._roi_accept_when_measured = wanted
+        self._roi_wanted = wanted
+        self.roi_proposer.request(wanted, self.session.view, paths)
+        self.report(ROI_REMEASURING)
 
     @S.guard
     def act_no_roi(self) -> None:
@@ -462,8 +641,9 @@ class RoiMixin:
         answered = self.roi_key()
         if answered is not None:
             self._roi_dismissed.add(answered)
-        self._roi_pending = None
-        self._roi_proposal = None
+            self._roi_pending.discard(answered)
+            self._roi_proposal.pop(answered, None)
+        self._roi_accept_when_measured = None
         self.roi_proposer.cancel()
         self._roi_awaiting = False
         self._show_roi_rect()

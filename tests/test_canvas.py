@@ -1522,6 +1522,21 @@ def test_the_roi_tool_cursor_says_where_the_handles_are(qapp):
     assert tool.cursor_for(2.0, 2.0) == Qt.CursorShape.CrossCursor
 
 
+def test_a_rectangle_narrower_than_the_grab_radius_can_still_be_moved(qapp):
+    """Round 2, M3: every point of it used to read as the ``nw`` handle."""
+    canvas = _blank_canvas()
+    canvas.set_zoom(1.0)
+    tool = RoiBoxTool(canvas, None)
+    tool.set_rect((40.0, 40.0, 52.0, 130.0))      # 12 px wide, tolerance is 9
+
+    assert tool.hit(46.0, 85.0) == "inside", "the middle must be a move"
+    assert tool.cursor_for(46.0, 85.0) == Qt.CursorShape.SizeAllCursor
+    assert tool.hit(40.0, 40.0) == "nw", "the corner is still a corner"
+    assert tool.hit(52.0, 130.0) == "se"
+    # nearest wins, not first-in-list
+    assert tool.hit(51.5, 41.0) == "ne"
+
+
 def test_a_resize_never_leaves_the_frame_or_an_inside_out_rectangle(qapp):
     canvas = _blank_canvas()
     canvas.set_zoom(1.0)

@@ -132,17 +132,26 @@ class EditMixin:
         #: unbounded box, silently.  A re-cut always moves a range, so the key
         #: cannot survive one.
         self._roi_dismissed: set[tuple] = set()
-        #: The segment whose ROI question nobody has answered yet, or ``None``.
-        #: Dismissing the *rectangle* (``Esc``, picking a tool, starting an
-        #: edit) stops it popping up on every frame -- that is what
-        #: :attr:`_roi_dismissed` is for -- but it does not answer the
-        #: question, and the annotator's first trial ended with the rectangle
-        #: gone, no ROI stored, and nothing on screen saying so. While this is
-        #: set the ROI bar keeps a one-line reminder up (ruling U-ROI-3).
-        self._roi_pending: Optional[tuple] = None
-        #: The last rectangle offered or dragged for :attr:`_roi_pending`, kept
+        #: Segment keys whose ROI question nobody has answered yet. Dismissing
+        #: the *rectangle* (``Esc``, picking a tool, starting an edit) stops it
+        #: popping up on every frame -- that is what :attr:`_roi_dismissed` is
+        #: for -- but it does not answer the question, and the annotator's
+        #: first trial ended with the rectangle gone, no ROI stored and nothing
+        #: on screen saying so (ruling U-ROI-3).
+        #:
+        #: A **set**, keyed the same way as :attr:`_roi_dismissed`: it used to
+        #: be one key and was cleared the moment the frame moved to another
+        #: segment, so a glance at another view with ``F2`` answered the
+        #: question by accident and the rest of the segment was annotated with
+        #: the difference map over the whole frame (round 2, I1).
+        self._roi_pending: set[tuple] = set()
+        #: Per segment key, the last rectangle offered or dragged for it, kept
         #: across a dismissal so that "确认建议框" has something to store.
-        self._roi_proposal: Optional[tuple] = None
+        self._roi_proposal: dict[tuple, tuple] = {}
+        #: The segment a re-measurement was asked for on behalf of "确认建议框".
+        self._roi_accept_when_measured: Optional[tuple] = None
+        #: A stored ROI whose zoom is waiting for the edit to end (M2).
+        self._roi_fit_pending = False
         self._pending_scope: Optional[str] = None
         self._restore_offer: Optional[dict] = None
         #: The instance an ``add_bench_box`` card item armed the box tool for.
@@ -301,8 +310,10 @@ class EditMixin:
         """
         self._roi_dismissed.clear()
         self._roi_awaiting = False
-        self._roi_pending = None
-        self._roi_proposal = None
+        self._roi_pending.clear()
+        self._roi_proposal.clear()
+        self._roi_accept_when_measured = None
+        self._roi_fit_pending = False
         self.roi_proposer.cancel()
 
     def _sync_editing_layer(self, repaint: bool = True) -> None:
