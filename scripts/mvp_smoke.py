@@ -68,6 +68,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--draw", action="append", default=None, metavar="STEP:INSTANCE",
                     help="draw one named instance on one step "
                          f"(default for D13: {DEFAULT_DRAW[0]})")
+    ap.add_argument("--start-step", type=int, default=None, metavar="K",
+                    help="stand on this logical step instead of the last one; "
+                         "annotation runs backwards, so an early teardown step "
+                         "is where most of the machine is still drawn")
     ap.add_argument("--instances", type=int, default=0, metavar="N",
                     help="before timing anything, give N instances of the start "
                          "frame a synthetic rectangle inside the ROI -- what a "
@@ -149,6 +153,8 @@ class Smoke:
         session = AnnotationSession(db, tax, TruthService(db, tax),
                                     config["cache_dir"], self.args.annotator)
         session.open(int(self.args.desktop), str(self.args.view))
+        if self.args.start_step is not None:
+            session.goto(int(self.args.start_step), force=True)
         window = MainWindow(session, config, self.args.annotator)
         if self.args.shots:
             # Real fonts, no window on screen: the offscreen plugin has no font

@@ -35,6 +35,7 @@ from tda.ui import session_api as api
 from tda.ui.session import AnnotationSession
 from session_scene import (
     ANNOTATOR,
+    BOARD_STEP,
     CHASSIS,
     COOLER,
     DESKTOP,
@@ -441,6 +442,103 @@ def test_confirming_a_frame_is_under_budget_at_full_scanner_resolution(
 
     session.close()
     _under(0.6, f"confirm_frame at step {step}", confirm_runs)
+
+
+# --------------------------------------------------------------------------- #
+# the 12 MP budgets (plan B task B3 step 5)
+# --------------------------------------------------------------------------- #
+#: What both OAK cameras shoot (spec 2.4). 12.26 MP, 7.5x a scanner frame.
+OAK_HW = (3040, 4032)
+#: The frame the budgets are measured on. Annotation runs in reverse, so the
+#: *last* frame of a session is the *first* step of the teardown -- the one
+#: where the whole machine is still in the chassis and every instance has a row
+#: in the truth table. That is the expensive frame, and measuring the cheap one
+#: is the F1 lesson this test exists to avoid repeating.
+OAK_STEP = 2
+#: Spec 4.2 read through plan B: what an annotator may wait for one gesture.
+BUDGET_COMMIT = 0.45
+BUDGET_CONFIRM = 0.6
+BUDGET_FRAME_CHANGE = 0.15
+BUDGET_TIMELINE_JUMP = 0.5
+
+
+@pytest.mark.slow
+def test_gui_thread_budgets_on_a_12mp_frame_with_forty_instances(qapp, tmp_path):
+    """Commit, Space, frame change and timeline jump on a 4032x3040 frame.
+
+    **In the shipped configuration**: the sweeper is on, so the prefetch of
+    ``k-1`` competes for the same cores and the same database; the frame is the
+    one with every instance still in the machine, so the truth table has forty
+    rows to derive and write; and the mask committed is chassis-sized, so the
+    reach of the edit is the whole interval.
+
+    What made this impossible before (measured, same scene, same machine):
+    commit 4.1 s, Space 2.5 s, timeline jump 2.5 s. The compiler composited
+    every layer across the whole 12 MP canvas and the truth table transposed
+    every visible mask into a Fortran buffer before encoding it.
+    """
+    session = make_session(tmp_path, last_step=BOARD_STEP, hw=OAK_HW)
+    session.goto(OAK_STEP)
+    drawn = seed_shapes(session, OAK_STEP, grid=7, anchor=BOARD_STEP, refresh=False)
+    assert len(drawn) >= 40, f"the scene has only {len(drawn)} instances"
+    assert session.sweeper_enabled is True
+    session.compiled()  # the frame the gestures start from
+
+    def before_commit(attempt: int) -> None:
+        session.goto(OAK_STEP)
+        session.begin_edit(CHASSIS)
+        # a different mask each time: re-committing the same pixels is a no-op
+        session.set_editing_mask(
+            rect(100, 100, 3900 - attempt, 2900 - attempt, OAK_HW)
+        )
+
+    def commit(attempt: int) -> None:
+        session.commit_edit(api.SCOPE_KEYFRAME)
+
+    _, commit_runs = best_of(commit, before_commit)
+    assert len(session.db.compiled(FrameKey(DESKTOP, OAK_STEP, VIEW))) >= 40
+
+    def before_confirm(attempt: int) -> None:
+        session.goto(OAK_STEP + 1)
+        session.drain_prefetch(timeout=120.0)
+        session.goto(OAK_STEP)                # arrive on the prefetched frame
+        session.drain_prefetch(timeout=120.0)
+        session.db.set_frame_flags(FrameKey(DESKTOP, OAK_STEP, VIEW),
+                                   review_status=None)
+
+    def confirm(attempt: int) -> None:
+        assert session.confirm_frame() is True
+
+    _, confirm_runs = best_of(confirm, before_confirm)
+
+    def before_change(attempt: int) -> None:
+        session.goto(OAK_STEP + 3)
+        session.drain_prefetch(timeout=120.0)  # warms k-1, which is where we go
+
+    def change(attempt: int) -> None:
+        session.goto(OAK_STEP + 2)
+        session.compiled()
+        session.image()
+
+    _, change_runs = best_of(change, before_change)
+
+    def before_jump(attempt: int) -> None:
+        session.goto(BOARD_STEP - 2)
+        session.images.clear()
+        session._invalidate()
+
+    def jump(attempt: int) -> None:
+        session.goto(OAK_STEP + 6)
+        session.compiled()
+        session.image()
+
+    _, jump_runs = best_of(jump, before_jump)
+
+    session.close(force=True)
+    _under(BUDGET_COMMIT, "commit", commit_runs)
+    _under(BUDGET_CONFIRM, "confirm_frame (Space)", confirm_runs)
+    _under(BUDGET_FRAME_CHANGE, "frame change", change_runs)
+    _under(BUDGET_TIMELINE_JUMP, "timeline jump", jump_runs)
 
 
 def _count_compiles_in(monkeypatch) -> list:
