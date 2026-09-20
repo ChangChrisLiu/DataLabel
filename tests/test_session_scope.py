@@ -327,18 +327,27 @@ def test_instance_rows_follow_the_compiler_not_the_stored_order(session):
 def test_overlay_layers_hands_the_window_masks_and_the_paint_order(session):
     session.goto(10)
     seed_shapes(session, 10)
-    layers, order = session.overlay_layers()
+    layers, order, windows = session.overlay_layers()
     assert order and set(order) <= set(layers)
     assert order == session.compiled().painted["in_chassis"] + session.compiled().painted.get(
         "on_bench", []
     )
     for mask in layers.values():
         assert mask.dtype == bool
+    # every mask comes with the box the compiler knows it is empty outside,
+    # and the box really does contain it
+    assert set(windows) == set(layers)
+    for key, box in windows.items():
+        assert box is not None, f"{key} was handed over without a window"
+        assert masks.bbox(layers[key]) is None or (
+            masks.bbox(layers[key])[0] >= box[0] and masks.bbox(layers[key])[1] >= box[1]
+            and masks.bbox(layers[key])[2] <= box[2] and masks.bbox(layers[key])[3] <= box[3]
+        ), f"{key}'s window does not contain it"
 
     hidden = order[0]
     session.set_hidden(hidden, True)
-    layers, order = session.overlay_layers()
-    assert hidden not in layers and hidden not in order
+    layers, order, windows = session.overlay_layers()
+    assert hidden not in layers and hidden not in order and hidden not in windows
 
 
 # --------------------------------------------------------------------------- #

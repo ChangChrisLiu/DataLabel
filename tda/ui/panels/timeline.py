@@ -304,16 +304,7 @@ class TimelinePanel(QWidget):
         if not session_is_open(self._session):
             return None
         path = self._session.thumb_path(step)
-        pm: Optional[QPixmap] = None
-        if path:
-            loaded = QPixmap(str(path))
-            if not loaded.isNull():
-                pm = loaded.scaled(
-                    self.THUMB_SIZE,
-                    self.THUMB_SIZE,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
+        pm = self._load_thumb(path) if path else None
         if pm is None:
             pm = self._placeholder()
         self._thumbs[cache_key] = pm
@@ -321,6 +312,39 @@ class TimelinePanel(QWidget):
         if item is not None:
             item.setIcon(QIcon(pm))
         return pm
+
+    def _load_thumb(self, path: str) -> Optional[QPixmap]:
+        """Read one image scaled to :data:`THUMB_SIZE`, never at full size.
+
+        ``thumb_path`` falls back to the frame itself when the offline
+        thumbnail pass has not run, and on an OAK view that frame is 4032x3040:
+        building a 48 MB ``QPixmap`` of it and then smooth-scaling all 12 MP
+        down to 96 px cost 50 ms per row -- a fifth of a timeline click, for a
+        picture the size of a postage stamp.  ``QImageReader`` is told the size
+        that is wanted, so the decoder produces it directly.
+        """
+        from PySide6.QtGui import QImageReader
+
+        reader = QImageReader(str(path))
+        reader.setAutoTransform(True)
+        size = reader.size()
+        if size.isValid() and (size.width() > self.THUMB_SIZE
+                               or size.height() > self.THUMB_SIZE):
+            size.scale(self.THUMB_SIZE, self.THUMB_SIZE,
+                       Qt.AspectRatioMode.KeepAspectRatio)
+            reader.setScaledSize(size)
+        image = reader.read()
+        if image.isNull():
+            return None
+        loaded = QPixmap.fromImage(image)
+        if loaded.width() <= self.THUMB_SIZE and loaded.height() <= self.THUMB_SIZE:
+            return loaded
+        return loaded.scaled(
+            self.THUMB_SIZE,
+            self.THUMB_SIZE,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
 
     def ensure_visible_thumbs(self) -> None:
         """Load the thumbnails of the rows currently on screen (plus a margin).

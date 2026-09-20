@@ -559,7 +559,7 @@ class LabelOverlay:
         elif rect is not None:
             self._mark(rect)
 
-        limit: Rect = (0, 0, w, h) if clip is None else self._clip(clip)
+        limit: Optional[Rect] = (0, 0, w, h) if clip is None else self._clip(clip)
         stale, rendered = self._dirty, []
         self._dirty = []
         for region in stale:
@@ -567,13 +567,20 @@ class LabelOverlay:
             if part is None:
                 self._dirty.append(region)
                 continue
-            self._render(part, style[0], style[1])
             rendered.append(part)
             self._dirty.extend(_subtract(region, limit))
+        # One composite over the box the stale parts fit in, rather than one
+        # per region: a repaint pays a fixed price in edge padding and slicing,
+        # and the box can never be larger than the clip the caller named.  With
+        # no clip this is exactly the single union rect the overlay always
+        # rebuilt.
+        target = _bounds(rendered)
+        if target is not None:
+            self._render(target, style[0], style[1])
         if len(self._dirty) > MAX_DIRTY_RECTS:
             bounds = _bounds(self._dirty)
             self._dirty = [] if bounds is None else [bounds]
-        self.last_rebuild_rect = _bounds(rendered)
+        self.last_rebuild_rect = target
         return self._image
 
     def _halo(self, rect: Rect) -> Rect:

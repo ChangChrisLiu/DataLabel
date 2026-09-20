@@ -236,7 +236,7 @@ class AssistMixin:
         box, so the old version was always empty and nothing was ever explained.
         """
         wanted = self._card_instances()
-        masks, _order = compat.overlay_layers(self.session)
+        masks, _order, _windows = compat.overlay_layers(self.session)
         chosen = {key: mask for key, mask in masks.items() if key in wanted}
         boxes = []
         for key, inst in self.session.compiled().instances.items():

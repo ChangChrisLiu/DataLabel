@@ -1065,3 +1065,249 @@ def test_clear_drops_both_branches():
     stack.push(edit_editing_mask_op("a", _mask(), _mask(box=(1, 1, 4, 4))))
     stack.clear()
     assert not stack.can_undo and not stack.can_redo and len(stack) == 0
+
+
+# ---------------------------------------------------------------------------
+# what the annotator sees is what a whole-frame composite would have drawn
+# ---------------------------------------------------------------------------
+def _screen(canvas: ImageCanvas) -> np.ndarray:
+    """The canvas as the annotator sees it, as an HxW uint32 ARGB array.
+
+    The **viewport** is grabbed, not the view: ``QGraphicsView.grab()``
+    renders its child viewport through a path that clips the scene items away,
+    so it produces a picture with no overlay in it at all -- which would make
+    every comparison below pass without proving anything.
+    """
+    from PySide6.QtGui import QImage
+
+    QApplication.processEvents()
+    image = canvas.viewport().grab().toImage().convertToFormat(
+        QImage.Format.Format_ARGB32
+    )
+    w, h = image.width(), image.height()
+    raw = np.frombuffer(bytes(image.constBits()), dtype=np.uint32)
+    return raw.reshape(h, image.bytesPerLine() // 4)[:, :w].copy()
+
+
+def _fidelity_layers() -> tuple[dict, list]:
+    """Four shapes: one on the left border, one in the middle, one in the
+    bottom-right corner, and a 3 px column crossing the whole frame."""
+    hw = (160, 200)
+    layers = {
+        "edge-left": np.zeros(hw, dtype=bool),
+        "middle": np.zeros(hw, dtype=bool),
+        "corner": np.zeros(hw, dtype=bool),
+        "thin": np.zeros(hw, dtype=bool),
+    }
+    layers["edge-left"][20:140, 0:40] = True
+    layers["middle"][40:120, 60:150] = True
+    layers["corner"][130:160, 170:200] = True
+    layers["thin"][0:160, 96:99] = True
+    return layers, ["edge-left", "middle", "corner", "thin"]
+
+
+@pytest.fixture
+def fidelity_scene(qapp):
+    """A 200x160 frame on a 130x100 viewport, plus a factory for fresh overlays.
+
+    The factory matters: an overlay's buffer starts at zero, so a region the
+    lazy path never composites shows *through* -- which is how a comparison can
+    tell "composited on demand" apart from "composited earlier and still
+    right".  Reusing one overlay hides every mistake this file exists to find.
+    """
+    layers, order = _fidelity_layers()
+    canvas = _shown(ImageCanvas(), 130, 100)
+    canvas.set_image(_rgb(160, 200))
+
+    def fresh(shown=None, stack=None) -> LabelOverlay:
+        given = layers if shown is None else shown
+        ov = LabelOverlay((160, 200))
+        ov.set_instances(given, order if stack is None else stack,
+                         windows=_windows(given))
+        return ov
+
+    return canvas, fresh, layers, order
+
+
+def _walk(canvas, fresh, moves, *, whole: bool, dress=None) -> list[np.ndarray]:
+    """Take a *new* overlay through ``moves``, grabbing the screen at each one.
+
+    ``whole=False`` is the shipped path: the overlay is attached (one clipped
+    composite) and from then on only what is about to be drawn is composited.
+    ``whole=True`` composites the entire frame before every grab.  The two
+    lists of screens have to be identical.
+    """
+    canvas.set_overlay(None)
+    # Attached on a close-up, so the one composite the attachment makes covers
+    # a corner of the frame and everything the moves below reach is genuinely
+    # uncomposited.  Attaching while the whole frame is on screen composites
+    # the whole frame, and then there is nothing left for the comparison to
+    # catch.
+    canvas.set_zoom(8.0)
+    canvas.center_on((100.0, 80.0))
+    ov = fresh()
+    if dress is not None:
+        dress(ov)
+    canvas.set_overlay(ov)
+    shots = []
+    for move in moves:
+        move()
+        if whole:
+            ov.force_full_rebuild()
+            ov.qimage(alpha=canvas.overlay_alpha, outline=canvas.overlay_outline)
+        shots.append(_screen(canvas))
+    return shots
+
+
+def _same(canvas, fresh, moves, what: str, dress=None) -> None:
+    lazy = _walk(canvas, fresh, moves, whole=False, dress=dress)
+    whole = _walk(canvas, fresh, moves, whole=True, dress=dress)
+    for index, (here, there) in enumerate(zip(lazy, whole)):
+        wrong = int(np.count_nonzero(here != there))
+        assert wrong == 0, f"{wrong} px differ at {what} step {index}"
+
+
+ZOOMS = (0.37, 0.5, 1.0, 1.0 / 3.0, 2.5, 3.7, 7.25)
+CENTRES = ((0.0, 0.0), (99.0, 80.0), (97.5, 80.5), (199.0, 159.0),
+           (40.0, 20.0), (150.0, 130.0))
+
+
+def test_the_screen_is_the_same_at_every_zoom_and_pan(fidelity_scene):
+    """Fractional zooms, the four borders, and a shape crossing the viewport."""
+    canvas, fresh, _layers, _order = fidelity_scene
+    for zoom in ZOOMS:
+        moves = []
+        for centre in CENTRES:
+            moves.append(lambda z=zoom, c=centre: (canvas.set_zoom(z),
+                                                   canvas.center_on(c)))
+        _same(canvas, fresh, moves, f"zoom {zoom}")
+
+
+def test_the_screen_is_the_same_with_every_display_setting(fidelity_scene):
+    """``Q`` outline, ``,``/``.`` opacity and ``A`` overlays-off, at two zooms."""
+    canvas, fresh, _layers, _order = fidelity_scene
+    try:
+        for zoom, centre in ((1.0 / 3.0, (99.0, 80.0)), (3.7, (60.0, 45.0))):
+            for outline in (True, False):
+                for alpha in (0, 70, 110, 255):
+                    canvas.overlay_outline = outline
+                    canvas.overlay_alpha = alpha
+
+                    def move(z=zoom, c=centre):
+                        canvas.set_zoom(z)
+                        canvas.center_on(c)
+
+                    _same(canvas, fresh, [move],
+                          f"outline={outline} alpha={alpha} zoom={zoom}")
+    finally:
+        canvas.overlay_outline = True
+        canvas.overlay_alpha = 110
+
+
+def test_the_screen_is_the_same_with_the_overlays_switched_off(fidelity_scene):
+    """``A``: the layers go, and what is left has to be the same either way."""
+    canvas, fresh, _layers, _order = fidelity_scene
+
+    def hide(ov):
+        ov.visible = False
+
+    _same(canvas, fresh,
+          [lambda: (canvas.set_zoom(2.5), canvas.center_on((99.0, 80.0)))],
+          "overlays off", dress=hide)
+
+
+def test_the_screen_is_the_same_with_the_edit_layers_up(fidelity_scene):
+    """The editing layer, the draft ghost under it and two occluder types."""
+    canvas, fresh, _layers, _order = fidelity_scene
+
+    def dress(ov):
+        edit = np.zeros((160, 200), dtype=bool)
+        edit[70:110, 80:130] = True        # crosses the viewport border
+        ghost = np.zeros((160, 200), dtype=bool)
+        ghost[60:100, 70:120] = True       # under the editing layer, overlapping
+        ov.set_ghost(ghost, (70, 60, 120, 100))
+        ov.set_editing("being-drawn", edit)
+        ov.paint_occluder((100, 80), 9, True, "hand")
+        ov.paint_occluder((30, 140), 6, True, "cable")
+
+    moves = []
+    for zoom, centre in ((0.37, (99.0, 80.0)), (1.0, (100.0, 80.0)),
+                         (2.5, (95.5, 79.5)), (7.25, (99.0, 80.0))):
+        moves.append(lambda z=zoom, c=centre: (canvas.set_zoom(z),
+                                               canvas.center_on(c)))
+    _same(canvas, fresh, moves, "the edit layers", dress=dress)
+
+
+def test_the_screen_is_the_same_after_hiding_and_showing_instances(fidelity_scene):
+    """``H`` on an instance, then back: each step against the whole composite."""
+    canvas, fresh, layers, order = fidelity_scene
+
+    def hide(name):
+        shown = {k: v for k, v in layers.items() if k != name}
+        stack = [k for k in order if k != name]
+
+        def move():
+            canvas.overlay().set_instances(shown, stack, windows=_windows(shown))
+            canvas.refresh()
+
+        return move
+
+    moves = [lambda: (canvas.set_zoom(2.5), canvas.center_on((99.0, 80.0)))]
+    moves += [hide(name) for name in
+              ("middle", "thin", "edge-left", None, "corner", None)]
+    _same(canvas, fresh, moves, "hiding an instance")
+
+
+def test_panning_one_step_at_a_time_never_shows_a_stale_strip(fidelity_scene):
+    """The strip a pan exposes is composited before it is drawn, every time."""
+    canvas, fresh, _layers, _order = fidelity_scene
+
+    def step():
+        hbar, vbar = canvas.horizontalScrollBar(), canvas.verticalScrollBar()
+        hbar.setValue(hbar.value() + 17)
+        vbar.setValue(vbar.value() + 11)
+
+    moves = [lambda: (canvas.set_zoom(3.0), canvas.center_on((40.0, 40.0)))]
+    moves += [step] * 12
+    _same(canvas, fresh, moves, "a pan")
+
+
+def test_zooming_out_composites_the_frame_that_comes_into_view(fidelity_scene):
+    """``F`` from a close-up: everything the smaller scale reveals is drawn."""
+    canvas, fresh, _layers, _order = fidelity_scene
+    moves = [lambda: (canvas.set_zoom(6.0), canvas.center_on((99.0, 80.0)))]
+    moves += [lambda z=z: canvas.set_zoom(z) for z in (5.0, 3.0, 1.0, 0.5, 0.37)]
+    _same(canvas, fresh, moves, "zooming out")
+
+
+def test_a_stroke_lands_where_the_image_coordinates_say_at_any_zoom(qapp):
+    """Hit testing is untouched: a click is the same pixel it always was."""
+    canvas = _shown(ImageCanvas(), 130, 100)
+    canvas.set_image(_rgb(160, 200))
+    ov = LabelOverlay((160, 200))
+    canvas.set_overlay(ov)
+    brush = BrushTool(canvas, ov, radius=0)
+    brush.attach()
+    checked = 0
+    for zoom, centre in ((1.0, (100.0, 80.0)), (3.7, (60.0, 45.0)),
+                         (0.5, (100.0, 80.0)), (7.25, (120.5, 90.5))):
+        canvas.set_zoom(zoom)
+        canvas.center_on(centre)
+        ov.clear_editing()
+        for pos in (QPointF(11.0, 7.0), QPointF(64.0, 52.0), QPointF(129.0, 99.0)):
+            x, y = canvas.image_pos(pos)
+            expected = (int(round(x)), int(round(y)))
+            if not (0 <= expected[0] < 200 and 0 <= expected[1] < 160):
+                continue
+            before = int(ov.editing.sum())
+            brush.on_press(x, y, _press(pos.x(), pos.y()))
+            brush.on_release(x, y, _press(pos.x(), pos.y()))
+            if int(ov.editing.sum()) == before:
+                continue
+            painted = {tuple(p) for p in np.argwhere(ov.editing)}
+            assert (expected[1], expected[0]) in painted, (
+                f"a click at {pos.toTuple()} (zoom {zoom}) painted "
+                f"{sorted(painted)[:4]}, not {expected}"
+            )
+            checked += 1
+    assert checked >= 8, f"only {checked} clicks were inside the frame"

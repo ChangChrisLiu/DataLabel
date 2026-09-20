@@ -178,10 +178,15 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
             )
             self._ensure_overlay(image.shape[:2])
             self.canvas.set_image(image)
+            # The view is put back *before* anything is composited.  The
+            # overlay only paints what is about to be drawn, and ``set_image``
+            # leaves the canvas fitted to the whole frame: compositing there
+            # and then zooming back to the ROI paid for all 12 MP to show a
+            # sixth of it, on every frame change.
+            self._restore_view(keep, zoom, centre)
             # Edit layer first, committed masks second: one composite per frame.
             self._sync_editing_layer(repaint=False)
             self.refresh_overlay()
-            self._restore_view(keep, zoom, centre)
             self._attach_tool()
         self._segment = segment
 
@@ -241,11 +246,17 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
                 tool.overlay = self.overlay
 
     def refresh_overlay(self) -> None:
-        """Repaint the committed masks of the frame (hidden instances left out)."""
+        """Repaint the committed masks of the frame (hidden instances left out).
+
+        The windows travel with the masks: they are what lets the overlay
+        repaint the one layer that moved, and what makes a second call with the
+        same compiled frame -- which every commit makes, once here and once
+        when the session re-announces the frame -- cost nothing at all.
+        """
         if self.overlay is None:
             return
-        masks, order = compat.overlay_layers(self.session)
-        self.overlay.set_instances(masks, order)
+        masks, order, windows = compat.overlay_layers(self.session)
+        self.overlay.set_instances(masks, order, windows=windows)
         self.canvas.refresh()
 
 
