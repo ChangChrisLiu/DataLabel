@@ -143,6 +143,10 @@ class RoiMixin:
         # painting the draft before the swap would erase it again.
         self._attach_tool()
         self._show_roi_rect()
+        # Also on this path: ``Shift+R`` re-arms the rectangle without going
+        # through the frame hook, and a rectangle with no bar is the thing the
+        # annotator could not read in the first place.
+        self.refresh_roi_bar()
         self.logger.info("roi proposal opened segment=%s stored=%s",
                          self._roi_wanted, stored)
         self.update_status()
