@@ -1,0 +1,497 @@
+"""Offscreen tests for the Relations tab (:mod:`tda.ui.panels.relations`).
+
+Stage S6 inside the S1 panel: the edge table, the add row, the decisions about
+a rule edge, and the spec 7.4 violations list that updates while the edits are
+still staged.
+"""
+from __future__ import annotations
+
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+from steps_fixtures import seeded_db
+
+from tda.cli_graph import constraints_into_db
+from tda.core.db import Db
+from tda.core.graph import edges_from_db
+from tda.core.graph_edit import MANUAL, OVERRIDE, RULE
+from tda.core.taxonomy import load_taxonomy
+from tda.ui.panels.relations import (
+    RELATION_COLUMNS,
+    STATUS_COLUMN,
+    STEP_ROLE,
+    WAS_RULE,
+)
+from tda.ui.panels.steptable import StepTablePanel
+
+DESKTOP = 13
+FIRST_REMOVE = 10
+DRIVE = "storage_drive.ssd.01"
+PSU = "psu.01"
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+@pytest.fixture(scope="module")
+def tax():
+    return load_taxonomy()
+
+
+@pytest.fixture
+def db(tmp_db_path, tax) -> Db:
+    conn = seeded_db(tmp_db_path, tax)
+    constraints_into_db(conn, tax, {DESKTOP})
+    yield conn
+    conn.close()
+
+
+@pytest.fixture
+def panel(qapp, db, tmp_path, tax) -> StepTablePanel:
+    widget = StepTablePanel(db, DESKTOP, taxonomy=tax, cache_dir=tmp_path / "cache")
+    yield widget
+    widget.deleteLater()
+
+
+@pytest.fixture
+def tab(panel):
+    return panel.relations_tab
+
+
+def arm(tab, target=DRIVE, kind="blocked_by", blocker=PSU, note="") -> None:
+    """Fill the add row the way the annotator would, without a dialog."""
+    tab.target_box.setCurrentText(target)
+    tab.kind_box.setCurrentText(kind)
+    tab.blocker_box.setCurrentText(blocker)
+    tab.note_edit.setText(note)
+
+
+def triples(edges) -> set[tuple[str, str, str]]:
+    return {(e.type, e.target, e.blocker) for e in edges}
+
+
+def errors(tab) -> list[str]:
+    seen: list[str] = []
+    tab.sigError.connect(seen.append)
+    return seen
+
+
+# --------------------------------------------------------------------------- #
+# construction
+# --------------------------------------------------------------------------- #
+def test_the_panel_has_a_third_tab(panel):
+    assert panel.tabs.count() == 3
+    assert panel.tabs.tabText(2) == "Relations"
+
+
+def test_the_table_shows_every_stored_edge_with_its_source(tab, db):
+    assert tab.model.rowCount() == len(edges_from_db(db, DESKTOP))
+    assert tab.model.columnCount() == len(RELATION_COLUMNS)
+    sources = {tab.model.index(row, 0).data()
+               for row in range(tab.model.rowCount())}
+    assert sources == {RULE}
+
+
+def test_the_table_is_read_only(tab):
+    index = tab.model.index(0, 2)
+    assert not (tab.model.flags(index) & Qt.ItemIsEditable)
+
+
+def test_the_pickers_are_filled_with_the_desktop_s_instances(tab):
+    keys = [tab.target_box.itemText(i) for i in range(tab.target_box.count())]
+    assert DRIVE in keys and PSU in keys
+    assert not [k for k in keys if k.startswith("ls:")]
+
+
+def test_the_blocker_picker_also_offers_the_cable_nodes(tab):
+    keys = [tab.blocker_box.itemText(i) for i in range(tab.blocker_box.count())]
+    assert [k for k in keys if k.startswith("cable:")]
+
+
+def test_only_blocked_by_offers_a_mode(tab):
+    tab.kind_box.setCurrentText("covered_by")
+    assert not tab.mode_box.isEnabled()
+    assert tab.mode_box.currentText() == ""
+    tab.kind_box.setCurrentText("blocked_by")
+    assert tab.mode_box.isEnabled()
+    assert tab.mode_box.currentText() == "physical_path"
+
+
+# --------------------------------------------------------------------------- #
+# adding
+# --------------------------------------------------------------------------- #
+def test_adding_an_edge_stages_it_and_shows_it(tab, db):
+    before = tab.model.rowCount()
+    changed = []
+    tab.sigChanged.connect(lambda: changed.append(1))
+    arm(tab, note="电源挡住硬盘")
+
+    tab.add_edge()
+
+    assert tab.model.rowCount() == before + 1
+    assert changed == [1]
+    row = tab.model.row_of(DRIVE, "blocked_by", PSU)
+    assert row >= 0
+    assert tab.model.index(row, 0).data() == MANUAL
+    assert tab.model.index(row, 7).data() == "电源挡住硬盘"
+    assert ("blocked_by", DRIVE, PSU) not in triples(edges_from_db(db, DESKTOP))
+
+
+def test_a_refused_edge_says_why_and_stages_nothing(tab):
+    seen = errors(tab)
+    arm(tab, target=DRIVE, blocker=DRIVE)
+    before = tab.model.rowCount()
+
+    tab.add_edge()
+
+    assert seen and "/" in seen[0]
+    assert tab.model.rowCount() == before
+    assert not tab.data.relations.dirty
+
+
+def test_a_duplicate_is_refused_with_the_other_edge_s_source(tab):
+    seen = errors(tab)
+    edge = tab.model.edge_at(0)
+    arm(tab, target=edge.target, kind=edge.type, blocker=edge.blocker)
+
+    tab.add_edge()
+
+    assert seen and RULE in seen[0]
+
+
+def test_the_note_is_cleared_after_a_successful_add(tab):
+    arm(tab, note="电源挡住硬盘")
+    tab.add_edge()
+    assert tab.note_edit.text() == ""
+
+
+# --------------------------------------------------------------------------- #
+# the context menu
+# --------------------------------------------------------------------------- #
+def labels(menu) -> list[str]:
+    return [a.text() for a in menu.actions()]
+
+
+def test_a_rule_edge_offers_accept_and_reject_but_not_remove(tab):
+    menu = tab.edge_menu(0)
+    assert any("Accept" in text for text in labels(menu))
+    assert any("Reject" in text for text in labels(menu))
+    assert not any("Remove" in text for text in labels(menu))
+
+
+def test_a_manual_edge_offers_remove(tab):
+    arm(tab)
+    tab.add_edge()
+    row = tab.model.row_of(DRIVE, "blocked_by", PSU)
+    menu = tab.edge_menu(row)
+    assert labels(menu) == ["Remove this manual edge"]
+
+
+def test_removing_a_manual_edge_takes_it_off_the_table(tab):
+    arm(tab)
+    tab.add_edge()
+    before = tab.model.rowCount()
+    tab.remove_edge(DRIVE, "blocked_by", PSU)
+    assert tab.model.rowCount() == before - 1
+    assert tab.model.row_of(DRIVE, "blocked_by", PSU) == -1
+
+
+def test_rejecting_a_rule_edge_marks_it_without_dropping_the_row(tab):
+    edge = tab.model.edge_at(0)
+    before = tab.model.rowCount()
+
+    tab.decide(edge.target, edge.type, edge.blocker, "rejected")
+
+    row = tab.model.row_of(edge.target, edge.type, edge.blocker)
+    assert tab.model.rowCount() == before
+    assert tab.model.index(row, 0).data() == OVERRIDE
+    assert tab.model.index(row, 6).data() == "rejected"
+
+
+def test_a_decided_edge_offers_to_take_the_decision_back(tab):
+    edge = tab.model.edge_at(0)
+    tab.decide(edge.target, edge.type, edge.blocker, "rejected")
+    row = tab.model.row_of(edge.target, edge.type, edge.blocker)
+    assert "Clear the decision" in labels(tab.edge_menu(row))
+    tab.decide(edge.target, edge.type, edge.blocker, "proposed")
+    row = tab.model.row_of(edge.target, edge.type, edge.blocker)
+    assert tab.model.index(row, 0).data() == RULE
+
+
+# --------------------------------------------------------------------------- #
+# Apply / Revert
+# --------------------------------------------------------------------------- #
+def test_apply_writes_the_staged_edge(tab, panel, db):
+    arm(tab, note="电源挡住硬盘")
+    tab.add_edge()
+
+    panel.apply()
+
+    assert ("blocked_by", DRIVE, PSU) in triples(edges_from_db(db, DESKTOP))
+    assert not panel.data.relations.dirty
+
+
+def test_revert_discards_the_staged_edge(tab, panel, db):
+    arm(tab)
+    tab.add_edge()
+
+    panel.revert()
+
+    assert panel.relations_tab.model.row_of(DRIVE, "blocked_by", PSU) == -1
+    assert ("blocked_by", DRIVE, PSU) not in triples(edges_from_db(db, DESKTOP))
+
+
+def test_a_staged_edge_puts_a_line_in_the_status(tab, panel):
+    arm(tab)
+    tab.add_edge()
+    assert "Apply" in panel.status.text()
+
+
+# --------------------------------------------------------------------------- #
+# the violations list
+# --------------------------------------------------------------------------- #
+def fail_the_first_removal(panel) -> None:
+    panel.data.apply_edit(FIRST_REMOVE, "result", "failed")
+    panel.data.apply_edit(FIRST_REMOVE, "failure_reason", "blocked_by_part")
+    panel.relations_tab.refresh()
+
+
+def test_the_violations_list_is_empty_on_a_clean_log(tab):
+    assert tab.violations.count() == 0
+
+
+def test_a_staged_failed_attempt_shows_up_in_the_list(tab, panel):
+    fail_the_first_removal(panel)
+    assert tab.violations.count() == 1
+    assert "missing edge?" in tab.violations.item(0).text()
+    assert tab.violations.item(0).data(STEP_ROLE) == FIRST_REMOVE
+
+
+def test_the_right_blocked_by_clears_the_line_before_apply(tab, panel, db):
+    fail_the_first_removal(panel)
+    arm(tab)
+
+    tab.add_edge()
+
+    assert tab.violations.count() == 0
+    panel.apply()
+    assert tab.violations.count() == 0
+    assert ("blocked_by", DRIVE, PSU) in triples(edges_from_db(db, DESKTOP))
+
+
+def test_an_s1_edit_refreshes_the_violations_too(tab, panel):
+    """The replay is about the staged actions, and a result is a staged action."""
+    column = [c.field for c in panel.steps_model.columns].index("result")
+    row = panel.steps_model.first_row_of(FIRST_REMOVE)
+    panel.steps_model.setData(panel.steps_model.index(row, column), "failed",
+                              Qt.EditRole)
+    assert tab.violations.count() == 1
+
+
+# --------------------------------------------------------------------------- #
+# cycles, orphans, and the small things (round 1)
+# --------------------------------------------------------------------------- #
+def test_the_cycle_line_says_there_are_none(tab):
+    assert "none" in tab.cycles_label.text().lower()
+    assert not tab.cycles_label.styleSheet()
+
+
+def test_a_cycle_a_database_already_holds_is_shown(qapp, db, tmp_path, tax):
+    """The panel cannot create one, but a database written elsewhere can hold one."""
+    from tda.core.graph import Edge, edges_to_db
+
+    edges_to_db(db, DESKTOP, [
+        Edge(type="blocked_by", target=DRIVE, blocker=PSU, mode="physical_path",
+             source=MANUAL, status="accepted"),
+        Edge(type="blocked_by", target=PSU, blocker=DRIVE, mode="physical_path",
+             source=MANUAL, status="accepted"),
+    ])
+    widget = StepTablePanel(db, DESKTOP, taxonomy=tax, cache_dir=tmp_path / "cache")
+    try:
+        text = widget.relations_tab.cycles_label.text()
+        assert DRIVE in text and "->" in text
+        assert "bold" in widget.relations_tab.cycles_label.styleSheet()
+        assert any("deadlock" in widget.issues.item(i).text()
+                   for i in range(widget.issues.count()))
+    finally:
+        widget.deleteLater()
+
+
+def orphan(panel) -> tuple[str, str, str]:
+    """Accept a rule edge, then take away the field that derived it."""
+    screw = "screw.motherboard.01"
+    triple = ("motherboard.01", "fastened_by", screw)
+    panel.data.relations.decide(*triple, "accepted")
+    panel.apply()
+    panel.data.apply_instance_edit(screw, "fastens", "")
+    panel.relations_tab.refresh()
+    return triple
+
+
+def test_an_orphaned_decision_is_shown_with_its_own_status(tab, panel):
+    target, kind, blocker = orphan(panel)
+    row = tab.model.row_of(target, kind, blocker)
+    assert tab.model.index(row, 6).data() == "accepted_orphan"
+
+
+def test_an_orphan_offers_keeping_or_clearing_but_not_deciding(tab, panel):
+    target, kind, blocker = orphan(panel)
+    menu = tab.edge_menu(tab.model.row_of(target, kind, blocker))
+    assert labels(menu) == ["Keep as a manual edge", "Clear the decision"]
+
+
+def test_keeping_an_orphan_makes_it_manual(tab, panel, db):
+    target, kind, blocker = orphan(panel)
+    tab.adopt(target, kind, blocker)          # the first call only prefills
+    assert tab.note_edit.text().startswith(WAS_RULE)
+    tab.note_edit.setText("我看过，确实拧着")
+    tab.adopt(target, kind, blocker)
+    row = tab.model.row_of(target, kind, blocker)
+    assert tab.model.index(row, 0).data() == MANUAL
+    panel.apply()
+    stored = next(e for e in edges_from_db(db, DESKTOP)
+                  if (e.target, e.type, e.blocker) == (target, kind, blocker))
+    assert stored.source == MANUAL
+
+
+def test_clearing_an_orphan_takes_the_row_away(tab, panel):
+    target, kind, blocker = orphan(panel)
+    tab.drop(target, kind, blocker)
+    assert tab.model.row_of(target, kind, blocker) == -1
+
+
+def test_the_new_row_is_selected_and_scrolled_to(tab):
+    arm(tab)
+    tab.add_edge()
+    assert tab.view.currentIndex().row() == tab.model.row_of(DRIVE, "blocked_by", PSU)
+
+
+def test_a_cell_carries_the_full_key_as_its_tooltip(tab):
+    edge = tab.model.edge_at(0)
+    assert edge.target in tab.model.data(tab.model.index(0, 2), Qt.ToolTipRole)
+    assert edge.blocker in tab.model.data(tab.model.index(0, 3), Qt.ToolTipRole)
+
+
+def test_the_note_column_takes_the_rest_of_the_width(tab):
+    assert tab.view.horizontalHeader().stretchLastSection()
+
+
+def test_the_blocker_picker_never_starts_on_the_target(tab):
+    first = tab.target_box.itemText(0)
+    tab.target_box.setCurrentText(first)
+    assert tab.blocker_box.currentText() != first
+
+
+def test_the_mode_picker_says_what_each_mode_blocks(tab):
+    tip = tab.mode_box.toolTip()
+    for mode in ("cable_tension", "physical_path", "tool_access"):
+        assert mode in tip
+
+
+def test_double_clicking_a_violation_jumps_the_steps_table(tab, panel):
+    fail_the_first_removal(panel)
+    seen: list[int] = []
+    tab.sigGoToStep.connect(seen.append)
+
+    tab._on_violation_activated(tab.violations.item(0))
+
+    assert seen == [FIRST_REMOVE]
+    assert panel.tabs.currentWidget() is panel.steps_view
+    assert panel.steps_view.currentIndex().row() == \
+        panel.steps_model.first_row_of(FIRST_REMOVE)
+
+
+def test_the_jump_never_touches_the_session(tab, panel):
+    """The gate stays the window's: this moves a table, not the frame."""
+    fail_the_first_removal(panel)
+    assert not hasattr(panel, "session")
+    tab._on_violation_activated(tab.violations.item(0))
+    assert panel.data.desktop == DESKTOP
+
+
+def test_keeping_an_orphan_needs_a_reason_of_your_own(tab, panel):
+    """The row is about to say a human wrote it (round 2, minor 4)."""
+    target, kind, blocker = orphan(panel)
+    seen = errors(tab)
+
+    tab.adopt(target, kind, blocker)
+
+    assert seen and "/" in seen[0]
+    assert tab.note_edit.text().startswith(WAS_RULE)
+    row = tab.model.row_of(target, kind, blocker)
+    assert tab.model.index(row, 0).data() == OVERRIDE, "nothing was staged"
+
+
+def test_the_status_column_never_elides(tab):
+    from PySide6.QtWidgets import QHeaderView
+
+    assert tab.view.horizontalHeader().sectionResizeMode(STATUS_COLUMN) ==         QHeaderView.ResizeToContents
+
+
+# --------------------------------------------------------------------------- #
+# round 3: preferences are a note, and a refused Apply points at the edge
+# --------------------------------------------------------------------------- #
+def contradictory_preferences(panel) -> None:
+    """Two recommended edges pointing at each other: not a law, still worth saying."""
+    panel.data.relations.add(DRIVE, "blocked_by", PSU, mode="tool_access",
+                             necessity="recommended", note="prefer the PSU first")
+    panel.data.relations.add(PSU, "blocked_by", DRIVE, mode="tool_access",
+                             necessity="recommended", note="prefer the drive first")
+    panel.relations_tab.refresh()
+
+
+def test_contradictory_preferences_are_a_note_not_a_refusal(tab, panel, db):
+    contradictory_preferences(panel)
+
+    assert not tab.cycles_label.styleSheet(), "not red: nothing is wrong"
+    assert "建议顺序互相矛盾" in tab.cycles_label.text()
+    assert DRIVE in tab.cycles_label.text()
+    assert panel.data.relations.cycles() == []
+
+    panel.apply()
+
+    assert ("blocked_by", DRIVE, PSU) in triples(edges_from_db(db, DESKTOP))
+    assert "Saved" in panel.status.text()
+
+
+def deadlocked(panel) -> None:
+    """The I-2 sequence, staged: a rule edge and a manual edge that wait on each other."""
+    screw = "screw.cpu_cooler.01"
+    panel.data.apply_instance_edit(screw, "fastens", "")
+    panel.apply()
+    panel.data.relations.add(screw, "blocked_by", "cpu_cooler.fan.01",
+                             mode="tool_access", note="盖住了")
+    panel.apply()
+    panel.data.apply_instance_edit(screw, "fastens", "cpu_cooler.fan.01")
+    panel.relations_tab.refresh()
+    panel._refresh_issues()
+
+
+def test_a_refused_apply_puts_the_manual_edge_on_screen(tab, panel):
+    deadlocked(panel)
+
+    panel.apply()
+
+    assert "deadlock" in panel.status.text() or "死锁" in panel.status.text()
+    assert panel.tabs.currentWidget() is tab
+    row = tab.model.row_of("screw.cpu_cooler.01", "blocked_by", "cpu_cooler.fan.01")
+    assert row >= 0 and tab.view.currentIndex().row() == row
+
+
+def test_the_open_question_jumps_to_the_edge_too(tab, panel):
+    deadlocked(panel)
+    item = next(panel.issues.item(i) for i in range(panel.issues.count())
+                if "deadlock" in panel.issues.item(i).text())
+
+    panel._on_issue_activated(item)
+
+    assert panel.tabs.currentWidget() is tab
+    row = tab.model.row_of("screw.cpu_cooler.01", "blocked_by", "cpu_cooler.fan.01")
+    assert tab.view.currentIndex().row() == row

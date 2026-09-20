@@ -132,6 +132,10 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
             panel.sigSaved.connect(self.on_steps_saved)
             for model in (panel.steps_model, panel.instances_model):
                 model.dataChanged.connect(self._mark_steps_dirty)
+            # A staged constraint edge is an unsaved step-table edit like any
+            # other: the one gate has to know about it, or leaving Steps mode
+            # would drop it without asking.
+            panel.relations_tab.sigChanged.connect(self._mark_steps_dirty)
             self._steps_panel = panel
             self.stack.addWidget(panel)
         return self._steps_panel

@@ -1,13 +1,15 @@
 """Stage S1 panel: "步骤与实例核对" -- review the imported log of one desktop.
 
-Two tables behind a :class:`QTabWidget` (spec 4.1):
+Three tables behind a :class:`QTabWidget` (spec 4.1):
 
 * **Steps** -- one row per action, grouped under its logical step, with the
   scanner thumbnails of frames k-1 and k, the parsed target, verb, tool,
   direction, result, failure reason, difficulty and the operator's notes;
 * **Instances** -- the desktop's instance table with the relational attributes
   of spec 7.1 (parent/attached, mounted_on, fastens, socket_host, cable, screw
-  head and captive flag, group order, removal direction).
+  head and captive flag, group order, removal direction);
+* **Relations** -- stage S6: the constraint graph, with the spec 7.4 replay
+  below it (:mod:`tda.ui.panels.relations`).
 
 Below them sits the list of open questions, re-derived after every edit. The
 context menus resolve them in place: split a compound row into N actions, add
@@ -32,6 +34,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QListWidget,
+    QListWidgetItem,
     QMenu,
     QPushButton,
     QStyledItemDelegate,
@@ -43,6 +46,7 @@ from PySide6.QtWidgets import (
 
 from tda.core.db import Db
 from tda.core.taxonomy import Taxonomy, load_taxonomy
+from tda.ui.panels.relations import RelationsTab
 from tda.ui.panels.steptable_models import (
     BLANK,
     INSTANCE_COLUMNS,
@@ -68,6 +72,7 @@ __all__ = [
     "ComboDelegate",
     "DifficultyDelegate",
     "InstanceTableModel",
+    "RelationsTab",
     "StepTableModel",
     "StepTablePanel",
     "thumb_path",
@@ -75,6 +80,22 @@ __all__ = [
 
 #: How many targets a compound row is split into unless the annotator says else.
 DEFAULT_SPLIT = 2
+
+#: What an "Open questions" row stores so a double-click can jump to an edge.
+EDGE_ROLE = Qt.UserRole + 2
+
+
+def _edge_to_change(deadlock) -> object:
+    """The edge in a deadlock a human can actually do something about.
+
+    The manual one, if there is one: a rule edge is derived and can only be
+    rejected, so the way out of a loop almost always runs through the edge
+    somebody wrote. Falls back to the first edge of the loop.
+    """
+    for edge in deadlock.edges:
+        if edge.source == "manual":
+            return edge
+    return deadlock.edges[0] if deadlock.edges else None
 
 
 def _default_cache_dir() -> str:
@@ -115,6 +136,7 @@ class StepTablePanel(QWidget):
         self.instances_model = InstanceTableModel(self.data, self)
         self.steps_view = self._table(self.steps_model, STEP_COLUMNS, THUMB_PX + 8)
         self.instances_view = self._table(self.instances_model, INSTANCE_COLUMNS)
+        self.relations_tab = RelationsTab(self.data, self)
         self.issues = QListWidget(self)
         self.tabs = QTabWidget(self)
         self._build()
@@ -125,6 +147,7 @@ class StepTablePanel(QWidget):
     def _build(self) -> None:
         self.tabs.addTab(self.steps_view, "Steps")
         self.tabs.addTab(self.instances_view, "Instances")
+        self.tabs.addTab(self.relations_tab, "Relations")
         self.apply_button = QPushButton("Apply", self)
         self.revert_button = QPushButton("Revert", self)
         self.status = QLabel(BLANK, self)
@@ -155,6 +178,13 @@ class StepTablePanel(QWidget):
         ):
             view.setContextMenuPolicy(Qt.CustomContextMenu)
             view.customContextMenuRequested.connect(handler)
+        self.relations_tab.sigError.connect(self._show_error)
+        self.relations_tab.sigChanged.connect(self._on_relations_changed)
+        # The jump stays inside the panel: the Steps *table* moves, the session
+        # does not, so the window's uncommitted-edit gate is not involved and
+        # the Relations tab adds no second path around it.
+        self.relations_tab.sigGoToStep.connect(self.show_step)
+        self.issues.itemDoubleClicked.connect(self._on_issue_activated)
 
     def _table(
         self, model, columns: Sequence[Column], row_height: int = 0
@@ -187,7 +217,17 @@ class StepTablePanel(QWidget):
         self.data = StepTableData.load(self.db, desktop, self.tax)
         self.steps_model.set_data(self.data)
         self.instances_model.set_data(self.data)
+        self.relations_tab.set_data(self.data)
         self._refresh_issues()
+
+    def show_step(self, step: int) -> None:
+        """Select one logical step in the Steps table and bring it into view."""
+        row = self.steps_model.first_row_of(step)
+        if row < 0:
+            return
+        self.tabs.setCurrentWidget(self.steps_view)
+        self.steps_view.selectRow(row)
+        self.steps_view.scrollTo(self.steps_model.index(row, 0))
 
     def revert(self) -> None:
         """Throw away every unsaved edit and reload from the database."""
@@ -204,7 +244,12 @@ class StepTablePanel(QWidget):
             messages = self.data.save(self.db)
         except Exception as error:  # a failed save must not take the panel down
             self._show_error(f"could not save D{self.desktop:02d}: {error}")
+            self.relations_tab.refresh()
+            self._refresh_issues()
+            # a refused Apply names an edge; put the annotator in front of it
+            self.show_deadlock_edge()
             return
+        self.relations_tab.refresh()
         self._refresh_issues()
         # A step that became (or stopped being) a `reorient` moved a pose
         # boundary in every view, and every shape of those views is anchored to
@@ -348,11 +393,51 @@ class StepTablePanel(QWidget):
     # -- feedback ---------------------------------------------------------- #
     def _on_data_changed(self, *_args) -> None:
         self._refresh_issues()
+        # A step edit can create or settle a spec 7.4 violation (a result that
+        # becomes `failed` is the whole point of the Relations tab), so the
+        # replay is re-run with the issues.
+        self.relations_tab.refresh()
+
+    def _on_relations_changed(self) -> None:
+        staged = self.data.relations.dirty
+        self.status.setText("Constraint edit staged; press Apply to write it."
+                            if staged else "No constraint edit is staged.")
 
     def _refresh_issues(self) -> None:
+        """Every open question, deadlocks first.
+
+        A deadlock is the one thing in the Relations tab that stops ``Apply``
+        from writing anything at all, so it is also said here, where the
+        annotator sees it from the Steps and Instances tabs too.
+        """
         self.issues.clear()
+        for deadlock in self.data.relations.cycles():
+            item = QListWidgetItem(
+                f"约束死锁 / deadlock (Apply refuses): {deadlock.label()}")
+            edge = _edge_to_change(deadlock)
+            if edge is not None:
+                # double-clicking jumps to the edge a human can actually change
+                item.setData(EDGE_ROLE, [edge.target, edge.type, edge.blocker])
+            self.issues.addItem(item)
         self.issues.addItems(self.data.issues)
         self.issues.addItems(f"state event: {m}" for m in self.data.messages)
+
+    def _on_issue_activated(self, item: QListWidgetItem) -> None:
+        """A deadlock line points at an edge: show it in the Relations tab."""
+        edge = item.data(EDGE_ROLE)
+        if not edge:
+            return
+        self.tabs.setCurrentWidget(self.relations_tab)
+        self.relations_tab.show_edge(*edge)
+
+    def show_deadlock_edge(self) -> None:
+        """Select the edge of the first deadlock, the one a human can change."""
+        for deadlock in self.data.relations.cycles():
+            edge = _edge_to_change(deadlock)
+            if edge is not None:
+                self.tabs.setCurrentWidget(self.relations_tab)
+                self.relations_tab.show_edge(edge.target, edge.type, edge.blocker)
+                return
 
     def _show_error(self, message: str) -> None:
         self.status.setText(f"Rejected: {message}")

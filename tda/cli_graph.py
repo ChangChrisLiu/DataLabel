@@ -6,7 +6,7 @@
                                   [--report PATH]
 
 Spec 7 was implemented and never called. :func:`~tda.core.graph.propose_edges`,
-:func:`~tda.core.graph.find_cycles` and
+:func:`~tda.core.graph.find_deadlocks` and
 :func:`~tda.core.graph.validate_sequence` had no caller outside the tests, so
 the only ``relation`` rows the database held came from the Label Studio import
 and every VLM export wrote ``"graph_version": None``. This command is the
@@ -21,7 +21,7 @@ Per desktop, in one transaction:
    touches nothing else: an edge a human wrote or the Label Studio import
    brought keeps its reason, its status and its provenance, even when the rules
    would have derived the same triple;
-4. :func:`~tda.core.graph.find_cycles` checks the spec 7.4 acyclicity
+4. :func:`~tda.core.graph.find_deadlocks` checks the spec 7.4 acyclicity
    invariant, and ``--validate`` additionally replays the log against the graph;
 5. a content hash of the resulting edge set is stamped in the desktop meta as
    ``graph_version``, so an export can say which graph it shipped.
@@ -50,17 +50,15 @@ from tda.core.db import Db
 from tda.core.graph import (
     HARD_TYPES,
     Edge,
-    constraint_edges,
     edge_digest,
     edges_from_db,
-    edges_to_db,
-    find_cycles,
+    find_deadlocks,
     graph_version,
     is_provisional,
-    propose_edges,
     unresolved_fan_owners,
     validate_sequence,
 )
+from tda.core.graph_derive import Derivation, derive_edges, write_derivation
 from tda.core.taxonomy import Taxonomy, load_taxonomy
 
 __all__ = [
@@ -91,16 +89,26 @@ Triple = tuple[str, str, str]
 # --------------------------------------------------------------------------- #
 @dataclass
 class DesktopGraph:
-    """What ``constraints`` derived, stored and found for one desktop."""
+    """What ``constraints`` derived, stored and found for one desktop.
+
+    ``by_type`` and :attr:`edges` count the **active** edges -- what the graph
+    actually gates with. A rejected rule edge and an orphaned decision are rows
+    the table still holds and are reported on their own lines, because a number
+    that quietly includes them is not "the size of the graph".
+    """
 
     desktop: int
     status: str = "applied"  # applied | failed
     by_type: dict[str, int] = field(default_factory=dict)
-    stored: int = 0  # rule edges written
+    stored: int = 0  # rule edges the rules propose and own
     removed: int = 0  # rule edges the rules no longer propose
-    protected: int = 0  # manual / Label Studio edges left alone
+    accepted: int = 0  # rule edges a human accepted (spec 7.3)
+    rejected: int = 0  # ... and rejected
+    orphans: list[str] = field(default_factory=list)  # decisions without a rule edge
+    manual: int = 0  # edges a human wrote
+    imported: int = 0  # hard edges from the Label Studio import
     protected_other: int = 0  # rows of a type that is not a hard constraint
-    cycles: list[list[str]] = field(default_factory=list)
+    cycles: list[str] = field(default_factory=list)  # deadlock labels
     violations: list[str] = field(default_factory=list)
     unresolved: list[str] = field(default_factory=list)
     version: Optional[str] = None
@@ -110,6 +118,11 @@ class DesktopGraph:
     @property
     def edges(self) -> int:
         return sum(self.by_type.values())
+
+    @property
+    def decided(self) -> int:
+        """Rule edges a human has decided about, orphans included."""
+        return self.accepted + self.rejected + len(self.orphans)
 
     @property
     def hints(self) -> list[str]:
@@ -179,10 +192,6 @@ class GraphRun:
 # --------------------------------------------------------------------------- #
 # one desktop
 # --------------------------------------------------------------------------- #
-def _triple(edge: Edge) -> Triple:
-    return (edge.type, edge.target, edge.blocker)
-
-
 def _settled(db: Db, desktop: int) -> dict:
     """The desktop's instances without the Label Studio drafts.
 
@@ -193,56 +202,50 @@ def _settled(db: Db, desktop: int) -> dict:
     return {k: rec for k, rec in db.instances(desktop).items() if not is_provisional(k)}
 
 
-def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
-               validate: bool) -> DesktopGraph:
-    """Derive, store and check one desktop's graph inside a single transaction."""
-    instances = _settled(db, desktop)
-    proposed = [
-        Edge(type=e.type, target=e.target, blocker=e.blocker, necessity=e.necessity,
-             mode=e.mode, reason=e.reason, source=RULE, evidence_step=e.evidence_step,
-             status=e.status)
-        for e in propose_edges(instances, tax)
-    ]
-    existing = edges_from_db(db, desktop)
-    keep = [e for e in existing if e.source != RULE]
-    # Only the five hard-constraint types of spec 7.2 are the *constraint graph*.
-    # The Label Studio import also files `partner_of` / `is_pre-request_of` rows
-    # in the same table; they are annotations of another kind, they gate nothing,
-    # and feeding them to `find_cycles` or `unmet` invents eight cycles and a
-    # stack of violations out of rows nobody claimed were constraints. They are
-    # left exactly where they are and counted apart.
-    protected = {_triple(e): e for e in constraint_edges(keep)}
-    proposed_triples = {_triple(p) for p in proposed}
-    stale = [_triple(e) for e in existing
-             if e.source == RULE and _triple(e) not in proposed_triples]
-    to_store = [e for e in proposed if _triple(e) not in protected]
-
-    # What the desktop's constraint graph will be afterwards: the rules' edges
-    # plus every hard edge a human or the import owns. Cycles, the replay and the
-    # version are all asked of *that*, so a dry run and a real run answer the
-    # same thing -- and a manual `blocked_by` that closes a loop with a rule edge
-    # is caught.
-    effective = to_store + list(protected.values())
-    out = DesktopGraph(
+def _summary(desktop: int, derivation: Derivation, instances: dict, tax: Taxonomy,
+             validate: bool) -> DesktopGraph:
+    """The run record of one derivation, before anything is written."""
+    counts = derivation.counts()
+    return DesktopGraph(
         desktop=desktop,
-        by_type=dict(Counter(e.type for e in effective)),
-        stored=len(to_store),
-        removed=len(stale),
-        protected=len(protected),
-        protected_other=len(keep) - len(protected),
-        cycles=find_cycles(effective),
-        unresolved=unresolved_fan_owners(instances),
-        version=edge_digest(effective),
+        by_type=derivation.by_type,
+        stored=counts["rule"],
+        removed=counts["stale"],
+        accepted=counts["decided"] - counts["rejected"] - counts["orphaned"],
+        rejected=counts["rejected"],
+        orphans=[f"{e.status} {e.label()}" for e in derivation.orphans],
+        manual=counts["manual"],
+        imported=counts["imported"],
+        protected_other=counts["other"],
+        cycles=[d.label() for d in find_deadlocks(derivation.edges, instances, tax)],
+        version=edge_digest(derivation.edges),
         validated=validate,
     )
+
+
+def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
+               validate: bool) -> DesktopGraph:
+    """Derive, store and check one desktop's graph inside a single transaction.
+
+    The derivation itself is :func:`tda.core.graph_derive.derive_edges`, which
+    the S1 ``Apply`` runs too -- there is one set of rules and one answer, so
+    the Relations tab cannot describe a graph the command line would not write.
+    Only the five hard types of spec 7.2 are the constraint graph; the Label
+    Studio ``partner_of`` rows share the table, gate nothing, and are left
+    exactly where they are and counted apart.
+    """
+    instances = _settled(db, desktop)
+    stored = edges_from_db(db, desktop)
+    derivation = derive_edges(instances, stored, tax)
+    out = _summary(desktop, derivation, instances, tax, validate)
+    out.unresolved = unresolved_fan_owners(instances)
     if validate:
-        out.violations = validate_sequence(instances, effective, db.actions(desktop), tax)
+        out.violations = validate_sequence(
+            instances, derivation.edges, db.actions(desktop), tax)
     if dry_run:
         return out
     with db.transaction():
-        for rel_type, target, blocker in stale:
-            db.delete_relation(desktop, rel_type, target, blocker)
-        edges_to_db(db, desktop, to_store)
+        write_derivation(db, desktop, derivation, stored)
         # read the accessor back rather than stamping the digest computed above:
         # the meta and `graph.graph_version` are then the same answer by
         # construction, which is what the exports quote
@@ -254,8 +257,9 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
         })
         db.log_op(
             desktop, OP_VIEW, OP_KIND,
-            {"stored": out.stored, "removed": out.removed, "version": out.version},
-            {"removed": [list(t) for t in stale]}, ANNOTATOR,
+            {"stored": out.stored, "removed": out.removed,
+             "orphaned": len(out.orphans), "version": out.version},
+            {"removed": [list(t) for t in derivation.stale]}, ANNOTATOR,
         )
     return out
 
@@ -317,12 +321,20 @@ def _log_desktop(log, prefix: str, one: DesktopGraph) -> None:
         return
     other = f", {one.protected_other} non-constraint rows untouched" \
         if one.protected_other else ""
-    log(f"{prefix} D{one.desktop:02d}: {one.edges} edges "
-        f"({one.stored} rule, {one.protected} kept, {one.removed} dropped{other}), "
-        f"{len(one.cycles)} cycles, {len(one.violations)} violations, "
+    # the breakdown is of the ROWS the table holds and does not add up to the
+    # active total (a rejected or orphaned row gates nothing), so it is fenced
+    # off rather than left looking like a sum
+    log(f"{prefix} D{one.desktop:02d}: {one.edges} active edges; rows: "
+        f"{one.stored} rule + {one.decided} decided "
+        f"({one.rejected} rejected, {len(one.orphans)} orphaned) + "
+        f"{one.manual} manual + {one.imported} imported{other}; "
+        f"{one.removed} rule rows dropped; "
+        f"{len(one.cycles)} deadlocks, {len(one.violations)} violations, "
         f"graph_version {one.version or '-'}")
     for cycle in one.cycles:
-        log(f"{prefix}   CYCLE {' -> '.join(cycle)}")
+        log(f"{prefix}   DEADLOCK {cycle}")
+    for text in one.orphans:
+        log(f"{prefix}   ORPHANED DECISION {text} (its rule edge is no longer derived)")
     for text in one.unresolved:
         log(f"{prefix}   {text}")
 
@@ -341,17 +353,21 @@ def constraints_report(run: GraphRun) -> str:
         + (" --dry-run" if run.dry_run else "") + "`.",
         "",
         f"- desktops: {len(applied)} stored, {len(run.failed)} failed",
-        f"- edges: {run.edges} ("
+        f"- edges: {run.edges} active ("
         + ", ".join(f"{t} {run.by_type.get(t, 0)}" for t in HARD_TYPES) + ")",
-        f"- cycles: {run.cycles}",
+        f"- decided by hand: {sum(r.accepted for r in applied)} accepted, "
+        f"{sum(r.rejected for r in applied)} rejected, "
+        f"{sum(len(r.orphans) for r in applied)} orphaned; "
+        f"{sum(r.manual for r in applied)} manual edges",
+        f"- deadlocks (spec 7.4): {run.cycles}",
         f"- violations: {run.violations}"
         + (f" ({sum(len(r.breaches) for r in applied)} likely log gaps, "
            f"{sum(len(r.hints) for r in applied)} failed attempts wanting a "
            f"manual blocked_by)" if run.validate
            else " (not checked; pass --validate)"),
         "",
-        "| desktop | edges | " + " | ".join(HARD_TYPES)
-        + " | cycles | violations | graph_version |",
+        "| desktop | active edges | " + " | ".join(HARD_TYPES)
+        + " | deadlocks | violations | graph_version |",
         "|---|---|" + "---|" * len(HARD_TYPES) + "---|---|---|",
     ]
     for r in run.runs:
@@ -373,17 +389,29 @@ def _desktop_section(r: DesktopGraph) -> list[str]:
     lines = [f"## D{r.desktop:02d}", ""]
     if r.status == "failed":
         return lines + [f"- FAILED: {r.error}", ""]
-    lines.append("- edges: "
+    lines.append("- active edges: "
                  + ", ".join(f"{t} {r.by_type.get(t, 0)}" for t in HARD_TYPES))
     lines.append(f"- graph_version: `{r.version or '-'}`")
-    lines.append(f"- rule edges written: {r.stored}, dropped: {r.removed}; "
-                 f"manual / Label Studio hard edges kept: {r.protected}; "
+    lines.append(f"- rule edges: {r.stored} derived, {r.removed} dropped")
+    lines.append(f"- decided by hand: {r.accepted} accepted, {r.rejected} rejected, "
+                 f"{len(r.orphans)} orphaned (the rule edge is no longer derived)")
+    lines.append(f"- manual edges: {r.manual}; Label Studio hard edges: {r.imported}; "
                  f"rows of a non-constraint type left untouched: {r.protected_other}")
     lines.append("")
-    lines.append("### cycles")
+    if r.orphans:
+        lines.append("### decisions whose rule edge is no longer derived")
+        lines.append("")
+        lines.append("A rule edge these decisions were about is not derived any more, "
+                     "so they gate nothing and are counted apart. In the Relations tab: "
+                     "keep one as a manual edge, or clear it.")
+        lines.append("")
+        lines.extend(f"- {text}" for text in r.orphans)
+        lines.append("")
+    lines.append("### deadlocks (spec 7.4)")
     lines.append("")
-    lines.extend([f"- {' -> '.join(cycle)}" for cycle in r.cycles]
-                 or ["- none (the graph is acyclic, as spec 7.4 requires)"])
+    lines.extend([f"- {cycle}" for cycle in r.cycles]
+                 or ["- none (no loop of actions waits on itself, as spec 7.4 "
+                     "requires; the graph is acyclic in the sense that matters)"])
     lines.append("")
     lines.append("### likely log gaps")
     lines.append("")

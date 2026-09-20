@@ -64,10 +64,11 @@ def _column(model, title: str) -> int:
 # --------------------------------------------------------------------------- #
 # construction
 # --------------------------------------------------------------------------- #
-def test_panel_builds_with_two_tabs(panel):
-    assert panel.tabs.count() == 2
+def test_panel_builds_with_three_tabs(panel):
+    assert panel.tabs.count() == 3
     assert panel.tabs.tabText(0) == "Steps"
     assert panel.tabs.tabText(1) == "Instances"
+    assert panel.tabs.tabText(2) == "Relations"
 
 
 def test_step_model_row_and_column_counts(panel):

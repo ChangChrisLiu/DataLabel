@@ -9,7 +9,8 @@ the dataset needs and the spec deliberately does *not* store (spec 7.1):
 * :func:`unmet`                    -- which of them are not satisfied yet;
 * :func:`legal_actions`            -- "what can be removed now" (V-task truth);
 * :func:`validate_sequence`        -- the spec 7.4 replay check over a real log;
-* :func:`find_cycles`              -- the spec 7.4 acyclicity check;
+* :func:`find_deadlocks`           -- the spec 7.4 acyclicity check, as a loop
+  of *actions* (it lives with the planner, which decides the same question);
 * :func:`remaining_plan`           -- "what next", as a shortest legal sequence;
 * :func:`graph_version`            -- which graph an export shipped.
 
@@ -26,7 +27,7 @@ from __future__ import annotations
 import hashlib
 from typing import Optional, Union
 
-from tda.core.graph_plan import remaining_plan
+from tda.core.graph_plan import Deadlock, find_deadlocks, remaining_plan
 from tda.core.graph_rules import (
     BLOCKED_MODES,
     Edge,
@@ -57,6 +58,7 @@ from tda.core.taxonomy import Taxonomy
 
 __all__ = [
     "BLOCKED_MODES",
+    "Deadlock",
     "Edge",
     "GATED_VERBS",
     "GATES",
@@ -70,7 +72,7 @@ __all__ = [
     "edge_digest",
     "edges_from_db",
     "edges_to_db",
-    "find_cycles",
+    "find_deadlocks",
     "gated_verbs",
     "graph_version",
     "infer_relational_fields",
@@ -113,14 +115,18 @@ def applicable_preconditions(edges: list[Edge], action: ActionLike) -> list[Edge
     taken away but not swung aside. A verb nothing can block (only ``reorient``
     today) has no preconditions at all.
 
+    A ``blocked_by`` edge gates by its ``mode`` (spec 7.1): a cable under
+    tension stops the part leaving, a blocked path stops it moving as well, and
+    only ``tool_access`` stops you reaching its own screws and plugs.
+
     ``action`` is an :class:`~tda.core.model.ActionRec` or a plain
-    ``(verb, target)`` pair. Rejected edges are dropped.
+    ``(verb, target)`` pair. Rejected and orphaned edges are dropped.
     """
     verb, target = _verb_target(action)
     if verb not in GATED_VERBS:
         return []
     return [e for e in active_edges(edges)
-            if e.target == target and verb in gated_verbs(e.type)]
+            if e.target == target and verb in gated_verbs(e.type, e.mode)]
 
 
 def _necessity_rank(necessity: str) -> int:
@@ -267,75 +273,6 @@ def validate_sequence(
                 "has no unmet constraint - missing edge?"
             )
     return problems
-
-
-# --------------------------------------------------------------------------- #
-# 4. cycles (spec 7.4: the graph must be acyclic)
-# --------------------------------------------------------------------------- #
-def find_cycles(edges: list[Edge]) -> list[list[str]]:
-    """Every cycle of the ``target -> blocker`` graph, as sorted node lists.
-
-    Iterative Tarjan, so a pathological chain cannot blow the recursion limit.
-    Returns each strongly connected component of more than one node, plus every
-    self-loop; an acyclic graph gives ``[]``. Components and their nodes come
-    back sorted, so the result is stable across runs.
-    """
-    graph: dict[str, list[str]] = {}
-    selfish: set[str] = set()
-    for edge in active_edges(edges):
-        graph.setdefault(edge.target, []).append(edge.blocker)
-        graph.setdefault(edge.blocker, [])
-        if edge.target == edge.blocker:
-            selfish.add(edge.target)
-    for succ in graph.values():
-        succ.sort()
-
-    index: dict[str, int] = {}
-    low: dict[str, int] = {}
-    on_stack: set[str] = set()
-    stack: list[str] = []
-    counter = 0
-    found: list[list[str]] = []
-
-    for root in sorted(graph):
-        if root in index:
-            continue
-        # (node, iterator position) frames, expanded by hand instead of recursing
-        work: list[tuple[str, int]] = [(root, 0)]
-        index[root] = low[root] = counter
-        counter += 1
-        stack.append(root)
-        on_stack.add(root)
-        while work:
-            node, at = work[-1]
-            succ = graph[node]
-            if at < len(succ):
-                work[-1] = (node, at + 1)
-                nxt = succ[at]
-                if nxt not in index:
-                    index[nxt] = low[nxt] = counter
-                    counter += 1
-                    stack.append(nxt)
-                    on_stack.add(nxt)
-                    work.append((nxt, 0))
-                elif nxt in on_stack:
-                    low[node] = min(low[node], index[nxt])
-                continue
-            work.pop()
-            if work:
-                parent = work[-1][0]
-                low[parent] = min(low[parent], low[node])
-            if low[node] == index[node]:
-                component: list[str] = []
-                while True:
-                    member = stack.pop()
-                    on_stack.discard(member)
-                    component.append(member)
-                    if member == node:
-                        break
-                if len(component) > 1 or component[0] in selfish:
-                    found.append(sorted(component))
-    return sorted(found)
 
 
 # --------------------------------------------------------------------------- #
