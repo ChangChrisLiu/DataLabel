@@ -37,6 +37,7 @@ EXPECTED_TABLES = {
     "instance",
     "state_event",
     "pose_segment",
+    "pose_break",
     "frame_transform",
     "shape_keyframe",
     "shape_part",
@@ -70,7 +71,7 @@ def _tables(conn: sqlite3.Connection) -> set[str]:
 def test_schema_creation_is_idempotent_and_sets_pragmas(tmp_db_path: str):
     db = Db(tmp_db_path)
     assert _tables(db.conn) >= EXPECTED_TABLES
-    assert db.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "3"
+    assert db.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "4"
     assert db.conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
     assert db.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     db.close()

@@ -49,6 +49,23 @@ class RecheckMixin:
             )
         return wanted
 
+    def frozen_steps(self, desktop: int, view: str) -> list[int]:
+        """Steps of one view a human has frozen: the frame, or any row in it.
+
+        "Frozen" is the same notion :meth:`tda.core.truth.TruthService` works
+        with, and it is one query so that a caller who needs to queue only
+        *part* of a view (a pose re-cut reaches two segments, not a hundred
+        frames) cannot end up asking a different question than
+        :meth:`queue_rechecks_for_view` does.
+        """
+        rows = self.conn.execute(
+            "SELECT step FROM frame WHERE desktop=? AND view=? AND review_status='verified' "
+            "UNION "
+            "SELECT step FROM compiled_mask WHERE desktop=? AND view=? AND status='verified'",
+            (int(desktop), str(view), int(desktop), str(view)),
+        ).fetchall()
+        return sorted({int(r["step"]) for r in rows})
+
     def queue_rechecks_for_view(self, desktop: int, view: str) -> list[int]:
         """Queue **every frozen frame** of one view; returns the steps queued.
 
@@ -63,13 +80,7 @@ class RecheckMixin:
         with: the frame's own ``review_status``, or any compiled row a human
         signed. Queueing is idempotent, so a caller may be generous.
         """
-        rows = self.conn.execute(
-            "SELECT step FROM frame WHERE desktop=? AND view=? AND review_status='verified' "
-            "UNION "
-            "SELECT step FROM compiled_mask WHERE desktop=? AND view=? AND status='verified'",
-            (int(desktop), str(view), int(desktop), str(view)),
-        ).fetchall()
-        return self.add_rechecks(desktop, view, [int(r["step"]) for r in rows])
+        return self.add_rechecks(desktop, view, self.frozen_steps(desktop, view))
 
     def rechecks(self, desktop: int, view: Optional[str] = None) -> list[int]:
         """Logical steps still waiting for a re-check, ascending."""

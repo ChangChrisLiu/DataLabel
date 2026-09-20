@@ -21,7 +21,7 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Iterator, Optional
 
-__all__ = ["MIGRATIONS", "ConnectionMixin"]
+__all__ = ["ADDED_TABLES", "MIGRATIONS", "ConnectionMixin"]
 
 #: Columns added after schema_version 1, per table. Every one an existing
 #: database is missing is added when it is opened, so upgrading is just
@@ -42,6 +42,14 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "bench_roi_json": "TEXT",
     },
 }
+#: Tables that arrived whole with a later schema version. ``schema.sql`` is
+#: replayed on every open and every statement in it is ``IF NOT EXISTS``, so an
+#: older file simply gains them -- this list exists so that "which version added
+#: what" is answerable from the code rather than from the git history.
+#:
+#: * version 3: ``recheck_queue``
+#: * version 4: ``pose_break`` (per-view pose breaks, spec 2.5 v1.5)
+ADDED_TABLES: dict[int, tuple[str, ...]] = {3: ("recheck_queue",), 4: ("pose_break",)}
 
 
 class ConnectionMixin:

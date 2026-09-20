@@ -50,7 +50,7 @@ from tda.core.model import (
     ZOrderRec,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 #: ``desktop`` meta key holding the classes whose implied instance the annotator
 #: has deleted (:meth:`Db.declined_implied`). Meta rather than a table: it is one
 #: short list per desktop and it has to survive a ``--force`` re-import, which
