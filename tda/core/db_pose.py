@@ -707,6 +707,20 @@ class PoseSegmentMixin:
                     (target, desktop, view, step))
 
     # -- carrying shapes across a new boundary --------------------------------
+    def straddling_keyframes(self, desktop: int, view: str, boundary: int) -> list[int]:
+        """Ids of the shapes a new segment starting at ``boundary`` would cut through.
+
+        What the split dialog shows the annotator before they decide, and --
+        via :meth:`_straddling_ids` -- exactly the set a carried re-cut would
+        duplicate, so the number on the dialog cannot disagree with what
+        happens.
+        """
+        starts = {int(s["seg"]): int(s["start_step"])
+                  for s in self.pose_segments(desktop, view)
+                  if s["start_step"] is not None}
+        return [kid for kid, _b in
+                self._straddling_ids(desktop, view, starts, [int(boundary)])]
+
     def _carry_keyframes(self, desktop: int, view: str, plan: RecutPlan,
                          carry: list[int]) -> list[tuple[int, int]]:
         """``(keyframe id, boundary)`` for every shape a carried boundary cuts through.
@@ -714,20 +728,25 @@ class PoseSegmentMixin:
         Read **before** anything is re-keyed, because "which shapes straddle
         this boundary" is a question about the segment as it still is.
         """
-        if not carry:
+        return self._straddling_ids(
+            desktop, view, {seg: start for seg, start, _end in plan.old}, carry)
+
+    def _straddling_ids(self, desktop: int, view: str, starts: dict[int, int],
+                        at: list[int]) -> list[tuple[int, int]]:
+        """``(keyframe id, boundary)`` per chain of ``(instance, placement, segment)``."""
+        if not at or not starts:
             return []
-        keys = ", ".join("?" * len(plan.renumber))
+        keys = ", ".join("?" * len(starts))
         rows = self.conn.execute(
             f"SELECT id, instance, placement, pose_segment, anchor_step, source "
             f"FROM shape_keyframe WHERE desktop=? AND view=? AND pose_segment IN ({keys}) "
-            f"ORDER BY anchor_step, id", (desktop, view, *sorted(plan.renumber))).fetchall()
-        starts = {seg: start for seg, start, _end in plan.old}
+            f"ORDER BY anchor_step, id", (desktop, view, *sorted(starts))).fetchall()
         chains: dict[tuple, list] = {}
         for row in rows:
             chains.setdefault(
                 (row["instance"], row["placement"], int(row["pose_segment"])), []).append(row)
         out: list[tuple[int, int]] = []
-        for boundary in carry:
+        for boundary in at:
             for (_inst, _place, seg), chain in chains.items():
                 anchors = [int(r["anchor_step"]) for r in chain]
                 if boundary - 1 in anchors:

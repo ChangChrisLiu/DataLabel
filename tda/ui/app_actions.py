@@ -200,6 +200,9 @@ ACTIONS: tuple[Action, ...] = (
            "选中实例下移一层", "edit", (+1,), _ANN, repeat=True),
     Action("edit_roi", ("Shift+R",), "act_edit_roi", "Re-edit the ROI",
            "重新框定 ROI（机箱范围）", "edit", (), _ANN),
+    Action("split_pose", ("Ctrl+Shift+B",), "act_split_pose",
+           "Split pose segment at this frame",
+           "从这一帧起断开位姿段（本视角）", "edit", (), _ANN),
     # -- display ------------------------------------------------------------
     Action("toggle_overlays", ("A",), "act_toggle_overlays", "All overlays on/off",
            "开关全部标注图层", "display", (), _ANN_REV),
