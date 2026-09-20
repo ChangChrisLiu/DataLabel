@@ -139,7 +139,7 @@ def encode_rle(mask: np.ndarray, window: Optional[Box] = None) -> dict:
     produced the mask may pass one.
     """
     arr = _as_bool(mask)
-    if window is None:
+    if window is None or arr.size == 0:
         rle = coco_mask.encode(np.asfortranarray(arr.view(np.uint8)))
     else:
         x0, y0, x1, y1 = (int(v) for v in window)

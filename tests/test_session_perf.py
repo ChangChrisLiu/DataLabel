@@ -344,7 +344,7 @@ def test_gui_thread_budgets_at_full_scanner_resolution(qapp, tmp_path):
             rect(100, 100, 1500 - attempt, 1500 - attempt, (1600, 1600))
         )
 
-    _, commit_runs = best_of(commit, before_commit)
+    _, commit_runs = best_of(commit, before_commit, times=BEST_OF_12MP)
     assert min(reached) >= 20  # it really does reach that far
 
     def warm(attempt: int) -> None:
@@ -431,7 +431,7 @@ def test_confirming_a_frame_is_under_budget_at_full_scanner_resolution(
         session.db.set_frame_flags(FrameKey(DESKTOP, step, VIEW), review_status=None)
         compiles.clear()
 
-    _, confirm_runs = best_of(confirm, before_confirm)
+    _, confirm_runs = best_of(confirm, before_confirm, times=BEST_OF_12MP)
     # The frame Space confirmed was compiled by nobody on this thread: it came
     # from the prefetch and the truth service proved it still current. Stepping
     # back to k-2 afterwards does compile that frame -- arriving anywhere does,
@@ -460,6 +460,13 @@ BUDGET_COMMIT = 0.45
 BUDGET_CONFIRM = 0.6
 BUDGET_FRAME_CHANGE = 0.15
 BUDGET_TIMELINE_JUMP = 0.5
+#: Samples per gesture here, against :data:`BEST_OF` elsewhere. This machine is
+#: shared, and a 12 MP gesture is long enough that being descheduled once
+#: doubles it: a full-suite run with another worker on the box measured 0.56,
+#: 0.58 and 0.59 s for a commit that is 0.30 s on its own. Five samples is the
+#: same guard as three -- a regression makes every one of them slow -- with a
+#: better chance of catching a moment when the machine is this test's.
+BEST_OF_12MP = 5
 
 
 @pytest.mark.slow
@@ -520,7 +527,7 @@ def test_gui_thread_budgets_on_a_12mp_frame_with_forty_instances(qapp, tmp_path)
         session.compiled()
         session.image()
 
-    _, change_runs = best_of(change, before_change)
+    _, change_runs = best_of(change, before_change, times=BEST_OF_12MP)
 
     def before_jump(attempt: int) -> None:
         session.goto(BOARD_STEP - 2)
@@ -532,7 +539,7 @@ def test_gui_thread_budgets_on_a_12mp_frame_with_forty_instances(qapp, tmp_path)
         session.compiled()
         session.image()
 
-    _, jump_runs = best_of(jump, before_jump)
+    _, jump_runs = best_of(jump, before_jump, times=BEST_OF_12MP)
 
     session.close(force=True)
     _under(BUDGET_COMMIT, "commit", commit_runs)

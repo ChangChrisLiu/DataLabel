@@ -193,7 +193,11 @@ def commit_edit(db: Db, truth: TruthService, key: FrameKey, instance: str,
                                       extra)
     if scope not in (api.SCOPE_KEYFRAME, api.SCOPE_SPLIT):
         raise SessionRefusal(f"unknown commit scope {scope!r}")
-    parts = [ShapePart(MAIN, masks.encode_rle(edited))]
+    # The mask comes off the canvas overlay, so it is C-ordered and encoding it
+    # means transposing a 12 MP canvas -- 40 ms of every commit on an OAK frame.
+    # Its bounding box is measured here rather than trusted (0.5 ms) and the
+    # encode then only touches what the box holds.
+    parts = [ShapePart(MAIN, masks.encode_rle(edited, masks.bbox(edited)))]
     return _commit_shape(db, truth, key, instance, parts, GEOM_MASK, scope, direction,
                          cache, annotator, pair=pair, extra=extra)
 
