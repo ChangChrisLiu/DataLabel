@@ -516,6 +516,26 @@ def _label_for(box: Optional[tuple], ratio: float, *, present: bool = True) -> s
 
 
 
+def _publish(mask: Optional[np.ndarray]) -> None:
+    """Mark a mask the compiler hands out as **read-only**, in place.
+
+    A compiled frame is shared: the canvas overlay, the truth table, the
+    difference map's "what is already explained" and the scope suggestion all
+    read the same arrays, and the overlay goes further and treats *the same
+    array object* as "the same pixels" so that a commit's second repaint costs
+    nothing.  An in-place edit of one of these would therefore not just give
+    one caller a surprise -- it would leave a picture on screen that disagrees
+    with what is stored, silently.
+
+    So it raises instead.  This is the rule
+    :func:`tda.core.masks.decode_rle_shared` already applies to the shapes it
+    memoises, for the same reason; a caller that needs to write takes its own
+    copy.
+    """
+    if mask is not None:
+        mask.setflags(write=False)
+
+
 def _instance_order(layers: list[LayerKey]) -> list[str]:
     """The instance keys of a painted layer list, bottom-up, each one once.
 
@@ -853,6 +873,10 @@ def compile_frame(
             window=None if visible is None else visible_window,
             amodal_window=window,
         )
+
+    for inst_rec in compiled.values():
+        _publish(inst_rec.visible)
+        _publish(inst_rec.amodal)
 
     return CompiledFrame(
         key=key,
