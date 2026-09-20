@@ -159,14 +159,22 @@ FORCED = {
 }
 
 
-def build(db: Db, *, views=VIEWS, verified_steps=STEPS) -> Taxonomy:
-    """Seed ``db`` with the whole scene and return the taxonomy it was built on."""
+def build(db: Db, *, views=VIEWS, verified_steps=STEPS, skip_actions=()) -> Taxonomy:
+    """Seed ``db`` with the whole scene and return the taxonomy it was built on.
+
+    ``skip_actions`` drops the action of those steps from the log without
+    dropping the step, which is what a real log gap looks like: with ``(2,)``
+    the PSU comes out at step 5 with its screw still fastened, and the graph
+    says that was impossible -- one of the 18 lines of
+    ``reports/constraints_report.md``, reproduced in miniature.
+    """
     tax = load_taxonomy()
     db.upsert_desktop(DESKTOP, {"brand": "HP", "model_family": "EliteDesk 800 G2 TWR",
                                 "chassis_type": "twr"})
     for rec in _instances():
         db.upsert_instance(rec)
-    db.replace_steps(DESKTOP, _steps(), _actions())
+    db.replace_steps(DESKTOP, _steps(),
+                     [a for a in _actions() if a.step not in set(skip_actions)])
     for view in views:
         for step in STEPS:
             db.upsert_frame(
