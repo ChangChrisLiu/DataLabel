@@ -287,9 +287,9 @@ class EditSidecar:
         # the same reason the adoptions do: a crash takes the undo history,
         # and a restored layer that lost its erasures would have them put back
         # by the next SAM prompt (round 2, E1).
-        if erased is not None and np.any(erased):
-            payload["rle_erased"] = masks.encode_rle_boxed(
-                np.asarray(erased, dtype=bool))
+        boxed = masks.BoxedMask.of(erased)
+        if boxed is not None:
+            payload["rle_erased"] = boxed.rle()
         target = self._file(key, instance)
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".tmp")
@@ -320,8 +320,7 @@ class EditSidecar:
             return None
         adopted = payload.get("adopted")
         try:
-            erased_rle = payload.get("rle_erased")
-            erased = None if erased_rle is None else masks.decode_rle(erased_rle)
+            erased = masks.BoxedMask.from_rle(payload.get("rle_erased"))
         except (ValueError, KeyError, TypeError):
             erased = None      # an unreadable protection is no protection
         return {"key": key, "instance": str(payload["instance"]), "mask": mask,

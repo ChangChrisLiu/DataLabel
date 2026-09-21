@@ -68,6 +68,22 @@ def _px(mask) -> int:
     return 0 if mask is None else int(np.count_nonzero(mask))
 
 
+def _clip_box(rect, hw):
+    """``rect`` inside ``(h, w)``, or ``None`` when none of it is."""
+    if rect is None:
+        return None
+    height, width = int(hw[0]), int(hw[1])
+    x0, y0, x1, y1 = (int(v) for v in rect)
+    box = (min(max(x0, 0), width), min(max(y0, 0), height),
+           min(max(x1, 0), width), min(max(y1, 0), height))
+    return None if box[2] <= box[0] or box[3] <= box[1] else box
+
+
+def _disjoint(a, b) -> bool:
+    """Do these two boxes not meet at all?"""
+    return a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]
+
+
 def _is_right(ev: Any) -> bool:
     """Was this press the right button?  Stubs may not answer at all."""
     button = getattr(ev, "button", None)
@@ -150,8 +166,9 @@ class EditMixin:
         self._roi_proposal: dict[tuple, tuple] = {}
         #: The segment a re-measurement was asked for on behalf of "确认建议框".
         self._roi_accept_when_measured: Optional[tuple] = None
-        #: A stored ROI whose zoom is waiting for the edit to end (M2).
-        self._roi_fit_pending = False
+        #: The segment key of a stored ROI whose zoom is waiting for the edit
+        #: to end (M2); ``None`` when nothing is owed.
+        self._roi_fit_pending: Optional[tuple] = None
         self._pending_scope: Optional[str] = None
         self._restore_offer: Optional[dict] = None
         #: The instance an ``add_bench_box`` card item armed the box tool for.
@@ -313,7 +330,7 @@ class EditMixin:
         self._roi_pending.clear()
         self._roi_proposal.clear()
         self._roi_accept_when_measured = None
-        self._roi_fit_pending = False
+        self._roi_fit_pending = None
         self.roi_proposer.cancel()
 
     def _sync_editing_layer(self, repaint: bool = True) -> None:
@@ -568,40 +585,77 @@ class EditMixin:
         self._invalidate_area_warning()
         before = getattr(tool, "stroke_before", None)
         after = self.overlay.editing
-        erased = self.next_erased(tool, before, after)
+        erased = self.next_erased(tool, before, after, rect)
         self.note_layer_change("stroke", instance, before, after)
         compat.push_stroke(self.session, instance, before, after, erased=erased)
         self.queue_sidecar(self.session.current(), instance, after)
         self.update_status()
 
-    def erased_mask(self) -> Optional[np.ndarray]:
-        """Pixels this edit has deliberately taken off, or ``None`` (E1)."""
+    def erased_mask(self):
+        """Pixels this edit has deliberately taken off, or ``None`` (E1).
+
+        A :class:`~tda.core.masks.BoxedMask`, not a canvas: see
+        :meth:`next_erased` for why.
+        """
         getter = getattr(self.session, "erased_mask", None)
         return getter() if callable(getter) else None
 
-    def next_erased(self, tool, before, after) -> Optional[np.ndarray]:
+    def next_erased(self, tool, before, after, rect=None):
         """The protected set after one change of the layer.
 
         Two rules, and they are the whole of ruling E1:
 
         * a change that **deliberately** removes pixels -- an eraser stroke, a
-          negative-point SAM result -- adds what it removed to the set;
+          negative-point SAM result, ``Shift+D``'s specks -- adds what it
+          removed to the set;
         * a pixel that is back in the layer is not erased, whatever put it
-          there. That is what makes a brush stroke over an erased patch, or a
-          positive click inside one, lift the annotator's own protection
-          without a second mechanism to keep in step.
+          there. That is what makes a brush stroke over an erased patch, a
+          positive click inside one, or ``Shift+F`` filling an erased hole,
+          lift the annotator's own protection without a second mechanism to
+          keep in step.
+
+        Both rules only ever concern pixels the change actually touched, so
+        ``rect`` -- the dirty rect the stroke already reports -- bounds the
+        work. Outside it ``after`` equals ``before``, so nothing enters the set
+        and nothing leaves it. With the set kept boxed as well, an eraser
+        stroke costs the size of the stroke instead of 27 ms of 12 MP boolean
+        algebra (round 3).
         """
         current = self.erased_mask()
         after = np.asarray(after, dtype=bool)
         deliberate = tool is self.eraser or bool(getattr(tool, "removes_pixels", False))
+        win = _clip_box(rect, after.shape) if rect is not None else (
+            (0, 0, after.shape[1], after.shape[0]))
+        if win is None:
+            return current
+        x0, y0, x1, y1 = win
+        after_win = after[y0:y1, x0:x1]
+        removed = None
         if deliberate and before is not None:
-            removed = np.asarray(before, dtype=bool) & ~after
-            if removed.any():
-                current = removed if current is None else (current | removed)
-        if current is None:
+            removed = np.asarray(before, dtype=bool)[y0:y1, x0:x1] & ~after_win
+            if not removed.any():
+                removed = None
+        if current is None and removed is None:
             return None
-        current = current & ~after
-        return current if current.any() else None
+        if current is None:
+            return _masks.BoxedMask.of_patch(after.shape, win, removed)
+        # Rebuild over the union of what is protected and what was touched;
+        # everything outside it is unchanged by construction.
+        box = (min(current.box[0], x0), min(current.box[1], y0),
+               max(current.box[2], x1), max(current.box[3], y1))
+        if removed is None:
+            box = current.box if _disjoint(current.box, win) else box
+        bx0, by0, bx1, by1 = box
+        patch = np.zeros((by1 - by0, bx1 - bx0), dtype=bool)
+        cx0, cy0, cx1, cy1 = current.box
+        patch[cy0 - by0:cy1 - by0, cx0 - bx0:cx1 - bx0] = current.patch
+        if removed is not None:
+            patch[y0 - by0:y1 - by0, x0 - bx0:x1 - bx0] |= removed
+        ox0, oy0 = max(bx0, x0), max(by0, y0)
+        ox1, oy1 = min(bx1, x1), min(by1, y1)
+        if ox1 > ox0 and oy1 > oy0:
+            patch[oy0 - by0:oy1 - by0, ox0 - bx0:ox1 - bx0] &= ~after[oy0:oy1, ox0:ox1]
+        return _masks.BoxedMask.of_patch(after.shape, box, patch)
 
     def note_layer_change(self, why: str, instance: Optional[str],
                           before, after) -> None:
@@ -752,15 +806,17 @@ class EditMixin:
             self._sidecar_written.discard(self._sidecar_id(key, instance))
 
     def set_editing_mask(self, mask: np.ndarray, undoable: bool = False,
-                         adopted: Optional[dict] = None,
-                         erased: Optional[np.ndarray] = None) -> None:
+                         adopted: Optional[dict] = None, erased=None,
+                         deliberate: bool = False) -> None:
         """Replace the editing layer everywhere it is held at once.
 
         ``adopted`` marks the change as an adopted Label Studio draft, which
         travels on the undo entry and into the crash sidecar.  ``erased`` is a
         caller that already knows the protected set -- a restored sidecar --
         saying so; everything else keeps the invariant that a pixel in the
-        layer is not an erased one.
+        layer is not an erased one.  ``deliberate`` marks a replacement that
+        **removes on purpose** (``Shift+D``'s specks), so what it takes off is
+        protected like an eraser stroke (round 3, ruling 4b).
         """
         instance = getattr(self.session, "editing_instance", None)
         before = None if self.overlay is None else self.overlay.editing.copy()
@@ -769,7 +825,8 @@ class EditMixin:
         # to it is gone with them (see ``_invalidate_area_warning``).
         self._invalidate_area_warning()
         if erased is None:
-            erased = self.next_erased(None, before, mask)
+            erased = self.next_erased(
+                self.eraser if deliberate else None, before, mask)
         if undoable and instance is not None:
             compat.push_stroke(self.session, instance, before, mask, adopted,
                                erased=erased)
@@ -795,13 +852,20 @@ class EditMixin:
 
     @S.guard
     def act_despeckle(self) -> None:
-        """``Shift+D``: drop components under :data:`DESPECKLE_MIN_PX` pixels."""
+        """``Shift+D``: drop components under :data:`DESPECKLE_MIN_PX` pixels.
+
+        A speck the annotator deleted is a deletion like any other: it joins
+        the protected set, so the next SAM prompt does not hand it back
+        (round 3, ruling 4b).  ``Shift+F`` is the mirror image and needs no
+        flag -- the pixels it *adds* leave the set by the standing invariant.
+        """
         mask = self.session.editing_mask()
         if mask is None:
             self.report("nothing is being edited")
             return
         self.set_editing_mask(
-            _masks.remove_small_components(mask, DESPECKLE_MIN_PX), undoable=True
+            _masks.remove_small_components(mask, DESPECKLE_MIN_PX),
+            undoable=True, deliberate=True,
         )
         self.report(f"removed components under {DESPECKLE_MIN_PX} px")
 

@@ -63,8 +63,8 @@ class Op:
 def edit_editing_mask_op(
     instance: str, before: np.ndarray, after: np.ndarray,
     adopted: Optional[dict] = None,
-    erased_before: Optional[np.ndarray] = None,
-    erased_after: Optional[np.ndarray] = None,
+    erased_before=None,
+    erased_after=None,
 ) -> Op:
     """Build an ``edit_editing_mask`` op from the two mask states.
 
@@ -90,12 +90,14 @@ def edit_editing_mask_op(
     # of the protected set and redoing it has to put them back, or "a manual
     # edit is never lost" would outlive the edit itself (round 2, E1).  Two
     # more encodes, and only while the set is non-empty.
-    if erased_before is not None and np.any(erased_before):
-        rle = _masks.encode_rle_boxed(np.asarray(erased_before, dtype=bool))
-        inverse["rle_erased_after"] = rle
-    if erased_after is not None and np.any(erased_after):
-        payload["rle_erased_after"] = _masks.encode_rle_boxed(
-            np.asarray(erased_after, dtype=bool))
+    # Encoded straight out of the box rather than off a 12 MP canvas: see
+    # :class:`tda.core.masks.BoxedMask` (round 3).
+    boxed_before = _masks.BoxedMask.of(erased_before)
+    boxed_after = _masks.BoxedMask.of(erased_after)
+    if boxed_before is not None:
+        inverse["rle_erased_after"] = boxed_before.rle()
+    if boxed_after is not None:
+        payload["rle_erased_after"] = boxed_after.rle()
     return Op(kind="edit_editing_mask", payload=payload, inverse=inverse)
 
 

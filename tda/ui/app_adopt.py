@@ -43,8 +43,15 @@ from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 
 __all__ = ["ADOPT_BENCH", "ADOPT_BUSY", "ADOPT_FIRST", "ADOPT_NEEDS_INSTANCE",
-           "ADOPT_NO_IMAGE", "ADOPT_RESTORE", "ADOPT_SHAPE_MISMATCH",
-           "ADOPT_WRONG_MODE", "AdoptMixin", "no_drafts_text"]
+           "ADOPT_NO_IMAGE", "ADOPT_RESTORE", "ADOPT_REVIVED",
+           "ADOPT_SHAPE_MISMATCH", "ADOPT_WRONG_MODE", "AdoptMixin",
+           "no_drafts_text"]
+
+#: Said when adopting a draft puts back pixels this edit had erased.  It is
+#: allowed -- ``Shift+A`` is the annotator asking for those pixels -- but it
+#: has to be visible, because everything *else* in the tool refuses to undo an
+#: erasure (round 3, ruling 4a).
+ADOPT_REVIVED = "（其中 {px:,} px 是你擦掉过的 / {px:,} of them had been erased）"
 
 #: Shown when ``Shift+A`` is pressed with nothing being edited.
 ADOPT_NEEDS_INSTANCE = ("先双击任务卡或实例表里的一条再按 Shift+A  "
@@ -328,12 +335,21 @@ class AdoptMixin:
                 else int(candidate.keyframe_id),
                 "instance": str(instance),
                 "frame": [int(key.desktop), int(key.step), str(key.view)]}
+        # Adopting a draft may put pixels back that the annotator rubbed out
+        # earlier in this edit.  That is allowed -- ``Shift+A`` is an explicit
+        # action, not something a prompt did behind them -- but it may not be
+        # silent (round 3, ruling 4a).
+        erased = self.erased_mask()
+        back = 0 if erased is None else int(
+            np.count_nonzero(candidate.mask & erased.full()))
         self.clear_draft_ghost()
         self.set_editing_mask(merged, undoable=True, adopted=note)
-        self.logger.info("adopted %s (step %s) into %s: %s", candidate.key,
-                         candidate.step, instance, "replace" if empty else "union")
+        self.logger.info("adopted %s (step %s) into %s: %s, %d px re-added",
+                         candidate.key, candidate.step, instance,
+                         "replace" if empty else "union", back)
         self.report(f"采纳 {candidate.key}（{'替换' if empty else '并入'}编辑层）/ "
-                    f"{'replaced' if empty else 'unioned'} from {candidate.key} "
+                    f"{'replaced' if empty else 'unioned'} from {candidate.key}"
+                    f"{ADOPT_REVIVED.format(px=back) if back else ''} "
                     f"— Enter 提交 / Esc 放弃")
         return True
 

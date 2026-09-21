@@ -37,6 +37,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal
 
+from tda.core.masks import BoxedMask
 from tda.models.sam_service import SamRequest, SamResult
 from tda.ui.canvas.overlay import LabelOverlay
 from tda.ui.canvas.sam_crop import (
@@ -395,28 +396,27 @@ class SamToolBase(CandidatesMixin, Tool):
         except TypeError:  # an older queue (or a stub) without the hook
             self.queue.submit(req, callback)
 
-    def erased_mask(self) -> Optional[np.ndarray]:
-        """The pixels this edit has deliberately taken off, or ``None``."""
+    def erased_mask(self):
+        """The pixels this edit has deliberately taken off, or ``None``.
+
+        A :class:`~tda.core.masks.BoxedMask`; the tool only ever asks it for a
+        crop or for one pixel, neither of which needs the canvas.
+        """
         provider = self.erased_provider
-        if provider is None:
+        if provider is None or self.overlay is None:
             return None
-        found = provider()
-        if found is None or self.overlay is None:
-            return None
-        found = np.asarray(found, dtype=bool)
-        return found if found.shape == self.overlay.hw else None
+        found = BoxedMask.of(provider())
+        return found if found is not None and found.hw == self.overlay.hw else None
 
     def _lifts_erasure(self, points: Sequence[Point]) -> bool:
         """Does a positive point of this prompt land on an erased pixel?"""
         erased = self.erased_mask()
         if erased is None:
             return False
-        height, width = erased.shape
         for px, py, label in points:
             if int(label) != 1:
                 continue
-            x, y = int(round(float(px))), int(round(float(py)))
-            if 0 <= y < height and 0 <= x < width and erased[y, x]:
+            if erased.at(int(round(float(px))), int(round(float(py)))):
                 return True
         return False
 
@@ -505,8 +505,8 @@ class SamToolBase(CandidatesMixin, Tool):
         # a positive point of this prompt landing inside the set: they clicked
         # there, so they want it back.  Snapshotted like the base, so a stroke
         # made afterwards cannot change what these candidates render to.
-        erased = None if lifts else self.erased_mask()
-        self._candidate_erased = None if erased is None else erased.copy()
+        # Immutable, so the snapshot is the value itself.
+        self._candidate_erased = None if lifts else self.erased_mask()
         self._apply_candidate()
 
 

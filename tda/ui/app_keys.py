@@ -76,11 +76,14 @@ class KeysMixin:
             return False
         focus = self._focus_widget()
         if A.blocks_shortcuts(focus):
+            # ``action_for`` first: ``_warn_swallowed_once`` *consumes* the
+            # once-per-episode marker, so asking it about an unbound key spent
+            # the budget and the ``B`` that followed said nothing (round 3).
             if (event.type() == QEvent.Type.KeyPress
                     and not event.isAutoRepeat()
-                    and self._warn_swallowed_once(focus)
                     and A.action_for(event.key(), event.modifiers(),
-                                     self.mode) is not None):
+                                     self.mode) is not None
+                    and self._warn_swallowed_once(focus)):
                 self.report(KEY_SWALLOWED)
             return False
         self._swallow_warned = None

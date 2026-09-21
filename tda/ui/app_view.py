@@ -257,7 +257,7 @@ class ToolsMixin:
     @S.guard
     def act_fit_roi(self) -> None:
         # ``F`` is the annotator asking for the move a mid-edit store put off.
-        self._roi_fit_pending = False
+        self._roi_fit_pending = None
         roi = self.roi()
         self.canvas.zoom_to(roi) if roi is not None else self.canvas.fit_image()
         self.update_status()

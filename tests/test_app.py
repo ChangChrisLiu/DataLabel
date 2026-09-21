@@ -1258,6 +1258,18 @@ def test_a_shortcut_that_went_into_a_text_field_says_so(window):
     assert window.handle_key(event) is False
     assert window.status_message() == "something the annotator is reading"
 
+    # Round 3: an **unbound** first keystroke must not spend the budget.
+    other = QLineEdit(window)
+    other.setFocus()
+    window.report("")
+    unbound = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Z,
+                        Qt.KeyboardModifier.NoModifier, "z")
+    assert window.handle_key(unbound) is False
+    assert window.status_message() == "", "an unbound key said something"
+    assert window.handle_key(event) is False
+    assert window.status_message() == KEY_SWALLOWED, "the budget was spent by z"
+    other.deleteLater()
+
     # A key that is *not* bound in this mode is an ordinary letter: no line.
     window.report("")
     assert window.handle_key(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Z,

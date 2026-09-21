@@ -171,7 +171,7 @@ class CandidatesMixin:
         # cannot put it back either (round 2b).
         erased = self._candidate_erased
         if erased is not None:
-            window = erased[y0:y1, x0:x1]
+            window = erased.crop((x0, y0, x1, y1))
             self._kept_out_of[index] = int(np.count_nonzero(mask & window))
             mask = mask & ~window
         if self._candidate_union:

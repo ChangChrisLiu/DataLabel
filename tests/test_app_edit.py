@@ -30,6 +30,7 @@ from app_scene import (
     make_session,
     seed_shapes,
 )
+from tda.core import masks as M
 from tda.core.cache import suggest_roi, suggest_roi_over
 from tda.core.model import FrameKey
 from tda.core.truth import StaleConflictError, TruthService
@@ -471,14 +472,17 @@ def test_an_eraser_stroke_is_remembered_as_erased(window):
 
     assert erased is not None, "the eraser stroke was not remembered"
     removed = before & ~window.overlay.editing
-    assert removed.any() and np.array_equal(erased, removed)
+    assert removed.any() and np.array_equal(erased.full(), removed)
+    # kept boxed, not as a 12 MP canvas (round 3)
+    assert erased.box == M.bbox(removed)
+    assert erased.count() == int(removed.sum())
 
 
 def test_undo_and_redo_of_an_eraser_stroke_move_the_erased_set(window):
     _seed_layer(window)
     window.act_tool("eraser")
     paint(window)
-    erased = window.erased_mask().copy()
+    erased = window.erased_mask().full()
     layer = window.overlay.editing.copy()
 
     window.act_undo()
@@ -488,21 +492,77 @@ def test_undo_and_redo_of_an_eraser_stroke_move_the_erased_set(window):
     window.act_redo()
     QApplication.processEvents()
     assert np.array_equal(window.session.editing_mask(), layer)
-    assert np.array_equal(window.erased_mask(), erased)
+    assert np.array_equal(window.erased_mask().full(), erased)
 
 
 def test_a_brush_stroke_over_erased_pixels_lifts_the_protection(window):
     _seed_layer(window)
     window.act_tool("eraser")
     paint(window)
-    assert window.erased_mask().any()
+    assert window.erased_mask().count() > 0
 
     window.act_tool("brush")
     paint(window)                       # the same place, painting it back
 
     remaining = window.erased_mask()
-    assert remaining is None or not (remaining & window.overlay.editing).any()
-    assert remaining is None or remaining.sum() < 1e9
+    assert remaining is None or not (remaining.full() & window.overlay.editing).any()
+
+
+def test_despeckled_specks_stay_removed(window):
+    """Round 3, 4b: a speck the annotator deleted is a deletion like any other."""
+    instance = first_task_instance(window)
+    window.on_request_edit(instance)
+    mask = np.zeros(window.overlay.hw, dtype=bool)
+    mask[8:40, 8:40] = True
+    mask[50, 50] = True                 # a 1 px speck
+    window.set_editing_mask(mask, undoable=True)
+
+    window.act_despeckle()
+    erased = window.erased_mask()
+
+    assert erased is not None and erased.at(50, 50), "the speck is not protected"
+    assert not window.overlay.editing[50, 50]
+
+    window.act_tool("sam_point")
+    window.sam_point.on_press(20.0, 20.0, None)
+    window.sam_queue.flush(multimask=True)
+    QApplication.processEvents()
+    assert not window.overlay.editing[50, 50], "SAM put the speck back"
+
+
+def test_filling_an_erased_hole_lifts_the_protection(window):
+    """``Shift+F`` puts pixels *in*, and anything in the layer is not erased."""
+    instance = first_task_instance(window)
+    window.on_request_edit(instance)
+    ring = np.zeros(window.overlay.hw, dtype=bool)
+    ring[10:30, 10:30] = True
+    ring[16:24, 16:24] = False          # a hole
+    window.set_editing_mask(ring, undoable=True)
+    window.act_tool("eraser")
+    window.set_editing_mask(ring, undoable=True, deliberate=True)
+    # protect the hole the way an eraser stroke would
+    window.session.set_erased_mask(~ring & _block(window, 16, 24))
+    assert window.erased_mask().at(20, 20)
+
+    window.act_fill_holes()
+
+    assert window.overlay.editing[20, 20], "the hole was not filled"
+    remaining = window.erased_mask()
+    assert remaining is None or not remaining.at(20, 20), "still protected"
+
+
+def _block(win: MainWindow, lo: int, hi: int) -> np.ndarray:
+    out = np.zeros(win.overlay.hw, dtype=bool)
+    out[lo:hi, lo:hi] = True
+    return out
+
+
+def test_adopting_a_draft_may_revive_erased_pixels_but_says_so(window):
+    """Round 3, 4a: an explicit action may, a prompt may not -- and it shows."""
+    from tda.ui.app_adopt import ADOPT_REVIVED
+
+    assert "{px" in ADOPT_REVIVED, "the clause must carry the count"
+    assert "擦掉过" in ADOPT_REVIVED and "had been erased" in ADOPT_REVIVED
 
 
 def test_the_erased_set_goes_out_with_the_edit(window):
@@ -522,20 +582,20 @@ def test_the_erased_set_travels_in_the_crash_sidecar(qapp, tmp_path):
         instance = _seed_layer(win)
         win.act_tool("eraser")
         paint(win)
-        erased = win.erased_mask().copy()
+        erased = win.erased_mask().full()
         key = win.session.current()
         win.flush_sidecar()
 
         entry = win.sidecar.pending_for(key, instance, win.overlay.hw)
         assert entry is not None
-        assert np.array_equal(entry["erased"], erased), "the sidecar lost it"
+        assert np.array_equal(entry["erased"].full(), erased), "the sidecar lost it"
 
         win.session.clear_edit()
         win._sync_editing_layer()
         win._offer_restore(key, instance)
         assert win.pending_restore() is not None
         win.restore_pending()
-        assert np.array_equal(win.erased_mask(), erased), "the restore lost it"
+        assert np.array_equal(win.erased_mask().full(), erased), "the restore lost it"
     finally:
         close_window(win)
 
@@ -545,7 +605,7 @@ def test_a_sam_result_does_not_put_an_erased_patch_back(window):
     _seed_layer(window)
     window.act_tool("eraser")
     paint(window)
-    erased = window.erased_mask().copy()
+    erased = window.erased_mask().full()
     assert erased.any()
 
     # a SAM point prompt somewhere else entirely; the stub's mask covers most
@@ -666,12 +726,42 @@ def test_storing_the_roi_mid_edit_does_not_move_the_view(qapp, tmp_path):
 
         assert tuple(win.roi()) == offered, "the rectangle was not stored"
         assert abs(win.canvas.zoom_factor() - zoom) < 1e-6, "the view moved mid-edit"
-        assert win._roi_fit_pending is True
+        assert win._roi_fit_pending == win.roi_key()
         assert "F" in win.status_message()
 
         win.act_fit_roi()                       # F: the annotator asks for it
         assert win.canvas.zoom_factor() != zoom
-        assert win._roi_fit_pending is False
+        assert win._roi_fit_pending is None
+    finally:
+        close_window(win)
+
+
+def test_the_deferred_fit_waits_for_its_own_segment(qapp, tmp_path):
+    """Round 3: a bare flag was spent by any frame change, in any view."""
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        offered = tuple(win.roi_draft)
+        win.act_clear_edit()
+        _open_edit_with_pixels(win)
+        win.canvas.set_zoom(3.0)
+        QApplication.processEvents()
+        zoom = win.canvas.zoom_factor()
+        here = win.roi_key()
+        win._roi_proposal[here] = offered
+        win.act_accept_roi_proposal()
+        assert win._roi_fit_pending == here
+
+        win.act_clear_edit()                 # drop the edit so nothing blocks
+        win.act_set_view("oak1")             # ... and go and look elsewhere
+        QApplication.processEvents()
+        assert win.session.view == "oak1"
+        assert win._roi_fit_pending == here, "the promised fit was dropped"
+
+        win.act_set_view(VIEW)
+        QApplication.processEvents()
+        assert win._roi_fit_pending is None, "it did not land on return"
+        assert win.canvas.zoom_factor() != zoom
     finally:
         close_window(win)
 
@@ -687,13 +777,13 @@ def test_the_deferred_fit_lands_on_the_next_frame_change(qapp, tmp_path):
         QApplication.processEvents()
         win._roi_proposal[win.roi_key()] = offered
         win.act_accept_roi_proposal()
-        assert win._roi_fit_pending is True
+        assert win._roi_fit_pending == win.roi_key()
 
         win.act_clear_edit()                    # drop the edit
         win.act_step(-1)
         QApplication.processEvents()
 
-        assert win._roi_fit_pending is False
+        assert win._roi_fit_pending is None
     finally:
         close_window(win)
 

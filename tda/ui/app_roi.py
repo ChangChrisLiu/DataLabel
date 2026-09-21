@@ -562,7 +562,10 @@ class RoiMixin:
         if self.has_uncommitted_edit():
             # Storing loses nothing, but moving the view under a half-drawn
             # mask does: the fit waits for the next frame change or ``F``.
-            self._roi_fit_pending = True
+            # It remembers **which segment** it owes: a bare flag was consumed
+            # by any frame change, so a glance at another view either dropped
+            # the promised fit or jumped to a different rectangle (round 3).
+            self._roi_fit_pending = answered
             self.report(ROI_FIT_DEFERRED.format(roi=accepted))
         else:
             self.canvas.zoom_to(accepted)
@@ -570,12 +573,18 @@ class RoiMixin:
         return True
 
     def fit_pending_roi(self) -> None:
-        """Do the zoom :meth:`store_roi` put off, once it is safe (round 2, M2)."""
-        if not getattr(self, "_roi_fit_pending", False):
+        """Do the zoom :meth:`store_roi` put off, once it is safe (M2).
+
+        Only for the segment it was promised for: on any other one it waits,
+        so a trip to another view neither drops it nor fits the wrong
+        rectangle (round 3).
+        """
+        wanted = getattr(self, "_roi_fit_pending", None)
+        if wanted is None or wanted != self.roi_key():
             return
         if self.has_uncommitted_edit():
             return
-        self._roi_fit_pending = False
+        self._roi_fit_pending = None
         roi = self.roi()
         if roi is not None:
             self.canvas.zoom_to(roi)
