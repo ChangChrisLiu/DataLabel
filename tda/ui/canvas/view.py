@@ -20,9 +20,11 @@ import numpy as np
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
+    QCursor,
     QImage,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
     QTransform,
@@ -38,9 +40,99 @@ from PySide6.QtWidgets import (
 
 from tda.ui.canvas.overlay import LabelOverlay
 
-__all__ = ["ImageCanvas", "MiniMap", "OverlayItem"]
+__all__ = ["CURSOR_MAX_PX", "ImageCanvas", "MiniMap", "OverlayItem", "ToolCursor",
+           "circle_cursor"]
 
 Rect = tuple[int, int, int, int]
+
+#: Largest ring a circle cursor is drawn at, in screen pixels.  Above this the
+#: platform's cursor would be scaled down (Windows) or refused, so the cursor
+#: falls back to a crosshair and the status bar's ``r=<n>`` is what says how big
+#: the brush is.  A radius that big is a fill, not a stroke.
+CURSOR_MAX_PX = 128
+#: Smallest ring that is still a ring rather than a blob.  Below it the brush
+#: family keeps its **shape** -- a ring this size with a centre dot -- rather
+#: than falling back to the crosshair every other tool uses: at 27 % zoom (the
+#: fit-to-frame the annotator works at before an ROI is stored) a default r=8
+#: brush is 5 px across, and a crosshair there made the brush, the eraser, SAM
+#: and the box tools all look identical (round 2, I2).  The badge says
+#: ``光标未按比例`` so the scale is not being claimed.
+CURSOR_MIN_PX = 9
+
+
+class ToolCursor:
+    """What cursor a tool wants: ``(kind, rgb, radius)`` with the drawing rules.
+
+    ``kind`` is one of :data:`KINDS`; ``radius`` is in **image** pixels for
+    ``circle`` (the canvas turns it into screen pixels with its own zoom, so the
+    ring is the size of the stroke the annotator is about to make) and ignored
+    otherwise.  ``dashed`` is how the eraser is told apart from the brush at a
+    glance, without relying on colour alone.
+    """
+
+    KINDS = ("circle", "cross", "arrow", "forbidden")
+
+    def __init__(self, kind: str, rgb: tuple[int, int, int] = (255, 232, 64),
+                 radius: int = 0, dashed: bool = False) -> None:
+        if kind not in self.KINDS:
+            raise ValueError(f"unknown cursor kind {kind!r}; expected {self.KINDS}")
+        self.kind = kind
+        self.rgb = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+        self.radius = max(0, int(radius))
+        self.dashed = bool(dashed)
+
+    def key(self, diameter: int, dpr: float) -> tuple:
+        """Cache key: two specs with this key produce the same cursor.
+
+        Keyed on the **drawn diameter**, not on (radius, zoom): the ring only
+        depends on how many screen pixels it ends up being, so a wheel spin
+        that lands on a size already drawn costs nothing.
+        """
+        return (self.kind, self.rgb, int(diameter), self.dashed,
+                round(float(dpr), 3))
+
+    def __eq__(self, other: object) -> bool:  # noqa: D105
+        return isinstance(other, ToolCursor) and (
+            (self.kind, self.rgb, self.radius, self.dashed)
+            == (other.kind, other.rgb, other.radius, other.dashed)
+        )
+
+    def __repr__(self) -> str:  # noqa: D105 - for a failing assert
+        return (f"ToolCursor({self.kind!r}, rgb={self.rgb}, radius={self.radius}, "
+                f"dashed={self.dashed})")
+
+
+def circle_cursor(diameter: int, rgb: tuple[int, int, int], dashed: bool,
+                  dpr: float = 1.0) -> QCursor:
+    """A ring ``diameter`` screen pixels across, with a dark halo and a centre dot.
+
+    The halo matters: the chassis is dark metal and the scan bed is white paper,
+    and a one-colour ring disappears into one of them.  The dot is the pixel the
+    stamp is centred on, which a ring alone does not say at low zoom.
+    """
+    size = max(CURSOR_MIN_PX, int(diameter)) + 6
+    dpr = max(1.0, float(dpr))
+    pixmap = QPixmap(int(round(size * dpr)), int(round(size * dpr)))
+    pixmap.setDevicePixelRatio(dpr)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    box = QRectF(3.0, 3.0, float(size - 6), float(size - 6))
+    halo = QPen(QColor(0, 0, 0, 170), 3.0)
+    painter.setPen(halo)
+    painter.drawEllipse(box)
+    pen = QPen(QColor(*rgb), 1.6)
+    if dashed:
+        pen.setStyle(Qt.PenStyle.DashLine)
+    painter.setPen(pen)
+    painter.drawEllipse(box)
+    centre = size / 2.0
+    painter.setPen(QPen(QColor(0, 0, 0, 200), 3.0))
+    painter.drawPoint(QPointF(centre, centre))
+    painter.setPen(QPen(QColor(*rgb), 1.0))
+    painter.drawPoint(QPointF(centre, centre))
+    painter.end()
+    return QCursor(pixmap, size // 2, size // 2)
 
 
 class OverlayItem(QGraphicsItem):
@@ -228,12 +320,28 @@ class ImageCanvas(QGraphicsView):
         self._panning = False
         self._pan_origin = QPointF()
         self._rubber_band: Optional[tuple[float, float, float, float]] = None
+        #: The chassis-range rectangle, and whether it is being edited.  Drawn
+        #: in :meth:`drawForeground` like the rubber band rather than into the
+        #: overlay image: it changes on every mouse move of a drag and the
+        #: overlay is a 12 MP composite (B7's budgets).
+        self._roi: Optional[tuple[float, float, float, float]] = None
+        self._roi_editing = False
+        #: Whether a *stored* rectangle's thin outline is drawn; the overlays
+        #: key ``A`` owns it, like every other layer.
+        self.roi_outline_visible = True
         #: A pixel inside the armed box prompt -- "click here" (``Shift+C``).
         #: Painted in :meth:`drawForeground` next to the rubber band rather
         #: than added to the scene, so there is nothing under the cursor that
         #: could swallow a press or shift the coordinate a tool is handed.
         self._prompt_point: Optional[tuple[int, int]] = None
         self._last_zoom: Optional[float] = None
+        #: What the armed tool looks like under the mouse; ``None`` means the
+        #: platform's own arrow.  The one thing on screen that says *what a
+        #: press will do*, which is why it is the canvas' business and not the
+        #: window's: the ring has to follow the zoom, and only the canvas knows
+        #: the zoom has changed (U1 report 1, ruling R1).
+        self._tool_cursor: Optional[ToolCursor] = None
+        self._cursor_cache: dict[tuple, QCursor] = {}
         # Parented to the view, not the viewport: QGraphicsView scrolls the
         # viewport's child widgets together with the scene, which would drag the
         # minimap off screen on the first pan.
@@ -375,6 +483,90 @@ class ImageCanvas(QGraphicsView):
         self._rubber_band = box
         self.viewport().update()
 
+    # -- the chassis range --------------------------------------------------
+    #: Half-width, in screen pixels, of a resize handle's square.
+    HANDLE_PX = 5
+    #: The eight handles, as ``(x fraction, y fraction)`` of the rectangle.
+    HANDLES: tuple[tuple[str, float, float], ...] = (
+        ("nw", 0.0, 0.0), ("n", 0.5, 0.0), ("ne", 1.0, 0.0),
+        ("w", 0.0, 0.5), ("e", 1.0, 0.5),
+        ("sw", 0.0, 1.0), ("s", 0.5, 1.0), ("se", 1.0, 1.0),
+    )
+    #: How dark the frame outside the rectangle goes while it is being edited.
+    DIM_ALPHA = 90
+
+    def set_roi(self, box: Optional[tuple], editing: bool = False) -> None:
+        """Show the chassis-range rectangle (``None`` clears it).
+
+        ``editing`` draws the thick dashed outline with its eight handles and
+        dims everything outside it; otherwise a stored rectangle gets a thin,
+        subtle outline that says where the difference map and the SAM prompt
+        boxes are being computed without competing with the masks.
+        """
+        value = None if box is None else tuple(float(v) for v in box)
+        if value == self._roi and bool(editing) == self._roi_editing:
+            return
+        self._roi, self._roi_editing = value, bool(editing)
+        self.viewport().update()
+
+    def roi_rect(self) -> Optional[tuple]:
+        """The rectangle being drawn, or ``None``."""
+        return self._roi
+
+    def roi_handle_points(self) -> dict[str, tuple[float, float]]:
+        """Where the eight handles sit, in image coordinates."""
+        if self._roi is None:
+            return {}
+        x0, y0, x1, y1 = self._roi
+        return {name: (x0 + (x1 - x0) * fx, y0 + (y1 - y0) * fy)
+                for name, fx, fy in self.HANDLES}
+
+    def _draw_roi(self, painter: QPainter) -> None:
+        """The rectangle, its handles and the dimmed surround (ruling U-ROI-2)."""
+        if self._roi is None:
+            return
+        if not self._roi_editing and not self.roi_outline_visible:
+            return
+        x0, y0, x1, y1 = self._roi
+        box = QRectF(x0, y0, x1 - x0, y1 - y0)
+        if not self._roi_editing:
+            pen = QPen(QColor(255, 232, 64, 150), 1, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(box)
+            return
+        # Everything outside the rectangle goes dark, so "inside" is a thing
+        # you can see rather than a thing you have to trace with your eye.
+        h, w = self.image_hw()
+        if w and h:
+            outside = QPainterPath()
+            outside.addRect(QRectF(0, 0, float(w), float(h)))
+            inside = QPainterPath()
+            inside.addRect(box)
+            painter.fillPath(outside.subtracted(inside),
+                             QColor(0, 0, 0, self.DIM_ALPHA))
+        # Two strokes: a dark one under a bright dashed one, so the outline is
+        # visible both on the dark chassis and on the white scan bed.
+        under = QPen(QColor(0, 0, 0, 220), 5)
+        under.setCosmetic(True)
+        painter.setPen(under)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(box)
+        over = QPen(QColor(255, 232, 64), 3, Qt.PenStyle.DashLine)
+        over.setCosmetic(True)
+        painter.setPen(over)
+        painter.drawRect(box)
+        # Handles, sized in screen pixels so they stay grabbable at any zoom.
+        half = self.HANDLE_PX / max(self.zoom_factor(), 1e-6)
+        edge = QPen(QColor(0, 0, 0, 230), 1)
+        edge.setCosmetic(True)
+        painter.setPen(edge)
+        painter.setBrush(QColor(255, 255, 255))
+        for _name, (hx, hy) in self.roi_handle_points().items():
+            painter.drawRect(QRectF(hx - half, hy - half, 2 * half, 2 * half))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
     def set_prompt_point(self, point: Optional[tuple]) -> None:
         """Mark one pixel inside the armed box prompt, or clear it with ``None``.
 
@@ -394,6 +586,91 @@ class ImageCanvas(QGraphicsView):
     def prompt_point(self) -> Optional[tuple[int, int]]:
         """The marked pixel, or ``None``."""
         return self._prompt_point
+
+    # -- the armed tool, under the mouse ------------------------------------
+    def set_tool_cursor(self, spec: Optional[ToolCursor]) -> None:
+        """Say what the armed tool is; ``None`` restores the arrow.
+
+        The annotator's first trial ended with four box prompts where they
+        believed they were brushing.  Nothing on screen said which tool was
+        armed: the status bar read ``sam_box`` in 9 pt English in the corner and
+        the cursor was the same arrow for every tool.
+        """
+        self._tool_cursor = spec
+        self._apply_tool_cursor()
+
+    def tool_cursor(self) -> Optional[ToolCursor]:
+        """The spec the canvas was last given (for the window and the tests)."""
+        return self._tool_cursor
+
+    def cursor_diameter(self) -> int:
+        """On-screen diameter of the ring, ``0`` when no circle is shown.
+
+        A brush of radius ``r`` image pixels stamps ``2r + 1`` of them, so the
+        ring is that many screen pixels across at the current zoom -- which is
+        what "the brush's true on-screen radius" means and what makes it follow
+        both ``[``/``]`` and the wheel.
+        """
+        spec = self._tool_cursor
+        if spec is None or spec.kind != "circle":
+            return 0
+        return int(round((2 * spec.radius + 1) * self.zoom_factor()))
+
+    def ring_scale(self) -> str:
+        """How faithful the ring under the mouse is: ``""``, ``"small"``, ``"large"``.
+
+        ``""`` means the ring is the size of the stroke. ``"small"`` means a
+        minimum-size ring is drawn instead (the shape is still the brush's, the
+        size is not to scale); ``"large"`` means no ring could be made at all
+        and the cursor is a crosshair. The badge says which, so the cursor is
+        never quietly claiming a size it does not have.
+        """
+        spec = self._tool_cursor
+        if spec is None or spec.kind != "circle":
+            return ""
+        diameter = self.cursor_diameter()
+        if diameter > CURSOR_MAX_PX:
+            return "large"
+        return "small" if diameter < CURSOR_MIN_PX else ""
+
+    def cursor_is_ring(self) -> bool:
+        """Is a ring drawn at all (to scale or not)?"""
+        spec = self._tool_cursor
+        if spec is None or spec.kind != "circle":
+            return False
+        return self.cursor_diameter() <= CURSOR_MAX_PX
+
+    def _apply_tool_cursor(self) -> None:
+        """Put the spec on the viewport, building (and caching) the pixmap."""
+        spec = self._tool_cursor
+        if spec is None:
+            self.viewport().unsetCursor()
+            return
+        if spec.kind == "circle":
+            diameter = self.cursor_diameter()
+            if diameter > CURSOR_MAX_PX:
+                # Bigger than the platform will draw as a cursor at all.
+                self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+                return
+            # Below the minimum the ring is drawn at the minimum rather than
+            # abandoned: the brush family must never look like the crosshair
+            # tools, whatever the zoom (round 2, I2).
+            diameter = max(CURSOR_MIN_PX, diameter)
+            dpr = float(self.devicePixelRatioF() or 1.0)
+            key = spec.key(diameter, dpr)
+            cursor = self._cursor_cache.get(key)
+            if cursor is None:
+                if len(self._cursor_cache) > 64:
+                    self._cursor_cache.clear()   # a long wheel spin, not a leak
+                cursor = circle_cursor(diameter, spec.rgb, spec.dashed, dpr)
+                self._cursor_cache[key] = cursor
+            self.viewport().setCursor(cursor)
+            return
+        self.viewport().setCursor({
+            "cross": Qt.CursorShape.CrossCursor,
+            "arrow": Qt.CursorShape.ArrowCursor,
+            "forbidden": Qt.CursorShape.ForbiddenCursor,
+        }[spec.kind])
 
     # -- zoom / pan ---------------------------------------------------------
     def zoom_factor(self) -> float:
@@ -489,6 +766,9 @@ class ImageCanvas(QGraphicsView):
         zoom = self.zoom_factor()
         if self._last_zoom is None or abs(zoom - self._last_zoom) > 1e-9:
             self._last_zoom = zoom
+            # The brush ring is the size of the stroke, so it follows the wheel
+            # as well as ``[``/``]``; this is the one place every zoom passes.
+            self._apply_tool_cursor()
             self.sigZoomChanged.emit(zoom)
 
     def _place_minimap(self, margin: int = 8) -> None:
@@ -541,7 +821,9 @@ class ImageCanvas(QGraphicsView):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: D102
         if self._panning:
             self._panning = False
-            self.viewport().unsetCursor()
+            # Not ``unsetCursor``: that would drop the armed tool's ring and
+            # leave an arrow over the canvas until the next tool switch.
+            self._apply_tool_cursor()
             self._sync_minimap()
             event.accept()
             return
@@ -551,6 +833,7 @@ class ImageCanvas(QGraphicsView):
 
     def drawForeground(self, painter: QPainter, rect: QRectF) -> None:  # noqa: D102
         super().drawForeground(painter, rect)
+        self._draw_roi(painter)
         if self._rubber_band is not None:
             x0, y0, x1, y1 = self._rubber_band
             pen = QPen(QColor(255, 232, 64), 1, Qt.PenStyle.DashLine)

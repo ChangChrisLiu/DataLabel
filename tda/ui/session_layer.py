@@ -17,6 +17,7 @@ from typing import Optional
 
 import numpy as np
 
+from tda.core.masks import BoxedMask
 from tda.ui.commands import Op, edit_editing_mask_op
 
 __all__ = ["EditingLayer"]
@@ -39,6 +40,13 @@ class EditingLayer:
         self.edit_id: Optional[int] = None
         self._mask: Optional[np.ndarray] = None
         self._before: Optional[np.ndarray] = None
+        #: Pixels the annotator has deliberately taken off **during this edit**
+        #: -- eraser strokes, ``Shift+D``'s specks, and what a negative-point
+        #: SAM prompt removed -- as a :class:`~tda.core.masks.BoxedMask`.
+        #: ``None`` while nothing has been erased, which is the common case and
+        #: costs nothing.  No SAM result ever puts these back: an erase is a
+        #: manual edit and a manual edit is never lost (ruling E1).
+        self.erased: Optional[BoxedMask] = None
 
     # -- state --------------------------------------------------------------
     @property
@@ -53,12 +61,16 @@ class EditingLayer:
         self._before = self._mask.copy()
         self.instance = instance
         self.edit_id = next(self._next_id)
+        self.erased = None
 
     def clear(self) -> None:
         self.instance = None
         self.edit_id = None
         self._mask = None
         self._before = None
+        # The protection belongs to the edit, not to the instance: it goes out
+        # with the layer it was about.
+        self.erased = None
 
     def mask(self) -> Optional[np.ndarray]:
         """The layer as the session last saw it; the session owns this array."""
@@ -93,8 +105,17 @@ class EditingLayer:
             self._before = self._mask.copy()
 
     # -- undo ---------------------------------------------------------------
+    def set_erased(self, erased) -> None:
+        """Replace the protected set (``None`` = nothing is protected).
+
+        A :class:`~tda.core.masks.BoxedMask` is taken **as it is**: it is an
+        immutable value the caller has just built, so copying it here was
+        3 ms of every stroke for nothing (round 3). A raw canvas is boxed.
+        """
+        self.erased = BoxedMask.of(erased)
+
     def stroke_op(self, before: np.ndarray, after: np.ndarray,
-                  adopted: Optional[dict] = None) -> Op:
+                  adopted: Optional[dict] = None, erased=None) -> Op:
         """The undoable record of one brush or eraser stroke (spec 4.6).
 
         ``adopted`` travels with a stroke that came from a Label Studio draft,
@@ -105,12 +126,22 @@ class EditingLayer:
         """
         if self.instance is None:
             raise RuntimeError("a stroke needs an instance; call begin_edit() first")
+        was_erased = self.erased
         self.set(after)
+        self.set_erased(erased)
         if adopted:
             adopted = dict(adopted) | {"edit_id": self.edit_id}
-        return edit_editing_mask_op(self.instance, before, after, adopted)
+        return edit_editing_mask_op(self.instance, before, after, adopted,
+                                    erased_before=was_erased,
+                                    erased_after=self.erased)
 
-    def apply_stroke(self, payload: dict, mask: np.ndarray) -> None:
-        """Adopt the mask an undo or redo of a stroke restored."""
+    def apply_stroke(self, payload: dict, mask: np.ndarray, erased=None) -> None:
+        """Adopt the mask an undo or redo of a stroke restored.
+
+        ``erased`` is the protected set that belongs with it; ``None`` means
+        the payload carried none, i.e. nothing was protected at that point in
+        the history.
+        """
         self.instance = payload["instance"]
         self._mask = mask
+        self.set_erased(erased)

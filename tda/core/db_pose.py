@@ -60,6 +60,13 @@ def _clean_roi(roi: Sequence[float],
     The one validator for every rectangle stored against a pose segment -- the
     chassis crop an export may cut to, and the staging area that decides whether
     a view is asked for bench boxes at all.
+
+    It checks shape, not plausibility: the **interactive** minimum -- a chassis
+    rectangle whose shorter side is under 64 px or 5 % of the frame's shorter
+    side is refused, with the floor capped at half of it so a small frame stays
+    usable -- lives in :meth:`tda.ui.app_roi.RoiMixin.roi_refusal`, because the
+    CLI and the importers also store rectangles through here and often without
+    an ``hw`` to measure a fraction of.
     """
     values = list(roi)
     if len(values) != 4:

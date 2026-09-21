@@ -38,12 +38,14 @@ from pycocotools import mask as coco_mask
 from tda.core.model import Similarity
 
 __all__ = [
+    "BoxedMask",
     "CHECK_ENCODE_WINDOW",
     "DECODE_CACHE_BYTES",
     "clear_decode_cache",
     "decode_cache_stats",
     "encode_rle",
     "encode_rle_boxed",
+    "encode_rle_patch",
     "decode_rle",
     "decode_rle_shared",
     "rle_area",
@@ -204,6 +206,148 @@ def encode_rle(mask: np.ndarray, window: Optional[Box] = None) -> dict:
         "size": [int(rle["size"][0]), int(rle["size"][1])],
         "counts": rle["counts"].decode("ascii"),
     }
+
+
+def encode_rle_patch(patch: np.ndarray, box: Box, hw: HW) -> dict:
+    """:func:`encode_rle` for a caller holding only the box and its contents.
+
+    The same scratch canvas and the same bytes out, without ever materialising
+    the full-frame array: an eraser stroke's protected set is a few hundred
+    pixels across on a 12 MP frame, and building 12 MB to encode it twice per
+    stroke was 6 ms of every stroke (round 3).
+    """
+    x0, y0, x1, y1 = (int(v) for v in box)
+    buffer = _encode_buffer(hw)
+    try:
+        if x1 > x0 and y1 > y0:
+            buffer[y0:y1, x0:x1] = _as_bool(patch).view(np.uint8)
+        rle = coco_mask.encode(buffer)
+    finally:
+        if x1 > x0 and y1 > y0:
+            buffer[y0:y1, x0:x1] = 0
+    return {
+        "size": [int(rle["size"][0]), int(rle["size"][1])],
+        "counts": rle["counts"].decode("ascii"),
+    }
+
+
+class BoxedMask:
+    """A mostly-empty full-frame boolean kept as its bounding box and patch.
+
+    What the annotator has erased during one edit is a handful of blobs on a
+    12 MP canvas, and every full-frame operation on it -- the copy, the two
+    RLE encodes per stroke, the ``& ~layer`` that keeps it honest -- was paid
+    at 12 MP whatever its size. Keeping the box means the work is the size of
+    what is in it (round 3).
+
+    Instances are treated as **immutable**: every operation returns a new one,
+    so a value that has been handed to the undo stack or the sidecar cannot
+    change underneath them. ``None`` is the empty set: this class never
+    represents one, so "is there anything protected?" is ``is not None`` and
+    costs nothing.
+    """
+
+    __slots__ = ("hw", "box", "patch")
+
+    def __init__(self, hw: HW, box: Box, patch: np.ndarray) -> None:
+        self.hw = (int(hw[0]), int(hw[1]))
+        self.box = tuple(int(v) for v in box)
+        self.patch = patch
+
+    # -- construction -------------------------------------------------------
+    @classmethod
+    def of(cls, mask, hw: Optional[HW] = None) -> Optional["BoxedMask"]:
+        """Box a full-frame mask; ``None`` when it holds nothing."""
+        if mask is None:
+            return None
+        if isinstance(mask, BoxedMask):
+            return mask
+        arr = _as_bool(mask)
+        box = bbox(arr)
+        if box is None:
+            return None
+        x0, y0, x1, y1 = box
+        return cls(hw or arr.shape, box,
+                   np.array(arr[y0:y1, x0:x1], dtype=bool, copy=True))
+
+    @classmethod
+    def of_patch(cls, hw: HW, box: Box, patch: np.ndarray) -> Optional["BoxedMask"]:
+        """Re-tighten ``patch`` (which sits at ``box``); ``None`` when empty."""
+        inner = bbox(patch)
+        if inner is None:
+            return None
+        ix0, iy0, ix1, iy1 = inner
+        x0, y0 = int(box[0]) + ix0, int(box[1]) + iy0
+        return cls(hw, (x0, y0, int(box[0]) + ix1, int(box[1]) + iy1),
+                   np.array(patch[iy0:iy1, ix0:ix1], dtype=bool, copy=True))
+
+    @classmethod
+    def from_rle(cls, rle: Optional[dict]) -> Optional["BoxedMask"]:
+        """Read either shape: :meth:`rle`'s, or a plain full-frame COCO RLE.
+
+        The second is what round 2 wrote, and a crash sidecar from then must
+        still restore -- it is the annotator's unfinished work.
+        """
+        if not rle:
+            return None
+        if "box" in rle and "rle" in rle:
+            patch = decode_rle(rle["rle"])
+            return cls.of_patch(tuple(rle["hw"]), tuple(rle["box"]), patch)
+        return cls.of(decode_rle(rle))
+
+    # -- reading ------------------------------------------------------------
+    def full(self) -> np.ndarray:
+        """The whole frame, for a caller that really needs the canvas."""
+        out = np.zeros(self.hw, dtype=bool)
+        x0, y0, x1, y1 = self.box
+        out[y0:y1, x0:x1] = self.patch
+        return out
+
+    def crop(self, rect: Box) -> np.ndarray:
+        """The window ``rect`` of the full mask, as a bool array of its size."""
+        x0, y0, x1, y1 = (int(v) for v in rect)
+        out = np.zeros((max(0, y1 - y0), max(0, x1 - x0)), dtype=bool)
+        bx0, by0, bx1, by1 = self.box
+        ox0, oy0 = max(x0, bx0), max(y0, by0)
+        ox1, oy1 = min(x1, bx1), min(y1, by1)
+        if ox1 > ox0 and oy1 > oy0:
+            out[oy0 - y0:oy1 - y0, ox0 - x0:ox1 - x0] = self.patch[
+                oy0 - by0:oy1 - by0, ox0 - bx0:ox1 - bx0]
+        return out
+
+    def at(self, x: int, y: int) -> bool:
+        """Is the pixel ``(x, y)`` in the set?"""
+        x0, y0, x1, y1 = self.box
+        if not (x0 <= x < x1 and y0 <= y < y1):
+            return False
+        return bool(self.patch[int(y) - y0, int(x) - x0])
+
+    def count(self) -> int:
+        return int(np.count_nonzero(self.patch))
+
+    def copy(self) -> "BoxedMask":
+        return BoxedMask(self.hw, self.box, self.patch.copy())
+
+    def rle(self) -> dict:
+        """The box, the frame it sits in, and the **patch's** run lengths.
+
+        Not the frame's: ``coco_mask.encode`` walks whatever canvas it is
+        given, so encoding a 500x300 erasure as a 12 MP mask was 2.5 ms, twice
+        per stroke, for a few hundred bytes of output.  This is a private
+        format -- the undo payload and the crash sidecar -- never stored
+        geometry, so it is free to say where the box is instead (round 3).
+        """
+        return {"box": list(self.box), "hw": [self.hw[0], self.hw[1]],
+                "rle": encode_rle(self.patch)}
+
+    def __eq__(self, other: object) -> bool:  # noqa: D105
+        if not isinstance(other, BoxedMask):
+            return NotImplemented
+        return (self.hw == other.hw and self.box == other.box
+                and np.array_equal(self.patch, other.patch))
+
+    def __repr__(self) -> str:  # noqa: D105 - for a failing assert
+        return f"BoxedMask(hw={self.hw}, box={self.box}, {self.count()} px)"
 
 
 def encode_rle_boxed(mask: np.ndarray) -> dict:

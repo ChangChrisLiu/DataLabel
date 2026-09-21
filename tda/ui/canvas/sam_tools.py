@@ -37,6 +37,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal
 
+from tda.core.masks import BoxedMask
 from tda.models.sam_service import SamRequest, SamResult
 from tda.ui.canvas.overlay import LabelOverlay
 from tda.ui.canvas.sam_crop import (
@@ -132,12 +133,21 @@ class SamToolBase(CandidatesMixin, Tool):
         self.paused = False
         self.prompt_box: Optional[Box] = None
         self.stroke_before: Optional[np.ndarray] = None
+        #: Called for the pixels the annotator has deliberately taken off in
+        #: this edit -- eraser strokes and negative-point results -- or
+        #: ``None``.  An add-only result never puts them back (ruling E1); the
+        #: window wires this to the session's editing layer.
+        self.erased_provider: Optional[Any] = None
+        self._candidate_erased: Optional[np.ndarray] = None
         self._frame_token: Any = None
         self._token = 0
         self._candidates: list[np.ndarray] = []
         self._candidate_index = 0
         self._candidate_rect: Optional[Rect] = None
         self._candidate_base: Optional[np.ndarray] = None
+        #: Whether the current result is **added** to the base rather than
+        #: replacing it inside the crop; see :meth:`_on_result`.
+        self._candidate_union = True
         self._candidate_identity: Any = None
         #: ``(frame token, instance)`` the prompt being built belongs to.
         self._prompt_identity: Any = None
@@ -329,6 +339,24 @@ class SamToolBase(CandidatesMixin, Tool):
             return
 
         mask_input = self._mask_input(rect, crop.shape[:2])
+        # **The rule of U1 report 1, as ruled in round 1**: what may take pixels
+        # away is decided by *the prompt*, not by what SAM was shown.  A prompt
+        # whose points are all positive -- and every box prompt, which has none
+        # -- is the annotator saying "this too", so its answer is composed with
+        # what is already there.  Only once they have right-clicked does the
+        # prompt say "not that", and only then may the answer remove something,
+        # and only inside the crop it was computed on.
+        #
+        # The first version of this fix keyed on ``mask_input`` instead, which
+        # left an ordinary left click deleting hand strokes inside the crop --
+        # the same surprise, one gesture further along.  ``mask_input`` is
+        # still sent exactly when it was: it makes the answer better, and that
+        # is a separate question from what the answer is allowed to do.
+        subtractive = any(int(label) == 0 for _px, _py, label in crop_points)
+        # A positive point *inside* the erased set is the annotator asking for
+        # those pixels back -- they clicked there on purpose -- so this one
+        # application ignores the protection (ruling E1).
+        lifts = self._lifts_erasure(points)
         req = SamRequest(
             image_crop=crop,
             points=crop_points,
@@ -351,13 +379,13 @@ class SamToolBase(CandidatesMixin, Tool):
                  self._target_instance(), len(crop_points), crop_box is not None,
                  bool(self.refine), bool(req.multimask))
         stamp = (self._token, self._identity())
-        bridge, refine = self._bridge, self.refine
+        bridge = self._bridge
         # on_error matters as much as the callback: without it a failed
         # inference (out of memory, a malformed prompt) leaves the annotator
         # waiting for a mask that is never coming, with nothing on screen.
         self._submit_to_queue(
             req,
-            lambda res: bridge.deliver((res, rect, refine, stamp)),
+            lambda res: bridge.deliver((res, rect, (subtractive, lifts), stamp)),
             lambda exc: bridge.deliver_error(f"SAM failed: {exc}"),
         )
 
@@ -367,6 +395,39 @@ class SamToolBase(CandidatesMixin, Tool):
             self.queue.submit(req, callback, on_error)
         except TypeError:  # an older queue (or a stub) without the hook
             self.queue.submit(req, callback)
+
+    def erased_mask(self):
+        """The pixels this edit has deliberately taken off, or ``None``.
+
+        A :class:`~tda.core.masks.BoxedMask`; the tool only ever asks it for a
+        crop or for one pixel, neither of which needs the canvas.
+        """
+        provider = self.erased_provider
+        if provider is None or self.overlay is None:
+            return None
+        found = BoxedMask.of(provider())
+        return found if found is not None and found.hw == self.overlay.hw else None
+
+    def _lifts_erasure(self, points: Sequence[Point]) -> bool:
+        """Does a positive point of this prompt land on an erased pixel?"""
+        erased = self.erased_mask()
+        if erased is None:
+            return False
+        for px, py, label in points:
+            if int(label) != 1:
+                continue
+            if erased.at(int(round(float(px))), int(round(float(py)))):
+                return True
+        return False
+
+    @property
+    def removes_pixels(self) -> bool:
+        """Was the application that just landed allowed to take pixels off?
+
+        What the window needs in order to decide whether a removal is the
+        annotator's ("put that in ``erased``") or an artefact of composition.
+        """
+        return bool(self._candidates) and not self._candidate_union
 
     def _mask_input(
         self, rect: Rect, crop_hw: tuple[int, int]
@@ -393,7 +454,8 @@ class SamToolBase(CandidatesMixin, Tool):
         Every rejection path returns quietly instead of raising: this runs as a
         Qt slot, where an exception would escape into the event loop.
         """
-        result, rect, refine, stamp = payload  # type: ignore[misc]
+        result, rect, how, stamp = payload  # type: ignore[misc]
+        subtractive, lifts = how
         token, identity = stamp
         if token != self._token:
             # Superseded.  By a newer prompt -- nothing to report, the annotator
@@ -424,11 +486,27 @@ class SamToolBase(CandidatesMixin, Tool):
         self._candidate_rect = rect
         self._candidate_identity = identity
         self._renders = None
-        # Outside the crop the prediction says nothing: in refine mode the prior
-        # mask survives there, otherwise the layer is replaced outright. The
-        # base is snapshotted once so that switching candidates re-renders from
-        # the same starting point instead of compounding onto the previous one.
-        self._candidate_base = self.overlay.editing.copy() if refine else None
+        # **Everything already in the layer is the annotator's** -- hand
+        # strokes, an adopted draft, the shape ``begin_edit`` loaded from a
+        # keyframe, an earlier prompt's accepted result -- and none of it came
+        # from this prompt.  It is snapshotted once, here, so that switching
+        # candidates re-renders from the same starting point instead of
+        # compounding onto the previous one, and so that a stroke made while
+        # the prompt was in flight counts as owned rather than as a proposal.
+        self._candidate_base = self.overlay.editing.copy()
+        # Whether the crop's contents may be thrown away: only once the prompt
+        # holds a negative point (see :meth:`_submit`).
+        self._candidate_union = not bool(subtractive)
+        # **Both** compositions reduce the result by the erased set: a
+        # subtractive prompt replaces inside the crop, and SAM's refined mask
+        # can contain a pixel the annotator rubbed out earlier.  It usually
+        # will not -- it was shown the mask without it -- and "usually" is
+        # exactly what the report was about (round 2b).  The one exception is
+        # a positive point of this prompt landing inside the set: they clicked
+        # there, so they want it back.  Snapshotted like the base, so a stroke
+        # made afterwards cannot change what these candidates render to.
+        # Immutable, so the snapshot is the value itself.
+        self._candidate_erased = None if lifts else self.erased_mask()
         self._apply_candidate()
 
 

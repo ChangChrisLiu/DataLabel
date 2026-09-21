@@ -25,10 +25,17 @@ from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 
-__all__ = ["FLASH_UNNAMED", "KeysMixin"]
+__all__ = ["FLASH_UNNAMED", "KEY_SWALLOWED", "KeysMixin"]
 
 #: ``_flashing`` when a neighbour is on screen but its step number is unknown.
 FLASH_UNNAMED = -1
+
+#: Shown when a key that *is* a shortcut went into a text field instead.  A
+#: shortcut that silently does nothing is a shortcut the annotator presses
+#: again, harder, and then works for ten minutes with the wrong tool armed
+#: (task U1, report 1, ruling R1).
+KEY_SWALLOWED = ("快捷键没生效：焦点在输入框里，先点一下画布 / that key went into "
+                 "a text field, not the canvas -- click the canvas first")
 
 
 class KeysMixin:
@@ -68,7 +75,19 @@ class KeysMixin:
         if not self._shortcut_context_ok():
             return False
         focus = self._focus_widget()
-        if A.blocks_shortcuts(focus) or A.navigates_a_list(focus, event.key()):
+        if A.blocks_shortcuts(focus):
+            # ``action_for`` first: ``_warn_swallowed_once`` *consumes* the
+            # once-per-episode marker, so asking it about an unbound key spent
+            # the budget and the ``B`` that followed said nothing (round 3).
+            if (event.type() == QEvent.Type.KeyPress
+                    and not event.isAutoRepeat()
+                    and A.action_for(event.key(), event.modifiers(),
+                                     self.mode) is not None
+                    and self._warn_swallowed_once(focus)):
+                self.report(KEY_SWALLOWED)
+            return False
+        self._swallow_warned = None
+        if A.navigates_a_list(focus, event.key()):
             return False
         action = A.action_for(event.key(), event.modifiers(), self.mode)
         if action is None:
@@ -86,6 +105,19 @@ class KeysMixin:
             self.dispatch(action, pressed)
         elif pressed:
             self.dispatch(action)
+        return True
+
+    def _warn_swallowed_once(self, focus) -> bool:
+        """``True`` the first time this focus episode swallows a shortcut.
+
+        Once per episode, not once per keystroke: typing a sentence into a note
+        field would otherwise rewrite the status line on every letter and push
+        whatever was there off the screen (round 2, M4). The memory is the
+        focused widget itself, so moving the focus away and back asks again.
+        """
+        if getattr(self, "_swallow_warned", None) is focus:
+            return False
+        self._swallow_warned = focus
         return True
 
     def _shortcut_context_ok(self) -> bool:

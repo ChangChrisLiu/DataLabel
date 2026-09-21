@@ -53,6 +53,16 @@ class StatusMixin:
         self.zoom_label = QLabel("100%")
         self.frame_label = QLabel("")
         self.tool_label = QLabel("")
+        # The tool indicator is the one label that answers "what will my next
+        # press do?", and the annotator's first trial ended with four box
+        # prompts they believed were brush strokes.  It is therefore the only
+        # one that shouts: bold, boxed, and in Chinese first (ruling R1).
+        self.tool_label.setStyleSheet(
+            "QLabel { font-weight: bold; padding: 1px 7px; border-radius: 3px;"
+            " background: #2f3238; color: #ffe840; }"
+        )
+        self.roi_label = QLabel("")
+        self.roi_label.setStyleSheet("QLabel { padding: 1px 5px; }")
         self.sam_label = QLabel("")
         self.hint_label = QLabel("")
         # The Chinese hints start with a full-width glyph, which Qt draws hard
@@ -67,21 +77,46 @@ class StatusMixin:
         self.hint_label.setMinimumWidth(1)
         self.hint_label.setTextFormat(Qt.TextFormat.PlainText)
         bar = self.statusBar()
-        for label in (self.zoom_label, self.frame_label, self.tool_label,
-                      self.sam_label):
+        for label in (self.zoom_label, self.frame_label, self.roi_label,
+                      self.tool_label, self.sam_label):
             bar.addPermanentWidget(label)
         bar.addWidget(self.hint_label, 1)
 
 
     # ----------------------------------------------------------- status bar
     def update_status(self) -> None:
-        """Rewrite the four permanent status labels from the current state."""
+        """Rewrite the five permanent status labels from the current state."""
         self.zoom_label.setText(f"{self.canvas.zoom_factor() * 100:.0f}%")
         self.frame_label.setText(self._frame_text())
-        radius = getattr(self.active_tool, "radius", None)
-        suffix = "" if radius is None else f" r{radius}"
-        self.tool_label.setText(f"{self._tool_name}{suffix}")
+        self.roi_label.setText(self.roi_status_text())
+        shown, tip = self._tool_text()
+        self.tool_label.setText(shown)
+        self.tool_label.setToolTip(tip)
         self.sam_label.setText(self.sam_status_text())
+
+    def _tool_text(self) -> tuple[str, str]:
+        """``工具：画笔 B r=8`` and its English tooltip."""
+        from tda.ui.app_view import tool_label_text
+
+        name = self.armed_tool_name()
+        radius = getattr(self._tool_for(name) if name else None, "radius", None)
+        return tool_label_text(name or "", radius, armed=name is not None,
+                               scale=self.canvas.ring_scale())
+
+    def roi_status_text(self) -> str:
+        """``ROI ✓`` / ``ROI 未确认`` / ``无 ROI`` (task U1, ruling U-ROI-3).
+
+        The rectangle is what the difference map and the SAM prompt boxes are
+        computed inside, so whether the segment has one is a fact about every
+        later gesture -- and the annotator had no way of knowing it.
+        """
+        if not compat.is_open(self.session):
+            return ""
+        if self.roi() is not None:
+            return "ROI ✓"
+        if self.roi_editing or self.roi_unanswered():
+            return "ROI 未确认 / unanswered"
+        return "无 ROI / none"
 
     def _frame_text(self) -> str:
         if not compat.is_open(self.session):

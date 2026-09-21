@@ -413,7 +413,13 @@ def test_sam_tools_without_a_queue_do_not_crash(rig):
 # ---------------------------------------------------------------------------
 # applying a result
 # ---------------------------------------------------------------------------
-def test_sam_point_tool_result_replaces_the_editing_layer(zoomed):
+def test_sam_point_tool_result_is_added_to_the_editing_layer(zoomed):
+    """A prompt SAM saw no prior mask for may only *add* (task U1, report 1).
+
+    This used to assert the opposite -- "non-refine results replace the layer"
+    -- which is the defect the annotator hit on their first day: the pixels
+    already in the layer are theirs and SAM was never shown them.
+    """
     canvas, ov = zoomed
     ov.editing[0:5, 0:5] = True
     queue = StubQueue(_blob_result)
@@ -425,7 +431,7 @@ def test_sam_point_tool_result_replaces_the_editing_layer(zoomed):
     assert _spin(lambda: bool(strokes))
     # _blob_result fills rows h/4..h/2, cols w/4..w/2 of the 60x80 crop
     assert ov.editing[20, 25]
-    assert not ov.editing[0, 0], "non-refine results replace the layer"
+    assert ov.editing[0, 0], "the pixels the annotator owned were thrown away"
 
 
 def test_sam_point_tool_refine_keeps_the_mask_outside_the_crop(qapp):
@@ -877,7 +883,10 @@ def test_a_manual_edit_cancels_cycling_and_is_never_discarded(zoomed):
     assert tool.cycle_candidate() == 0
     assert ov.editing[55, 5], "the manual stroke was overwritten"
     assert tool.candidate_count == 0, "candidates must be dropped, not re-applied"
-    assert hints == [HINT_EDITED]
+    # The first hint is the application's own "SAM +N px" clause (ruling R2b);
+    # what matters here is that the *last* word is why cycling stopped.
+    assert hints[-1] == HINT_EDITED
+    assert hints[0].startswith("SAM +")
 
 
 def test_cycle_candidate_follows_the_layer_after_undo(zoomed):
@@ -1073,3 +1082,419 @@ def test_a_reset_prompt_does_not_stop_the_next_one(zoomed):
     _drain()
 
     assert ov.editing.any(), "the prompt after the reset was dropped too"
+
+
+# ---------------------------------------------------------------------------
+# a new prompt never destroys the pixels the annotator owns (task U1, report 1)
+# ---------------------------------------------------------------------------
+# "SAM 给出掩码之后，如果我用 B 来补充的话，同时会删掉所有的 SAM 做的本身的掩码，
+# 就是成了替代了，而不是添加" -- the annotator's first trial.  Measured on the
+# real D13/scan/step 42 with SAM 2.1: a box prompt produced 595,473 px, two
+# brush strokes added 2,372 px, and the next box prompt left 244,356 px with
+# **0** of the hand-painted ones.
+#
+# The rule this section pins down (round 1, ruling R2b): **what may remove
+# pixels is decided by the prompt, not by what SAM was shown.** A prompt whose
+# points are all positive -- and every box prompt -- can only add; a prompt
+# holding at least one negative point may also remove, and only inside the crop
+# it was computed on.  Pixels outside the crop are untouchable either way.
+def _painted(ov, box) -> np.ndarray:
+    """Put a block into the editing layer and hand back a copy of it."""
+    x0, y0, x1, y1 = box
+    layer = ov.editing.copy()
+    layer[y0:y1, x0:x1] = True
+    ov.set_editing(ov.editing_instance or "inst-x", layer)
+    own = np.zeros_like(layer)
+    own[y0:y1, x0:x1] = True
+    return own
+
+
+def test_a_box_prompt_keeps_the_pixels_the_annotator_owns(zoomed):
+    """The report, in one test: a box prompt is an addition, not a replacement."""
+    canvas, ov = zoomed
+    own = _painted(ov, (60, 50, 70, 58))  # far from _blob_result's block
+    queue = StubQueue(_blob_result)
+    tool = _box_tool(canvas, ov, queue)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: bool(strokes))
+
+    assert ov.editing[20, 25], "the SAM result did not land"
+    assert (ov.editing & own).sum() == own.sum(), "the annotator's pixels were erased"
+
+
+def test_a_second_box_prompt_keeps_the_first_result_and_the_brush_strokes(zoomed):
+    """X, drag, B, paint, X, drag -- the exact sequence of the trial."""
+    canvas, ov = zoomed
+    queue = StubQueue(_blob_result)
+    tool = _box_tool(canvas, ov, queue)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: bool(strokes))
+    first = ov.editing.copy()
+
+    brush = BrushTool(canvas, ov, radius=2)
+    brush.on_press(5.0, 55.0, None)
+    brush.on_release(5.0, 55.0, None)
+    hand = ov.editing & ~first
+    assert hand.any(), "the brush stroke did not land"
+
+    tool.reset_prompt()          # a new box is a new prompt
+    tool.on_press(12.0, 12.0, None)
+    tool.on_move(46.0, 46.0, None)
+    tool.on_release(46.0, 46.0, None)
+    assert _spin(lambda: len(strokes) > 1)
+
+    assert (ov.editing & hand).sum() == hand.sum(), "the brush strokes were erased"
+    assert (ov.editing & first).sum() == first.sum(), "the first mask was erased"
+
+
+def test_cycling_swaps_only_the_current_prompts_contribution(zoomed):
+    """``C`` walks SAM's three answers; the owned pixels never move."""
+    canvas, ov = zoomed
+    own = _painted(ov, (60, 50, 70, 58))
+    queue = StubQueue(_multi_result)
+    tool = _box_tool(canvas, ov, queue)
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: tool.candidate_count == 3)
+
+    seen = set()
+    for _ in range(3):
+        assert (ov.editing & own).sum() == own.sum(), "cycling ate the owned pixels"
+        seen.add(int((ov.editing & ~own).sum()))
+        tool.cycle_candidate()
+    assert len(seen) == 3, f"the candidates did not differ: {seen}"
+
+
+def test_one_undo_takes_the_whole_sam_application_back(zoomed):
+    canvas, ov = zoomed
+    own = _painted(ov, (60, 50, 70, 58))
+    queue = StubQueue(_blob_result)
+    tool = _box_tool(canvas, ov, queue)
+    stack = _wire_undo(tool, ov)
+
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: len(stack) == 1)
+
+    stack.undo()
+    assert np.array_equal(ov.editing, own), "one undo did not reach the owned mask"
+
+
+# --------------------------------------------------------------------------- #
+# what may remove pixels is decided by the prompt (round 1, ruling R2b)
+# --------------------------------------------------------------------------- #
+def _negative(x: float, y: float):
+    return _press(x, y, button=Qt.MouseButton.RightButton)
+
+
+def test_a_positive_click_never_removes_a_pixel_the_annotator_owns(zoomed):
+    """A left click adds, even though the prior mask is still sent to SAM.
+
+    The first rule of this fix said "SAM may remove what it was shown", which
+    left an ordinary left click deleting hand strokes inside the viewport crop
+    -- to the annotator, the very surprise they reported.
+    """
+    canvas, ov = zoomed
+    # _blob_result covers rows 15..30, cols 20..40 of the 60x80 crop; this
+    # block sits below it, so the old rule wiped it.
+    own = _painted(ov, (20, 32, 40, 40))
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue, refine=True)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(25.0, 25.0, _press(25.0, 25.0))
+    assert _spin(lambda: bool(strokes))
+
+    assert queue.last.mask_input is not None, "the prior mask must still be sent"
+    assert ov.editing[20, 25], "the result did not land"
+    assert (ov.editing & own).sum() == own.sum(), "a positive click ate owned pixels"
+
+
+def test_a_negative_point_removes_inside_the_crop_only(qapp):
+    """A right click is how pixels come off -- and only where SAM looked."""
+    canvas = _shown(ImageCanvas(), 200, 200)
+    canvas.set_image(_rgb(200, 200))
+    ov = LabelOverlay((200, 200))
+    prior = np.zeros((200, 200), dtype=bool)
+    prior[20:60, 20:60] = True        # inside the zoomed viewport
+    prior[180:200, 180:200] = True    # far outside it
+    ov.set_editing("inst-x", prior)
+    canvas.set_overlay(ov)
+    canvas.zoom_to((0, 0, 60, 60))
+    QApplication.processEvents()
+    rect = canvas.viewport_image_rect()
+    assert rect[2] >= 60 and rect[3] >= 60 and rect[2] < 180, rect
+
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue, refine=True)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(30.0, 30.0, _negative(30.0, 30.0))
+    assert _spin(lambda: bool(strokes))
+
+    assert tool.points[-1][2] == 0, "the right click was not a negative point"
+    assert ov.editing[190, 190], "a negative point reached outside the crop"
+    assert not ov.editing[55, 25], "a negative point removed nothing at all"
+
+
+def test_cycling_a_negative_prompt_keeps_everything_outside_the_crop(qapp):
+    canvas = _shown(ImageCanvas(), 200, 200)
+    canvas.set_image(_rgb(200, 200))
+    ov = LabelOverlay((200, 200))
+    prior = np.zeros((200, 200), dtype=bool)
+    prior[20:60, 20:60] = True
+    prior[180:200, 180:200] = True
+    ov.set_editing("inst-x", prior)
+    canvas.set_overlay(ov)
+    canvas.zoom_to((0, 0, 60, 60))
+    QApplication.processEvents()
+
+    queue = StubQueue(_multi_result)
+    tool = _point_tool(canvas, ov, queue, refine=True)
+    tool.on_press(30.0, 30.0, _negative(30.0, 30.0))
+    assert _spin(lambda: tool.candidate_count >= 2)
+
+    for _ in range(tool.candidate_count):
+        assert ov.editing[190, 190], "cycling reached outside the crop"
+        tool.cycle_candidate()
+
+
+def test_one_undo_takes_a_negative_point_application_back(qapp):
+    canvas = _shown(ImageCanvas(), 200, 200)
+    canvas.set_image(_rgb(200, 200))
+    ov = LabelOverlay((200, 200))
+    prior = np.zeros((200, 200), dtype=bool)
+    prior[20:60, 20:60] = True
+    prior[180:200, 180:200] = True
+    ov.set_editing("inst-x", prior)
+    canvas.set_overlay(ov)
+    canvas.zoom_to((0, 0, 60, 60))
+    QApplication.processEvents()
+
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue, refine=True)
+    stack = _wire_undo(tool, ov)
+    tool.on_press(30.0, 30.0, _negative(30.0, 30.0))
+    assert _spin(lambda: len(stack) == 1)
+    assert not np.array_equal(ov.editing, prior), "nothing was removed to undo"
+
+    stack.undo()
+    assert np.array_equal(ov.editing, prior), "undo did not restore the layer"
+
+
+# --------------------------------------------------------------------------- #
+# a deliberate erase is a manual edit too (round 2, ruling E1)
+# --------------------------------------------------------------------------- #
+# Erase 630 px out of an 840 px SAM result, then click positively somewhere
+# else: all 630 used to come straight back, reported as `SAM +630 px`.  An
+# erase is an edit, and "a manual edit is never lost" covers it.
+def test_an_add_only_result_does_not_put_erased_pixels_back(zoomed):
+    canvas, ov = zoomed
+    erased = np.zeros((60, 80), dtype=bool)
+    erased[20:25, 25:35] = True          # inside _blob_result's block
+    queue = StubQueue(_blob_result)
+    tool = _box_tool(canvas, ov, queue)
+    tool.erased_provider = lambda: erased
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: bool(strokes))
+
+    assert ov.editing[16, 25], "the rest of the result did not land"
+    assert not (ov.editing & erased).any(), "the erased pixels came back"
+
+
+def test_cycling_never_puts_erased_pixels_back(zoomed):
+    canvas, ov = zoomed
+    erased = np.zeros((60, 80), dtype=bool)
+    erased[16:20, 22:30] = True
+    queue = StubQueue(_multi_result)
+    tool = _box_tool(canvas, ov, queue)
+    tool.erased_provider = lambda: erased
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: tool.candidate_count == 3)
+
+    for _ in range(3):
+        assert not (ov.editing & erased).any(), "cycling put erased pixels back"
+        tool.cycle_candidate()
+
+
+def test_a_positive_point_inside_the_erased_set_asks_for_them_back(zoomed):
+    """They clicked there: that is the annotator lifting their own protection."""
+    canvas, ov = zoomed
+    erased = np.zeros((60, 80), dtype=bool)
+    erased[20:25, 25:35] = True
+    queue = StubQueue(_blob_result)
+    tool = _point_tool(canvas, ov, queue)
+    tool.erased_provider = lambda: erased
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(28.0, 22.0, _press(28.0, 22.0))    # inside the erased block
+    assert _spin(lambda: bool(strokes))
+
+    assert (ov.editing & erased).any(), "the click did not lift the protection"
+
+
+def _erasing_rig(canvas, ov, maker=None):
+    """A layer with a prior mask and an erased block inside the result's area."""
+    prior = np.zeros((60, 80), dtype=bool)
+    prior[20:40, 20:40] = True
+    ov.set_editing("inst-x", prior)
+    erased = np.zeros((60, 80), dtype=bool)
+    erased[16:20, 22:30] = True      # inside _blob_result's rows 15..30
+    queue = StubQueue(maker or _blob_result)
+    tool = _point_tool(canvas, ov, queue, refine=True)
+    tool.erased_provider = lambda: erased
+    return tool, queue, erased
+
+
+def test_a_negative_prompt_still_honours_the_erased_set(zoomed):
+    """Round 2b: "usually SAM will not put it back" is not a guarantee.
+
+    The prompt replaces inside the crop, so without this an earlier erasure
+    comes back whenever the refined mask happens to cover it -- and "happens
+    to" is exactly what the annotator's report was about.
+    """
+    canvas, ov = zoomed
+    tool, queue, erased = _erasing_rig(canvas, ov)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    # one positive point well away from the erased block, one negative point
+    tool.on_press(35.0, 35.0, _press(35.0, 35.0))
+    assert _spin(lambda: bool(strokes))
+    tool.on_press(25.0, 25.0, _negative(25.0, 25.0))
+    assert _spin(lambda: len(strokes) > 1)
+
+    assert queue.last.mask_input is not None, "the prior mask was not sent"
+    assert any(int(label) == 0 for *_xy, label in queue.last.points)
+    assert ov.editing[16, 21], "the rest of the result did not land"
+    assert not (ov.editing & erased).any(), "the erased block came back"
+
+
+def test_a_positive_point_inside_erased_lifts_it_for_a_negative_prompt_too(zoomed):
+    canvas, ov = zoomed
+    tool, queue, erased = _erasing_rig(canvas, ov)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(25.0, 17.0, _press(25.0, 17.0))      # inside the erased block
+    assert _spin(lambda: bool(strokes))
+    tool.on_press(35.0, 35.0, _negative(35.0, 35.0))
+    assert _spin(lambda: len(strokes) > 1)
+
+    assert any(int(label) == 0 for *_xy, label in queue.last.points)
+    assert (ov.editing & erased).any(), "the click did not lift the protection"
+
+
+def test_a_negative_prompt_has_nothing_to_cycle(zoomed):
+    """It carries a prior mask, so SAM answers once: ``C`` is inert."""
+    canvas, ov = zoomed
+    tool, queue, _erased = _erasing_rig(canvas, ov)
+    strokes: list[object] = []
+    tool.sigStroke.connect(strokes.append)
+
+    tool.on_press(25.0, 25.0, _negative(25.0, 25.0))
+    assert _spin(lambda: bool(strokes))
+
+    assert queue.last.multimask is False
+    assert tool.candidate_count == 1
+    layer = ov.editing.copy()
+    assert tool.cycle_candidate() == 0
+    assert np.array_equal(ov.editing, layer), "C moved a single-candidate result"
+    assert len(strokes) == 1, "a pointless swap made an undo step"
+
+
+def test_a_negative_prompt_reports_the_erased_pixels_kept_out(zoomed):
+    canvas, ov = zoomed
+    tool, _queue, erased = _erasing_rig(canvas, ov)
+    hints: list[str] = []
+    tool.sigHint.connect(hints.append)
+
+    tool.on_press(25.0, 25.0, _negative(25.0, 25.0))
+    assert _spin(lambda: bool(hints))
+
+    assert f"保留擦除 {int(erased.sum())} px" in hints[-1], hints
+    assert "含负点" in hints[-1], "the negative-point clause was dropped"
+
+
+def test_the_status_line_reports_the_erased_pixels_kept_out(zoomed):
+    canvas, ov = zoomed
+    erased = np.zeros((60, 80), dtype=bool)
+    erased[20:25, 25:35] = True
+    queue = StubQueue(_blob_result)
+    tool = _box_tool(canvas, ov, queue)
+    tool.erased_provider = lambda: erased
+    hints: list[str] = []
+    tool.sigHint.connect(hints.append)
+    tool.on_press(10.0, 10.0, None)
+    tool.on_move(44.0, 44.0, None)
+    tool.on_release(44.0, 44.0, None)
+    assert _spin(lambda: bool(hints))
+
+    assert "保留擦除 50 px" in hints[-1], hints
+    assert "50 erased px kept out" in hints[-1]
+
+
+def test_the_status_line_says_what_the_application_did(zoomed):
+    """One clause, bilingual only where it has to be (ruling R2b)."""
+    canvas, ov = zoomed
+    queue = StubQueue(_blob_result)
+    box = _box_tool(canvas, ov, queue)
+    hints: list[str] = []
+    box.sigHint.connect(hints.append)
+    box.on_press(10.0, 10.0, None)
+    box.on_move(44.0, 44.0, None)
+    box.on_release(44.0, 44.0, None)
+    assert _spin(lambda: bool(hints))
+    assert hints[-1].startswith("SAM +") and hints[-1].endswith(" px"), hints
+    assert "−" not in hints[-1], "an add-only prompt must not report a removal"
+
+    # Cycling to a smaller candidate is the other way the layer can shrink, and
+    # a bare "SAM +0 px" over 79k lost pixels is the silence this task is about.
+    shrinking = _box_tool(canvas, ov, StubQueue(_multi_result))
+    shrink_hints: list[str] = []
+    shrinking.sigHint.connect(shrink_hints.append)
+    ov.set_editing("inst-x", np.zeros((60, 80), dtype=bool))
+    shrinking.on_press(10.0, 10.0, None)
+    shrinking.on_move(44.0, 44.0, None)
+    shrinking.on_release(44.0, 44.0, None)
+    assert _spin(lambda: shrinking.candidate_count == 3)
+    biggest = int(ov.editing.sum())
+    for _ in range(3):
+        shrinking.cycle_candidate()
+        if int(ov.editing.sum()) < biggest:
+            break
+    assert "−" in shrink_hints[-1] and "换候选" in shrink_hints[-1], shrink_hints
+    assert "candidate swap" in shrink_hints[-1]
+
+    prior = np.zeros((60, 80), dtype=bool)
+    prior[20:40, 20:40] = True
+    ov.set_editing("inst-x", prior)
+    point = _point_tool(canvas, ov, queue, refine=True)
+    point_hints: list[str] = []
+    point.sigHint.connect(point_hints.append)
+    point.on_press(25.0, 25.0, _negative(25.0, 25.0))
+    assert _spin(lambda: bool(point_hints))
+    assert "−" in point_hints[-1] and "含负点" in point_hints[-1], point_hints
+    assert "with a negative point" in point_hints[-1]

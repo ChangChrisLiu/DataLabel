@@ -546,7 +546,10 @@ def test_a_mask_already_applied_for_rank_one_stays_and_undo_removes_it(window):
 
     assert np.array_equal(window.overlay.editing, applied)
     message = window.status_message()
-    assert "Ctrl+Z" in message and ("留着" in message or "stays" in message)
+    # Since round 1 a result is composed into the layer rather than replacing
+    # it, so the line says what the pixels *are* now and which key undoes them.
+    assert "Ctrl+Z" in message
+    assert "并进图层" in message and "part of the layer" in message
 
     window.act_undo()
     QApplication.processEvents()

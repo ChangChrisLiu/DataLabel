@@ -30,6 +30,7 @@ from app_scene import (
     make_session,
     seed_shapes,
 )
+from tda.core import masks as M
 from tda.core.cache import suggest_roi, suggest_roi_over
 from tda.core.model import FrameKey
 from tda.core.truth import StaleConflictError, TruthService
@@ -308,6 +309,544 @@ def test_shift_r_re_edits_the_roi_and_escape_keeps_the_old_one(qapp, tmp_path):
         win.act_clear_edit()                  # Esc
         assert win.roi_editing is False
         assert tuple(win.roi()) == stored
+    finally:
+        close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# the ROI explains itself and never disappears silently (task U1, report 2)
+# --------------------------------------------------------------------------- #
+# "ROI 这个不是很明显，让我很迷惑" -- the annotator did not know what the
+# rectangle was, that it was waiting for an answer, or what it was for; and
+# starting an edit made it vanish with nothing stored and nothing said.
+def _roi_bar_text(win: MainWindow) -> str:
+    return win.roi_bar.label.text() if win.roi_bar.isVisibleTo(win) else ""
+
+
+def _shown(win: MainWindow, name: str) -> bool:
+    return win._roi_buttons[name].isVisibleTo(win.roi_bar)
+
+
+def test_the_proposal_bar_says_what_the_rectangle_is_for_and_what_to_do(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        assert win.roi_editing is True
+        text = _roi_bar_text(win)
+        assert "机箱范围" in text and "ROI" in text
+        assert "差异图" in text and "SAM" in text, "what it is for"
+        assert "Enter" in text and "Esc" in text and "Shift+R" in text
+        assert _shown(win, "save") and _shown(win, "skip")
+        assert not _shown(win, "none")
+        assert win.roi_label.text().startswith("ROI 未确认")
+    finally:
+        close_window(win)
+
+
+def test_starting_an_edit_leaves_a_reminder_instead_of_silence(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        card = [r for r in win.session.task_card() if r.get("instance")]
+        win.on_request_edit(str(card[0]["instance"]))     # the silent dismissal
+
+        assert win.roi_editing is False
+        assert win.roi() is None
+        assert win.roi_unanswered() is True
+        text = _roi_bar_text(win)
+        assert "ROI 未确认" in text and "整张图" in text
+        assert _shown(win, "accept") and _shown(win, "redraw") and _shown(win, "none")
+        assert not _shown(win, "save")
+        assert win.roi_label.text().startswith("ROI 未确认")
+    finally:
+        close_window(win)
+
+
+def test_the_reminder_survives_a_frame_change_inside_the_segment(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win.act_clear_edit()                   # Esc: skipped
+        assert win.roi_unanswered() is True
+        win.act_step(-1)
+        QApplication.processEvents()
+        assert win.roi_editing is False, "it must not pop up on every frame"
+        assert win.roi_unanswered() is True, "...and it must not go quiet either"
+        assert "ROI 未确认" in _roi_bar_text(win)
+    finally:
+        close_window(win)
+
+
+def test_confirming_the_proposal_stores_it_as_it_stands(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        offered = tuple(win.roi_draft)
+        win.act_tool("brush")                  # the proposal leaves the screen
+        assert win.roi_editing is False and win.roi() is None
+
+        win.act_accept_roi_proposal()          # 确认建议框
+        assert tuple(win.roi()) == offered
+        assert win.roi_unanswered() is False
+        assert _roi_bar_text(win) == ""
+        assert win.roi_label.text() == "ROI ✓"
+    finally:
+        close_window(win)
+
+
+def test_no_roi_is_an_answer_and_is_remembered_for_the_segment(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        key = win.roi_key()
+        win.act_no_roi()                       # 不用 ROI
+        assert win.roi_editing is False
+        assert win.roi() is None
+        assert win.roi_unanswered() is False
+        assert key in win._roi_dismissed
+        assert _roi_bar_text(win) == ""
+        assert win.roi_label.text().startswith("无 ROI")
+
+        win.act_step(-1)
+        QApplication.processEvents()
+        assert win.roi_editing is False and _roi_bar_text(win) == ""
+    finally:
+        close_window(win)
+
+
+def test_a_stored_roi_never_asks_and_is_drawn_thin(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win.act_commit()
+        stored = tuple(win.roi())
+        assert win.roi_unanswered() is False
+        assert _roi_bar_text(win) == ""
+        assert win.canvas.roi_rect() == tuple(float(v) for v in stored)
+        assert win.roi_label.text() == "ROI ✓"
+    finally:
+        close_window(win)
+
+
+def test_dragging_a_handle_resizes_the_proposal_rather_than_replacing_it(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        x0, y0, x1, y1 = (float(v) for v in win.roi_draft)
+        assert win.active_tool is win.roi_tool
+        assert win.roi_tool.rect == (x0, y0, x1, y1)
+
+        win.roi_tool.on_press(x1, y1, None)          # the se handle
+        win.roi_tool.on_move(x1 + 3, y1 + 3, None)
+        win.roi_tool.on_release(x1 + 3, y1 + 3, None)
+        QApplication.processEvents()
+
+        grown = tuple(win.roi_draft)
+        assert grown[:2] == (int(x0), int(y0)), "the far corner moved too"
+        assert grown[2] >= int(x1) and grown[3] >= int(y1)
+    finally:
+        close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# a deliberate erase is a manual edit too (round 2, ruling E1)
+# --------------------------------------------------------------------------- #
+def _seed_layer(win: MainWindow, box=(8, 8, 40, 40)) -> str:
+    """Begin an edit and put a solid block into the layer."""
+    instance = first_task_instance(win)
+    win.on_request_edit(instance)
+    mask = np.zeros(win.overlay.hw, dtype=bool)
+    x0, y0, x1, y1 = box
+    mask[y0:y1, x0:x1] = True
+    win.set_editing_mask(mask, undoable=True)
+    return instance
+
+
+def test_an_eraser_stroke_is_remembered_as_erased(window):
+    _seed_layer(window)
+    assert window.erased_mask() is None, "nothing has been erased yet"
+
+    window.act_tool("eraser")
+    before = window.overlay.editing.copy()
+    paint(window)
+    erased = window.erased_mask()
+
+    assert erased is not None, "the eraser stroke was not remembered"
+    removed = before & ~window.overlay.editing
+    assert removed.any() and np.array_equal(erased.full(), removed)
+    # kept boxed, not as a 12 MP canvas (round 3)
+    assert erased.box == M.bbox(removed)
+    assert erased.count() == int(removed.sum())
+
+
+def test_undo_and_redo_of_an_eraser_stroke_move_the_erased_set(window):
+    _seed_layer(window)
+    window.act_tool("eraser")
+    paint(window)
+    erased = window.erased_mask().full()
+    layer = window.overlay.editing.copy()
+
+    window.act_undo()
+    QApplication.processEvents()
+    assert window.erased_mask() is None, "undo left the pixels protected"
+
+    window.act_redo()
+    QApplication.processEvents()
+    assert np.array_equal(window.session.editing_mask(), layer)
+    assert np.array_equal(window.erased_mask().full(), erased)
+
+
+def test_a_brush_stroke_over_erased_pixels_lifts_the_protection(window):
+    _seed_layer(window)
+    window.act_tool("eraser")
+    paint(window)
+    assert window.erased_mask().count() > 0
+
+    window.act_tool("brush")
+    paint(window)                       # the same place, painting it back
+
+    remaining = window.erased_mask()
+    assert remaining is None or not (remaining.full() & window.overlay.editing).any()
+
+
+def test_despeckled_specks_stay_removed(window):
+    """Round 3, 4b: a speck the annotator deleted is a deletion like any other."""
+    instance = first_task_instance(window)
+    window.on_request_edit(instance)
+    mask = np.zeros(window.overlay.hw, dtype=bool)
+    mask[8:40, 8:40] = True
+    mask[50, 50] = True                 # a 1 px speck
+    window.set_editing_mask(mask, undoable=True)
+
+    window.act_despeckle()
+    erased = window.erased_mask()
+
+    assert erased is not None and erased.at(50, 50), "the speck is not protected"
+    assert not window.overlay.editing[50, 50]
+
+    window.act_tool("sam_point")
+    window.sam_point.on_press(20.0, 20.0, None)
+    window.sam_queue.flush(multimask=True)
+    QApplication.processEvents()
+    assert not window.overlay.editing[50, 50], "SAM put the speck back"
+
+
+def test_filling_an_erased_hole_lifts_the_protection(window):
+    """``Shift+F`` puts pixels *in*, and anything in the layer is not erased."""
+    instance = first_task_instance(window)
+    window.on_request_edit(instance)
+    ring = np.zeros(window.overlay.hw, dtype=bool)
+    ring[10:30, 10:30] = True
+    ring[16:24, 16:24] = False          # a hole
+    window.set_editing_mask(ring, undoable=True)
+    window.act_tool("eraser")
+    window.set_editing_mask(ring, undoable=True, deliberate=True)
+    # protect the hole the way an eraser stroke would
+    window.session.set_erased_mask(~ring & _block(window, 16, 24))
+    assert window.erased_mask().at(20, 20)
+
+    window.act_fill_holes()
+
+    assert window.overlay.editing[20, 20], "the hole was not filled"
+    remaining = window.erased_mask()
+    assert remaining is None or not remaining.at(20, 20), "still protected"
+
+
+def _block(win: MainWindow, lo: int, hi: int) -> np.ndarray:
+    out = np.zeros(win.overlay.hw, dtype=bool)
+    out[lo:hi, lo:hi] = True
+    return out
+
+
+def test_adopting_a_draft_may_revive_erased_pixels_but_says_so(window):
+    """Round 3, 4a: an explicit action may, a prompt may not -- and it shows."""
+    from tda.ui.app_adopt import ADOPT_REVIVED
+
+    assert "{px" in ADOPT_REVIVED, "the clause must carry the count"
+    assert "擦掉过" in ADOPT_REVIVED and "had been erased" in ADOPT_REVIVED
+
+
+def test_the_erased_set_goes_out_with_the_edit(window):
+    _seed_layer(window)
+    window.act_tool("eraser")
+    paint(window)
+    assert window.erased_mask() is not None
+
+    window.act_clear_edit()             # Esc
+    assert window.erased_mask() is None
+
+
+def test_the_erased_set_travels_in_the_crash_sidecar(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.act_clear_edit()            # answer the ROI
+        instance = _seed_layer(win)
+        win.act_tool("eraser")
+        paint(win)
+        erased = win.erased_mask().full()
+        key = win.session.current()
+        win.flush_sidecar()
+
+        entry = win.sidecar.pending_for(key, instance, win.overlay.hw)
+        assert entry is not None
+        assert np.array_equal(entry["erased"].full(), erased), "the sidecar lost it"
+
+        win.session.clear_edit()
+        win._sync_editing_layer()
+        win._offer_restore(key, instance)
+        assert win.pending_restore() is not None
+        win.restore_pending()
+        assert np.array_equal(win.erased_mask().full(), erased), "the restore lost it"
+    finally:
+        close_window(win)
+
+
+def test_a_sam_result_does_not_put_an_erased_patch_back(window):
+    """The reviewer's case: erase most of a result, then click positively."""
+    _seed_layer(window)
+    window.act_tool("eraser")
+    paint(window)
+    erased = window.erased_mask().full()
+    assert erased.any()
+
+    # a SAM point prompt somewhere else entirely; the stub's mask covers most
+    # of the crop, so without the protection it would cover the erased patch
+    before = int(window.overlay.editing.sum())
+    window.act_tool("sam_point")
+    window.sam_point.on_press(50.0, 50.0, None)
+    window.sam_queue.flush(multimask=True)
+    QApplication.processEvents()
+
+    assert int(window.overlay.editing.sum()) > before, "the result did not land"
+    assert window.sam_point.kept_out() == int(erased.sum())
+    assert not (window.overlay.editing & erased).any(), "the erasure was undone"
+    assert "保留擦除" in window.status_message()
+
+
+# --------------------------------------------------------------------------- #
+# a refused proposal must not wedge the window (round 2, C1 / M2 / M3 / I1)
+# --------------------------------------------------------------------------- #
+WHOLE_FRAME = (0, 0, 64, 64)
+
+
+def _open_edit_with_pixels(win: MainWindow) -> str:
+    instance = first_task_instance(win)
+    win.on_request_edit(instance)
+    win.act_tool("brush")
+    paint(win)
+    assert win.has_uncommitted_edit(), "the test needs uncommitted pixels"
+    return instance
+
+
+def test_confirming_a_refused_proposal_leaves_enter_with_the_edit(qapp, tmp_path):
+    """C1: the whole-frame "not found" used to leave Enter aimed at nothing."""
+    from tda.ui.app_roi import NO_CHASSIS_FOUND
+
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win._roi_proposal[win.roi_key()] = WHOLE_FRAME   # what "not found" is
+        win.act_clear_edit()                             # Esc: skipped
+        win.refresh_roi_bar()
+        assert not _shown(win, "accept"), "a button that will refuse is offered"
+        assert "整幅图不作为 ROI" in _roi_bar_text(win)
+
+        _open_edit_with_pixels(win)
+        before = (win.roi_editing, win._tool_name, win.active_tool)
+
+        win.act_accept_roi_proposal()                    # the button anyway
+
+        assert (win.roi_editing, win._tool_name, win.active_tool) == before
+        assert win.roi() is None
+        assert NO_CHASSIS_FOUND in win.status_message()
+        assert win.canvas.roi_rect() is None
+
+        win.act_commit()                                 # Enter still commits
+        assert win.session.editing_instance is None, "the edit could not be committed"
+    finally:
+        close_window(win)
+
+
+def test_a_failed_roi_write_leaves_the_window_exactly_as_it_was(qapp, tmp_path,
+                                                                monkeypatch):
+    """``db.set_pose_segment_roi`` can raise; the window may not be left armed."""
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        offered = tuple(win.roi_draft)
+        assert win.roi_editing is True
+
+        def boom(*_a, **_k):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(win.db, "set_pose_segment_roi", boom)
+        win.act_commit()                                 # Enter on the rectangle
+
+        assert win.roi_editing is True, "the rectangle must still be answerable"
+        assert win.active_tool is win.roi_tool
+        assert tuple(win.roi_draft) == offered
+        assert win.roi() is None
+        assert "disk full" in win.last_error_message()
+        assert _shown(win, "save"), "the bar still offers the two answers"
+    finally:
+        close_window(win)
+
+
+def test_a_rectangle_too_small_for_a_chassis_is_refused(qapp, tmp_path):
+    from tda.ui.app_roi import roi_min_side
+
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        floor = roi_min_side(win.overlay.hw)
+        assert floor > 0
+        win.roi_draft = (10, 10, 10 + floor - 1, 10 + floor + 4)
+        win.act_commit()
+
+        assert win.roi() is None, "a sliver was stored as the chassis range"
+        assert "太小" in win.status_message()
+        assert win.roi_editing is True
+    finally:
+        close_window(win)
+
+
+def test_storing_the_roi_mid_edit_does_not_move_the_view(qapp, tmp_path):
+    """M2: no edit is lost, but the canvas may not jump under a half-drawn mask."""
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        offered = tuple(win.roi_draft)
+        win.act_clear_edit()                    # Esc, so the reminder is up
+        _open_edit_with_pixels(win)
+        win.canvas.set_zoom(3.0)
+        QApplication.processEvents()
+        zoom = win.canvas.zoom_factor()
+
+        win._roi_proposal[win.roi_key()] = offered
+        win.act_accept_roi_proposal()
+
+        assert tuple(win.roi()) == offered, "the rectangle was not stored"
+        assert abs(win.canvas.zoom_factor() - zoom) < 1e-6, "the view moved mid-edit"
+        assert win._roi_fit_pending == win.roi_key()
+        assert "F" in win.status_message()
+
+        win.act_fit_roi()                       # F: the annotator asks for it
+        assert win.canvas.zoom_factor() != zoom
+        assert win._roi_fit_pending is None
+    finally:
+        close_window(win)
+
+
+def test_the_deferred_fit_waits_for_its_own_segment(qapp, tmp_path):
+    """Round 3: a bare flag was spent by any frame change, in any view."""
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        offered = tuple(win.roi_draft)
+        win.act_clear_edit()
+        _open_edit_with_pixels(win)
+        win.canvas.set_zoom(3.0)
+        QApplication.processEvents()
+        zoom = win.canvas.zoom_factor()
+        here = win.roi_key()
+        win._roi_proposal[here] = offered
+        win.act_accept_roi_proposal()
+        assert win._roi_fit_pending == here
+
+        win.act_clear_edit()                 # drop the edit so nothing blocks
+        win.act_set_view("oak1")             # ... and go and look elsewhere
+        QApplication.processEvents()
+        assert win.session.view == "oak1"
+        assert win._roi_fit_pending == here, "the promised fit was dropped"
+
+        win.act_set_view(VIEW)
+        QApplication.processEvents()
+        assert win._roi_fit_pending is None, "it did not land on return"
+        assert win.canvas.zoom_factor() != zoom
+    finally:
+        close_window(win)
+
+
+def test_the_deferred_fit_lands_on_the_next_frame_change(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        offered = tuple(win.roi_draft)
+        win.act_clear_edit()
+        _open_edit_with_pixels(win)
+        win.canvas.set_zoom(3.0)
+        QApplication.processEvents()
+        win._roi_proposal[win.roi_key()] = offered
+        win.act_accept_roi_proposal()
+        assert win._roi_fit_pending == win.roi_key()
+
+        win.act_clear_edit()                    # drop the edit
+        win.act_step(-1)
+        QApplication.processEvents()
+
+        assert win._roi_fit_pending is None
+    finally:
+        close_window(win)
+
+
+def test_the_unanswered_reminder_survives_a_trip_to_another_view(qapp, tmp_path):
+    """I1: a glance at another view used to answer the question by accident."""
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win.act_clear_edit()                    # Esc: skipped, not answered
+        here = win.roi_key()
+        assert win.roi_unanswered() is True
+
+        win.act_set_view("oak1")
+        QApplication.processEvents()
+        assert win.session.view == "oak1", "the scene has no second view to visit"
+        win.act_set_view(VIEW)
+        QApplication.processEvents()
+
+        assert win.roi_key() == here
+        assert win.roi_unanswered() is True, "the reminder was lost"
+        assert "ROI 未确认" in _roi_bar_text(win)
+        assert win.roi_editing is False, "it must be the reminder, not the rectangle"
+        assert win.roi_label.text().startswith("ROI 未确认")
+    finally:
+        close_window(win)
+
+
+def test_confirming_with_no_proposal_in_hand_re_measures(qapp, tmp_path):
+    """I1: a reopened session has the reminder but no rectangle to confirm."""
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win.act_clear_edit()
+        key = win.roi_key()
+        win._roi_proposal.pop(key, None)        # what a restart looks like
+        win.refresh_roi_bar()
+        assert _shown(win, "accept"), "with nothing in hand the button re-measures"
+
+        win.act_accept_roi_proposal()
+        assert win._roi_accept_when_measured == key
+        assert win.wait_for_roi_proposal() is True
+        QApplication.processEvents()
+
+        assert win.roi() is not None, "the re-measured rectangle was not stored"
+        assert win.roi_unanswered() is False
+        assert _roi_bar_text(win) == ""
+    finally:
+        close_window(win)
+
+
+def test_a_recut_asks_about_the_pieces_again(qapp, tmp_path):
+    win = open_window(tmp_path)
+    try:
+        win.wait_for_roi_proposal()
+        win.act_clear_edit()
+        assert win.roi_unanswered() is True
+        win.reset_roi_proposals()
+        assert win.roi_unanswered() is False
+        assert win._roi_proposal == {}
+        win.render_frame()
+        QApplication.processEvents()
+        assert win.roi_editing is True, "the re-cut piece must be asked about"
     finally:
         close_window(win)
 
