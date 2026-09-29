@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication, QGraphicsPixmapItem
 from tda.core.diffmap import DiffBlob, explain_blobs
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
+from tda.ui import prompt_gate as PG
 from tda.ui import session_api as api
 from tda.ui.app_diff import (
     AssistController,
@@ -30,9 +31,11 @@ from tda.ui.app_diff import (
     heat_rgba,
 )
 from tda.ui.app_roi_worker import RoiProposer
+from tda.ui.class_names import class_zh
 
 __all__ = ["ASSIST_CONFIRM_WAIT", "BOX_REFUSED", "NO_ALTERNATE", "PROMPT_ARMED",
-           "PROMPT_CHIP", "PROMPT_CHIP_RANK", "PROMPT_TOO_BIG", "AssistMixin"]
+           "PROMPT_CHIP", "PROMPT_CHIP_RANK", "PROMPT_TOO_BIG", "PROMPT_WITHHELD",
+           "AssistMixin"]
 
 class _SamLoader(QObject):
     """Carries the outcome of the background SAM load onto the GUI thread."""
@@ -74,8 +77,9 @@ PROMPT_CHIP = "SAM 提示框（程序猜的位置）"
 #: ... and after ``Shift+C``: which of how many.
 PROMPT_CHIP_RANK = "SAM 提示框 {rank}/{total}"
 #: The arrival line, when the difference map arms a box (addendum C).  The
-#: box's coordinates and size go to the log, not here.
-PROMPT_ARMED = ("虚线小框是程序猜的位置（这一帧和下一帧差别最大的地方）：对就直接在零件上点 S；"
+#: box's coordinates and size go to the log, not here.  "虚线框", not "小框":
+#: the box is whatever changed, and on D13/scan 37 that was 120 x 350 px.
+PROMPT_ARMED = ("虚线框是程序猜的位置（这一帧和下一帧差别最大的地方）：对就直接在零件上点 S；"
                 "不对就直接点零件，框会自动不用，或按 Shift+C 换一个 / the dashed box is "
                 "a guess: click the part; a click outside it drops the box, "
                 "Shift+C offers another")
@@ -83,6 +87,12 @@ PROMPT_ARMED = ("虚线小框是程序猜的位置（这一帧和下一帧差别
 PROMPT_TOO_BIG = ("这一帧差不多整块机箱范围都变了，这次没有提示框：直接在零件上点 S 就行 / "
                   "almost the whole chassis range changed: no prompt box this "
                   "time, just click the part")
+#: ... and when its size is not the size of the part the card asks for (task
+#: U2h, :mod:`tda.ui.prompt_gate`).  ``{name}`` is the part's Chinese name;
+#: several are joined by :data:`WITHHELD_JOIN`.
+PROMPT_WITHHELD = ("这一步要补的是「{name}」，程序找到的变化大小不像它，这次不给提示框："
+                   "直接在零件上点 S，或用 B 涂 / no guess this time: click the part")
+WITHHELD_JOIN = "」或「"
 #: The first click of a prompt landed outside the armed box (addendum B).
 BOX_REFUSED = ("你点在提示框外：这次只用你的点，提示框不用了 / clicked outside the "
                "prompt box: point only")
@@ -157,6 +167,17 @@ class AssistMixin:
         #: :meth:`prompt_alternates`.  It is *only* ever non-zero because the
         #: annotator pressed ``Shift+C``.
         self._prompt_rank = 0
+        #: "No box when unsure" (task U2h): which views, ``k`` and the bands.
+        self.prompt_gate = PG.load_prompt_gate()
+        #: The rank-1 box the gate withheld on this frame, or ``None``.  Never
+        #: armed or drawn; kept so that ``Shift+C``'s alternates are the ones
+        #: they would have been behind it (a split piece that *is* the
+        #: withheld box is not an alternative to it).
+        self._withheld_box: Optional[tuple[float, float, float, float]] = None
+        #: The frame on which a click outside the armed box turned it down, or
+        #: ``None``.  Until the next frame visit nothing arms a box by itself
+        #: there again (task U2h); ``Shift+C`` is the annotator asking.
+        self._refused_on: Optional[Any] = None
 
         self.heat_visible = False
         self.heat_item = QGraphicsPixmapItem()
@@ -203,6 +224,7 @@ class AssistMixin:
             tool.instance = instance
         if changed:
             self.reset_prompt_rank()
+        self.hand_prompt_box_to_tools()
 
     def reset_sam_prompt(self) -> None:
         """Forget the points, the box drag and the candidates of both SAM tools.
@@ -211,23 +233,48 @@ class AssistMixin:
         -- a commit, ``Esc``, an undo/redo, a restored sidecar.  That is the one
         rule worth remembering: a prompt refines the layer it produced, so the
         moment somebody else writes that layer the prompt describes nothing.
+
+        The armed *box* is not the prompt's but the frame's, and it stays: the
+        tools are handed it back (:meth:`hand_prompt_box_to_tools`), so the
+        next click carries the box the canvas is showing.
         """
         for tool in (self.sam_point, self.sam_box):
             tool.reset_prompt()
         self.reset_prompt_rank()
+        self.hand_prompt_box_to_tools()
+
+    def hand_prompt_box_to_tools(self) -> None:
+        """Give both SAM tools the window's armed box: the one the canvas shows.
+
+        :meth:`~tda.ui.canvas.sam_tools.SamToolBase.reset_prompt` -- which a
+        detach, an ``Esc``, an undo and an instance change all end in -- drops
+        the tool's copy of the box, and the canvas kept drawing the window's.
+        After ``Esc`` at rank 2 the canvas showed rank 1 and neither tool held
+        it; after an undo the next click went out point-only under a box on
+        screen (task U2h).  Every funnel that resets a tool ends here instead,
+        so the canvas, ``S`` and ``X`` hold one box -- :attr:`_prompt_box` --
+        on every path.  Setting a box touches neither the token nor the
+        candidates, so this cancels nothing.
+        """
+        for tool in (self.sam_point, self.sam_box):
+            if tool.prompt_box != self._prompt_box:
+                tool.set_prompt_box(self._prompt_box)
 
     def clear_prompt_box(self) -> None:
         """Forget the box prompt; the next frame's diff map proposes its own.
 
         Including the *alternates* the annotator may have been walking: the
         difference map that produced them is about the pair of frames being
-        left, and rank 1 of the next frame is the next frame's own blob.
+        left, and rank 1 of the next frame is the next frame's own blob.  And
+        a box the gate withheld: that was the pair being left too.
         """
         self._prompt_box = None
         self._rank_one = None
+        self._withheld_box = None
         self._prompt_rank = 0
         self.canvas.set_prompt_point(None)
         self.canvas.set_rubber_band(None, kind="prompt")
+        self.hand_prompt_box_to_tools()
 
     def reset_prompt_rank(self) -> None:
         """Put the armed box back to rank 1 -- the difference map's own offer.
@@ -253,12 +300,32 @@ class AssistMixin:
         At rank 1 this returns without touching anything, which is what makes
         an annotator who never presses ``Shift+C`` see byte-identical
         behaviour: the whole feature is unreachable from here.
+
+        **A refused box is not put back** (task U2h).  When a click outside the
+        armed box turned it down on this frame, the rank goes to 1 with *no*
+        box armed: the rule "a refused box stays off until the next frame
+        visit" has no exception.  ``Tab``, a Review round trip, ``Esc``, a
+        restored sidecar and an ROI re-edit all used to re-arm rank 1 here,
+        which the annotator had just said was wrong -- or had walked past with
+        ``Shift+C`` to the alternate they then also turned down.
         """
         if self._prompt_rank == 0:
             return
+        refused = self._box_refused_here()
         self._prompt_rank = 0
         self._drop_prompt_for_new_box()
-        self._arm_prompt_box(self._rank_one)
+        self._arm_prompt_box(None if refused else self._rank_one)
+
+    def _box_refused_here(self) -> bool:
+        """Has a click outside the armed box turned it down on this frame?
+
+        The prompt's own flag (:attr:`~tda.ui.canvas.sam_tools.SamPointTool.box_refused`)
+        goes with the prompt; the frame's (:attr:`_refused_on`) with the frame.
+        """
+        if self.sam_point.box_refused:
+            return True
+        return (self._refused_on is not None and compat.is_open(self.session)
+                and self._refused_on == self.session.current())
 
     def _drop_prompt_for_new_box(self) -> str:
         """Invalidate the prompt because a **different** box is about to be armed.
@@ -320,9 +387,15 @@ class AssistMixin:
         through :meth:`_arm_prompt_box`, so ``X``, a tool switch
         (:meth:`rearm_sam`) and the hover all agree that there is no box now.
         ``Shift+C`` still offers the alternates: it starts a new prompt.
+        Nothing else arms a box on this frame again until it is left and
+        visited anew (task U2h): not a late comparison, not ``Esc``, not the
+        next part of the card.
         """
         self.logger.info("prompt box %s dropped: the first click was outside it",
                          None if box is None else tuple(int(round(v)) for v in box))
+        # Off until the next frame visit, whatever resets the prompt meanwhile.
+        self._refused_on = (self.session.current() if compat.is_open(self.session)
+                            else None)
         self._arm_prompt_box(None)
         self.report(BOX_REFUSED, hold_ms=BOX_REFUSED_HOLD_MS)
 
@@ -352,6 +425,10 @@ class AssistMixin:
         """
         image = self.session.image()
         token = key if image is not None else None
+        if self._refused_on is not None and self._refused_on != key:
+            # A visit to another frame: the box turned down was that frame's.
+            # The same frame announced again (a commit, F5) is not a visit.
+            self._refused_on = None
         self.clear_prompt_box()
         for tool in (self.sam_point, self.sam_box):
             tool.overlay = self.overlay
@@ -572,7 +649,7 @@ class AssistMixin:
             return
         blob = best_unexplained(self.assist_result)
         if blob is not None:
-            self.begin_add_shape(blob)
+            self.begin_add_shape(blob, rows=rows)
 
     def arm_prompt_box_for(self, instance: str) -> None:
         """Arm the box prompt for the instance the annotator actually activated.
@@ -584,29 +661,36 @@ class AssistMixin:
         payload = self.assist_result
         if not payload or payload.get("key") != self.session.current():
             return
-        rows = {str(r.get("instance")): r for r in self.session.task_card()}
+        card = self.session.task_card()
+        rows = {str(r.get("instance")): r for r in card}
         row = rows.get(str(instance))
         if row is None or row.get("kind") != api.KIND_ADD_SHAPE:
             return
         blob = best_unexplained(payload)
         if blob is not None:
-            self.begin_add_shape(blob)
+            self.begin_add_shape(blob, rows=card)
 
-    def begin_add_shape(self, blob: DiffBlob) -> None:
+    def begin_add_shape(self, blob: DiffBlob, rows: Optional[list] = None) -> None:
         """Feed a changed region's box to SAM as the box half of point+box.
 
         Only once the segment has a stored ROI.  Without one the difference map
         covers the whole frame, and its strongest region is as likely to be a
         scan-bed artefact at the edge as the part being drawn -- which is
         exactly what happened on 7 of 13 real frames.
+
+        Not on a view :mod:`tda.ui.prompt_gate` is on for when the blob is not
+        the size of any part the card asks to add back (task U2h): no box
+        rather than a likely-wrong one.  ``rows`` is the task card the caller
+        already read; ``None`` reads it, and only on a gated view.
         """
         roi = self.roi()
         if roi is None:
             return
-        if self.sam_point.box_refused:
-            # The prompt being built has already turned a box down with a
-            # click outside it; a comparison landing late must not put one
-            # back under the annotator's next click (U2g addendum B).
+        if self._box_refused_here():
+            # A click outside the armed box has already turned it down on this
+            # frame; a comparison landing late, an ``Esc`` or the next part of
+            # the card must not put one back under the annotator's next click
+            # (U2g addendum B; until the next frame visit, U2h).
             return
         box = tuple(float(v) for v in blob.box)
         if _covers_most(box, roi):
@@ -620,14 +704,49 @@ class AssistMixin:
                              "box, point-only (%d px)", int(blob.area))
             self.report(PROMPT_TOO_BIG)
             return
+        if self._withhold(blob, box, rows):
+            return
         # This is rank 1 by definition: the difference map arming its own blob.
         # Whatever ``Shift+C`` was walking belonged to the previous offer.
         self._rank_one = box
+        self._withheld_box = None
         self._prompt_rank = 0
         self._arm_prompt_box(box)
         self.logger.info("prompt box from the difference map: %s (%d px)",
                          tuple(int(v) for v in blob.box), int(blob.area))
         self.report(PROMPT_ARMED)
+
+    def _withhold(self, blob: DiffBlob, box: tuple, rows: Optional[list]) -> bool:
+        """Withhold the box when the gate says so (task U2h); ``True`` if it did.
+
+        The classes are those of the card's open ✚ rows -- what this frame asks
+        to add back -- and the box stays if it fits any one of their bands.
+        Withheld means withheld everywhere: nothing armed on either tool,
+        nothing on the canvas, and :meth:`_frame_diff_box` offers it to no
+        hover.  The heat map and ``Shift+C`` stay.
+        """
+        gate = self.prompt_gate
+        view = getattr(self.session.current(), "view", None)
+        if not gate.applies(view):
+            return False
+        card = self.session.task_card() if rows is None else rows
+        wanted = [r for r in card if r.get("kind") == api.KIND_ADD_SHAPE
+                  and not r.get("done") and r.get("instance")]
+        classes = [str(r.get("cls") or str(r["instance"]).split(".", 1)[0])
+                   for r in wanted]
+        verdict = gate.judge(view, classes, int(blob.area))
+        if verdict is None:
+            return False
+        self.clear_prompt_box()
+        self._withheld_box = box
+        names = list(dict.fromkeys(
+            class_zh(r.get("cls"), r.get("attrs"), str(r["instance"])) for r in wanted))
+        self.logger.info("prompt box withheld: blob %s (%d px) is %.1fx outside the "
+                         "area band of %s on %s (k=%g)",
+                         tuple(int(v) for v in blob.box), int(blob.area),
+                         verdict.factor, "/".join(verdict.classes), view, gate.k)
+        self.report(PROMPT_WITHHELD.format(name=WITHHELD_JOIN.join(names)))
+        return True
 
     # ------------------------------------------------- alternate box prompts
     def prompt_rank(self) -> int:
@@ -655,7 +774,10 @@ class AssistMixin:
             return []
         inside = [part for part in (payload.get("proposals") or [])
                   if not _covers_most(tuple(float(v) for v in part.box), roi)]
-        return alternate_parts(inside, self._rank_one)
+        # Behind a withheld rank 1 the alternates are the ones they would have
+        # been behind it: the withheld box spelled twice is not an alternative.
+        armed = self._rank_one if self._rank_one is not None else self._withheld_box
+        return alternate_parts(inside, armed)
 
     def _alternate_refusal(self) -> str:
         """Why ``Shift+C`` can do nothing right now, or ``""``.
@@ -707,6 +829,12 @@ class AssistMixin:
         chip = PROMPT_CHIP_RANK.format(rank=self._prompt_rank + 1, total=total)
         if self._prompt_rank == 0:
             self._arm_prompt_box(self._rank_one, label=chip)
+            if self._rank_one is None:
+                # Rank 1 was no box at all -- withheld (U2h) or the whole ROI.
+                self.report(f"提示框 1/{total}：这次不给框，直接在零件上点 / "
+                            f"prompt box 1/{total}: none this time, click the "
+                            f"part{note}")
+                return
             self.report(f"提示框 1/{total}：差异图原本给的那块 / "
                         f"prompt box 1/{total}: the difference map's own{note}")
             return

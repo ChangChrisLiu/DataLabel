@@ -335,6 +335,10 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
         """One of :data:`tda.ui.session_api.FRAME_STATUSES` (spec 4.5 colours)."""
         return self.review.frame_status(step)
 
+    def open_conflict_count(self, step: int) -> int:
+        """Open conflicts about ``step``, from the read :meth:`frame_status` makes."""
+        return self.review.open_conflict_count(step)
+
     # ----------------------------------------------------------------- images
     def image(self) -> Optional[np.ndarray]:
         """RGB pixels of the current frame, or ``None`` when it has no image."""

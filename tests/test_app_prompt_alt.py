@@ -797,8 +797,17 @@ def test_a_late_comparison_does_not_put_a_refused_box_back(window):
     assert window._prompt_box is None and window.sam_point.prompt_box is None
     window.sam_point.on_press(x - 1.0, y - 1.0, None)
     assert window.sam_queue.requests[-1].box is None
-    # ... until the prompt ends: Esc / a commit / another part start a new one
+    # ... nor after the prompt ends (Esc / a commit / another part): a refused
+    # box stays off until the next frame visit, without exception (U2h)
     window.reset_sam_prompt()
+    window.begin_add_shape(_blob(tuple(int(v) for v in box)))
+    assert window._prompt_box is None
+    # ... which is a visit to another frame and back
+    step = window.session.current().step
+    window.session.goto(step - 1)
+    QApplication.processEvents()
+    window.session.goto(step)
+    QApplication.processEvents()
     window.begin_add_shape(_blob(tuple(int(v) for v in box)))
     assert window._prompt_box == box
 
@@ -814,7 +823,8 @@ def test_the_armed_box_has_its_chip_and_the_arrival_line_has_no_coordinates(wind
     assert window.canvas.prompt_band() == (box, PROMPT_CHIP)
     assert window.canvas.rubber_band_kind() == "prompt"
     message = window.status_message()
-    assert message == PROMPT_ARMED and message.startswith("虚线小框是程序猜的位置")
+    # "虚线框", not "虚线小框": the box can be 120 x 350 px (U2h)
+    assert message == PROMPT_ARMED and message.startswith("虚线框是程序猜的位置")
     assert str(tuple(int(v) for v in rank1.box)) not in message and " px" not in message
     total = len(alts) + 1
     window.act_cycle_prompt_box()

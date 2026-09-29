@@ -412,7 +412,12 @@ def test_the_prompt_box_is_cleared_on_a_frame_change(window):
 
 
 def test_the_prompt_box_survives_a_detour_through_the_brush(window):
-    """``detach()`` clears the tool's box, so re-arming has to put it back."""
+    """``detach()`` clears the tool's box, so the window has to put it back.
+
+    Since U2h it is put back on the detached tool too: the canvas keeps
+    showing the box while the brush is armed, and both SAM tools hold what
+    the canvas shows on every path.
+    """
     window.session.goto(LAST_STEP - 1)
     payload = wait_for_assist(window)
     if not payload["unexplained"]:
@@ -420,8 +425,10 @@ def test_the_prompt_box_survives_a_detour_through_the_brush(window):
     window.act_tool("sam_point")
     window.begin_add_shape(payload["unexplained"][0])
     box = window.sam_point.prompt_box
+    assert box is not None
     window.act_tool("brush")
-    assert window.sam_point.prompt_box is None      # the tool was detached
+    assert window.canvas.prompt_band()[0] == box
+    assert window.sam_point.prompt_box == box == window.sam_box.prompt_box
     window.act_tool("sam_point")
     assert window.sam_point.prompt_box == box
 

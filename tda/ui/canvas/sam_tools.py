@@ -63,11 +63,13 @@ __all__ = [
     "ERR_OUT_OF_BOUNDS",
     "FALLBACK_INSTANCE",
     "PROMPT_BOX_MARGIN_PX",
+    "PROMPT_BOX_MARGIN_SCREEN_PX",
     "SamResultBridge",
     "SamToolBase",
     "SamPointTool",
     "SamBoxTool",
     "box_holds",
+    "prompt_box_margin",
     "viewport_crop",
 ]
 
@@ -85,9 +87,32 @@ ERR_FLASHING = "松开 Tab 再操作 / release Tab first: another frame is on sc
 #: click of a prompt may land and still count as a click *in* it (task U2g,
 #: addendum B).  A fixed distance rather than a share of the box: the boxes
 #: that matter here are screws of 20-30 px, where 2 % is under one pixel and a
-#: click on the part's own rim would already miss.  Eight pixels is 2-3 screen
-#: pixels at the 29 % an OAK frame opens at and 9 at the scanner's 109 %.
+#: click on the part's own rim would already miss.  At the scanner's 109 % it
+#: is 9 screen pixels; see :data:`PROMPT_BOX_MARGIN_SCREEN_PX` for the OAK
+#: frames, where it would be two.
 PROMPT_BOX_MARGIN_PX = 8.0
+#: ... and at least this many **screen** pixels, whatever the zoom (task U2h).
+#: Eight image pixels are 2.3 screen pixels at the 29 % an OAK frame opens at:
+#: a click that visibly lands on the box's dashed outline -- itself 4.5
+#: logical pixels wide, drawn outside the box -- read as "outside" and threw
+#: the box away.  Eight screen pixels are 27.6 image pixels there, and at
+#: 109 % they are 7.3, so the image-pixel floor still decides on the scanner.
+PROMPT_BOX_MARGIN_SCREEN_PX = 8.0
+
+
+def prompt_box_margin(zoom: Optional[float]) -> float:
+    """The margin, in image pixels, at ``zoom`` (screen pixels per image pixel).
+
+    ``max(PROMPT_BOX_MARGIN_PX, PROMPT_BOX_MARGIN_SCREEN_PX / zoom)``; an
+    unknown or broken zoom is the image-pixel floor alone.
+    """
+    try:
+        scale = float(zoom)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return PROMPT_BOX_MARGIN_PX
+    if not scale > 0.0:
+        return PROMPT_BOX_MARGIN_PX
+    return max(PROMPT_BOX_MARGIN_PX, PROMPT_BOX_MARGIN_SCREEN_PX / scale)
 
 
 def box_holds(box: Box, x: float, y: float,
@@ -111,9 +136,10 @@ class SamToolBase(CandidatesMixin, Tool):
         instance: instance key the result belongs to; ``None`` keeps whatever
             the overlay is already editing.
         prompt_box: optional box sent along with the points, set via
-            :meth:`set_prompt_box` -- normally the box of a
+            :meth:`set_prompt_box` by the window, and only by it: the box of a
             :class:`~tda.core.diffmap.DiffBlob` from the frame difference map,
-            or the last box dragged with :class:`SamBoxTool`.
+            or a ``Shift+C`` alternate.  A :class:`SamBoxTool` drag is a
+            prompt of its own and arms nothing.
         stroke_before: the editing layer as it was immediately before the last
             application, exactly like ``PaintTool.stroke_before``, so the
             session can build one ``edit_editing_mask`` op per applied mask --
@@ -222,10 +248,18 @@ class SamToolBase(CandidatesMixin, Tool):
         drag).  ``clear_points()`` used to be the only way to drop the points
         and **nothing called it**, so every mask after the first commit was a
         union over everything the annotator had clicked that session.
+
+        The identity the prompt was built for goes too (task U2h).  It is what
+        :meth:`_sync_identity` compares the next click with, and kept past a
+        reset it made that click reset the prompt a *second* time -- after
+        the window had handed the box back: click part A, commit, start part
+        B, and the first click on B went out point-only under the box on
+        screen.  Everything that check protects has already been dropped here.
         """
         self._token += 1  # nothing already submitted can match again
         self._reset_candidates()
         self.prompt_box = None
+        self._prompt_identity = None
 
     # -- frame identity -----------------------------------------------------
     @property
@@ -543,17 +577,19 @@ class SamPointTool(SamToolBase):
     editing layer.
 
     A lone first click is sent with ``multimask=True`` and the three proposals
-    are then reachable with :meth:`~SamToolBase.cycle_candidate`. When
-    :meth:`~SamToolBase.set_prompt_box` holds a box -- the changed region from
-    the difference map, or the last :class:`SamBoxTool` drag -- the click is
-    sent as point+box instead, which needs no candidates.
+    are then reachable with :meth:`~SamToolBase.cycle_candidate`. When the
+    window has armed a box with :meth:`~SamToolBase.set_prompt_box` -- the
+    changed region from the difference map, or a ``Shift+C`` alternate -- the
+    click is sent as point+box instead.  (A :class:`SamBoxTool` drag arms
+    nothing: it is its own prompt.)
 
     **Unless the click says the box is wrong** (task U2g, addendum B): the
     difference map's box is a guess, and on D13/scan 37 it sat on a cable that
     had moved more than the screw that was taken out.  A first positive click
-    more than :data:`PROMPT_BOX_MARGIN_PX` outside it is the annotator pointing
-    somewhere else, and sending it with the cable's box asked SAM for the
-    cable.  So that prompt goes point-only: the box is not sent,
+    further outside it than :func:`prompt_box_margin` -- eight image pixels,
+    or eight screen pixels when that is more (task U2h) -- is the annotator
+    pointing somewhere else, and sending it with the cable's box asked SAM for
+    the cable.  So that prompt goes point-only: the box is not sent,
     :attr:`sigBoxRefused` asks the window to take it off both tools and the
     canvas, and no later click of the same prompt brings it back
     (:attr:`box_refused`).  A first click inside the box is sent exactly as
@@ -580,16 +616,28 @@ class SamPointTool(SamToolBase):
         self._sync_identity()  # the box may belong to the previous target
         positive = not self._is_negative(ev)
         if (positive and self.prompt_box is not None and not self.box_refused
-                and not any(int(label) == 1 for _px, _py, label in self.points)
-                and not box_holds(self.prompt_box, x, y)):
-            refused, self.prompt_box = self.prompt_box, None
-            self.box_refused = True
-            log.info("sam prompt: first click (%.1f, %.1f) outside the prompt box %s "
-                     "(margin %.0f px): point only", float(x), float(y),
-                     tuple(int(round(v)) for v in refused), PROMPT_BOX_MARGIN_PX)
-            self.sigBoxRefused.emit(refused)
+                and not any(int(label) == 1 for _px, _py, label in self.points)):
+            # The zoom of this click: the margin is partly in screen pixels.
+            margin = prompt_box_margin(self._zoom())
+            if not box_holds(self.prompt_box, x, y, margin):
+                refused, self.prompt_box = self.prompt_box, None
+                self.box_refused = True
+                log.info("sam prompt: first click (%.1f, %.1f) outside the prompt box "
+                         "%s (margin %.1f image px): point only", float(x), float(y),
+                         tuple(int(round(v)) for v in refused), margin)
+                self.sigBoxRefused.emit(refused)
         self.points.append((float(x), float(y), 1 if positive else 0))
         self._submit(self.points, box=None if self.box_refused else self.prompt_box)
+
+    def _zoom(self) -> Optional[float]:
+        """The canvas' zoom right now (screen px per image px), or ``None``."""
+        zoom = getattr(self.canvas, "zoom_factor", None)
+        if not callable(zoom):
+            return None
+        try:
+            return float(zoom())
+        except Exception:  # noqa: BLE001 - a stub canvas: the image-pixel floor
+            return None
 
     @staticmethod
     def _is_negative(ev: Any) -> bool:

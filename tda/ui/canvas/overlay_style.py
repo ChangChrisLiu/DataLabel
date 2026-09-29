@@ -15,9 +15,10 @@ code, and both are fixed here rather than at each call site:
   29 % an OAK frame opens at as at 800 % (a cosmetic pen ignores the zoom).
 * **One colour could vanish into another.**  Each overlay kind has its own
   colour and :func:`tda.ui.canvas.overlay._build_palette` leaves a band of
-  :data:`RESERVED_HUE_HALF_WIDTH` degrees around each of them empty, so no
-  instance mask can ever share an overlay's hue; the drag band is white, which
-  the palette's saturation floor (0.62) cannot produce either.
+  :data:`RESERVED_HUE_HALF_WIDTH` degrees around each of them empty
+  (:data:`ROI_HUE_HALF_WIDTH` around the ROI's), so no instance mask can ever
+  share an overlay's hue; the drag band is white, which the palette's
+  saturation floor (0.62) cannot produce either.
 
 The look itself is the one the ROI editor already had (ruling U-ROI-2): a
 dark, solid under-stroke two logical pixels wider than a fully opaque bright
@@ -43,9 +44,11 @@ __all__ = [
     "CHIP_BG", "CHIP_GAP", "CHIP_MARGIN", "CHIP_MAX_W", "CURSOR_RING_PX", "DASH_PX",
     "DRAFT_RGB", "DRAG_BAND", "DRAG_RGB", "GAP_PX", "HANDLE_EDGE", "HINT_PX",
     "OutlineStyle", "PROMPT_BOX", "PROMPT_POINT", "PROMPT_RGB", "RESERVED_HUE_HALF_WIDTH",
-    "RESERVED_RGBS", "ROI_CHIP", "ROI_EDITING", "ROI_RGB", "ROI_STORED", "SHAPE_RGB",
+    "RESERVED_HUE_HALF_WIDTHS", "RESERVED_RGBS", "ROI_CHIP", "ROI_EDITING",
+    "ROI_HUE_HALF_WIDTH", "ROI_RGB", "ROI_STORED", "SHAPE_RGB",
     "UNDER_ALPHA", "UNDER_EXTRA_PX", "chip_pixmap", "draw_outline_rect",
-    "hint_style", "hue_degrees", "hue_distance", "place_chip", "reserved_hue_bands",
+    "hint_style", "hue_degrees", "hue_distance", "place_chip", "reserved_half_width",
+    "reserved_hue_bands",
 ]
 
 RGB = tuple[int, int, int]
@@ -81,6 +84,20 @@ RESERVED_RGBS: tuple[RGB, ...] = (ROI_RGB, PROMPT_RGB, DRAFT_RGB, SHAPE_RGB)
 #: 15 keeps the nearest instance colour a clearly different hue (orange vs
 #: amber, green vs lime) while leaving two thirds of the wheel to the palette.
 RESERVED_HUE_HALF_WIDTH = 15.0
+#: ... except around the ROI's magenta (task U2h).  At 15 the palette still
+#: made violet and pink that read as the ROI next to it: D13's
+#: screw.motherboard.05 (217, 92, 242) at 290 degrees and (242, 29, 160) at
+#: 323, 15 and 18 degrees from the ROI's 305.  The ROI is the one outline
+#: drawn round the whole chassis, over every part, so its band is the one
+#: that is widened; the other three stay at 15.
+ROI_HUE_HALF_WIDTH = 25.0
+#: The half-width of each reserved band, keyed like :data:`RESERVED_RGBS`.
+RESERVED_HUE_HALF_WIDTHS: dict[RGB, float] = {
+    ROI_RGB: ROI_HUE_HALF_WIDTH,
+    PROMPT_RGB: RESERVED_HUE_HALF_WIDTH,
+    DRAFT_RGB: RESERVED_HUE_HALF_WIDTH,
+    SHAPE_RGB: RESERVED_HUE_HALF_WIDTH,
+}
 
 # --------------------------------------------------------------------------- #
 # the strokes
@@ -205,14 +222,22 @@ def hue_distance(a: float, b: float) -> float:
     return min(d, 360.0 - d)
 
 
+def reserved_half_width(rgb: Sequence[int]) -> float:
+    """How far either side of an overlay's hue the palette stays, degrees."""
+    return RESERVED_HUE_HALF_WIDTHS.get(tuple(int(c) for c in rgb[:3]),
+                                        RESERVED_HUE_HALF_WIDTH)
+
+
 def reserved_hue_bands() -> list[tuple[float, float]]:
     """The hue bands no instance colour may fall in, as ``(lo, hi)`` degrees.
 
-    Each band is :data:`RESERVED_HUE_HALF_WIDTH` either side of an overlay
-    hue; ``lo`` may be negative or ``hi`` above 360 for a band that wraps.
+    Each band is :func:`reserved_half_width` either side of an overlay hue --
+    :data:`ROI_HUE_HALF_WIDTH` for the ROI, :data:`RESERVED_HUE_HALF_WIDTH`
+    for the others; ``lo`` may be negative or ``hi`` above 360 for a band that
+    wraps.
     """
-    return [(hue_degrees(rgb) - RESERVED_HUE_HALF_WIDTH,
-             hue_degrees(rgb) + RESERVED_HUE_HALF_WIDTH) for rgb in RESERVED_RGBS]
+    return [(hue_degrees(rgb) - reserved_half_width(rgb),
+             hue_degrees(rgb) + reserved_half_width(rgb)) for rgb in RESERVED_RGBS]
 
 
 # --------------------------------------------------------------------------- #

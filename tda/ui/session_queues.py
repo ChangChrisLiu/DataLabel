@@ -34,6 +34,8 @@ class ReviewState:
         #: ``() -> {step: FrameCoverage}``: what has been drawn, without pixels.
         self.coverage: Callable[[], dict] = dict
         self._conflict_steps: Optional[set[int]] = None
+        #: step -> open conflicts, from the same read as ``_conflict_steps``.
+        self._conflict_counts: Optional[dict[int, int]] = None
         self._pending: Optional[set[int]] = None
         self._coverage: Optional[dict] = None
 
@@ -56,6 +58,7 @@ class ReviewState:
     def invalidate(self) -> None:
         """Forget every per-change memo; the next query builds it again."""
         self._conflict_steps = None
+        self._conflict_counts = None
         self._pending = None
         self._coverage = None
 
@@ -85,8 +88,22 @@ class ReviewState:
         not be one query per row.
         """
         if self._conflict_steps is None:
-            self._conflict_steps = {c["step"] for c in self.open_conflicts()}
+            counts: dict[int, int] = {}
+            for c in self.open_conflicts():
+                counts[c["step"]] = counts.get(c["step"], 0) + 1
+            self._conflict_counts = counts
+            self._conflict_steps = set(counts)
         return self._conflict_steps
+
+    def open_conflict_count(self, step: int) -> int:
+        """How many open conflicts are about ``step``: the same one read per change.
+
+        A second conflict queued on a frame that is already a conflict leaves
+        its status alone, and the window follows the frame on screen when
+        this number moves too (task U2h) -- without a query of its own.
+        """
+        self.conflicted_steps()
+        return int((self._conflict_counts or {}).get(int(step), 0))
 
     def open_conflicts(self) -> list[dict]:
         if self.desktop is None:

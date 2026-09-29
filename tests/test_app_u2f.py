@@ -173,6 +173,53 @@ def test_the_card_stops_saying_confirmed_when_a_recheck_moves_the_frame_on_scree
         assert not session.confirm_frame()
 
 
+def test_a_second_conflict_on_a_frame_already_in_conflict_reaches_the_pane(
+        confirmed_on_screen, monkeypatch):
+    """U2h: the status stays ``conflict``; the number of open conflicts moves.
+
+    The pane used to learn of the second one only at the next announce.
+    """
+    from app_scene import chassis_instances
+
+    session, win = confirmed_on_screen
+    _recheck_queues_a_conflict(session)
+    session._on_queues_changed()
+    QApplication.processEvents()
+    assert session.frame_status(STEP) == api.STATUS_CONFLICT
+    first = [c for c in surfaces(win)["pane"] if c.startswith("open_conflict:")]
+    assert len(first) == 1, first
+
+    rebuilt = _count(monkeypatch, session, "task_card")
+    follows = _count(monkeypatch, win.task_card, "follow_status")
+    other = next(k for k in chassis_instances(session, STEP) if k != "chassis")
+    session.db.add_keyframe(ShapeKeyframe(
+        id=None, instance=other, desktop=DESKTOP, view=VIEW, pose_segment=1,
+        anchor_step=LAST_STEP, placement="in_chassis", geom_type="mask", version=9,
+        parts=[ShapePart("main", masks.encode_rle(cell(61)))]))
+    assert session.truth.refresh(KEY5)["conflicts"] == 1      # the second one
+    queries = _count(monkeypatch, session.db, "conflicts")
+    session._on_queues_changed()
+    QApplication.processEvents()
+
+    assert session.frame_status(STEP) == api.STATUS_CONFLICT   # unchanged
+    seen = surfaces(win)
+    now = [c for c in seen["pane"] if c.startswith("open_conflict:")]
+    assert len(now) == 2, now
+    no_space_promise(seen)
+    assert follows == [1], "the second conflict was not followed, or followed twice"
+    assert rebuilt == [], "the card was rebuilt to learn one number"
+    # one read of the view's conflicts for the review panel's queues and one
+    # for the memo the timeline's statuses and this count share -- nothing
+    # per frame, nothing for the count itself
+    assert len(queries) <= 2, len(queries)
+
+    # the same queue signal again: nothing moved, nothing is repainted
+    follows.clear()
+    session._on_queues_changed()
+    QApplication.processEvents()
+    assert follows == []
+
+
 def test_a_queue_change_that_leaves_the_status_alone_repaints_nothing(
         confirmed_on_screen, monkeypatch):
     session, win = confirmed_on_screen

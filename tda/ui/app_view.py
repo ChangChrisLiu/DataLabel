@@ -210,11 +210,15 @@ class ToolsMixin:
             wanted.attach()
             if wanted in (self.sam_point, self.sam_box):
                 self.rearm_sam()
+        # A detach drops a SAM tool's box; the canvas keeps showing the
+        # window's, so both tools get it back, attached or not (task U2h).
+        self.hand_prompt_box_to_tools()
         self.sync_tool_cursor()
 
     def _detach_tool(self) -> None:
         for tool in self._all_tools():
             tool.detach()
+        self.hand_prompt_box_to_tools()
         self.sync_tool_cursor()
 
     @S.guard

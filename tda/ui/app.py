@@ -579,18 +579,31 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         header, with the frame's refusal reasons read again beside it (a
         conflict the re-check queued stops Space); the card is not rebuilt
         (task U2f).
+
+        A **second** conflict queued on a frame already in ``conflict`` leaves
+        the status where it was, and reached the pane only at the next
+        announce; the number of open conflicts about the frame on screen is
+        followed as well (task U2h).  Both come out of the one memo the
+        timeline's statuses have just filled, so an unchanged frame still
+        costs no query and repaints nothing.
         """
         self.review.refresh()
         self.timeline.refresh_statuses()
         self._follow_frame_status()
 
     def _follow_frame_status(self) -> None:
-        """Re-say the open frame's status where it is said, if it moved (U2f)."""
+        """Re-say the open frame's status where it is said, if it moved (U2f, U2h)."""
         if not compat.is_open(self.session):
             return
-        status = str(self.session.frame_status(self.session.current().step))
-        if status == getattr(self, "_frame_status_seen", None):
+        step = self.session.current().step
+        status = str(self.session.frame_status(step))
+        conflicts = self._open_conflicts_here(step)
+        if (status == getattr(self, "_frame_status_seen", None)
+                and conflicts == getattr(self, "_conflicts_seen", None)):
             return
+        # Seen now, also when the frame label is not rewritten (``Tab`` held):
+        # the next signal must not follow the same move a second time.
+        self._conflicts_seen = conflicts
         finder = getattr(self.session, "current_problems", None)
         self.task_card.follow_status(status, list(finder()) if callable(finder) else None)
         self.update_status()                # the frame label, then the guide
