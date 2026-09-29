@@ -2,9 +2,11 @@
 
 Not a test module. :func:`disagreement` here is ``tda.core.truth_conflicts.
 disagreement`` as it stood at ``df8333d``, with everything it reached copied
-verbatim beside it -- the full-canvas decode, the contiguous ``uint8`` copies,
-the tolerant symmetric difference and the box rule -- so that nothing the
-production module changes can move this one with it.
+beside it line for line -- the full-canvas decode, the contiguous ``uint8``
+copies, the tolerant symmetric difference and the box rule -- so that nothing
+the production module changes can move this one with it. Docstrings and
+annotations are left out and ``masks.x`` calls the copy of ``x`` here; with
+that, every function's syntax tree is ``df8333d``'s.
 
 It decides which conflicts are queued, so the fast one must return exactly
 what this returns for every input (U2f ruling 1):
