@@ -307,9 +307,13 @@ def place_chip(size: tuple[float, float], box: QRectF, viewport: QRectF,
         y = top + gap                      # no room above: just inside the box
     rect = clamped(left, y)
     if not free(rect):
-        for candidate in (clamped(left, bottom + gap),
-                          clamped(right - w, y),
-                          clamped(right - w, bottom + gap)):
+        # A big box (the ROI under the banner) keeps its label at the same
+        # corner, just inside; a small one (a screw) must not be covered by
+        # its own label, so it goes to another corner instead.
+        inside = [clamped(left, top + gap)] if box.height() > 4 * h else []
+        for candidate in inside + [clamped(left, bottom + gap),
+                                   clamped(right - w, y),
+                                   clamped(right - w, bottom + gap)]:
             if free(candidate):
                 return candidate
     for _ in range(24):

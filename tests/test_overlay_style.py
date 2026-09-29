@@ -314,6 +314,10 @@ def test_a_chip_that_would_collide_moves_to_another_corner_of_its_own_box():
     assert second == QRectF(200, 325 + OS.CHIP_GAP, 200, 20)         # under its own box
     third = OS.place_chip((200, 20), QRectF(250, 302, 20, 20), view, [first, second])
     assert not third.intersects(first) and not third.intersects(second)
+    # a big box (the ROI under the banner) keeps its label at its top-left, inside
+    banner = QRectF(0, 0, 800, 40)
+    roi = OS.place_chip((120, 20), QRectF(50, 45, 600, 500), view, [banner])
+    assert roi == QRectF(50, 45 + OS.CHIP_GAP, 120, 20)
 
 
 def test_the_roi_chip_goes_with_the_outline_toggle_but_not_while_editing(qapp):
