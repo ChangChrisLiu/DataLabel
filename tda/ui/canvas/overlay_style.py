@@ -155,18 +155,34 @@ def hint_style(rgb: Sequence[int]) -> OutlineStyle:
 
 
 def draw_outline_rect(painter: QPainter, rect: QRectF, style: OutlineStyle,
-                      dpr: float = 1.0, outside: bool = False) -> None:
+                      dpr: float = 1.0, outside: bool = False,
+                      exposed: Optional[QRectF] = None) -> None:
     """Stroke ``rect`` (in the painter's coordinates) in ``style``: dark, then bright.
 
     ``outside`` puts the whole stroke just outside the rectangle instead of
     centred on its edge -- for the boxes that name a part (the prompt box,
     the hover hints): a screw's box is 20-odd image pixels, and a five-pixel
     stroke centred on its edge covered a fifth of the screw it was pointing at.
+
+    ``exposed`` is the region being repainted: when it lies wholly inside or
+    wholly outside the band the stroke covers, nothing is stroked.  A brush
+    dab inside the ROI repaints a few pixels, and a wide dashed stroke does
+    not take Qt's one-pixel fast path -- it was being built around the whole
+    rectangle for every dab.  Drawn or not, it is always the whole path, so
+    the dashes stay in phase across partial repaints.
     """
+    scale = abs(painter.worldTransform().m11()) or 1.0
     if outside:
-        scale = abs(painter.worldTransform().m11()) or 1.0
         grow = style.under_width / 2.0 / scale
         rect = rect.adjusted(-grow, -grow, grow, grow)
+    if exposed is not None:
+        pad = (style.under_width / 2.0 + 2.0) / scale
+        outer = rect.adjusted(-pad, -pad, pad, pad)
+        inner = rect.adjusted(pad, pad, -pad, -pad)
+        if not outer.intersects(exposed):
+            return
+        if inner.width() > 0 and inner.height() > 0 and inner.contains(exposed):
+            return
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.setPen(style.under_pen(dpr))
     painter.drawRect(rect)

@@ -207,6 +207,23 @@ def test_the_hints_are_two_tone_in_their_colours(qapp):
         canvas.close()
 
 
+def test_a_repaint_that_misses_the_stroke_band_strokes_nothing(qapp):
+    """A brush dab inside the ROI must not pay for the ROI's dashed stroke."""
+    from unittest import mock
+
+    image = QImage(200, 200, QImage.Format.Format_RGB32)
+    image.fill(QColor(255, 255, 255))
+    painter = QPainter(image)
+    box = QRectF(20, 20, 150, 150)
+    with mock.patch.object(QPainter, "drawRect", autospec=True) as draw:
+        OS.draw_outline_rect(painter, box, OS.ROI_STORED, exposed=QRectF(80, 80, 10, 10))
+        OS.draw_outline_rect(painter, box, OS.ROI_STORED, exposed=QRectF(190, 190, 5, 5))
+        assert draw.call_count == 0, "stroked for a repaint that cannot show it"
+        OS.draw_outline_rect(painter, box, OS.ROI_STORED, exposed=QRectF(15, 80, 10, 10))
+        assert draw.call_count == 2, "a repaint across the edge must stroke it"
+    painter.end()
+
+
 def test_a_box_that_names_a_part_is_stroked_outside_it(qapp):
     """A screw's box is ~20 px: a stroke centred on its edge covered the screw."""
     canvas = _canvas()

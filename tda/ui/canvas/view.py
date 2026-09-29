@@ -635,14 +635,15 @@ class ImageCanvas(QGraphicsView):
         """Is the rectangle on screen?  Hidden with ``A`` unless being edited."""
         return self._roi is not None and (self._roi_editing or self.roi_outline_visible)
 
-    def _draw_roi(self, painter: QPainter, dpr: float) -> None:
+    def _draw_roi(self, painter: QPainter, dpr: float,
+                  exposed: Optional[QRectF] = None) -> None:
         """The rectangle, its handles and the dimmed surround (ruling U-ROI-2)."""
         if not self.roi_shown():
             return
         x0, y0, x1, y1 = self._roi
         box = QRectF(x0, y0, x1 - x0, y1 - y0)
         if not self._roi_editing:
-            OS.draw_outline_rect(painter, box, OS.ROI_STORED, dpr)
+            OS.draw_outline_rect(painter, box, OS.ROI_STORED, dpr, exposed=exposed)
             return
         # Everything outside the rectangle goes dark, so "inside" is a thing
         # you can see rather than a thing you have to trace with your eye.
@@ -816,13 +817,14 @@ class ImageCanvas(QGraphicsView):
         """The outlines on screen (a copy)."""
         return list(self._hints)
 
-    def _draw_hints(self, painter: QPainter, dpr: float) -> None:
+    def _draw_hints(self, painter: QPainter, dpr: float,
+                    exposed: Optional[QRectF] = None) -> None:
         """The hover outlines; their labels are chips (:meth:`chip_layout`)."""
         for (x0, y0, x1, y1), _label, rgb in self._hints:
             # Outside the box: the part it points at stays uncovered.
             OS.draw_outline_rect(
                 painter, QRectF(x0, y0, max(1.0, x1 - x0), max(1.0, y1 - y0)),
-                OS.hint_style(rgb), dpr, outside=True)
+                OS.hint_style(rgb), dpr, outside=True, exposed=exposed)
 
     # -- label chips (task U2g) ---------------------------------------------
     def _chip_specs(self) -> list[tuple[str, tuple, QRectF, float, float]]:
@@ -1187,17 +1189,17 @@ class ImageCanvas(QGraphicsView):
         # so on the annotator's 150 % screen a "1 px" line was two thirds of
         # one.  The painter's own ratio, so a grab is drawn like the screen.
         dpr = float(painter.device().devicePixelRatioF() or 1.0)
-        self._draw_roi(painter, dpr)
+        self._draw_roi(painter, dpr, rect)
         if self._prompt_band_shown():
             x0, y0, x1, y1 = self._prompt_band
             OS.draw_outline_rect(painter, QRectF(x0, y0, x1 - x0, y1 - y0),
-                                 OS.PROMPT_BOX, dpr, outside=True)
-        self._draw_hints(painter, dpr)
+                                 OS.PROMPT_BOX, dpr, outside=True, exposed=rect)
+        self._draw_hints(painter, dpr, rect)
         if self._drag_band is not None:
             # Last of the boxes: what the hand is doing now is on top.
             x0, y0, x1, y1 = self._drag_band
             OS.draw_outline_rect(painter, QRectF(x0, y0, x1 - x0, y1 - y0),
-                                 OS.DRAG_BAND, dpr)
+                                 OS.DRAG_BAND, dpr, exposed=rect)
         if self._prompt_point is not None and not self._roi_editing:
             # A cross with a hole in the middle, sized in *screen* pixels, so
             # the marked pixel itself stays visible at 800 % and the mark stays
