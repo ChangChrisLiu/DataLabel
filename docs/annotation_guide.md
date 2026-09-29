@@ -272,7 +272,7 @@ D:\Anaconda\envs\tda\python.exe -m tda.cli check --desktop 13 --view scan
 
 **某一步没有图像。**
 画布写"本视图在该步骤没有图像"，工具全禁用。这一逻辑步骤仍在时间轴上（状态机和形状锚点都要
-经过），只是这个视图没拍到；翻页自动跳过，点时间轴才停。
+经过），只是这个视图没拍到；时间轴上写"无图像"，翻页自动跳过，点时间轴才停。
 
 **提交之后出现冲突。**
 这次编辑改变了某个已确认帧的结论，去 Review 的 Conflicts 按§6 处理。
@@ -298,5 +298,5 @@ D:\Anaconda\envs\tda\python.exe -m tda.cli check --desktop 13 --view scan
 `paths.yaml` 的 `weights_dir`。
 
 **想知道还差多少。**
-顶部机器下拉框写着 `D13 <品牌> [已确认/总帧数]`，确认一帧、换视图或后台复检后即更新；
-`tda.cli status --desktop 13` 给分视图统计。
+顶部机器下拉框写着 `D13 <品牌> [已确认/有图像的帧数]`（没图像的帧不算），确认一帧、换视图或
+后台复检后即更新；`tda.cli status --desktop 13` 给分视图统计（`done/work` 是同一个数）。
