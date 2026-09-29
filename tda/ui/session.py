@@ -546,6 +546,15 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
         self.sigFrameChanged.emit(self.current())
         self.sigProblems.emit(self._current_problems())
 
+    def current_problems(self) -> list[str]:
+        """What :attr:`sigProblems` said on arriving at the open frame.
+
+        For a panel that starts listening after the frame was announced: the
+        window is built after :meth:`open`, so its task card never heard the
+        first frame's problems (task U2c).
+        """
+        return self._current_problems() if self.is_open else []
+
     def _current_problems(self) -> list[str]:
         """The compiler's problems for the open frame, or none when it has no image."""
         key = self.current()

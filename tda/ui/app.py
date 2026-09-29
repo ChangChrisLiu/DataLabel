@@ -570,15 +570,18 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         self.timeline.refresh_statuses()
 
     @S.guard
-    def _on_problems(self, problems: list) -> None:
-        """The compiler has something to say about the open frame.
+    def _on_card_problems(self, count: int) -> None:
+        """The task card put problems of the open frame in its pane.
 
         The count and where to read them; the list itself is the task card's
         problems pane.  Joining them into the status bar put 2,550 characters
-        into a one-line label.
+        into a one-line label.  It follows the *card*, not the session's
+        ``sigProblems``: that said "13 problem(s) — 见任务卡" over a card that
+        showed no pane at all (task U2c).  The missing shapes the card's rows
+        already are were never shown anywhere else, and never will be.
         """
-        if problems:
-            self.report(f"{len(problems)} problem(s) — 见任务卡 / see the task card")
+        if count:
+            self.report(f"{count} problem(s) — 见任务卡 / see the task card")
 
     @S.guard
     def _on_dirty(self, dirty: bool) -> None:

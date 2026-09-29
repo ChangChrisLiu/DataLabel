@@ -14,6 +14,8 @@ of its own any more (task U2b round 1): the four commit/confirm buttons it
 carried duplicated the tool palette's, and two places for one thing is the
 confusion the second trial reported.  When ``confirm_frame`` refuses, the
 problems that came with ``sigProblems`` are shown instead of any local check.
+On arriving at a frame the pane lists only what the rows do not already say
+(task U2c): a missing shape *is* its row, and the card is the to-do list.
 
 **A card that explains itself** (task U2b).  The second trial's annotator stood
 on the start frame, read "Draw cover.02 (cover) on this frame" four times and
@@ -48,7 +50,7 @@ from tda.ui.class_names import instance_label, state_zh, visibility_zh
 from tda.ui.panels import session_is_open
 
 __all__ = ["CHIP_DONE", "CHIP_EDITING", "CHIP_TODO", "KIND_ICONS", "KIND_SENTENCES",
-           "TaskCardPanel", "card_header", "row_view"]
+           "TaskCardPanel", "card_header", "row_view", "unlisted_problems"]
 
 INSTANCE_ROLE = int(Qt.ItemDataRole.UserRole)
 #: The painted view of a row (:func:`row_view`), for the delegate.
@@ -378,6 +380,16 @@ def _is_code(problem: str) -> bool:
 #: had both, and left the real missing shape showing its raw code.
 EXPLAINED_CODES = ("missing_shape:",)
 
+#: Codes an open card row already *is*: a missing shape is the ✚ / ✂ row of
+#: that instance, a missing bench box its ▭ row.  The card is the to-do list,
+#: so these are not said a second time anywhere (task U2c).
+ROW_CODES = ("missing_shape:", "bench_missing:")
+
+#: The pane's title when it lists what a frame has on arrival: the problems
+#: the card's rows do not already ask for (task U2c).
+ARRIVAL_TITLE = "清单以外的问题 / Problems not on the list above"
+REFUSAL_TITLE = "Problems"
+
 #: What every other code means, in one place.  ``{what}`` is the part of the
 #: code after the colon -- an instance key, sometimes with a part or a second
 #: key after it -- which is what the annotator has to go and look at.
@@ -440,8 +452,24 @@ def pair_problems(problems: list[str]) -> list[dict]:
     return rows
 
 
+def unlisted_problems(problems: list[str], rows: list[dict]) -> list[str]:
+    """The compiler codes of a frame that its card's open rows do not ask for.
+
+    Arriving on D13/scan step 34 said "13 problem(s) — 见任务卡" over a card
+    with one ✂ row and no problems pane at all (task U2c): the status line
+    pointed at nothing.  One of the thirteen *was* that row -- its missing
+    shape -- and is left out here, because the row already says it; the other
+    twelve (parts no row mentions) are what the pane is for.  Anything that is
+    not a compiler code -- a conflict that would not resolve, a re-check that
+    failed on another step -- is not about this frame's list and is dropped.
+    """
+    open_rows = {str(r.get("instance", "")) for r in rows if not r.get("done", False)}
+    return [str(p) for p in problems if _is_code(p)
+            and not (str(p).startswith(ROW_CODES) and instance_of(str(p)) in open_rows)]
+
+
 class TaskCardPanel(QWidget):
-    """The per-frame instruction list and the problems of a refused confirm."""
+    """The per-frame instruction list, and the problems its rows do not cover."""
 
     #: An item was activated: the canvas should start editing this instance.
     sigRequestEdit = Signal(str)
@@ -449,12 +477,18 @@ class TaskCardPanel(QWidget):
     sigHover = Signal(str)
     #: A row that is not work was clicked; the payload is what it means.
     sigExplain = Signal(str)
+    #: A frame's problems arrived and the pane now lists this many of them
+    #: (``0``: it is hidden).  The status line says "见任务卡" from this and
+    #: from nothing else, so it never points at a pane that is not there.
+    sigProblemsShown = Signal(int)
 
     def __init__(self, session: Optional[api.SessionLike] = None,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._session: Optional[api.SessionLike] = None
         self._problems: list[str] = []
+        #: Inside :meth:`confirm`: a refusal's problems are kept for it to show.
+        self._confirming = False
         self._rows: list[dict] = []
         #: The card rows as the session last gave them (``rows()``).
         self._card: list[dict] = []
@@ -491,7 +525,7 @@ class TaskCardPanel(QWidget):
         self._list.viewportEntered.connect(lambda: self._set_hover(""))
         self._list.viewport().installEventFilter(self)
 
-        self._problems_label = QLabel("Problems")
+        self._problems_label = QLabel(REFUSAL_TITLE)
         self._problems_list = QListWidget()
         self._problems_list.setMaximumHeight(90)     # it scrolls; 60 of them fit
         self._problems_list.setTextElideMode(Qt.TextElideMode.ElideRight)
@@ -529,6 +563,11 @@ class TaskCardPanel(QWidget):
             session.sigProblems.connect(self._on_problems)
         self._hide_problems()
         self.refresh()
+        # The session announced the frame it opened on before this panel was
+        # listening (the window is built after ``open``), so ask once.
+        finder = getattr(session, "current_problems", None)
+        if session_is_open(session) and callable(finder):
+            self._show_arrival([str(p) for p in finder()])
 
     def list_widget(self) -> QListWidget:
         """The underlying list, for the main window's layout and for tests."""
@@ -664,16 +703,23 @@ class TaskCardPanel(QWidget):
         Only the problems that arrived during *this* call are shown: a refusal
         always comes with a fresh ``sigProblems`` (see :class:`api.SessionLike`),
         and showing an older list would attribute another frame's problems to
-        this one.
+        this one.  A refusal shows all of them, rows included: that list is
+        the answer to "why not?".  A confirmation steps to the next frame, and
+        what arrived during the call is *that* frame's, shown as on any
+        arrival (task U2c).
         """
         if self._session is None:
             return False
         self._problems = []
-        ok = self._session.confirm_frame()
+        self._confirming = True
+        try:
+            ok = self._session.confirm_frame()
+        finally:
+            self._confirming = False
         if ok:
-            self._hide_problems()
+            self._show_arrival(self._problems)
         else:
-            self._show_problems(self._problems)
+            self._show_problems(self._problems, REFUSAL_TITLE)
         return ok
 
     def problem_count(self) -> int:
@@ -781,8 +827,27 @@ class TaskCardPanel(QWidget):
 
     def _on_problems(self, problems: list) -> None:
         self._problems = [str(p) for p in problems]
+        if not self._confirming:
+            self._show_arrival(self._problems)
 
-    def _show_problems(self, problems: list[str]) -> None:
+    def _show_arrival(self, problems: list[str]) -> None:
+        """Put what a frame arrived with in the pane, minus the card's own rows.
+
+        Only a frame's own compiler codes decide the pane: a list with none of
+        them in it is a conflict or a failed re-check the window reports in
+        its own words, and it must not wipe the problems of the frame that is
+        on screen.
+        """
+        if problems and not any(_is_code(p) for p in problems):
+            return
+        shown = unlisted_problems(problems, self._card)
+        if shown:
+            self._show_problems(shown, ARRIVAL_TITLE)
+        else:
+            self._hide_problems()
+        self.sigProblemsShown.emit(self.problem_count())
+
+    def _show_problems(self, problems: list[str], title: str = REFUSAL_TITLE) -> None:
         """One row per problem: the sentence, with the code in the tooltip.
 
         The session emits the compiler's codes *and* the "how to fix it"
@@ -800,6 +865,7 @@ class TaskCardPanel(QWidget):
             item.setData(INSTANCE_ROLE, row["instance"])
             self._problems_list.addItem(item)
         visible = bool(problems)
+        self._problems_label.setText(title)
         self._problems_label.setVisible(visible)
         self._problems_list.setVisible(visible)
 

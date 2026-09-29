@@ -256,6 +256,8 @@ class ShellMixin:
         self.review_dock.hide()
 
         self.task_card.sigRequestEdit.connect(self.on_request_edit)
+        # The one source of "见任务卡": the card says when its pane shows some.
+        self.task_card.sigProblemsShown.connect(self._on_card_problems)
         self.instances.sigRequestEdit.connect(self.on_request_edit)
         self.review.sigRework.connect(self.on_rework)
         self._rewire_panels()
@@ -270,7 +272,6 @@ class ShellMixin:
     def _connect_session(self) -> None:
         """Every session signal the window reacts to, when the session has it."""
         self.session.sigFrameChanged.connect(self._on_frame_changed)
-        self.session.sigProblems.connect(self._on_problems)
         self.session.sigDirty.connect(self._on_dirty)
         signal = compat.editing_changed_signal(self.session)
         if signal is not None:
@@ -418,7 +419,6 @@ class ShellMixin:
         # sweeper that is still running would otherwise deliver into a window
         # that has let go of its session.
         for name, slot in (("sigFrameChanged", self._on_frame_changed),
-                           ("sigProblems", self._on_problems),
                            ("sigDirty", self._on_dirty),
                            ("sigEditingChanged", self._on_editing_changed),
                            ("sigQueuesChanged", self._on_queues_changed),
@@ -431,6 +431,11 @@ class ShellMixin:
                 signal.disconnect(slot)
             except (RuntimeError, TypeError):  # pragma: no cover - never connected
                 pass
+        try:
+            # the card relays the session's problems into the status line
+            self.task_card.sigProblemsShown.disconnect(self._on_card_problems)
+        except (RuntimeError, TypeError):  # pragma: no cover - never connected
+            pass
         if self._cheat_sheet is not None:
             self._cheat_sheet.close()
         sys.excepthook = self._previous_hook
