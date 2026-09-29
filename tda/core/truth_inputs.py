@@ -28,6 +28,7 @@ import cv2
 
 from tda.core.cache import cached_image_path
 from tda.core.db import Db
+from tda.core.rawroot import resolve_raw
 from tda.core.model import (
     FrameKey,
     FrameOverride,
@@ -170,15 +171,21 @@ def _image_path(row: Optional[dict], key: FrameKey,
     read-only source drive. That order is the point: measuring the size used to
     decode a 12 MP still off F: for every frame of a view on its first compile,
     and to fall back to the view's nominal size whenever F: was detached.
+
+    Returns the candidate **as recorded** -- a raw path keeps the letter it was
+    stored with, so the ``cache_path`` written back is provenance rather than
+    today's drive letter -- after checking that the file it resolves to now
+    (:func:`tda.core.rawroot.resolve_raw`) is really there.
     """
     aux = (row or {}).get("aux") or {}
     for candidate in (cached_image_path(cache_dir, key),
                       aux.get("cache_path"),
                       (row or {}).get("path")):
-        if not candidate:
+        found = resolve_raw(candidate)
+        if not found:
             continue
         try:
-            if Path(str(candidate)).exists():
+            if Path(found).exists():
                 return str(candidate)
         except (OSError, ValueError):
             continue
@@ -187,12 +194,17 @@ def _image_path(row: Optional[dict], key: FrameKey,
 
 def _measure_hw(row: Optional[dict], key: FrameKey, cache_dir: Optional[str]
                 ) -> Optional[tuple[tuple[int, int], str]]:
-    """``((H, W), path)`` read off the image file, or ``None`` when there is none."""
+    """``((H, W), path)`` read off the image file, or ``None`` when there is none.
+
+    ``path`` is the recorded spelling (see :func:`_image_path`); the file
+    opened is the one it resolves to today.
+    """
     path = _image_path(row, key, cache_dir)
-    if not path:
+    found = resolve_raw(path)
+    if not path or not found:
         return None
     try:
-        image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        image = cv2.imread(found, cv2.IMREAD_UNCHANGED)
     except (OSError, ValueError):
         return None
     if image is None or getattr(image, "ndim", 0) < 2:

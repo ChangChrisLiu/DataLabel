@@ -315,6 +315,19 @@ class TimelinePanel(QWidget):
         if self.isVisible():
             self.ensure_visible_thumbs()
 
+    def forget_thumbnails(self) -> None:
+        """Drop every remembered picture and read them again.
+
+        A thumbnail that could not be read is remembered as the placeholder, so
+        the rows stay grey for as long as the panel lives -- which is the right
+        thing for a missing file and the wrong one after the raw drive has just
+        been plugged in and ``F5`` pressed.
+        """
+        self._reader.forget()
+        self._thumbs.clear()
+        self._asked.clear()
+        self.refresh()
+
     def item_steps(self) -> list[int]:
         """The steps in display order."""
         return [

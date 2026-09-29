@@ -195,9 +195,15 @@ class BackupLockMixin:
 
         Never call this inside :meth:`~tda.core.dbconn.ConnectionMixin.transaction`
         -- see :meth:`_read_snapshot`.
+
+        ``dest_dir`` itself may be created, **nothing above it**: an exit backup
+        once built ``F:/PHD Data Backup/Desktop Dataset/TDA_backups`` on the
+        drive that happened to be ``F:`` that day, which was not the raw-data
+        one. Where a backup may go is :func:`tda.core.rawroot.backup_target`'s
+        answer; this only refuses to invent the folders above it.
         """
         dest = Path(dest_dir)
-        dest.mkdir(parents=True, exist_ok=True)
+        dest.mkdir(exist_ok=True)       # the leaf only: a missing parent raises
         out = self._backup_name(dest)
         target = sqlite3.connect(str(out))
         try:

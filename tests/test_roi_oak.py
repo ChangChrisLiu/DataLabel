@@ -172,9 +172,16 @@ OAK_ROOT = ("F:/PHD Data Backup/Desktop Dataset/OAKD Capture/"
 
 
 def _real(desktop: int, camera: int, step: int):
+    """One real frame, wherever the raw drive is mounted today (read only)."""
     from pathlib import Path
 
-    folder = Path(OAK_ROOT) / f"Desktop {desktop}" / "Disassemble" / f"Camera_{camera}" / f"{step:03d}"
+    from tda.core import rawroot
+    from tda.pipeline import load_paths
+
+    root = rawroot.locate(load_paths()).resolve(OAK_ROOT)
+    if root is None:
+        return None
+    folder = Path(root) / f"Desktop {desktop}" / "Disassemble" / f"Camera_{camera}" / f"{step:03d}"
     if not folder.is_dir():
         return None
     found = sorted(folder.glob("*_rgb_12mp.jpg"))

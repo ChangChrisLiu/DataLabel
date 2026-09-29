@@ -60,6 +60,8 @@ def load_paths(path: str) -> dict:
     """
     import yaml
 
+    from tda.core import rawroot
+
     try:
         loaded = P.load_paths(path)
     except (OSError, yaml.YAMLError) as exc:
@@ -69,6 +71,10 @@ def load_paths(path: str) -> dict:
             f"cannot read {path}: it holds a {type(loaded).__name__}, not a mapping "
             f"of settings"
         )
+    # Every command reads its configuration here, so this is where the raw
+    # drive is looked for: a stored ``F:/...`` path means whatever letter the
+    # drive has today (:mod:`tda.core.rawroot`).
+    rawroot.configure(loaded)
     return loaded
 
 
@@ -114,7 +120,7 @@ def safety_backup(paths: dict, db: Db, command: str, why: str) -> bool:
     annotator: there is nothing in it they could act on.
     """
     try:
-        out = db.backup(P.backup_dest(paths), P.backup_keep(paths))
+        out = db.backup(P.ready_backup_dest(paths), P.backup_keep(paths))
     except (OSError, sqlite3.Error, ValueError) as exc:
         print(f"[{command}] backup failed: {exc}; nothing was written")
         return False

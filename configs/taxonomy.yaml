@@ -177,6 +177,15 @@ classes:
   # declared on purpose: they sit on the chassis, the cage or the cooler, or it
   # genuinely depends on the machine -- so they stay a question for the human in
   # stage S1 rather than a guess the vocabulary makes for all 66 desktops.
+  #
+  # Every latch-group class has a `removed` state that needs no mask, because
+  # every one of them can leave the chassis: carried out on its host (a
+  # drive_latch whose S1 parent is the drive cage goes with the cage -- D13), or
+  # taken out by hand. The removable brackets and latches (psu_latch,
+  # drive_latch, card_latch, cooler_latch) are in `remove.applies_to` -- D13's
+  # PSU latch is physically taken out at step 33. ram_latch and
+  # cpu_socket_lever are moulded into the board and cable_clip holds a cable:
+  # none of them is removed by a verb of its own.
   ram_latch:
     group: latch
     host_class: motherboard
@@ -203,40 +212,43 @@ classes:
   psu_latch:
     group: latch
     attrs: {}
-    states: [closed, open]
+    states: [closed, open, removed]
     default_state: closed
-    needs_mask: {closed: true, open: true}
+    # `removed`: taken out (the verb), or out with its host (the cascade)
+    needs_mask: {closed: true, open: true, removed: false}
 
   drive_latch:
     group: latch
     attrs:
       of: []            # drive_cage or storage_drive instance key
-    states: [closed, open]
+    states: [closed, open, removed]
     default_state: closed
-    needs_mask: {closed: true, open: true}
+    needs_mask: {closed: true, open: true, removed: false}
 
   card_latch:
     group: latch
     attrs:
       of: []            # expansion_card instance key
-    states: [closed, open]
+    states: [closed, open, removed]
     default_state: closed
-    needs_mask: {closed: true, open: true}
+    needs_mask: {closed: true, open: true, removed: false}
 
   cooler_latch:
     group: latch
     attrs: {}
-    states: [closed, open]
+    states: [closed, open, removed]
     default_state: closed
-    needs_mask: {closed: true, open: true}
+    needs_mask: {closed: true, open: true, removed: false}
 
   cable_clip:
     group: latch
     attrs:
       holds: []         # virtual cable node id
-    states: [closed, open]
+    states: [closed, open, removed]
     default_state: closed
-    needs_mask: {closed: true, open: true}
+    # `removed` only through the cascade (a clip on a bracket that leaves);
+    # `remove.applies_to` does not list it
+    needs_mask: {closed: true, open: true, removed: false}
 
   # --- 接口 / interface ------------------------------------------------------
   connector:
@@ -289,9 +301,12 @@ verbs:
       by_class: {cable_clip: open, cable: released}
 
   remove:
+    # ram_latch and cpu_socket_lever are moulded into the board and are never
+    # listed; the four removable brackets/latches are.
     applies_to: [drive_cage, cover, cooler_bracket, motherboard, cpu, cpu_cooler,
                  ram_module, psu, storage_drive, optical_drive, expansion_card,
-                 case_fan, misc_part, screw, connector]
+                 case_fan, misc_part, screw, connector,
+                 psu_latch, drive_latch, card_latch, cooler_latch]
     effect: {attr: state, to: removed}
 
   displace:

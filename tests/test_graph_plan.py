@@ -460,10 +460,11 @@ def test_real_log_smoke(desktop, tax):
     assert all(isinstance(p, str) for p in problems)
 
 
-#: Latch-like classes and the chassis: ``remove`` does not apply (spec 6.3).
+#: The board-moulded latches, the cable clip and the chassis: ``remove`` does
+#: not apply (spec 6.3). The PSU, drive, card and cooler latches can be taken
+#: out by hand, so they plan like any other part (task U2a).
 _UNREMOVABLE_CLASSES = frozenset({
-    "chassis", "cpu_socket_lever", "psu_latch", "ram_latch", "drive_latch",
-    "card_latch", "cooler_latch", "cable_clip",
+    "chassis", "cpu_socket_lever", "ram_latch", "cable_clip",
 })
 
 

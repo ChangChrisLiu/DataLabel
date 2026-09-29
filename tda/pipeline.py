@@ -15,7 +15,8 @@ counters behind ``status``. The Drive-sheet import lives next door in
 :mod:`tda.pipeline_logs`.
 
 Nothing here writes outside ``D:`` -- :meth:`tda.core.db.Db.backup` is the one
-command that may reach ``F:``, and only into ``backup_dir``.
+command that may reach the raw drive, and only into ``backup_dir`` as
+:func:`ready_backup_dest` finds it today.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ import os
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-from tda.core import db_pose
+from tda.core import db_pose, rawroot
 from tda.core.db import Db
 from tda.core.pose_breaks import describe_discard, describe_uncarried
 from tda.core.db_backup import DEFAULT_KEEP
@@ -52,7 +53,8 @@ Log = Callable[[str], None]
 __all__ = [
     "backup_dest", "backup_keep", "cache_file", "desktops_without_steps", "drive_dir", "index_path",
     "load_index_into_db", "load_paths", "ls_export_path", "merge_desktop_meta", "open_db",
-    "parse_desktops", "read_index", "require", "split_pose_segments", "status_rows",
+    "parse_desktops", "read_index", "ready_backup_dest", "require", "split_pose_segments",
+    "status_rows",
 ]
 
 
@@ -143,22 +145,52 @@ def _within(target: Path, root: Path) -> bool:
     return target_text == root_text or target_text.startswith(root_text + os.sep)
 
 
-def backup_dest(paths: dict, dest: Optional[str] = None) -> str:
+def backup_dest(paths: dict, dest: Optional[str] = None,
+                raw: Optional["rawroot.RawRoot"] = None) -> str:
     """Where a backup may go: ``backup_dir`` itself or a folder inside it.
 
-    ``backup_dir`` is the one place on the read-only ``F:`` drive this tool
+    ``backup_dir`` is the one place on the read-only raw drive this tool
     writes to (spec 3.5), so an explicit ``--dest`` is confined to it rather
     than trusted. A configuration without a ``backup_dir`` raises ``ValueError``
     from :func:`require` -- ``--dest`` narrows that setting, it never replaces
     it.
+
+    A ``backup_dir`` on the raw drive follows that drive to the letter it has
+    *today* (:func:`tda.core.rawroot.backup_root`), and so does a ``--dest``
+    spelled with the recorded letter. Beyond re-checking that the raw root still
+    holds the dataset nothing here touches the disk; see
+    :func:`ready_backup_dest` for the answer a copy can actually be written to.
+    ``raw`` is an answer already re-checked by the caller.
     """
-    root = Path(require(paths, "backup_dir")).resolve()
+    require(paths, "backup_dir")
+    raw = raw or rawroot.checked(paths)
+    root = Path(rawroot.backup_root(paths, raw)).resolve()
     if dest is None:
         return str(root)
-    target = Path(dest).resolve()
+    target = Path(raw.resolve(dest) or dest).resolve()
     if not _within(target, root):
         raise ValueError(f"--dest must be inside the configured backup_dir ({root})")
     return str(target)
+
+
+def ready_backup_dest(paths: dict, dest: Optional[str] = None) -> str:
+    """:func:`backup_dest`, checked and made usable -- or ``BackupUnavailable``.
+
+    The one gate every backup goes through, the CLI's and the window's exit
+    copy alike. It **never creates a folder on a volume that is not the raw
+    data one**: on the raw drive only the ``TDA_backups`` leaf may be made; a
+    ``backup_dir`` anywhere else must already exist
+    (:func:`tda.core.rawroot.backup_target`). ``BackupUnavailable`` is an
+    ``OSError``, so every caller already reports it as "backup failed: ..."
+    with the reason in both languages.
+    """
+    # One answer for both halves, re-checked now: the drive the process found
+    # at start-up may have been unplugged, and its letter given to another
+    # volume, since.
+    raw = rawroot.checked(paths)
+    out = backup_dest(paths, dest, raw)  # refuses a bad --dest before any write
+    rawroot.backup_target(paths, raw)
+    return out
 
 
 def backup_keep(paths: dict, prune: bool = True) -> Optional[int]:

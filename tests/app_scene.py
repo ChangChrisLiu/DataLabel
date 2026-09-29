@@ -120,7 +120,12 @@ def seed_db(db: Db, tax, cache_dir: Path, last_step: int = LAST_STEP,
 
 
 def make_paths(tmp_path: Path) -> dict:
-    """A ``paths.yaml`` dict whose every writable root sits inside ``tmp_path``."""
+    """A ``paths.yaml`` dict whose every writable root sits inside ``tmp_path``.
+
+    The backup folder is created here: a ``backup_dir`` that is not on the raw
+    drive is never created by the tool (:func:`tda.core.rawroot.backup_target`).
+    """
+    (tmp_path / "backups").mkdir(parents=True, exist_ok=True)
     return {
         "oak_root": str(tmp_path / "src" / "oak"),
         "scanner_root": str(tmp_path / "src" / "scan"),

@@ -55,6 +55,7 @@ from tda.core.cache_thumbs import (DbRoiLookup, add_thumb_args, build_thumbs,  #
                                    run_thumb_cli, thumb_path)
 from tda.core.index import DEFAULT_PATHS_PATH, REPO_ROOT, DesktopIndex, FrameFile, load_index
 from tda.core.model import FrameKey
+from tda.core.rawroot import resolve_raw
 
 __all__ = [
     "DbRoiLookup", "build_cache", "build_thumbs", "burst_metrics", "cache_path",
@@ -134,6 +135,21 @@ def _norm(path: str) -> str:
     return str(path).replace("\\", "/")
 
 
+def _source(path) -> str:
+    """The file to open for a recorded source path, wherever its drive is today.
+
+    The index and the manifests keep the path as it was recorded -- that is
+    their provenance -- and :func:`tda.core.rawroot.resolve_raw` owns the
+    question of which letter the raw drive has now. With the drive unplugged
+    the read fails as ``OSError``, which :func:`build_cache` records per step
+    rather than letting it end the run.
+    """
+    found = resolve_raw(path)
+    if found is None:
+        raise OSError(f"the raw data drive is not connected: {path}")
+    return found
+
+
 # ---------------------------------------------------------------------------
 # burst metrics
 # ---------------------------------------------------------------------------
@@ -177,7 +193,7 @@ def burst_metrics(paths: list[str]) -> list[dict]:
     grays: list[np.ndarray] = []
     out: list[dict] = []
     for i, path in enumerate(paths):
-        img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        img = cv2.imread(_source(path), cv2.IMREAD_COLOR)
         if img is None:
             raise OSError(f"cannot read image: {path}")
         small = _downscale(img)
@@ -598,7 +614,7 @@ def _redecide(record: dict, view: str) -> Optional[dict]:
 def _up_to_date(src: str, dest: str) -> bool:
     """True when ``dest`` already holds a full copy of ``src`` (same byte size)."""
     try:
-        return os.path.getsize(src) == os.path.getsize(dest)
+        return os.path.getsize(_source(src)) == os.path.getsize(dest)
     except OSError:
         return False
 
@@ -606,7 +622,7 @@ def _up_to_date(src: str, dest: str) -> bool:
 def _copy(src: str, dest: str) -> None:
     """Copy ``src`` to ``dest`` atomically (via a ``.part`` file in the cache)."""
     tmp = f"{dest}.part"
-    shutil.copyfile(src, tmp)
+    shutil.copyfile(_source(src), tmp)
     os.replace(tmp, dest)
 
 
@@ -746,6 +762,22 @@ def _default_cache_dir(paths_path: str = DEFAULT_PATHS_PATH) -> str:
     return str(found)
 
 
+def _configure_raw(paths_path: str = DEFAULT_PATHS_PATH):
+    """Find the raw drive for this run (:mod:`tda.core.rawroot`); ``None`` on no config."""
+    import yaml
+
+    from tda.core import rawroot
+
+    path = paths_path if (os.path.isabs(paths_path) or os.path.exists(paths_path)) \
+        else os.path.join(REPO_ROOT, paths_path)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except (OSError, ValueError):
+        return None
+    return rawroot.configure(cfg if isinstance(cfg, dict) else {})
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI: build the cache for a range of desktops, logging progress.
 
@@ -775,6 +807,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.thumbs_only:  # the tier alone needs neither the index nor the source drive
         return run_thumb_cli(args, cache_dir, views, desktops)
 
+    raw = _configure_raw()
     index = load_index(index_path)
     total = sum(1 for d in desktops if d in index
                 for k in index[d].frames if k.view in views)
@@ -800,6 +833,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     emit(f"[{time.strftime('%H:%M:%S')}] start views={views} desktops={args.first}-{args.last} "
          f"steps={total} cache={cache_dir} index={index_path}")
+    if raw is not None and raw.log_line:
+        emit(f"  {raw.log_line}")
     code = 0
     try:
         stats = build_cache(index, cache_dir, views=views, desktops=desktops, progress=on_step,

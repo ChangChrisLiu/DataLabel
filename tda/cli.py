@@ -63,8 +63,9 @@ from tda.cli_common import (
 from tda.cli_graph import _add_constraints
 from tda.cli_pose import _add_pose_breaks
 from tda.cli_relations import _add_infer_relations
+from tda.core import rawroot
 from tda.core.db import Db
-from tda.core.index import build_index, load_index, save_index
+from tda.core.index import build_index, load_index, respell_paths, save_index
 from tda.core.index_report import write_report
 from tda.core.model import VIEWS
 from tda.core.taxonomy import load_taxonomy
@@ -76,14 +77,34 @@ __all__ = ["main"]
 # build-index
 # --------------------------------------------------------------------------- #
 def cmd_build_index(args: argparse.Namespace) -> int:
-    """Scan the source trees on F: and write ``cache/index.json`` + its report."""
+    """Scan the source trees and write ``cache/index.json`` + its report.
+
+    The trees are scanned where the raw drive is **today**
+    (:func:`tda.core.rawroot.resolve_raw`), and what is found there is written
+    in the spelling the dataset was **recorded** with
+    (:meth:`tda.core.rawroot.RawRoot.to_recorded`): a stored path is the
+    provenance record, and a re-index plus ``load-index`` must not rewrite
+    every ``F:/...`` into today's ``G:/...``. With the drive unplugged nothing
+    is scanned and nothing is written: an index of zero frames would be loaded
+    as "every frame missing".
+    """
     paths = load_paths(args.paths)
     wanted = _desktops(args) or set(P.ALL_DESKTOPS)
-    roots = {k: P.require(paths, k) for k in ("oak_root", "scanner_root", "rs_root")}
+    recorded = {k: P.require(paths, k) for k in ("oak_root", "scanner_root", "rs_root")}
+    roots = {k: rawroot.resolve_raw(v) for k, v in recorded.items()}
+    raw = rawroot.current()
+    if any(v is None for v in roots.values()):
+        why = raw.message if raw is not None else "raw data drive not connected"
+        print(f"[build-index] {why}; nothing was scanned and index.json was not touched")
+        return EXIT_ERROR
+    if raw is not None and raw.status == rawroot.MOVED:
+        print(f"[build-index] {raw.log_line}")
     out = args.out or P.index_path(paths)
     report = args.report or P.cache_file(paths, P.INDEX_REPORT_NAME)
 
     index = build_index(sorted(wanted), roots, args.fixes, progress=True)
+    if raw is not None:
+        respell_paths(index, raw.to_recorded, raw.respell)
     save_index(index, out)
     write_report(index, report)
     print(f"[build-index] {len(index)} desktops, "
@@ -95,7 +116,9 @@ def cmd_build_index(args: argparse.Namespace) -> int:
 
 
 def _add_build_index(sub) -> None:
-    p = sub.add_parser("build-index", help="scan F: and write cache/index.json")
+    p = sub.add_parser("build-index",
+                       help="scan the raw drive (wherever it is today) and write "
+                            "cache/index.json")
     p.add_argument("--desktops", default=None, help="e.g. 13 or 1-66 or 1-3,13")
     p.add_argument("--out", default=None, help="index JSON (default <cache_dir>/index.json)")
     p.add_argument("--report", default=None, help="index report Markdown")
@@ -389,8 +412,9 @@ def cmd_backup(args: argparse.Namespace) -> int:
     backup failure, without a traceback.
     """
     with _session(args) as (paths, db):
-        dest = P.backup_dest(paths, args.dest)
         try:
+            # a --dest outside backup_dir is a ValueError: a usage error, for main()
+            dest = P.ready_backup_dest(paths, args.dest)
             out = db.backup(dest, P.backup_keep(paths, prune=not args.no_prune))
         except (OSError, sqlite3.Error) as exc:
             print(f"[backup] backup failed: {exc}")

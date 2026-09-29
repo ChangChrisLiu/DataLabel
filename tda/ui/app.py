@@ -43,6 +43,7 @@ from tda.ui.app_commit import CommitMixin
 from tda.ui.app_edit import EditMixin
 from tda.ui.app_keys import FLASH_UNNAMED, KeysMixin
 from tda.ui.app_pose import PoseMixin
+from tda.ui.app_rawdata import NO_IMAGE_TEXT, RawDataMixin
 from tda.ui.app_roi import RoiMixin
 from tda.ui.app_shell import (
     MODE_TITLES,
@@ -68,7 +69,7 @@ __all__ += ["CANDIDATES_DROPPED", "FLASH_UNNAMED", "GRID_OFF", "OPACITY_STEP"]
 
 
 class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, AssistMixin,
-                 KeysMixin,
+                 KeysMixin, RawDataMixin,
                  ToolsMixin, StatusMixin, ShellMixin, QMainWindow):
     """One annotator, one desktop/view, three modes."""
 
@@ -109,6 +110,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         self._init_adopt()
         self._init_pose()
         self._init_assist(sam_queue)
+        self._init_rawdata()
         self._connect_session()
 
         self.setWindowTitle(f"Teardown Annotator — {self.annotator}")
@@ -164,6 +166,8 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         segment = self._pose_segment(key)
         keep = (self._segment == segment and self.canvas.image_rgb() is not None)
         zoom, centre = self.canvas.zoom_factor(), self._canvas_centre()
+        exact = self.canvas.view_state()
+        same_size = image is not None and self.canvas.image_hw() == tuple(image.shape[:2])
 
         self.tools_enabled = image is not None
         self.clear_prompt_box()  # before _attach_tool re-arms a SAM tool
@@ -174,8 +178,9 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
                 self.stack.setCurrentWidget(self.placeholder_label)
             self._detach_tool()
             # The placeholder is in the middle of the window and easy to miss
-            # while reading the task card; the status bar says which step.
-            self.report(f"step {key.step}: 本视图没有图像 / no image in this view")
+            # while reading the task card; the status bar says which step --
+            # and, for a frame that has a file nobody could read, which file.
+            self.show_no_image(key)
         else:
             self.stack.setCurrentWidget(
                 self.steps_panel if self.mode == A.MODE_STEPS else self.canvas
@@ -187,7 +192,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
             # leaves the canvas fitted to the whole frame: compositing there
             # and then zooming back to the ROI paid for all 12 MP to show a
             # sixth of it, on every frame change.
-            self._restore_view(keep, zoom, centre)
+            self._restore_view(keep, zoom, centre, exact if same_size else None)
             # Edit layer first, committed masks second: one composite per frame.
             self._sync_editing_layer(repaint=False)
             self.refresh_overlay()
@@ -203,6 +208,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         self.on_frame_changed_edit(key)
         self.on_frame_changed_pose(key)
         self.on_frame_changed_assist(key)
+        self.mark_view_buttons()          # once per machine, not per frame
         self.update_status()
 
     def _render_nothing(self) -> None:
@@ -216,6 +222,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         self.tools_enabled = False
         self._segment = None
         self._detach_tool()
+        self.placeholder_label.setText(NO_IMAGE_TEXT)
         self.stack.setCurrentWidget(self.placeholder_label)
         for panel in (self.timeline, self.task_card, self.instances, self.review):
             panel.refresh()
@@ -230,9 +237,18 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         point = self.canvas.mapToScene(rect.center())
         return (point.x(), point.y())
 
-    def _restore_view(self, keep: bool, zoom: float, centre) -> None:
-        """Keep the zoom inside a pose segment, reset to the ROI across one."""
+    def _restore_view(self, keep: bool, zoom: float, centre, exact=None) -> None:
+        """Keep the zoom inside a pose segment, reset to the ROI across one.
+
+        ``exact`` (:meth:`~tda.ui.canvas.view.ImageCanvas.view_state` taken on
+        a frame of the same size) puts the view back to the pixel; re-centring
+        on ``centre`` crept a pixel per repaint, so every occluder stroke --
+        which commits, and so repaints the frame -- nudged the view.
+        """
         if keep and zoom > 0:
+            if exact is not None:
+                self.canvas.restore_view_state(exact)
+                return
             self.canvas.set_zoom(zoom)
             self.canvas.center_on(centre)
             return
@@ -481,8 +497,14 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         ``sqlite3`` connection all belong to the GUI thread, and handing a
         second connection to a background recompile would have put two writers
         on one database for a convenience nobody asked for.
+
+        It is also "look for the raw data drive again": the bar that says the
+        drive is not connected tells the annotator to plug it in and press F5.
         """
         if not self.can_leave_edit():
+            return
+        found = self.act_recheck_raw_data() and self.raw_root.connected
+        if not compat.is_open(self.session):
             return
         key = self.session.current()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -505,7 +527,9 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         # on the second F5 a frame somebody is still arguing about reported
         # "0 conflicts". `open` is the same number the export and `cli check`
         # gates read, narrowed to this frame.
-        self.report(f"step {key.step} recompiled: {stats.get('updated', 0)} rows, "
+        drive = (f"原始数据盘已找到 / raw data drive found: {self.raw_root.resolved}; "
+                 if found else "")
+        self.report(f"{drive}step {key.step} recompiled: {stats.get('updated', 0)} rows, "
                     f"{stats.get('conflicts', 0)} new conflicts, "
                     f"{compat.open_conflicts(self.session, key)} open{retry} — use "
                     f"'python -m tda.cli check' for the whole view")

@@ -19,6 +19,9 @@ D:\Anaconda\envs\tda\python.exe -m tda.cli app --annotator chang --desktop 13 --
 窗口约 1 秒出现，SAM 在后台加载（右下角状态栏出现 `SAM ready` 后 `S` / `X` 才可用）。
 窗口里任何时候按 `?` 看全部快捷键。
 
+**原始数据在外接的 Elements 盘上，盘符每次插上可能不同（`F:`、`G:`……），程序启动时自己找。**
+找不到时画布上方有一条红条"原始数据盘没连上"，`oak1`/`oak2`/`rs` 的视角按钮变灰：插上盘后按 `F5`。
+
 **如果画布下方有一条黄色的"上次未提交的编辑可以恢复"：先点 `恢复` 或 `丢弃`，再动笔。**
 
 ## 1. 先到 Steps 模式核对这台机器（5 分钟）
@@ -31,7 +34,7 @@ D:\Anaconda\envs\tda\python.exe -m tda.cli app --annotator chang --desktop 13 --
 | 2 | `open cover.01`（CPU Fan Cover，导风罩） | 导风罩是**掀开还留在机箱上**，还是**整个拿走**了？拿走了就把这一步的动词从 `open` 改成 `remove`。 |
 | 35 | `open cover.02`（Case cover for motherboard screws） | 同上。翻到第 35、36 帧看一眼画面再决定。 |
 | 7 | `open drive_latch.01`（SSD shield locker） | 这个卡扣长在机箱上还是长在 SSD 支架（`drive_cage.01`，第 11 步拆走）上？长在支架上就在实例表里把它的 `parent` 设成 `drive_cage.01` 并勾 `attached`，它会跟着支架一起离开。 |
-| 33 | `open psu_latch.01`（Power module locker） | 同上，对象是电源 `psu.01`（第 34 步拆走）。留在机箱上就不用改。 |
+| 33 | `open psu_latch.01`（Power module locker） | 同上，对象是电源 `psu.01`（第 34 步拆走）。留在机箱上就不用改。如果画面里这个卡扣被**单独拿下来**了，就把这一步的动词从 `open` 改成 `remove`（电源、硬盘、扩展卡、散热器的卡扣都可以 `remove`；内存卡扣和 CPU 压杆不行）。 |
 
 内存卡扣（`ram_latch.01–04`）和 CPU 压杆已经自动挂在主板上，不用管。
 列表里 `ls:` 开头的实例是旧 Label Studio 的草稿，只作参考，不用画、不用删。
@@ -57,8 +60,12 @@ D:\Anaconda\envs\tda\python.exe -m tda.cli app --annotator chang --desktop 13 --
   - 直接双击任务卡开始画也可以：矩形让位给画笔，那一行 `ROI 未确认` 还在，随时可以回答。
 
 状态栏右侧一直写着 `ROI ✓` / `ROI 未确认` / `无 ROI`。存好之后矩形变成一条**细虚线**留在画面
-上（和其它图层一样，按 `A` 可以关掉），`F` 缩放到它，`Shift+R` 重画（编辑层有没提交的像素时
-会被挡，先 `Enter` 或 `Esc`）。
+上（和其它图层一样，按 `A` 可以关掉），`F` 缩放到它。
+
+**改已存的 ROI**：点状态栏的 `ROI ✓`（或按 `Shift+R`）。矩形会**在原来的位置**带着 8 个小方块
+出来：拖边/角调整、框里按住整体移动 → `Enter` 保存；`Esc` 保持原来的不变。编辑层有没提交的
+像素时会被挡，先 `Enter` 或 `Esc`。注意 **`R`（不带 Shift）是台面框**，只用于放在台面上的零件；
+画面右下角的小地图（蓝框）点一下只是移动视野，不是 ROI。
 
 ## 3. 起点帧（第 42 帧，主板已拆走的空机箱）
 

@@ -44,3 +44,18 @@ def paths_cfg() -> dict:
 @pytest.fixture(autouse=True)
 def _offscreen_qt(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", os.environ.get("QT_QPA_PLATFORM", "offscreen"))
+
+
+@pytest.fixture(autouse=True)
+def _raw_root_unconfigured():
+    """Every test starts with the raw-data resolver unconfigured (the identity).
+
+    It is process-wide state (:mod:`tda.core.rawroot`), so a test that
+    configures it -- directly, through the CLI or through a window -- must not
+    leave its fake drive layout behind for the next one.
+    """
+    from tda.core import rawroot
+
+    rawroot.reset()
+    yield
+    rawroot.reset()
