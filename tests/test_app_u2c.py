@@ -40,6 +40,7 @@ from tda.core.truth_inputs import annotatable_steps
 from tda.ui import app_actions as A
 from tda.ui import session_api as api
 from tda.ui.app import MainWindow
+from tda.ui.app_roi import NO_CHASSIS_CLOSED, NO_CHASSIS_FOUND
 from tda.ui.panels.instances import NOT_DRAWN
 from tda.ui.panels.taskcard import instance_of
 
@@ -266,3 +267,54 @@ def test_a_shape_drawn_for_this_frame_only_counts_as_drawn(window):
     assert session.compiled().instances[CHASSIS].keyframe_id is None
     assert row_of(window, CHASSIS)["has_shape"] is True
     assert shows_its_label(window, CHASSIS)
+
+
+# --------------------------------------------------------------------------- #
+# item 3: an open ROI editor is never told to press Shift+R
+# --------------------------------------------------------------------------- #
+def roi_bar_text(win: MainWindow) -> str:
+    return win.roi_bar.label.text() if win.roi_bar.isVisibleTo(win) else ""
+
+
+def test_a_failed_proposal_says_what_to_do_in_the_open_editor(qapp, tmp_path,
+                                                              monkeypatch):
+    """View rs of D13: the detector found nothing and the editor was open."""
+    from tda.ui import app_roi_worker
+
+    monkeypatch.setattr(app_roi_worker, "suggest_roi_over",
+                        lambda images, view: (0, 0, 64, 64))
+    win = open_window(tmp_path, show=True)
+    try:
+        assert win.roi_editing, "the editor opens on a segment with no ROI"
+        assert win.wait_for_roi_proposal() is True
+        bar = roi_bar_text(win)
+        assert bar.endswith(NO_CHASSIS_FOUND), bar
+        assert "请按 Shift+R 自己画" not in bar
+        assert NO_CHASSIS_FOUND in win.status_message()
+
+        win.act_commit()                  # Enter on the untouched whole frame
+        assert win.roi() is None, "a whole-frame ROI was stored"
+        assert win.roi_editing is True
+        assert NO_CHASSIS_FOUND in win.status_message()
+
+        win.act_clear_edit()              # Esc: now the editor is closed
+        assert win.roi_editing is False
+        assert NO_CHASSIS_CLOSED in roi_bar_text(win)
+        assert NO_CHASSIS_FOUND not in roi_bar_text(win)
+        win.act_accept_roi_proposal()     # the button would store the whole frame
+        assert NO_CHASSIS_CLOSED in win.status_message()
+        assert win.roi() is None
+    finally:
+        close_window(win)
+
+
+def test_a_too_small_rectangle_is_named_as_that_not_as_no_chassis(qapp, tmp_path):
+    win = open_window(tmp_path, show=True)
+    try:
+        win.wait_for_roi_proposal()
+        assert win.roi_editing
+        win.on_roi_box((10.0, 10.0, 14.0, 14.0))
+        bar = roi_bar_text(win)
+        assert "太小" in bar and "没找到机箱" not in bar
+    finally:
+        close_window(win)
