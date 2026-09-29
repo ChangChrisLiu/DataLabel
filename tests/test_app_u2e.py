@@ -137,6 +137,10 @@ def no_space_promise(seen: dict) -> None:
                  *(t for _s, t in plan.steps)]:
         assert not promises_space(text), text
         assert "confirm the frame" not in text, text
+    # the ✔ row's tooltip: Chinese first, and the row's own sentence (item 4)
+    for tip, row in zip(seen["tips"], seen["rows"]):
+        assert tip.startswith(row), (tip, row)
+        assert f"{n} problem(s) below stop Space" in tip
 
 
 # --------------------------------------------------------------------------- #
@@ -214,6 +218,7 @@ def test_a_click_on_the_conflict_opens_review_on_it_and_the_verdict_gives_space_
         assert seen["pane"] == [] and seen["count"] == 0
         assert seen["header"].endswith("直接 Space"), seen["header"]
         assert seen["rows"] == ["这一帧不用画，直接 Space"]
+        assert seen["tips"][0].startswith("这一帧不用画，直接 Space")
         # taking the new shape re-froze the frame: the guide calls it confirmed,
         # and Space (which would refuse a blocked frame) goes through
         assert seen["plan"].phase == G.PHASE_CONFIRMED, seen["plan"]
@@ -309,3 +314,79 @@ def test_the_race_blocker_is_the_refusal_verify_raises(qapp, tmp_path, monkeypat
         session.truth.verify_frame(session.current(), "tester", session.prepared())
     assert [b.kind for b in refused.value.blockers] == [RACE]
     assert "press Space again" in str(refused.value)
+
+
+# --------------------------------------------------------------------------- #
+# item 2: the scope bar's 仅本帧 is greyed like the palette's, and never errors
+# --------------------------------------------------------------------------- #
+def scope_bar_over(win: MainWindow, instance: str) -> None:
+    """Pixels painted on ``instance`` and a layering suggestion on the bar."""
+    win.on_request_edit(instance)
+    win.session.set_editing_mask(cell(40))
+    win._sync_editing_layer()
+    win._note_edit_facts()
+    win._offer_scope("zorder:above:chassis")
+    QApplication.processEvents()
+    assert win.scope_bar.isVisibleTo(win) and win.layer_facts()[2]
+
+
+def test_the_scope_bars_alt_enter_is_greyed_with_the_reason(qapp, tmp_path):
+    session = confirm_row_frame(tmp_path, skip=("connector.01",))  # no shape here
+    win = open_window(tmp_path, session)
+    try:
+        answer_roi(win)
+        scope_bar_over(win, "connector.01")
+        button = win.scope_override_button
+        assert not button.isEnabled()
+        assert button.toolTip() == api.OVERRIDE_NEEDS_SHAPE
+        assert button.toolTip() == win.palette.button("commit_override").reason()
+
+        errors = win.last_error_message()
+        ops = len(session.db.ops(DESKTOP, VIEW, limit=10_000))
+        win._scope_bar_override()                 # what a click runs, were it live
+        assert api.OVERRIDE_NEEDS_SHAPE in win.status_message()
+        assert win.last_error_message() == errors, "said as an error"
+        assert "refused" not in win.status_message()
+        assert len(session.db.ops(DESKTOP, VIEW, limit=10_000)) == ops
+        assert session.editing_instance == "connector.01"
+    finally:
+        close_window(win)
+
+
+def test_the_scope_bars_alt_enter_is_live_on_a_part_with_a_shape(qapp, tmp_path):
+    session = confirm_row_frame(tmp_path)
+    win = open_window(tmp_path, session)
+    try:
+        answer_roi(win)
+        scope_bar_over(win, "connector.01")
+        assert win.scope_override_button.isEnabled()
+        assert win.scope_override_button.toolTip() == ""
+    finally:
+        close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# item 3: "框好了" names Esc the way the bar does
+# --------------------------------------------------------------------------- #
+def test_box_ready_says_esc_as_the_bar_does(qapp, tmp_path):
+    from tda.ui.app_roi import (
+        ROI_BAR_KEYS,
+        ROI_BAR_KEYS_STORED,
+        ROI_BOX_READY,
+        ROI_BOX_READY_STORED,
+    )
+
+    win = open_window(tmp_path, make_session(tmp_path))
+    try:
+        win.wait_for_roi_proposal()
+        assert win.roi_editing and win.roi() is None
+        win.on_roi_box((8.0, 8.0, 56.0, 56.0))
+        assert win.status_message() == ROI_BOX_READY
+        assert "Esc 先跳过" in ROI_BOX_READY and "Esc 先跳过" in ROI_BAR_KEYS
+        win.act_commit()                          # stored
+        win.act_edit_roi()                        # Shift+R: over the stored one
+        win.on_roi_box((6.0, 6.0, 58.0, 58.0))
+        assert win.status_message() == ROI_BOX_READY_STORED
+        assert "Esc 不改" in ROI_BOX_READY_STORED and "Esc 不改" in ROI_BAR_KEYS_STORED
+    finally:
+        close_window(win)

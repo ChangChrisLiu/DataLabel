@@ -187,7 +187,11 @@ class EditMixin:
 
         self.scope_bar = Bar(self)
         self.scope_bar.add_button("Enter 接受", self.act_commit)
-        self.scope_bar.add_button("Alt+Enter 仅本帧", self.act_commit_override)
+        # Its key's path, guard included, and greyed with the palette button's
+        # reason: on a part with no shape here it used to reach the session's
+        # refusal and say it as an error (U2e).
+        self.scope_override_button = self.scope_bar.add_button(
+            "Alt+Enter 仅本帧", self._scope_bar_override)
         self.scope_bar.add_button("Ctrl+K 从此拆分", self.act_commit_split)
         self.restore_bar = Bar(self)
         self.restore_bar.add_button("恢复 Restore", self.restore_pending)
@@ -213,6 +217,10 @@ class EditMixin:
         self._central_layout.addWidget(self.scope_bar)
         self._central_layout.addWidget(self.restore_bar)
         self._central_layout.addWidget(self.roi_bar)
+
+    def _scope_bar_override(self) -> None:
+        """The scope bar's ``Alt+Enter 仅本帧``: exactly what the key does."""
+        self.run_palette_action("commit_override")
 
     @S.guard
     def _on_zoom_changed(self, _factor: float) -> None:

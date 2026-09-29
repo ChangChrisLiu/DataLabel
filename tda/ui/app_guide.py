@@ -508,7 +508,14 @@ class GuideMixin:
         self.guide.show_plan(plan, self._cheat_for(self.mode))
         self.palette.setVisible(self.mode != A.MODE_STEPS)
         self.palette.set_mode(self.mode)
-        self.palette.apply_states(self.palette_states(facts), plan.action)
+        states = self.palette_states(facts)
+        self.palette.apply_states(states, plan.action)
+        # The scope bar's 仅本帧 is the same action: the same grey, the same why (U2e).
+        enabled, _checked, why = states.get("commit_override", (True, False, ""))
+        button = getattr(self, "scope_override_button", None)
+        if button is not None:
+            button.setEnabled(bool(enabled))
+            button.setToolTip("" if enabled else str(why))
         self.palette.set_radius(self.brush.radius)
         self.canvas.set_banner(self.banner_text(facts))
         editing = getattr(self.session, "editing_instance", None)
