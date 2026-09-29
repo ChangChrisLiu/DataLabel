@@ -40,7 +40,7 @@ from tda.core.truth_inputs import annotatable_steps
 from tda.ui import app_actions as A
 from tda.ui import session_api as api
 from tda.ui.app import MainWindow
-from tda.ui.app_roi import NO_CHASSIS_CLOSED, NO_CHASSIS_FOUND
+from tda.ui.app_roi import NO_CHASSIS_CLOSED, NO_CHASSIS_DRAG, NO_CHASSIS_FOUND, ROI_BAR_KEYS
 from tda.ui.panels.instances import NOT_DRAWN
 from tda.ui.panels.taskcard import instance_of
 from tda.ui.panels.timeline import NO_IMAGE_TEXT, STEP_ROLE
@@ -289,7 +289,8 @@ def test_a_failed_proposal_says_what_to_do_in_the_open_editor(qapp, tmp_path,
         assert win.roi_editing, "the editor opens on a segment with no ROI"
         assert win.wait_for_roi_proposal() is True
         bar = roi_bar_text(win)
-        assert bar.endswith(NO_CHASSIS_FOUND), bar
+        # the reason, then the keys once (U2d: the bar ends with the keys)
+        assert NO_CHASSIS_DRAG in bar and bar.endswith(ROI_BAR_KEYS), bar
         assert "请按 Shift+R 自己画" not in bar
         assert NO_CHASSIS_FOUND in win.status_message()
 
