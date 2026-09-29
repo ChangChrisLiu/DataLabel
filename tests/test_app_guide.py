@@ -27,6 +27,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
@@ -59,7 +60,10 @@ from tda.ui.panels.palette import (
 )
 from tda.ui.panels.taskcard import CHIP_EDITING, card_header, row_view
 
+#: The buttons that are live in Annotate mode.
 PALETTE = A.PALETTE_TOOLS + A.PALETTE_ACTIONS
+#: Every button on the strip, Review's included (round 1, item 3).
+EVERY_BUTTON = tuple(dict.fromkeys(PALETTE + A.PALETTE_REVIEW))
 
 
 @pytest.fixture(scope="session")
@@ -139,8 +143,8 @@ def phase(win: MainWindow) -> str:
 # --------------------------------------------------------------------------- #
 def test_every_palette_button_is_an_action_with_its_own_key(window):
     buttons = window.palette.buttons()
-    assert set(buttons) == set(PALETTE)
-    for name in PALETTE:
+    assert set(buttons) == set(EVERY_BUTTON)
+    for name in EVERY_BUTTON:
         action = A.action_named(name)
         button = buttons[name]
         assert action.short, f"{name} has no palette caption"
@@ -172,10 +176,12 @@ def test_r_is_the_bench_box_and_shift_r_is_the_chassis_range(window):
 
 
 def test_nothing_on_the_palette_takes_the_keyboard(window):
-    widgets = [window.palette, window.palette.radius_slider, window.palette.radius_spin]
+    """Nothing but the brush-size number, which is typed into (round 1, item 5)."""
+    widgets = [window.palette, window.palette.radius_slider]
     widgets += list(window.palette.buttons().values())
     for widget in widgets:
         assert widget.focusPolicy() == Qt.FocusPolicy.NoFocus, type(widget).__name__
+    assert window.palette.radius_spin.focusPolicy() == Qt.FocusPolicy.ClickFocus
     for widget in (window.guide, window.guide.cheat_button,
                    window.task_card.list_widget()):
         assert widget.focusPolicy() == Qt.FocusPolicy.NoFocus
@@ -336,15 +342,45 @@ def test_the_roi_rectangle_owns_the_commit_button(window):
     assert not window.palette.button("commit_split").isEnabled()
 
 
-def test_review_mode_greys_the_tools_out_with_the_reason(window):
+def test_review_mode_keeps_only_what_works_there(window):
+    """Round 1, item 3: the drawing tools and the brush size go, as in Steps;
+    what stays is the difference map and the queue's own four keys."""
     answer_roi(window)
     window.set_mode(A.MODE_REVIEW)
+    palette = window.palette
+    assert not palette.isHidden()
+    assert palette.tools_section_hidden()
     for name in A.PALETTE_TOOLS:
-        button = window.palette.button(name)
-        assert not button.isEnabled() and not button.isChecked()
-        assert "只读" in button.reason()
-    assert not window.palette.button("commit").isEnabled()
-    assert window.palette.button("toggle_heat").isEnabled()   # D works in Review
+        assert palette.button(name).isHidden()
+    assert palette.radius_slider.isHidden() and palette.radius_spin.isHidden()
+    for name in ("commit", "commit_override", "commit_split", "confirm", "undo",
+                 "redo", "flash_compare", "cycle_candidate", "clear_edit"):
+        assert palette.button(name).isHidden(), name
+    shown = [n for n, b in palette.buttons().items() if not b.isHidden()]
+    assert sorted(shown) == sorted(A.PALETTE_REVIEW)
+    assert palette.button("toggle_heat").isEnabled()          # D works in Review
+    assert palette.button("review_accept").isEnabled()
+    keep = palette.button("review_keep_old")
+    assert not keep.isEnabled() and "冲突" in keep.reason()   # nothing selected
+    window.set_mode(A.MODE_ANNOTATE)
+    assert not palette.tools_section_hidden()
+    assert all(palette.button(n).isHidden() for n in A.PALETTE_REVIEW
+               if n not in A.PALETTE_ACTIONS)
+
+
+@pytest.mark.parametrize("name", ["review_accept", "review_rework",
+                                  "review_keep_old", "review_accept_new"])
+def test_the_review_buttons_are_the_review_keys(window, name):
+    action = A.action_named(name)
+    calls: list[tuple] = []
+    setattr(window, action.slot, lambda *args: calls.append(args))
+    window.set_mode(A.MODE_REVIEW)
+    button = window.palette.button(name)
+    button.setEnabled(True)
+    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    QApplication.processEvents()
+    assert calls == [tuple(action.args)]
+    assert (button.name, button.key) == (A.short_parts(action)[0], A.key_caption(action))
 
 
 def test_the_difference_map_button_is_checked_with_the_map(window):
@@ -564,6 +600,20 @@ def test_a_row_names_the_part_the_log_and_what_to_do(window):
     assert "[待画]" in texts[cover]
 
 
+def test_the_start_frame_says_what_a_complete_shape_is(window):
+    """Round 1, item 6: "完整形状" meant nothing to a first-time annotator."""
+    note = "（被别的零件挡住的部分也算它的，层级程序会处理）"
+    assert all(note in text for text, row in zip(window.task_card.row_texts(),
+                                                  window.task_card.rows())
+               if row["kind"] == api.KIND_ADD_SHAPE)
+    answer_roi(window)
+    window.act_step(-1)                   # not the start frame any more
+    assert not any(note in text for text in window.task_card.row_texts())
+    view = row_view({"instance": "chassis", "kind": api.KIND_ADD_SHAPE, "done": False,
+                     "cls": "chassis"}, start=True)
+    assert view["sentence"] == f"在这一帧画出它的完整形状{note}"
+
+
 @pytest.mark.parametrize("kind,sentence", [
     (api.KIND_SPLIT_KEYFRAME, "Ctrl+K"),
     (api.KIND_STATE_ONLY, "不用画"),
@@ -603,6 +653,18 @@ def test_a_double_click_still_works_and_asks_once(window, monkeypatch):
     click_row(window, row, double=True)
     assert asked == [instance]
     assert window.session.editing_instance == instance
+
+
+def test_the_task_card_has_no_action_buttons_of_its_own(window):
+    """Round 1, item 2: the palette is the one place for actions."""
+    from PySide6.QtWidgets import QPushButton
+
+    card = window.task_card
+    for name in ("commit_button", "override_button", "split_button", "confirm_button"):
+        assert not hasattr(card, name), name
+    assert not hasattr(card, "sigCommit") and not hasattr(card, "sigConfirm")
+    assert card.findChildren(QPushButton) == []
+    assert not hasattr(window, "on_panel_commit")
 
 
 def test_a_row_that_is_not_work_explains_itself(window):
@@ -821,3 +883,169 @@ def test_setting_the_same_banner_repaints_nothing(window, monkeypatch):
     monkeypatch.setattr(viewport, "update", lambda *a: updates.append(a))
     window.canvas.set_banner("正在画：x")
     assert updates == []
+
+
+# --------------------------------------------------------------------------- #
+# round 1, item 4: hover drafts over the whole pose segment, at most five
+# --------------------------------------------------------------------------- #
+SCREW_LABEL = "CPU Cooling Fan Screw"        # -> screw, via configs/ls_label_map.yaml
+
+
+def _screw_draft(win: MainWindow, ordinal: int, step: int, box) -> None:
+    """One importer-shaped Label Studio draft of class ``screw``."""
+    from tda.core.model import InstanceRec
+
+    key = f"ls:{SCREW_LABEL}#{ordinal}"
+    mask = np.zeros((64, 64), dtype=bool)
+    x0, y0, x1, y1 = box
+    mask[y0:y1, x0:x1] = True
+    win.db.upsert_instance(InstanceRec(key=key, desktop=DESKTOP, cls="screw",
+                                       raw_names=[SCREW_LABEL]))
+    win.db.add_keyframe(ShapeKeyframe(
+        id=None, instance=key, desktop=DESKTOP, view=VIEW, pose_segment=0,
+        anchor_step=step, placement="in_chassis", geom_type="mask",
+        parts=[ShapePart("main", masks.encode_rle(mask))],
+        amodal_complete=False, source="labelstudio", draft_id=7,
+    ))
+
+
+def _draft_boxes(hints) -> list:
+    return [box for box, label, _rgb in hints if "旧草稿" in label]
+
+
+def test_hover_drafts_come_from_the_whole_pose_segment_and_stop_at_five(window):
+    answer_roi(window)
+    # eight screws traced at step 3: eleven steps away from the start frame,
+    # far outside Shift+A's +-2, inside the one pose segment (1..14)
+    boxes = [(2 + 7 * i, 50, 5 + 7 * i, 53) for i in range(8)]
+    for index, box in enumerate(boxes):
+        _screw_draft(window, index + 1, 3, box)
+    window._prompt_box = None
+    window.assist_result = None
+    shown = _draft_boxes(window.card_hints("screw.motherboard.01"))
+    assert len(shown) == 5
+    assert all(box in [tuple(float(v) for v in b) for b in boxes] for box in shown)
+
+
+def test_the_five_hover_drafts_are_the_nearest_to_the_difference_box(window):
+    from tda.core.diffmap import DiffBlob
+
+    answer_roi(window)
+    boxes = [(2 + 7 * i, 50, 5 + 7 * i, 53) for i in range(8)]
+    for index, box in enumerate(boxes):
+        _screw_draft(window, index + 1, 3, box)
+    key = window.session.current()
+    blob = DiffBlob(box=(52, 44, 58, 50), area=36, score=1.0)
+    window.assist_result = {"key": key, "blobs": [blob], "unexplained": [blob],
+                            "explained": []}
+    window._prompt_box = None
+    shown = _draft_boxes(window.card_hints("screw.motherboard.01"))
+    nearest = sorted(boxes, key=lambda b: abs((b[0] + b[2]) / 2 - 55))[:5]
+    assert sorted(shown) == sorted(tuple(float(v) for v in b) for b in nearest)
+
+
+def test_shift_a_still_offers_only_drafts_within_two_steps(window):
+    """The wider window is for the hover outline only; adoption is unchanged."""
+    answer_roi(window)
+    _screw_draft(window, 1, 3, (30, 30, 33, 33))
+    window.on_request_edit("screw.motherboard.01")
+    window.act_adopt_draft(at=(31.0, 31.0))
+    assert not window.showing_draft_ghost()
+    assert "没有可用的旧草稿" in window.status_message()
+
+
+# --------------------------------------------------------------------------- #
+# round 1, item 5: the brush size can be typed
+# --------------------------------------------------------------------------- #
+def _focus_spin(win: MainWindow):
+    spin = win.palette.radius_spin
+    QTest.mouseClick(spin, Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, spin.rect().center())
+    QApplication.processEvents()
+    assert QApplication.focusWidget() is spin, QApplication.focusWidget()
+    spin.selectAll()
+    return spin
+
+
+def test_typing_a_brush_size_applies_it_and_gives_the_keyboard_back(window):
+    window.show()
+    QApplication.processEvents()
+    answer_roi(window)
+    window.act_tool("brush")
+    spin = _focus_spin(window)
+    QTest.keyClicks(spin, "24")
+    assert window.brush.radius != 24, "applied before Enter: keyboard tracking is on"
+    QTest.keyClick(spin, Qt.Key.Key_Return)
+    QApplication.processEvents()
+    assert window.brush.radius == window.eraser.radius == 24
+    assert "r=24" in window.tool_label.text()
+    assert window.canvas.tool_cursor().radius == 24
+    assert QApplication.focusWidget() is window.canvas
+    assert "r=24" in window.status_message()
+    QTest.keyClick(window.canvas, Qt.Key.Key_E)
+    assert window._tool_name == "eraser"
+    QTest.keyClick(window.canvas, Qt.Key.Key_B)
+    assert window._tool_name == "brush"
+
+
+def test_escape_in_the_brush_size_puts_it_back(window):
+    window.show()
+    QApplication.processEvents()
+    answer_roi(window)
+    window.on_request_edit("cover.01")
+    window.set_brush_radius(12)
+    spin = _focus_spin(window)
+    QTest.keyClicks(spin, "99")
+    QTest.keyClick(spin, Qt.Key.Key_Escape)
+    QApplication.processEvents()
+    assert window.brush.radius == 12 and spin.value() == 12
+    assert QApplication.focusWidget() is window.canvas
+    # Esc was the number box's, not the window's: the edit is still open
+    assert window.session.editing_instance == "cover.01"
+
+
+def test_while_the_brush_size_has_the_keyboard_shortcuts_are_swallowed(window):
+    from tda.ui.app_keys import KEY_SWALLOWED
+
+    window.show()
+    QApplication.processEvents()
+    answer_roi(window)
+    window.act_tool("brush")
+    spin = _focus_spin(window)
+    QTest.keyClick(spin, Qt.Key.Key_E)
+    assert window._tool_name == "brush"
+    assert window.status_message() == KEY_SWALLOWED
+
+
+# --------------------------------------------------------------------------- #
+# round 1, item 1: the raw drive's own sentence (task U2a)
+# --------------------------------------------------------------------------- #
+def test_the_raw_drive_reason_is_the_image_caches_own(qapp, tmp_path, monkeypatch):
+    win = open_window(tmp_path, missing=(LAST_STEP,))
+    try:
+        win.session.goto(LAST_STEP)
+        monkeypatch.setattr(win.session.images, "why_unreadable",
+                            lambda key: "原始数据盘没有接上 — F:/scan/42.png", raising=False)
+        win.refresh_guidance()
+        assert phase(win) == G.PHASE_RAW_MISSING
+        assert "原始数据盘没有接上 — F:/scan/42.png" in win.guide.text()
+    finally:
+        close_window(win)
+
+
+def test_the_raw_drive_reason_falls_back_to_the_windows_resolver(qapp, tmp_path):
+    from types import SimpleNamespace
+
+    win = open_window(tmp_path, missing=(LAST_STEP,))
+    try:
+        win.session.goto(LAST_STEP)
+        win.raw_root = SimpleNamespace(configured=True, connected=False,
+                                       message="原始数据盘 F: 不在")
+        win.refresh_guidance()
+        assert phase(win) == G.PHASE_RAW_MISSING
+        assert "原始数据盘 F: 不在" in win.guide.text()
+        win.raw_root = SimpleNamespace(configured=True, connected=True, message="")
+        win.refresh_guidance()
+        assert phase(win) == G.PHASE_NO_IMAGE
+    finally:
+        close_window(win)

@@ -3,15 +3,16 @@
 The session diffs this frame against the neighbour the annotator came from and
 turns the result into instructions -- draw this part back into the chassis, box
 that one in the staging area, split this keyframe, only flip that state -- and
-this panel is their checklist: done items are struck through, the first open one
-is highlighted and is what the four buttons act on.
+this panel is their checklist: done items are struck through and the first open
+one is highlighted.
 
 The panel decides nothing.  Activating an item only emits
 :attr:`TaskCardPanel.sigRequestEdit`; the main window is what calls
 ``begin_edit``, because it is the one that can refuse -- switching instance
-while pixels are uncommitted has to be answerable.  The buttons are the four
-commit/confirm calls of spec 4.3, with their keyboard equivalents handled here
-so they work while the list has focus.  When ``confirm_frame`` refuses, the
+while pixels are uncommitted has to be answerable.  It has **no action buttons**
+of its own any more (task U2b round 1): the four commit/confirm buttons it
+carried duplicated the tool palette's, and two places for one thing is the
+confusion the second trial reported.  When ``confirm_frame`` refuses, the
 problems that came with ``sigProblems`` are shown instead of any local check.
 
 **A card that explains itself** (task U2b).  The second trial's annotator stood
@@ -32,20 +33,16 @@ from typing import Optional
 from PySide6.QtCore import QEvent, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
-    QGridLayout,
     QLabel,
     QListView,
     QListWidget,
     QListWidgetItem,
-    QPushButton,
-    QSizePolicy,
     QStyle,
     QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
 
-from tda.ui import app_actions as A
 from tda.ui import session_api as api
 from tda.ui.class_names import instance_label
 from tda.ui.panels import session_is_open
@@ -131,10 +128,19 @@ def card_header(step: Optional[int], neighbour: Optional[int]) -> str:
     return f"第 {step} 帧：和第 {neighbour} 帧比，下面这些零件变了"
 
 
-def row_view(row: dict, editing: Optional[str] = None, bench: bool = False) -> dict:
+#: What "完整形状" means, said once on the start frame, where every part is
+#: drawn for the first time (round 1, item 6).
+START_NOTE = "（被别的零件挡住的部分也算它的，层级程序会处理）"
+
+
+def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
+             start: bool = False) -> dict:
     """What one row shows: title, the log's name, the sentence and the chip.
 
-    Pure, so the tests read exactly what the delegate paints.
+    ``start`` is the start frame, where every shape is drawn for the first
+    time: the sentence says what a complete shape is, and nothing "comes back
+    in with" a parent there.  Pure, so the tests read exactly what the delegate
+    paints.
     """
     kind = str(row.get("kind", api.KIND_CONFIRM))
     instance = str(row.get("instance", ""))
@@ -148,7 +154,9 @@ def row_view(row: dict, editing: Optional[str] = None, bench: bool = False) -> d
     transition = row.get("transition")
     if kind == api.KIND_SPLIT_KEYFRAME and transition:
         sentence += f"（{transition[0]} → {transition[1]}）"
-    if kind == api.KIND_ADD_SHAPE and row.get("parent"):
+    if kind == api.KIND_ADD_SHAPE and start:
+        sentence += START_NOTE
+    elif kind == api.KIND_ADD_SHAPE and row.get("parent"):
         sentence += f"（跟 {row['parent']} 一起装回来的）"
     span = row.get("span")
     if span:
@@ -289,8 +297,6 @@ class _RowDelegate(QStyledItemDelegate):
         painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
         painter.restore()
 
-#: :attr:`TaskCardPanel.sigCommit` payload meaning "ask the session".
-SUGGESTED = ""
 
 #: A compiler problem code looks like ``missing_shape:cpu_cooler.01`` -- one
 #: token, a colon, an instance key.  A "how to fix it" sentence has spaces.
@@ -373,15 +379,10 @@ def pair_problems(problems: list[str]) -> list[dict]:
 
 
 class TaskCardPanel(QWidget):
-    """The per-frame instruction list with the commit and confirm actions."""
+    """The per-frame instruction list and the problems of a refused confirm."""
 
     #: An item was activated: the canvas should start editing this instance.
     sigRequestEdit = Signal(str)
-    #: A commit button was pressed; the payload is the scope it asks for, or
-    #: :data:`SUGGESTED` for "whatever the session suggests" (the plain Commit).
-    sigCommit = Signal(str)
-    #: The confirm button was pressed.
-    sigConfirm = Signal()
     #: The pointer rests on the row of this instance; ``""`` when it left.
     sigHover = Signal(str)
     #: A row that is not work was clicked; the payload is what it means.
@@ -397,6 +398,8 @@ class TaskCardPanel(QWidget):
         self._card: list[dict] = []
         self._editing: Optional[str] = None
         self._editing_bench = False
+        #: Is the frame on screen the start frame (no neighbour)?
+        self._start = False
         self._hovered = ""
         #: ``(instance, monotonic time)`` of the last click on a row.
         self._last_click: tuple[str, float] = ("", 0.0)
@@ -426,27 +429,6 @@ class TaskCardPanel(QWidget):
         self._list.viewportEntered.connect(lambda: self._set_hover(""))
         self._list.viewport().installEventFilter(self)
 
-        # Short captions in a 2x2 grid, full sentences in the tooltips: laid out
-        # in a row with their long names the four buttons asked for 747 px of
-        # dock width -- "Commit as frame override (Alt+Enter)" alone is 446 --
-        # and the canvas was left with less than half the window.  The
-        # captions are the palette's, read off the same ACTIONS rows (U2b).
-        self.commit_button = self._action_button("commit")
-        self.override_button = self._action_button("commit_override")
-        self.split_button = self._action_button("commit_split")
-        self.confirm_button = self._action_button("confirm")
-        # The buttons **report**; they do not act.  Calling the session from
-        # here made "Confirm" step the frame back over an uncommitted layer --
-        # the window never heard about the click, so nothing checked and nothing
-        # was said -- and made "Commit" mean ``keyframe`` while the same label's
-        # key asked the session what the edit meant.
-        self.commit_button.clicked.connect(lambda: self.sigCommit.emit(SUGGESTED))
-        self.override_button.clicked.connect(
-            lambda: self.sigCommit.emit(api.SCOPE_FRAME_OVERRIDE)
-        )
-        self.split_button.clicked.connect(lambda: self.sigCommit.emit(api.SCOPE_SPLIT))
-        self.confirm_button.clicked.connect(self.sigConfirm.emit)
-
         self._problems_label = QLabel("Problems")
         self._problems_list = QListWidget()
         self._problems_list.setMaximumHeight(90)     # it scrolls; 60 of them fit
@@ -458,13 +440,6 @@ class TaskCardPanel(QWidget):
         self._problems_label.setVisible(False)
         self._problems_list.setVisible(False)
 
-        buttons = QGridLayout()
-        buttons.setContentsMargins(4, 0, 4, 4)
-        buttons.addWidget(self.commit_button, 0, 0)
-        buttons.addWidget(self.override_button, 0, 1)
-        buttons.addWidget(self.split_button, 1, 0)
-        buttons.addWidget(self.confirm_button, 1, 1)
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(3)
@@ -475,34 +450,10 @@ class TaskCardPanel(QWidget):
         layout.addWidget(self._list, 1)
         layout.addWidget(self._problems_label)
         layout.addWidget(self._problems_list)
-        layout.addLayout(buttons)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         if session is not None:
             self.set_session(session)
-
-    @staticmethod
-    def _button(caption: str, tooltip: str) -> QPushButton:
-        """A button that shows its key, explains itself, and stays narrow."""
-        button = QPushButton(caption)
-        button.setToolTip(tooltip)
-        button.setMinimumWidth(1)
-        button.setSizePolicy(QSizePolicy.Policy.Ignored,
-                             QSizePolicy.Policy.Fixed)
-        return button
-
-    @classmethod
-    def _action_button(cls, name: str) -> QPushButton:
-        """The palette's caption for one action, from its ACTIONS row."""
-        action = A.action_named(name)
-        head, _note = A.short_parts(action)
-        button = cls._button(f"{head}  {A.key_caption(action)}",
-                             f"{action.label_zh}（{' / '.join(action.keys)}）"
-                             f"\n{action.label}")
-        # A click must not leave the keyboard in the dock: the next B would
-        # be a list keystroke, not a brush (U1 ruling R1).
-        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        return button
 
     # -- wiring -------------------------------------------------------------
     def set_session(self, session: Optional[api.SessionLike]) -> None:
@@ -533,13 +484,15 @@ class TaskCardPanel(QWidget):
         opened = session_is_open(self._session)
         rows = self._session.task_card() if opened else []
         self._card = [dict(r) for r in rows]
-        self.header.setText(self._header_text() if opened else "")
+        step, neighbour = self._frame_pair() if opened else (None, None)
+        self._start = opened and neighbour is None
+        self.header.setText(card_header(step, neighbour) if opened else "")
         self.header.setVisible(bool(self.header.text()))
         first_open = -1
         for i, row in enumerate(rows):
             kind = str(row.get("kind", api.KIND_CONFIRM))
             instance = str(row.get("instance", ""))
-            view = row_view(row, self._editing, self._editing_bench)
+            view = row_view(row, self._editing, self._editing_bench, self._start)
             item = QListWidgetItem(plain_text(view))
             item.setData(INSTANCE_ROLE, instance)
             item.setData(KIND_ROLE, kind)
@@ -559,14 +512,15 @@ class TaskCardPanel(QWidget):
             self._list.addItem(item)
         self._list.setCurrentRow(first_open)
 
-    def _header_text(self) -> str:
+    def _frame_pair(self) -> tuple[int, Optional[int]]:
+        """``(step on screen, the step the card is diffed against or None)``."""
         key = self._session.current()
         finder = getattr(self._session, "task_neighbour", None)
         try:
             neighbour = finder() if callable(finder) else None
         except Exception:  # noqa: BLE001 - a header is not worth a failure
             neighbour = None
-        return card_header(int(key.step), neighbour)
+        return int(key.step), neighbour
 
     def header_text(self) -> str:
         """The sentence above the list."""
@@ -593,7 +547,7 @@ class TaskCardPanel(QWidget):
                        None)
             if row is None or not isinstance(old, dict):
                 continue
-            view = row_view(row, self._editing, self._editing_bench)
+            view = row_view(row, self._editing, self._editing_bench, self._start)
             if view != old:
                 item.setData(VIEW_ROLE, view)
                 item.setText(plain_text(view))
@@ -634,8 +588,8 @@ class TaskCardPanel(QWidget):
     # -- actions ------------------------------------------------------------
     # ``commit(scope)`` is gone: it called ``session.commit_edit`` straight, so
     # the window never cleared the layer, never dropped the crash sidecar and
-    # never showed the scope bar.  ``Enter`` and the buttons both reach
-    # ``MainWindow.act_commit`` now.
+    # never showed the scope bar.  ``Enter`` and the palette's 提交 both reach
+    # ``MainWindow.act_commit`` now; ``confirm`` below is what ``Space`` calls.
 
     def confirm(self) -> bool:
         """Confirm the frame; on refusal show the problems the session sent.

@@ -166,10 +166,21 @@ def click(button) -> None:
     QApplication.processEvents()
 
 
+def click_enabled(button) -> None:
+    """Click a palette button with its greying overridden.
+
+    The palette greys 确认整帧 while the layer is dirty; enabling it by hand
+    proves the gate *behind* the button holds even if that greying were wrong.
+    """
+    button.setEnabled(True)
+    click(button)
+
+
 #: "Confirm" steps the frame back, so the button is a way out like the key is.
 #: The reviewer's probe clicked it with 250 uncommitted pixels and watched the
-#: frame move from 14 to 13 with nothing written and nothing said.
-WAYS_OUT["button_confirm"] = lambda w: click(w.task_card.confirm_button)
+#: frame move from 14 to 13 with nothing written and nothing said.  Since U2b
+#: round 1 the one confirm button is the palette's.
+WAYS_OUT["button_confirm"] = lambda w: click_enabled(w.palette.button("confirm"))
 
 
 def _offer_a_sidecar(win: MainWindow) -> None:
@@ -208,16 +219,20 @@ def test_an_uncommitted_edit_blocks_every_way_out_of_the_frame(window, name):
 # the panel buttons are the window's actions, not their own
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("button,key", [
-    ("commit_button", "act_commit"),
-    ("override_button", "act_commit_override"),
-    ("split_button", "act_commit_split"),
-    ("confirm_button", "act_confirm"),
+    ("commit", "act_commit"),
+    ("commit_override", "act_commit_override"),
+    ("commit_split", "act_commit_split"),
+    ("confirm", "act_confirm"),
 ])
-def test_each_task_card_button_is_its_key(window, monkeypatch, button, key):
-    """One label, one meaning: the button calls exactly what the key calls."""
+def test_each_commit_button_is_its_key(window, monkeypatch, button, key):
+    """One label, one meaning: the button calls exactly what the key calls.
+
+    The four buttons were the task card's; since U2b round 1 they are the tool
+    palette's, the one place for actions.
+    """
     seen: list[str] = []
     monkeypatch.setattr(window, key, lambda *a: seen.append(key) or False)
-    click(getattr(window.task_card, button))
+    click_enabled(window.palette.button(button))
     assert seen == [key]
 
 
@@ -230,11 +245,11 @@ def test_the_commit_button_honours_the_suggested_scope(window, monkeypatch):
     committed: list[str] = []
     monkeypatch.setattr(session, "commit_edit",
                         lambda scope, *a, **k: committed.append(scope) or {})
-    click(window.task_card.commit_button)
+    click(window.palette.button("commit"))
     # exactly what Enter does: a suggestion that is not a plain keyframe is
     # shown first, and the next press accepts it
     assert committed == [] and api.SCOPE_SPLIT in window.scope_bar_text()
-    click(window.task_card.commit_button)
+    click(window.palette.button("commit"))
     assert committed == [api.SCOPE_SPLIT]
 
 
@@ -246,7 +261,7 @@ def test_a_button_commit_clears_the_layer_and_the_sidecar(window):
     window.flush_sidecar()
     key = window.session.current()
     assert Path(window.sidecar.path_for(key, instance)).exists()
-    click(window.task_card.commit_button)
+    click(window.palette.button("commit"))
     assert window.session.editing_instance is None
     assert not window.overlay.editing.any()
     assert not Path(window.sidecar.path_for(key, instance)).exists()

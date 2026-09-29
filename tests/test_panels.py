@@ -562,30 +562,19 @@ def test_taskcard_lists_items_with_icons_and_highlights_the_first_open_one(
     assert panel.list_widget().item(1).font().bold() is True
 
 
-def test_taskcard_buttons_only_report(session: StubSession) -> None:
-    """The buttons emit; the window acts.  Calling the session from here let
-    "Confirm" step the frame back over an uncommitted layer."""
-    from tda.ui.panels.taskcard import SUGGESTED
+def test_taskcard_has_no_commit_or_confirm_buttons(session: StubSession) -> None:
+    """Task U2b round 1: the tool palette is the one place for actions.
+
+    The card's four buttons duplicated the palette's (same slots, same keys),
+    and two places for one thing is the confusion the second trial reported.
+    """
+    from PySide6.QtWidgets import QPushButton
 
     panel = TaskCardPanel(session)
-    # Short captions keep the dock narrow; the full sentence is the tooltip.
-    for button, key in ((panel.commit_button, "Enter"),
-                        (panel.override_button, "Alt+Enter"),
-                        (panel.split_button, "Ctrl+K"),
-                        (panel.confirm_button, "Space")):
-        assert key in button.toolTip()
-        assert len(button.text()) <= 20
-
-    scopes: list[str] = []
-    confirms: list[int] = []
-    panel.sigCommit.connect(scopes.append)
-    panel.sigConfirm.connect(lambda: confirms.append(1))
-    panel.commit_button.click()
-    panel.override_button.click()
-    panel.split_button.click()
-    panel.confirm_button.click()
-    assert scopes == [SUGGESTED, api.SCOPE_FRAME_OVERRIDE, api.SCOPE_SPLIT]
-    assert confirms == [1]
+    assert panel.findChildren(QPushButton) == []
+    for name in ("commit_button", "override_button", "split_button",
+                 "confirm_button", "sigCommit", "sigConfirm"):
+        assert not hasattr(panel, name), name
     assert session.calls == []
 
 
@@ -641,7 +630,7 @@ def test_taskcard_problems_do_not_survive_a_frame_change(session: StubSession) -
 
     # a refusal that sends no problems must not resurrect the old list
     session.problems = []
-    panel.confirm_button.click()
+    panel.confirm()          # what Space (and the palette's 确认整帧) calls
     assert panel.problems() == []
 
 

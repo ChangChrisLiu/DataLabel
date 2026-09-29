@@ -47,6 +47,7 @@ __all__ = [
     "MODE_REVIEW",
     "MODE_STEPS",
     "PALETTE_ACTIONS",
+    "PALETTE_REVIEW",
     "PALETTE_TOOLS",
     "Action",
     "action_for",
@@ -205,14 +206,16 @@ ACTIONS: tuple[Action, ...] = (
     # Review mode: the canvas is read-only, so its two keys are the queue's.
     Action("review_accept", ("Return", "Enter", "Space"), "act_confirm",
            "Accept the frame the queue points at", "接受队列选中的这一帧",
-           "edit", (), (MODE_REVIEW,)),
+           "edit", (), (MODE_REVIEW,), short="接受这一帧"),
     Action("review_rework", ("R",), "act_rework_selected",
            "Rework: open it in Annotate mode", "返工：在标注模式下打开这一帧",
-           "edit", (), (MODE_REVIEW,)),
+           "edit", (), (MODE_REVIEW,), short="返工"),
     Action("review_keep_old", ("K",), "act_resolve", "Conflict: keep the frozen shape",
-           "冲突：保留已冻结的形状", "edit", (api.RESOLVE_KEEP_OLD,), (MODE_REVIEW,)),
+           "冲突：保留已冻结的形状", "edit", (api.RESOLVE_KEEP_OLD,), (MODE_REVIEW,),
+           short="保留旧的（冲突）"),
     Action("review_accept_new", ("N",), "act_resolve", "Conflict: take the edit",
-           "冲突：接受新的编辑", "edit", (api.RESOLVE_ACCEPT_NEW,), (MODE_REVIEW,)),
+           "冲突：接受新的编辑", "edit", (api.RESOLVE_ACCEPT_NEW,), (MODE_REVIEW,),
+           short="采用新的（冲突）"),
     Action("undo", ("Ctrl+Z",), "act_undo", "Undo", "撤销", "edit", (), _ANN,
            short="撤销"),
     Action("redo", ("Ctrl+Y",), "act_redo", "Redo", "重做", "edit", (), _ANN,
@@ -332,6 +335,12 @@ PALETTE_TOOLS: tuple[str, ...] = (
 PALETTE_ACTIONS: tuple[str, ...] = (
     "commit", "commit_override", "commit_split", "confirm", "undo", "redo",
     "toggle_heat", "flash_compare", "cycle_candidate", "clear_edit",
+)
+#: What the strip keeps in Review mode (U2b round 1): the canvas is read-only,
+#: so no tool and no brush -- only the difference map and the queue's keys.
+PALETTE_REVIEW: tuple[str, ...] = (
+    "review_accept", "review_rework", "review_keep_old", "review_accept_new",
+    "toggle_heat",
 )
 
 

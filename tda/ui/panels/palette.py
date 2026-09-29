@@ -12,10 +12,12 @@ emits :attr:`ToolPalette.sigAction` with that name, and the window runs the
 very slot the key runs -- so a button cannot do something its key does not,
 and its label cannot drift from the keyboard.
 
-**Nothing here takes the keyboard.**  Every button, the slider and the spin box
-are ``NoFocus``: the first trial ended with a combo box holding the focus and
-every shortcut silently switched off, and a palette that stole the focus on
-each click would be that bug with seventeen doors.
+**Nothing here takes the keyboard** but the brush-size number.  Every button
+and the slider are ``NoFocus``: the first trial ended with a combo box holding
+the focus and every shortcut silently switched off, and a palette that stole
+the focus on each click would be that bug with seventeen doors.  The number is
+typed into (round 1): it takes the focus on a click, shortcuts stand aside the
+way they do for every text field, and ``Enter`` / ``Esc`` give it back.
 
 **The window decides.**  The palette never knows whether an action can run;
 :meth:`ToolPalette.apply_states` is told which buttons are enabled, which one
@@ -33,7 +35,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -340,13 +342,22 @@ class PaletteButton(QAbstractButton):
 # the strip
 # --------------------------------------------------------------------------- #
 class ToolPalette(QScrollArea):
-    """Tools, the brush size, and the commit/confirm/undo keys, top to bottom."""
+    """Tools, the brush size, and the commit/confirm/undo keys, top to bottom.
+
+    Per mode (:meth:`set_mode`): Annotate shows everything but the Review
+    queue's keys; Review hides the tools and the brush size -- its canvas is
+    read-only -- and keeps the difference map and the queue's four keys; Steps
+    hides the whole strip (the window does that).
+    """
 
     #: ``(action name, pressed)``: a click (``pressed`` is ``True``), or the
     #: press and release of a held one (``对比上一帧``: ``Tab``).
     sigAction = Signal(str, bool)
     #: The annotator moved the slider or the spin box to this radius.
     sigRadius = Signal(int)
+    #: Typing in the brush-size box ended (``Enter`` or ``Esc``): the window
+    #: takes the keyboard back to the canvas.  The payload is the radius shown.
+    sigRadiusTyped = Signal(int)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -362,41 +373,58 @@ class ToolPalette(QScrollArea):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(3)
         self._buttons: dict[str, PaletteButton] = {}
+        self._mode = ""
+        #: The drawing half of the strip, hidden in Review (round 1, item 3).
+        self._tool_widgets: list[QWidget] = []
 
-        layout.addWidget(self._header("工具"))
+        header = self._header("工具")
+        layout.addWidget(header)
+        self._tool_widgets.append(header)
         for name in A.PALETTE_TOOLS:
-            layout.addWidget(self._add(name, checkable=True))
+            button = self._add(name, checkable=True)
+            layout.addWidget(button)
+            self._tool_widgets.append(button)
 
-        layout.addSpacing(4)
         self.radius_label = self._header("笔刷大小 r")
         self.radius_label.setToolTip("画笔、橡皮擦、遮挡共用一个大小，单位是图像像素；"
-                                     "键盘 [ 变小、] 变大（可长按）")
-        layout.addWidget(self.radius_label)
+                                     "拖滑块、点数字框直接输入（Enter 确定，Esc 取消），"
+                                     "或键盘 [ 变小、] 变大（可长按）")
         self.radius_slider = QSlider(Qt.Orientation.Horizontal)
         self.radius_slider.setRange(0, SLIDER_STEPS)
         self.radius_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.radius_slider.setToolTip(self.radius_label.toolTip())
+        # The one field on the strip that takes the keyboard, and only on a
+        # click: while it has it, the window's shortcuts stand aside the way
+        # they do for every text field (``blocks_shortcuts``), and Enter or Esc
+        # hand it back to the canvas.  No keyboard tracking: a radius of 2 on
+        # the way to 24 is not something anybody asked for.
         self.radius_spin = QSpinBox()
         self.radius_spin.setRange(RADIUS_MIN, RADIUS_MAX)
         self.radius_spin.setSuffix(" px")
-        self.radius_spin.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.radius_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.radius_spin.setKeyboardTracking(False)
         self.radius_spin.setToolTip(self.radius_label.toolTip())
         self.radius_spin.setAccelerated(True)
-        layout.addWidget(self.radius_slider)
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(self.radius_spin, 1)
-        layout.addLayout(row)
+        self.radius_spin.installEventFilter(self)
+        self.radius_spin.editingFinished.connect(self._on_spin_finished)
+        layout.addSpacing(4)
+        for widget in (self.radius_label, self.radius_slider, self.radius_spin):
+            layout.addWidget(widget)
+            self._tool_widgets.append(widget)
         self.radius_slider.valueChanged.connect(self._on_slider)
         self.radius_spin.valueChanged.connect(self._on_spin)
 
         layout.addSpacing(4)
         layout.addWidget(self._header("操作"))
-        for name in A.PALETTE_ACTIONS:
+        # Review's own keys first: in Review they are the whole strip, with
+        # 差异图 after them; in Annotate they are hidden.
+        review_first = tuple(n for n in A.PALETTE_REVIEW if n not in A.PALETTE_ACTIONS)
+        for name in dict.fromkeys(review_first + A.PALETTE_ACTIONS + A.PALETTE_REVIEW):
             layout.addWidget(self._add(name, checkable=(name == "toggle_heat")))
         layout.addStretch(1)
         self.setWidget(inner)
         self.set_radius(8)
+        self.set_mode(A.MODE_ANNOTATE)
 
     @staticmethod
     def _header(text: str) -> QLabel:
@@ -453,6 +481,56 @@ class ToolPalette(QScrollArea):
 
     def radius(self) -> int:
         return int(self.radius_spin.value())
+
+    # -- per mode -------------------------------------------------------------
+    def set_mode(self, mode: str) -> None:
+        """Show what works in ``mode``: a button is shown when its action is live.
+
+        The tools and the brush size are Annotate's alone; a button is shown
+        exactly in the modes its ``ACTIONS`` row lists, so 差异图 stays in
+        Review and the queue's 接受 / 返工 / K / N appear only there.
+        """
+        if mode == self._mode:
+            return
+        self._mode = mode
+        drawing = mode == A.MODE_ANNOTATE
+        for widget in self._tool_widgets:
+            widget.setVisible(drawing)
+        for name, button in self._buttons.items():
+            if name in A.PALETTE_TOOLS:
+                continue
+            button.setVisible(mode in button.action.modes)
+
+    def mode(self) -> str:
+        return self._mode
+
+    def tools_section_hidden(self) -> bool:
+        """Are the drawing tools and the brush size put away (Review)?"""
+        return all(widget.isHidden() for widget in self._tool_widgets)
+
+    # -- typing a radius ------------------------------------------------------
+    def eventFilter(self, obj, event) -> bool:  # noqa: D102 - the spin box's Esc
+        if (obj is self.radius_spin and event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Escape):
+            # Put back what is in force, typed digits and all, and hand the
+            # keyboard back: Esc here answers the box, never the edit behind it.
+            shown = int(self.radius_spin.value())
+            blocked = self.radius_spin.blockSignals(True)
+            self.radius_spin.setValue(shown)
+            self.radius_spin.blockSignals(blocked)
+            self.sigRadiusTyped.emit(shown)
+            return True
+        return super().eventFilter(obj, event)
+
+    def _on_spin_finished(self) -> None:
+        """``Enter`` (or the focus leaving): the value is in; give the keys back.
+
+        Only while the box still has the keyboard -- that is ``Enter``.  When
+        the focus has already gone somewhere the annotator clicked, it stays
+        there.
+        """
+        if self.radius_spin.hasFocus():
+            self.sigRadiusTyped.emit(int(self.radius_spin.value()))
 
     def _on_slider(self, value: int) -> None:
         radius = slider_to_radius(value)

@@ -47,8 +47,12 @@ BANNER_PIXELS = "Enter 提交 / Esc 放弃"
 #: How long the pointer rests on a card row before its outline is looked up.
 #: Passing over rows on the way to another one should not cost a query each.
 HINT_DWELL_MS = 120
-#: At most this many old Label Studio drafts are outlined for one hover.
-HINT_MAX_DRAFTS = 6
+#: At most this many old Label Studio drafts are outlined for one hover: a
+#: thirty-screw frame must not become a mess (round 1, item 4).
+HINT_MAX_DRAFTS = 5
+#: The hover's step window: unbounded, i.e. the pose segment ``drafts_for``
+#: clamps it to.  ``Shift+A`` keeps its own ±2 (``ls_adopt.NEAR_STEPS``).
+HINT_DRAFT_STEPS = 100_000
 HINT_DRAFT_RGB = (96, 208, 255)
 HINT_SHAPE_RGB = (80, 220, 120)
 HINT_DIFF_RGB = (255, 150, 40)
@@ -109,6 +113,13 @@ class GuideMixin:
         self._cheat_cache: dict[str, str] = {}
         self.palette.sigAction.connect(self.run_palette_action)
         self.palette.sigRadius.connect(self.set_brush_radius)
+        self.palette.sigRadiusTyped.connect(self._on_radius_typed)
+        # K / N are live only with a conflict selected: the queue's selection
+        # is state the palette's greying depends on.
+        for queue in api.QUEUE_NAMES:
+            self.review.list_for(queue).currentItemChanged.connect(
+                lambda *_a: self.refresh_guidance())
+        self.review.tabs().currentChanged.connect(lambda *_a: self.refresh_guidance())
         self.task_card.sigHover.connect(self.on_card_hover)
         self.task_card.sigExplain.connect(self.report)
         for bar in (self.warn_bar, self.scope_bar, self.restore_bar, self.roi_bar):
@@ -133,6 +144,17 @@ class GuideMixin:
         # earlier click on a dock may have taken.
         self.focus_canvas()
         self.refresh_guidance()
+
+    @S.guard
+    def _on_radius_typed(self, radius: int) -> None:
+        """``Enter`` / ``Esc`` in the brush-size box: the keyboard goes home.
+
+        Said in the status line as well, over the "快捷键没生效" the digits
+        may have raised on their way into the box -- they were numbers, not
+        shortcuts, and the answer to typing one is the size it set.
+        """
+        self.focus_canvas()
+        self.report(f"笔刷大小 r={int(radius)} / brush radius {int(radius)} px")
 
     @S.guard
     def set_brush_radius(self, radius: int) -> None:
@@ -213,6 +235,15 @@ class GuideMixin:
                      or facts.bench is not None or facts.editing is not None)
         states["clear_edit"] = (bool(not closed and escapable), False,
                                 closed or "没有可以放弃的编辑")
+        # The Review queue's own keys (round 1, item 3); shown only in Review.
+        review = self.mode == A.MODE_REVIEW and image
+        not_review = "只在复查模式可用"
+        states["review_accept"] = (bool(review), False, not_review)
+        states["review_rework"] = (bool(review), False, not_review)
+        conflict = review and self.review.selected_conflict() is not None
+        why_conflict = not_review if not review else "先在 Conflicts 队列里选一条冲突"
+        states["review_keep_old"] = (bool(conflict), False, why_conflict)
+        states["review_accept_new"] = (bool(conflict), False, why_conflict)
         return states
 
     # --------------------------------------------------------- the guide
@@ -257,11 +288,32 @@ class GuideMixin:
         )
 
     def _raw_missing_reason(self) -> str:
-        """Why no frame can be read at all, when the session can say (task U2a).
+        """Why this frame's pixels cannot be read, when task U2a can say.
 
-        Read if present, tolerated if not: the signal belongs to the data-access
-        fix running in parallel, and the guide must work before and after it.
+        Called only for a frame with no image, and read through ``getattr`` so
+        the guide works before U2a is merged and after:
+
+        1. ``session.images.why_unreadable(key)`` -- U2a's per-frame answer: the
+           raw drive's own sentence plus the path, or the file that could not
+           be opened; ``None`` for a step that simply has no image;
+        2. the window's ``raw_root`` (U2a's resolver result): configured and
+           not connected means the drive is not there, and its ``message`` says
+           which;
+        3. the two names this module first looked for, in case either appears.
         """
+        images = getattr(self.session, "images", None)
+        why = getattr(images, "why_unreadable", None)
+        if callable(why) and compat.is_open(self.session):
+            try:
+                found = why(self.session.current())
+            except Exception:  # noqa: BLE001 - a hint is never worth a failure
+                found = None
+            if found:
+                return str(found)
+        raw = getattr(self, "raw_root", None)
+        if (raw is not None and getattr(raw, "configured", False)
+                and not getattr(raw, "connected", True)):
+            return str(getattr(raw, "message", "") or "原始数据盘没有接上 / raw drive missing")
         for owner in (self.session, self):
             for name in ("image_unavailable_reason", "raw_missing_reason"):
                 found = getattr(owner, name, None)
@@ -291,6 +343,7 @@ class GuideMixin:
         plan = G.plan_for(facts)
         self.guide.show_plan(plan, self._cheat_for(self.mode))
         self.palette.setVisible(self.mode != A.MODE_STEPS)
+        self.palette.set_mode(self.mode)
         self.palette.apply_states(self.palette_states(facts), plan.action)
         self.palette.set_radius(self.brush.radius)
         self.canvas.set_banner(self.banner_text(facts))
@@ -444,19 +497,42 @@ class GuideMixin:
         Three sources, all read-only: the instance's own shape on the nearest
         keyframe of this pose segment, the difference map's strongest change
         (for a part the card says has come back), and the team's old Label
-        Studio drafts of the same class traced within two steps.  The two
-        stored ones are cached per frame and instance.
+        Studio drafts of the same class traced **anywhere in this pose
+        segment** -- at most :data:`HINT_MAX_DRAFTS` of them, the ones nearest
+        the difference map's box when there is one (round 1, item 4).  The
+        window is wider than ``Shift+A``'s ±2 steps on purpose: this only
+        points, it adopts nothing.  The two stored sources are cached per
+        frame, instance and difference box.
         """
         key = self.session.current()
         row = next((r for r in self.task_card.rows()
                     if str(r.get("instance")) == str(instance)), {})
-        cached = self._hint_cache.get((key, instance))
-        if cached is None:
-            cached = self._shape_hint(key, instance) + self._draft_hints(key, row, instance)
-            if len(self._hint_cache) > 64:
-                self._hint_cache.clear()
-            self._hint_cache[(key, instance)] = cached
-        return _merge_hints(self._diff_hint(key, row) + list(cached))
+        anchor = self._frame_diff_box(key)
+        centre = None if anchor is None else ((anchor[0] + anchor[2]) / 2.0,
+                                              (anchor[1] + anchor[3]) / 2.0)
+        if len(self._hint_cache) > 64:
+            self._hint_cache.clear()
+        shape = self._hint_cache.get(("shape", key, instance))
+        if shape is None:
+            shape = self._shape_hint(key, instance)
+            self._hint_cache[("shape", key, instance)] = shape
+        drafts = self._hint_cache.get(("drafts", key, instance, centre))
+        if drafts is None:
+            drafts = self._draft_hints(key, row, instance, centre)
+            self._hint_cache[("drafts", key, instance, centre)] = drafts
+        return _merge_hints(self._diff_hint(key, row) + list(shape) + list(drafts))
+
+    def _frame_diff_box(self, key) -> Optional[tuple]:
+        """The box SAM is armed with, else the strongest unexplained change."""
+        from tda.ui.app_diff import best_unexplained
+
+        payload = self.assist_result
+        if not payload or payload.get("key") != key:
+            return None
+        if self._prompt_box is not None:
+            return tuple(float(v) for v in self._prompt_box)
+        blob = best_unexplained(payload)
+        return None if blob is None else tuple(float(v) for v in blob.box)
 
     def _shape_hint(self, key, instance: str) -> list:
         seg = (self.db.pose_segment_for(key) or {}).get("seg")
@@ -486,7 +562,16 @@ class GuideMixin:
                  else f"第 {best[2]} 帧的形状")
         return [(best[1], label, HINT_SHAPE_RGB)]
 
-    def _draft_hints(self, key, row: dict, instance: str) -> list:
+    def _draft_hints(self, key, row: dict, instance: str,
+                     centre: Optional[tuple] = None) -> list:
+        """Same-class drafts of this pose segment, nearest first, at most five.
+
+        ``drafts_for`` clamps its step window to the frame's pose segment, so
+        an unbounded ``near_steps`` *is* "the whole segment".  With a
+        ``centre`` (the difference box's) it ranks by distance to it; without
+        one, by distance in steps.  A draft traced at several steps is one
+        place, outlined once.
+        """
         from tda.core import ls_adopt
 
         cls = str(row.get("cls") or self._class_of(instance) or "")
@@ -495,34 +580,32 @@ class GuideMixin:
         try:
             found = ls_adopt.drafts_for(self.db, self.session.tax, int(key.desktop),
                                         str(key.view), int(key.step), cls,
-                                        hw=self.overlay.hw)
+                                        hw=self.overlay.hw,
+                                        near_steps=HINT_DRAFT_STEPS, cursor=centre)
         except Exception:  # noqa: BLE001 - a hint is never worth a failure
             return []
-        out, seen = [], set()
+        out: list = []
         for candidate in found:
-            box = candidate.box
-            if box is None or tuple(box) in seen:
+            if not candidate.same_class or candidate.box is None:
+                continue          # the cursor also brings other classes under it
+            box = tuple(float(v) for v in candidate.box)
+            if any(_iou(box, kept) >= HINT_SAME_PLACE_IOU for kept, _l, _c in out):
                 continue
-            seen.add(tuple(box))
-            out.append((tuple(float(v) for v in box), "旧草稿", HINT_DRAFT_RGB))
+            out.append((box, "旧草稿", HINT_DRAFT_RGB))
             if len(out) >= HINT_MAX_DRAFTS:
                 break
         return out
 
     def _diff_hint(self, key, row: dict) -> list:
-        from tda.ui.app_diff import best_unexplained
+        """The difference map's box, outlined for a part the card says came back.
 
+        The box SAM is armed with when there is one -- it may be a ``Shift+C``
+        alternate -- and otherwise the strongest unexplained change.
+        """
         if row.get("kind") != api.KIND_ADD_SHAPE:
             return []
-        payload = self.assist_result
-        if not payload or payload.get("key") != key:
+        box = self._frame_diff_box(key)
+        if box is None:
             return []
-        # The box SAM is armed with, when there is one -- it may be a
-        # ``Shift+C`` alternate -- and otherwise the difference map's own.
-        if self._prompt_box is not None:
-            return [(tuple(float(v) for v in self._prompt_box), "差异图的提示框",
-                     HINT_DIFF_RGB)]
-        blob = best_unexplained(payload)
-        if blob is None:
-            return []
-        return [(tuple(float(v) for v in blob.box), "差异最大处", HINT_DIFF_RGB)]
+        label = "差异图的提示框" if self._prompt_box is not None else "差异最大处"
+        return [(box, label, HINT_DIFF_RGB)]

@@ -239,26 +239,11 @@ class EditMixin:
         self.timeline.sigOpenStep.connect(self.timeline_goto)
         self.instances.sigReorder.connect(self.move_instance)
         self.instances.sigHiddenToggled.connect(self.on_hidden_toggled)
-        self.task_card.sigCommit.connect(self.on_panel_commit)
-        self.task_card.sigConfirm.connect(self.act_confirm)
+        # The task card's commit / confirm buttons are gone (U2b round 1): the
+        # tool palette is the one place for actions, and its buttons dispatch
+        # through ACTIONS exactly like the keys (``run_palette_action``).
         self._panel_move = lambda d: (self.instances.move_up() if d < 0
                                       else self.instances.move_down())
-
-    @S.guard
-    def on_panel_commit(self, scope: str) -> None:
-        """A commit button was pressed; run the action its key runs.
-
-        ``""`` is the plain "Commit" button, which means the same as ``Enter``:
-        ask the session what the edit is, and show the scope bar when the answer
-        is not a plain keyframe.  Hard-coding ``keyframe`` here was one label
-        with two meanings.
-        """
-        if scope == api.SCOPE_FRAME_OVERRIDE:
-            self.act_commit_override()
-        elif scope == api.SCOPE_SPLIT:
-            self.act_commit_split()
-        else:
-            self.act_commit()
 
     @S.guard
     def on_hidden_toggled(self, instance: str, hidden: bool) -> None:
