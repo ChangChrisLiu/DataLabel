@@ -77,8 +77,9 @@ D:\Anaconda\envs\tda\python.exe -m tda.cli app --annotator chang --desktop 13 --
 3. **`Enter` 提交**（✂ 条用 `Ctrl+K`，`Enter` 会连前后帧的旧样子一起改）：普通情况按
    `keyframe`；判断是**层次关系**（像素落进别的实例形状）时画布下方
    弹非模态提示条，`Enter` 接受、`Alt+Enter` 只改这一帧、`Ctrl+K` 从这帧起拆分，`Esc` 放弃。
-4. **`Space` 确认整帧**：通过就退到 k−1；没通过不动，问题列在任务卡下面。仍"没人解释"的差异区
-   交给复查队列 `unexplained`。
+4. **`Space` 确认整帧**：通过就退到 k−1。挡住它的都列在任务卡下面，卡片和指引写"还有 N 个问题
+   挡住 Space"；"未处理的冲突"是确认过的形状在别帧被改了：单击它进 Review，`K` 留旧 / `N` 用新。
+   仍"没人解释"的差异区交给复查队列 `unexplained`。
 
 `Ctrl+Z` / `Ctrl+Y` 撤销重做，笔画、SAM、提交在同一条历史里。
 
