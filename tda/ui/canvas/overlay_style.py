@@ -43,7 +43,8 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap
 __all__ = [
     "CHIP_BG", "CHIP_GAP", "CHIP_MARGIN", "CHIP_MAX_W", "CURSOR_RING_PX", "DASH_PX",
     "DRAFT_RGB", "DRAG_BAND", "DRAG_RGB", "GAP_PX", "HANDLE_EDGE", "HINT_PX",
-    "OutlineStyle", "PROMPT_BOX", "PROMPT_POINT", "PROMPT_RGB", "RESERVED_HUE_HALF_WIDTH",
+    "OCCLUDER_RGB", "OutlineStyle", "PROMPT_BOX", "PROMPT_POINT", "PROMPT_RGB",
+    "RESERVED_HUE_HALF_WIDTH",
     "RESERVED_HUE_HALF_WIDTHS", "RESERVED_RGBS", "ROI_CHIP", "ROI_EDITING",
     "ROI_HUE_HALF_WIDTH", "ROI_RGB", "ROI_STORED", "SHAPE_RGB",
     "UNDER_ALPHA", "UNDER_EXTRA_PX", "chip_pixmap", "draw_outline_rect",
@@ -78,8 +79,16 @@ SHAPE_RGB: RGB = (80, 220, 120)
 #: achromatic, so no palette colour -- saturation 0.62 or more -- comes near it.
 DRAG_RGB: RGB = (255, 255, 255)
 
-#: The hued overlay colours the instance palette keeps clear of.
-RESERVED_RGBS: tuple[RGB, ...] = (ROI_RGB, PROMPT_RGB, DRAFT_RGB, SHAPE_RGB)
+#: The frame-level occluder layer (a hand, an arm, a tool painted with ``O``;
+#: :data:`tda.ui.canvas.overlay.OCCLUDER_RGB` is this).  Not an outline but a
+#: fill, and the palette made (242, 92, 92) next to it -- a part that reads as
+#: "this is a hand" (task U2i).
+OCCLUDER_RGB: RGB = (255, 72, 72)
+
+#: The hued colours the instance palette keeps clear of: the four outline
+#: kinds and the occluder fill.
+RESERVED_RGBS: tuple[RGB, ...] = (ROI_RGB, PROMPT_RGB, DRAFT_RGB, SHAPE_RGB,
+                                  OCCLUDER_RGB)
 #: Half the width of the hue band left empty around each of them, degrees.
 #: 15 keeps the nearest instance colour a clearly different hue (orange vs
 #: amber, green vs lime) while leaving two thirds of the wheel to the palette.
@@ -89,7 +98,7 @@ RESERVED_HUE_HALF_WIDTH = 15.0
 #: screw.motherboard.05 (217, 92, 242) at 290 degrees and (242, 29, 160) at
 #: 323, 15 and 18 degrees from the ROI's 305.  The ROI is the one outline
 #: drawn round the whole chassis, over every part, so its band is the one
-#: that is widened; the other three stay at 15.
+#: that is widened; the others stay at 15.
 ROI_HUE_HALF_WIDTH = 25.0
 #: The half-width of each reserved band, keyed like :data:`RESERVED_RGBS`.
 RESERVED_HUE_HALF_WIDTHS: dict[RGB, float] = {
@@ -97,6 +106,7 @@ RESERVED_HUE_HALF_WIDTHS: dict[RGB, float] = {
     PROMPT_RGB: RESERVED_HUE_HALF_WIDTH,
     DRAFT_RGB: RESERVED_HUE_HALF_WIDTH,
     SHAPE_RGB: RESERVED_HUE_HALF_WIDTH,
+    OCCLUDER_RGB: RESERVED_HUE_HALF_WIDTH,
 }
 
 # --------------------------------------------------------------------------- #

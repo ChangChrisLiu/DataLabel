@@ -1,22 +1,25 @@
-"""L1's M1 gate replayed with the bands in pixels and in ROI fractions (task U2h).
+"""L1's M1 gate replayed with the bands in pixels and in ROI fractions (U2h, U2i).
 
 ::
 
     D:\\Anaconda\\envs\\tda\\python.exe -m experiments.l1_localise.replay_m1_units \\
         --db D:\\DataSet\\.cache\\tmp\\<copy>.sqlite
 
-Why ``fit_bands.py`` fits pixels.  Reads L1's per-event rows
-(``experiments_out/l1_localise/events_v*.csv``; ``M0app`` is the app's own
-rank-1 blob) and the drafts of a database copy, and prints, for ``k = 3`` and
-GT-B, how many boxes each band withholds, how many of the wrong ones it cuts
-and how many good ones it withholds, per view:
+Why ``fit_bands.py`` fits pixels, and what its bands do.  Reads L1's per-event
+rows (``experiments_out/l1_localise/events_v*.csv``; ``M0app`` is the app's
+own rank-1 blob) and the drafts of a database copy, and prints, for ``k = 3``
+and GT-B, how many boxes each band withholds, how many of the wrong ones it
+cuts and how many good ones it withholds, per view:
 
 * ``frac-lodo (L1)`` -- L1's own ``band_lodo`` column: reproduces REPORT.md;
 * ``frac-lodo, stored ROI`` -- the same bands converted with the ROI the app
   would divide by on D13/scan (its stored one; no other segment of the copy
   has one);
-* ``px-lodo`` -- pixel bands, leave-one-desktop-out over every desktop;
-* ``px-all`` -- the production fit (in-sample for these events).
+* ``px-lodo`` -- **leave-one-desktop-out**: ``fit_bands``' own rule (parts,
+  at least five from two desktops) fitted without the event's desktop.  The
+  measurement of the gate on a machine it has not seen;
+* ``px-all`` -- the production fit, **in-sample**: it has seen every event's
+  desktop, so it flatters.
 """
 from __future__ import annotations
 
@@ -24,7 +27,6 @@ import argparse
 import glob
 import json
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -69,15 +71,15 @@ def main(argv=None) -> int:
         drafts = F.load_drafts(con)
     finally:
         con.close()
-    px = defaultdict(list)
-    for d in drafts:
-        px[(d["view"], d["cls"])].append((d["area"], d["desktop"]))
+    memo: dict = {}
 
     def band_px(r, exclude=True):
-        vals = [a for a, desk in px.get((r.view, r.cls), [])
-                if not exclude or desk != int(r.desktop)]
-        return (tuple(np.percentile(vals, F.PERCENTILES))
-                if len(vals) >= F.MIN_SAMPLES else None)
+        """``fit_bands``' band for the event's class, without its desktop."""
+        key = (r.view, r.cls, int(r.desktop) if exclude else None)
+        if key not in memo:
+            band = F.band_of(F.part_values(drafts, r.view, r.cls, key[2]))
+            memo[key] = None if band is None else (band["lo_px"], band["hi_px"])
+        return memo[key]
 
     def frac_l1(r):
         raw = r.band_lodo
@@ -103,7 +105,10 @@ def main(argv=None) -> int:
                                    for r in sub.itertuples()], dtype=bool)
 
             def pct(base):
-                return f"{100 * held[base].mean():5.1f}" if base.any() else "    -"
+                if not base.any():
+                    return "    -"
+                return (f"{100 * held[base].mean():5.1f} "
+                        f"({int(held[base].sum())}/{int(base.sum())})")
 
             print(f"  {view:5s} boxes {int(has.sum()):3d}  withheld {pct(has)}  "
                   f"wrong cut {pct(wrong)}  good withheld {pct(good)}")

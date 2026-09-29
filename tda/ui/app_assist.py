@@ -33,9 +33,9 @@ from tda.ui.app_diff import (
 from tda.ui.app_roi_worker import RoiProposer
 from tda.ui.class_names import class_zh
 
-__all__ = ["ASSIST_CONFIRM_WAIT", "BOX_REFUSED", "NO_ALTERNATE", "PROMPT_ARMED",
-           "PROMPT_CHIP", "PROMPT_CHIP_RANK", "PROMPT_TOO_BIG", "PROMPT_WITHHELD",
-           "AssistMixin"]
+__all__ = ["ASSIST_CONFIRM_WAIT", "BOX_REFUSED", "EDITING_NO_BOX", "NO_ALTERNATE",
+           "PROMPT_ARMED", "PROMPT_CHIP", "PROMPT_CHIP_RANK", "PROMPT_TOO_BIG",
+           "PROMPT_WITHHELD", "AssistMixin"]
 
 class _SamLoader(QObject):
     """Carries the outcome of the background SAM load onto the GUI thread."""
@@ -93,6 +93,9 @@ PROMPT_TOO_BIG = ("这一帧差不多整块机箱范围都变了，这次没有�
 PROMPT_WITHHELD = ("这一步要补的是「{name}」，程序找到的变化大小不像它，这次不给提示框："
                    "直接在零件上点 S，或用 B 涂 / no guess this time: click the part")
 WITHHELD_JOIN = "」或「"
+#: Appended to "正在画 X" when an edit starts on a frame whose box was
+#: withheld, which would otherwise overwrite the one line saying so (U2i).
+EDITING_NO_BOX = " — 这一帧没有提示框：直接在零件上点 S"
 #: The first click of a prompt landed outside the armed box (addendum B).
 BOX_REFUSED = ("你点在提示框外：这次只用你的点，提示框不用了 / clicked outside the "
                "prompt box: point only")
@@ -396,6 +399,9 @@ class AssistMixin:
         # Off until the next frame visit, whatever resets the prompt meanwhile.
         self._refused_on = (self.session.current() if compat.is_open(self.session)
                             else None)
+        # And the walk starts again (task U2i): a refused *alternate* left the
+        # rank at 2 with nothing armed, and the next Shift+C skipped to 3.
+        self._prompt_rank = 0
         self._arm_prompt_box(None)
         self.report(BOX_REFUSED, hold_ms=BOX_REFUSED_HOLD_MS)
 
@@ -715,6 +721,12 @@ class AssistMixin:
         self.logger.info("prompt box from the difference map: %s (%d px)",
                          tuple(int(v) for v in blob.box), int(blob.area))
         self.report(PROMPT_ARMED)
+
+    def no_box_note(self) -> str:
+        """:data:`EDITING_NO_BOX` while the gate's withholding is what is on the frame."""
+        if self._withheld_box is not None and self._prompt_box is None:
+            return EDITING_NO_BOX
+        return ""
 
     def _withhold(self, blob: DiffBlob, box: tuple, rows: Optional[list]) -> bool:
         """Withhold the box when the gate says so (task U2h); ``True`` if it did.
