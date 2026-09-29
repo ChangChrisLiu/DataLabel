@@ -30,12 +30,22 @@ from tda.core.truth_conflicts import (
 from tda.core.truth_fresh import digest_of, hash_of_inputs
 from tda.core.truth_inputs import gather
 
-__all__ = ["BLOCKING_PROBLEMS", "VerifyMixin", "usable"]
+__all__ = ["BLOCKING_PROBLEMS", "VerifyMixin", "is_blocking", "usable"]
 
 #: Problem prefixes that stop a frame from being verified (spec 3.3 step 3).
 #: Everything else -- ``bench_missing``, ``zorder_missing``, ``empty_visible``,
 #: ``pose_segment_ambiguous`` -- is a warning the annotator may accept.
 BLOCKING_PROBLEMS = ("missing_shape:", "zorder_cycle:", "shape_size_mismatch:")
+
+
+def is_blocking(problem: str) -> bool:
+    """Does this compiler problem stop the frame from being verified?
+
+    The one test :meth:`VerifyMixin.verify_frame` applies, and the one the task
+    card and the guide ask when they say what stands between the annotator and
+    ``Space`` (task U2d) -- so the two can never name different sets.
+    """
+    return str(problem).startswith(BLOCKING_PROBLEMS)
 
 VERIFIED = "verified"
 NEEDS_REVIEW = "needs_review"
@@ -131,7 +141,7 @@ class VerifyMixin:
         inputs = gather(self.db, self.tax, key, cache_dir=self.cache_dir)
         compiled = (prepared if usable(prepared, key, inputs, self.compiler_version)
                     else self._compile_inputs(key, inputs))
-        blocking = [p for p in compiled.problems if p.startswith(BLOCKING_PROBLEMS)]
+        blocking = [p for p in compiled.problems if is_blocking(p)]
         if blocking:
             raise ValueError(refused + ", ".join(blocking))
         stored = self.db.compiled(key)

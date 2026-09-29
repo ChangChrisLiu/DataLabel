@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from tda.core.truth_verify import is_blocking
 from tda.ui import session_api as api
 from tda.ui.class_names import instance_label, state_zh, visibility_zh
 from tda.ui.panels import session_is_open
@@ -56,6 +57,8 @@ INSTANCE_ROLE = int(Qt.ItemDataRole.UserRole)
 #: The painted view of a row (:func:`row_view`), for the delegate.
 VIEW_ROLE = INSTANCE_ROLE + 1
 KIND_ROLE = INSTANCE_ROLE + 2
+#: The compiler code a row of the problems pane stands for (``""``: none).
+CODE_ROLE = INSTANCE_ROLE + 3
 
 #: One glyph per task kind (spec 4.2), so the list can be skimmed vertically.
 KIND_ICONS: dict[str, str] = {
@@ -373,6 +376,9 @@ def _is_code(problem: str) -> bool:
     return bool(sep) and bool(head) and set(head) <= _CODE_CHARS and " " not in head
 
 
+#: The one problem a click answers by starting to draw (U2d).
+MISSING_SHAPE = "missing_shape:"
+
 #: The session writes a "how to fix it" sentence for exactly these codes
 #: (``session_review._how_to_fix``), in the order they appear, so they are the
 #: only ones a sentence may be paired with.  Pairing them with *every* code put
@@ -481,6 +487,9 @@ class TaskCardPanel(QWidget):
     #: (``0``: it is hidden).  The status line says "见任务卡" from this and
     #: from nothing else, so it never points at a pane that is not there.
     sigProblemsShown = Signal(int)
+    #: A problem in the pane was clicked: select this part where the keys
+    #: that fix it act -- the instance table (U2d).
+    sigPickInstance = Signal(str)
 
     def __init__(self, session: Optional[api.SessionLike] = None,
                  parent: Optional[QWidget] = None) -> None:
@@ -723,16 +732,21 @@ class TaskCardPanel(QWidget):
         return ok
 
     def problem_count(self) -> int:
-        """How many things there are to fix -- not how many lines are shown.
+        """How many things in the pane stop ``Space`` -- not how many lines are shown.
 
         The refusal's opening line restates the codes listed under it, so
         counting it as well told the annotator "3 problem(s)" for two missing
-        shapes.  When it is all there is -- an open conflict, which the
-        compiler cannot name -- it *is* the problem, and counts.
+        shapes.  When no code under it blocks -- an open conflict, which the
+        compiler cannot name -- it *is* the problem, and counts.  A code the
+        confirmation accepts (``empty_visible``, ``zorder_missing``, ...) is a
+        note and stops nothing, so it is not counted (U2d): which codes block
+        is :func:`tda.core.truth_verify.is_blocking`, the test
+        ``confirm_frame`` itself applies.
         """
         if not self._problems_list.isVisibleTo(self):
             return 0
-        return len([row for row in self._rows if row["code"]]) or len(self._rows)
+        blocking = [row for row in self._rows if row["code"] and is_blocking(row["code"])]
+        return len(blocking) or len([row for row in self._rows if not row["code"]])
 
     def problems(self) -> list[str]:
         """The problems currently on display (empty when none are shown)."""
@@ -863,6 +877,7 @@ class TaskCardPanel(QWidget):
             item = QListWidgetItem(row["text"])
             item.setToolTip(row["code"] or row["text"])
             item.setData(INSTANCE_ROLE, row["instance"])
+            item.setData(CODE_ROLE, row["code"])
             self._problems_list.addItem(item)
         visible = bool(problems)
         self._problems_label.setText(title)
@@ -884,7 +899,25 @@ class TaskCardPanel(QWidget):
             self.select_instance(instance)
 
     def _on_problem_clicked(self, item: QListWidgetItem) -> None:
-        self.activate_problem(str(item.data(INSTANCE_ROLE) or ""))
+        """One click on a problem goes to deal with it (U2d).
+
+        The guide says "单击一条去处理" when only this pane stands between the
+        annotator and ``Space``, and a click used to do nothing at all for a
+        part the card has no row for -- which is every problem the pane shows
+        on arrival.  A missing shape starts drawing that part, exactly as a
+        card row does; any other problem selects its part (on the card and in
+        the instance table, where the visibility keys, ``Ctrl+↑/↓`` and ``R``
+        act) and says its sentence in the status line.
+        """
+        instance = str(item.data(INSTANCE_ROLE) or "")
+        if not instance:
+            return
+        self.activate_problem(instance)
+        if str(item.data(CODE_ROLE) or "").startswith(MISSING_SHAPE):
+            self.sigRequestEdit.emit(instance)
+            return
+        self.sigPickInstance.emit(instance)
+        self.sigExplain.emit(item.text())
 
     def _on_problem_activated(self, item: QListWidgetItem) -> None:
         """Double click / Enter on a problem: start editing that instance.

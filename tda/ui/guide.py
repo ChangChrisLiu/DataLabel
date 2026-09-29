@@ -47,13 +47,16 @@ PHASE_DRAW_PIXELS = "draw_pixels"
 #: A stored shape loaded and not touched: ``Enter`` has nothing to commit.
 PHASE_LOADED = "loaded"
 PHASE_PICK = "pick"
+#: Every card row is done and the card's pane still lists problems that make
+#: ``Space`` refuse (U2d): the guide must not send anybody to that key.
+PHASE_BLOCKED = "blocked"
 PHASE_CONFIRM = "confirm"
 PHASE_CONFIRMED = "confirmed"
 PHASES: tuple[str, ...] = (
     PHASE_STEPS, PHASE_REVIEW, PHASE_CLOSED, PHASE_RAW_MISSING, PHASE_NO_IMAGE,
     PHASE_FLASH, PHASE_GHOST, PHASE_WARNING, PHASE_SCOPE, PHASE_ROI, PHASE_BENCH,
-    PHASE_DRAW_EMPTY, PHASE_DRAW_PIXELS, PHASE_LOADED, PHASE_PICK, PHASE_CONFIRM,
-    PHASE_CONFIRMED,
+    PHASE_DRAW_EMPTY, PHASE_DRAW_PIXELS, PHASE_LOADED, PHASE_PICK, PHASE_BLOCKED,
+    PHASE_CONFIRM, PHASE_CONFIRMED,
 )
 
 #: The key and the palette action of each commit scope, for the lines that
@@ -119,6 +122,10 @@ class GuideFacts:
     flashing: bool = False
     sam_ready: bool = True
     items: tuple[CardItem, ...] = ()
+    #: How many problems in the task card's pane stop ``Space``: the codes
+    #: ``confirm_frame`` refuses on (``tda.core.truth_verify.is_blocking``),
+    #: never the notes it accepts.  The window reads it off the card (U2d).
+    blockers: int = 0
 
 
 @dataclass(frozen=True)
@@ -195,14 +202,14 @@ def _open_work(facts: GuideFacts) -> list[CardItem]:
 
 
 def _steps(facts: GuideFacts, at: int, *, pick_text: str = "", draw_text: str = "",
-           commit_text: str = "", nothing: bool = False) -> tuple:
+           commit_text: str = "", confirm_text: str = "", nothing: bool = False) -> tuple:
     """The five lines, with ``at`` the one being done now (``-1``: none)."""
     texts = [
         None,
         pick_text or PICK,
         draw_text or DRAW,
         commit_text or COMMIT,
-        CONFIRM,
+        confirm_text or CONFIRM,
     ]
     if nothing:
         texts[1] = texts[2] = texts[3] = NOTHING_TO_DRAW
@@ -341,6 +348,16 @@ def _annotate_plan(facts: GuideFacts) -> GuidePlan:
                          f"现在：在右边任务卡上单击「{first}」开始画（还剩 {len(work)} 个）",
                          _steps(facts, 1, pick_text=f"{PICK}：{first}"), "")
     nothing = not any(item.kind in _WORK_KINDS for item in facts.items)
+    if facts.blockers:
+        # The rows are done, and Space would still say no: the pane under the
+        # card is the list, and no button is the next one (U2d).
+        return GuidePlan(PHASE_BLOCKED, title,
+                         f"现在：任务卡做完了，但下面还有 {facts.blockers} 个问题挡住 "
+                         f"Space：单击一条去处理",
+                         _steps(facts, 4, nothing=nothing,
+                                confirm_text=f"先处理任务卡下面的 {facts.blockers} 个问题"
+                                             f"（它们挡住 Space）"),
+                         "")
     if facts.frame_confirmed:
         return GuidePlan(PHASE_CONFIRMED, title,
                          "这一帧已经确认 ✓ — 按 PgDn 去上一帧继续；要改哪个零件就在"

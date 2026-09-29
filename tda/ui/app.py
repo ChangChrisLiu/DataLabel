@@ -582,6 +582,9 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         """
         if count:
             self.report(f"{count} problem(s) — 见任务卡 / see the task card")
+        # The guide reads the pane too: "Space" is not the next key while
+        # something in it blocks the confirmation (U2d).
+        self.refresh_guidance()
 
     @S.guard
     def _on_dirty(self, dirty: bool) -> None:

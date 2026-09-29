@@ -305,6 +305,7 @@ class CommitMixin:
             count = self.task_card.problem_count()
             self.report(f"step {step} is not complete: {count} problem(s) — "
                         f"见任务卡 / see the task card")
+            self.refresh_guidance()      # the pane now says what blocks Space
         return bool(ok)
 
     # ------------------------------------------------------- the size warning
