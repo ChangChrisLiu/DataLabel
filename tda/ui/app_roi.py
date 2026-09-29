@@ -26,9 +26,15 @@ ON_BENCH = "on_bench"
 #: Shown when the detector returns the whole frame, which means "not found",
 #: while the rectangle is open: what to do right there (task U2c).  The bar
 #: used to end "请按 Shift+R 自己画" over an editor that was already open.
+#: The bar says the first half and ends with the keys once (U2d).
+NO_CHASSIS_DRAG = ("自动没找到机箱：直接在画面上拖一个框框住机箱（或拖白色小方块）/ "
+                   "no chassis found: drag a box around it")
 NO_CHASSIS_FOUND = ("自动没找到机箱：直接在画面上拖一个框框住机箱（或拖白色小方块），"
                     "Enter 保存；Esc 先跳过 / no chassis found: drag a box around it, "
                     "Enter to save, Esc to skip")
+#: Said when a drag leaves a rectangle ``Enter`` would store: the refusal a
+#: previous drag earned is out of date the moment this one lands (U2d).
+ROI_BOX_READY = "框好了：Enter 保存 / Esc 放弃 / box ready: Enter to save"
 #: Shown when Enter arrives before the segment has been measured.
 ROI_STILL_MEASURING = ("还在找机箱，稍等或直接拖框 / still looking for the chassis "
                        "-- wait a moment, or drag a box yourself")
@@ -36,20 +42,41 @@ ROI_STILL_MEASURING = ("还在找机箱，稍等或直接拖框 / still looking 
 #: What the ROI bar says while the rectangle is on screen: what it is, what it
 #: is for, and what to do about it.  "ROI 这个不是很明显，让我很迷惑" -- the
 #: annotator's first trial; the rectangle appeared, waited for an answer and
-#: said none of that (task U1, ruling U-ROI-1).
-ROI_BAR_EDITING = (
+#: said none of that (task U1, ruling U-ROI-1).  Each is said once, and the
+#: keys once at the very end: the open editor's bar used to say "Enter 保存；
+#: Esc 先跳过" twice and point at a Shift+R that only matters after Esc (U2d).
+ROI_BAR_WHAT = (
     "机箱范围（ROI）/ chassis range — 差异图和 SAM 提示框只在这个框里算，"
     "画面也按它缩放 / the difference map and SAM's prompt boxes are computed "
-    "inside it and the view zooms to it。拖动边或角可以调整，框里按住可以整体"
-    "移动，空白处拖动重画 → Enter 保存；Esc 先跳过，之后按 Shift+R 再画。"
+    "inside it and the view zooms to it。"
 )
-#: The same bar over a rectangle that is already stored: ``Esc`` keeps it.
-ROI_BAR_EDITING_STORED = (
+ROI_BAR_WHAT_STORED = (
     "编辑已存的机箱范围（ROI：差异图和 SAM 提示框只在框里算）/ editing the stored "
     "chassis range (the difference map and SAM's prompt boxes stay inside it) — "
-    "拖动边或角调整，框里按住整体移动 / drag an edge or a corner, or drag inside "
-    "to move it → Enter 保存 / Enter saves；Esc 保持原来的不变 / Esc keeps it as it was。"
 )
+ROI_BAR_ADJUST = (
+    "拖边或角调整，框里按住整体移动，空白处拖动重画 / drag an edge or a corner, "
+    "drag inside to move it, drag on empty canvas to redraw it。"
+)
+ROI_BAR_KEYS = "Enter 保存 / Esc 先跳过（Enter saves, Esc skips）"
+#: Over a stored rectangle ``Esc`` skips nothing: it keeps what is stored.
+ROI_BAR_KEYS_STORED = "Enter 保存 / Esc 不改（Enter saves, Esc keeps it as it was）"
+
+
+def roi_bar_editing(stored: bool, reason: str = "") -> str:
+    """The open editor's bar: what the box is for, how to adjust it, the keys.
+
+    ``reason`` is why ``Enter`` would be refused right now (no chassis found,
+    too small), said between the two without keys of its own.
+    """
+    what, keys = ((ROI_BAR_WHAT_STORED, ROI_BAR_KEYS_STORED) if stored
+                  else (ROI_BAR_WHAT, ROI_BAR_KEYS))
+    return what + ROI_BAR_ADJUST + (f"{reason}。" if reason else "") + keys
+
+
+ROI_BAR_EDITING = roi_bar_editing(False)
+#: The same bar over a rectangle that is already stored: ``Esc`` keeps it.
+ROI_BAR_EDITING_STORED = roi_bar_editing(True)
 #: Bare ``R`` with no part on the bench armed: it is not the ROI (trial #2).
 BENCH_NEEDS_ITEM = (
     "R 是台面框（放在台面上的零件）；改机箱范围用 Shift+R 或工具栏的 ROI / R is "
@@ -78,10 +105,6 @@ ROI_REMEASURING = ("正在重新测量机箱范围，量到就存 / re-measuring
 NO_CHASSIS_CLOSED = ("自动框没找到机箱：整幅图不作为 ROI，请按 Shift+R 自己画 / "
                      "the detector found no chassis; a whole-frame rectangle is "
                      "never stored -- draw one with Shift+R")
-#: Appended to the reminder bar when the offered rectangle is one that will
-#: not be stored, so that a button that is going to refuse says so before it
-#: is pressed rather than after (round 2, C1).
-ROI_BAR_UNUSABLE = NO_CHASSIS_CLOSED + "。"
 #: Refused: too small to be a chassis.  The floor is the ruled 64 px / 5 % of
 #: the frame's shorter side, capped at half of it so that a small frame (the
 #: 64x64 test scene, a thumbnail) still has usable rectangles at all.
@@ -480,10 +503,11 @@ class RoiMixin:
                 buttons[name].setVisible(True)
             for name in ("accept", "redraw", "none"):
                 buttons[name].setVisible(False)
-            editing = ROI_BAR_EDITING_STORED if self.roi() is not None else ROI_BAR_EDITING
             # The rectangle is open: the bar says what ``Enter`` would answer,
-            # in the words for right here -- never "press Shift+R" (U2c).
-            self.roi_bar.show_text(editing + refusal)
+            # in the words for right here -- never "press Shift+R" (U2c) --
+            # and leaves the keys to the one ending (U2d).
+            reason = NO_CHASSIS_DRAG if refusal == NO_CHASSIS_FOUND else refusal
+            self.roi_bar.show_text(roi_bar_editing(self.roi() is not None, reason))
             return
         if self.roi_unanswered():
             buttons["save"].setVisible(False)
@@ -493,8 +517,11 @@ class RoiMixin:
             buttons["accept"].setVisible(not unusable)
             buttons["redraw"].setVisible(True)
             buttons["none"].setVisible(True)
-            self.roi_bar.show_text(
-                ROI_BAR_PENDING + (ROI_BAR_UNUSABLE if unusable else ""))
+            # An offer that will be refused says so before the button is
+            # pressed (round 2, C1) -- and says *why*, in the words 确认建议框
+            # would answer with: a 20 px drag left behind by Esc is "too
+            # small", not "no chassis" (U2d).
+            self.roi_bar.show_text(ROI_BAR_PENDING + (f"{refusal}。" if unusable else ""))
             return
         self.roi_bar.hide()
 
@@ -538,9 +565,9 @@ class RoiMixin:
         self._remember_proposal(self.roi_draft)
         self._show_roi_rect()
         self.refresh_roi_bar()
-        refusal = self.roi_refusal(self.roi_draft)
-        if refusal:
-            self.report(refusal)
+        # Every drag answers in the status line: a good one replaces the
+        # "too small" / "no chassis" the last one left there (U2d).
+        self.report(self.roi_refusal(self.roi_draft) or ROI_BOX_READY)
 
     @S.guard
     def accept_roi(self) -> None:

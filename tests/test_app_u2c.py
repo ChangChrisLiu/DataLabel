@@ -35,12 +35,12 @@ from app_scene import (
     write_paths_yaml,
 )
 from tda.core import masks
-from tda.core.model import FrameKey, ShapeKeyframe, ShapePart, ZOrderRec
+from tda.core.model import FrameKey, FrameOverride, ShapeKeyframe, ShapePart, ZOrderRec
 from tda.core.truth_inputs import annotatable_steps
 from tda.ui import app_actions as A
 from tda.ui import session_api as api
 from tda.ui.app import MainWindow
-from tda.ui.app_roi import NO_CHASSIS_CLOSED, NO_CHASSIS_FOUND
+from tda.ui.app_roi import NO_CHASSIS_CLOSED, NO_CHASSIS_DRAG, NO_CHASSIS_FOUND, ROI_BAR_KEYS
 from tda.ui.panels.instances import NOT_DRAWN
 from tda.ui.panels.taskcard import instance_of
 from tda.ui.panels.timeline import NO_IMAGE_TEXT, STEP_ROLE
@@ -126,7 +126,7 @@ def test_a_problem_no_row_mentions_is_in_the_pane_and_the_status_points_at_it(
         assert f"missing_shape:{UNLISTED}" in session.current_problems()
         assert win.task_card.problems_visible()
         assert pane_codes(win) == [f"missing_shape:{UNLISTED}"]
-        assert "1 problem(s) — 见任务卡" in win.status_message()
+        assert "1 个问题要先处理 — 见任务卡" in win.status_message()   # U2d wording
         # nothing an open row already asks for is said twice
         assert not {instance_of(c) for c in pane_codes(win)} & open_rows(win)
     finally:
@@ -253,17 +253,20 @@ def test_a_drawn_part_hidden_by_a_label_still_warns(window):
 
 
 def test_a_shape_drawn_for_this_frame_only_counts_as_drawn(window):
-    """A frame override with pixels carries no keyframe id, and still is a shape."""
+    """A frame override with pixels carries no keyframe id, and still is a shape.
+
+    Since U2d the session refuses to *write* one with no keyframe under it
+    (Alt+Enter on an undrawn part), so the row is put in the way an older
+    database may hold it: straight into ``frame_override``.
+    """
     answer_roi(window)
     session = window.session
     session.goto(LAST_STEP, force=True)
-    session.begin_edit(CHASSIS)
-    session.set_editing_mask(cell(9))
-    session.commit_edit(api.SCOPE_FRAME_OVERRIDE)
-    session.clear_edit()
+    key = session.current()
+    window.db.set_frame_override(FrameOverride(key, CHASSIS, masks.encode_rle(cell(9))))
+    session.refresh_all()                            # as seed_shapes does after a write
     window.instances.refresh()
 
-    key = session.current()
     assert window.db.frame_overrides(key)[CHASSIS].visible_rle is not None
     assert session.compiled().instances[CHASSIS].keyframe_id is None
     assert row_of(window, CHASSIS)["has_shape"] is True
@@ -289,7 +292,8 @@ def test_a_failed_proposal_says_what_to_do_in_the_open_editor(qapp, tmp_path,
         assert win.roi_editing, "the editor opens on a segment with no ROI"
         assert win.wait_for_roi_proposal() is True
         bar = roi_bar_text(win)
-        assert bar.endswith(NO_CHASSIS_FOUND), bar
+        # the reason, then the keys once (U2d: the bar ends with the keys)
+        assert NO_CHASSIS_DRAG in bar and bar.endswith(ROI_BAR_KEYS), bar
         assert "请按 Shift+R 自己画" not in bar
         assert NO_CHASSIS_FOUND in win.status_message()
 

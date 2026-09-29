@@ -152,6 +152,9 @@ class GuideMixin:
             lambda *_a: self.refresh_guidance())
         self.task_card.sigHover.connect(self.on_card_hover)
         self.task_card.sigExplain.connect(self.report)
+        # A problem clicked in the card's pane selects its part where the
+        # keys that fix it act (U2d: the guide says "单击一条去处理").
+        self.task_card.sigPickInstance.connect(self.instances.select_instance)
         for bar in (self.warn_bar, self.scope_bar, self.restore_bar, self.roi_bar,
                     getattr(self, "raw_bar", None)):
             if bar is not None:
@@ -275,7 +278,11 @@ class GuideMixin:
         else:
             why_scope = nothing
         scoped = bool(not closed and dirty and not facts.ghost and not facts.roi_editing)
-        states["commit_override"] = (scoped, False, closed or why_scope)
+        # 只改这一帧 is an exception *on* a shape: with no keyframe under it
+        # the part stays missing, so the button says so rather than write (U2d).
+        no_shape = self.override_refusal() if scoped else ""
+        states["commit_override"] = (scoped and not no_shape, False,
+                                     closed or no_shape or why_scope)
         states["commit_split"] = (scoped, False, closed or why_scope)
         if dirty:
             why_confirm = "有未提交的修改：先 Enter 提交或 Esc 放弃"
@@ -345,10 +352,29 @@ class GuideMixin:
         no_image = not (facts.is_open and facts.has_image)
         untouched = (name in _SCOPE_KEYS and not facts.layer_dirty and not facts.ghost
                      and not facts.roi_editing and not facts.scope and not facts.warning)
-        if not (no_image or untouched):
+        # Alt+Enter on a part with no shape here (U2d): refused like its button.
+        no_shape = name == "commit_override" and bool(self.override_refusal())
+        if not (no_image or untouched or no_shape):
             return ""
         enabled, _checked, why = self.palette_states(facts).get(name, (True, False, ""))
         return "" if enabled else (why or "现在不能用")
+
+    def override_refusal(self) -> str:
+        """Why ``Alt+Enter`` cannot write this edit, or ``""`` (U2d).
+
+        The session's answer to "does a keyframe of the part being edited
+        apply here?" -- the question behind ``missing_shape`` -- in the words
+        its own refusal uses (:data:`~tda.ui.session_api.OVERRIDE_NEEDS_SHAPE`).
+        A dict lookup on the compiled frame, so it may run on every refresh.
+        """
+        instance = getattr(self.session, "editing_instance", None)
+        applies = getattr(self.session, "keyframe_applies", None)
+        if instance is None or not callable(applies):
+            return ""
+        try:
+            return "" if applies(instance) else api.OVERRIDE_NEEDS_SHAPE
+        except Exception:  # noqa: BLE001 - a grey button is never worth a failure
+            return ""
 
     # --------------------------------------------------------- the guide
     def guide_facts(self) -> G.GuideFacts:
@@ -400,6 +426,8 @@ class GuideMixin:
             flashing=self.is_flashing(),
             sam_ready=bool(self.sam_available),
             items=items,
+            # What the card's pane holds that makes Space refuse (U2d).
+            blockers=self.task_card.problem_count() if opened else 0,
         )
 
     def _card_kind(self, instance: Optional[str]) -> str:

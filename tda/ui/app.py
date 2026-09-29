@@ -123,6 +123,10 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         for name, why in compat.ADAPTED.items():
             self.logger.info("session gap adapted: %s (%s)", name, why)
         self.render_frame()
+        # The card filled its pane for this frame while it was being built,
+        # before the status line listened, and render_frame has just cleared
+        # the line: say it now, in the order every arrival does (U2d).
+        self.task_card.announce()
 
     # ------------------------------------------------------- lazy step table
     @property
@@ -579,9 +583,15 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         ``sigProblems``: that said "13 problem(s) — 见任务卡" over a card that
         showed no pane at all (task U2c).  The missing shapes the card's rows
         already are were never shown anywhere else, and never will be.
+        ``count`` is what stops ``Space``; notes alone leave the line alone
+        (U2d) -- "见任务卡" is a to-do, and a note is not one.
         """
         if count:
-            self.report(f"{count} problem(s) — 见任务卡 / see the task card")
+            self.report(f"{count} 个问题要先处理 — 见任务卡 / {count} problem(s) to "
+                        f"fix first — see the task card")
+        # The guide reads the pane too: "Space" is not the next key while
+        # something in it blocks the confirmation (U2d).
+        self.refresh_guidance()
 
     @S.guard
     def _on_dirty(self, dirty: bool) -> None:

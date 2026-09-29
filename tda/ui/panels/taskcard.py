@@ -16,6 +16,8 @@ confusion the second trial reported.  When ``confirm_frame`` refuses, the
 problems that came with ``sigProblems`` are shown instead of any local check.
 On arriving at a frame the pane lists only what the rows do not already say
 (task U2c): a missing shape *is* its row, and the card is the to-do list.
+What stops ``Space`` comes first; the notes the confirmation accepts follow
+under their own greyed heading, 提示（不挡 Space） (task U2d).
 
 **A card that explains itself** (task U2b).  The second trial's annotator stood
 on the start frame, read "Draw cover.02 (cover) on this frame" four times and
@@ -45,6 +47,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from tda.core.truth_verify import is_blocking
 from tda.ui import session_api as api
 from tda.ui.class_names import instance_label, state_zh, visibility_zh
 from tda.ui.panels import session_is_open
@@ -56,6 +59,11 @@ INSTANCE_ROLE = int(Qt.ItemDataRole.UserRole)
 #: The painted view of a row (:func:`row_view`), for the delegate.
 VIEW_ROLE = INSTANCE_ROLE + 1
 KIND_ROLE = INSTANCE_ROLE + 2
+#: The compiler code a row of the problems pane stands for (``""``: none).
+CODE_ROLE = INSTANCE_ROLE + 3
+#: ``True`` on the pane's one line that is not a problem: the heading of the
+#: notes the confirmation accepts (U2d).
+NOTES_HEADING_ROLE = INSTANCE_ROLE + 4
 
 #: One glyph per task kind (spec 4.2), so the list can be skimmed vertically.
 KIND_ICONS: dict[str, str] = {
@@ -98,7 +106,7 @@ ICON_LEGEND = (
     "≡ 只是状态变了（例如螺丝拧紧），不用画\n"
     "▭ 零件放在台面上：用台面框 R 拖一个框\n"
     "⌫ 零件回到机箱：台面框到这里结束\n"
-    "✔ 这一帧没有要画的：直接 Space 确认\n"
+    "✔ 这一帧没有要画的：Space 确认（任务卡下面列着挡住 Space 的问题时，先处理它们）\n"
     "单击一条就开始画它；鼠标停在一条上，画面上会用虚线框标出它大概在哪。"
 )
 
@@ -118,6 +126,18 @@ def _double_click_s() -> float:
     return max(0.1, interval / 1000.0) + 0.05
 
 
+#: What stands where the card would say "直接 Space" while its own pane lists
+#: problems that make ``Space`` refuse (U2d round 2).  ``n`` is
+#: :meth:`TaskCardPanel.problem_count` -- the number the guide reads too -- so
+#: the header, the ✔ row and the guide cannot disagree about one frame.
+BLOCKED_SPACE = "但下面还有 {n} 个问题挡住 Space（见下方）"
+
+
+def space_or_blocked(blockers: int, space: str = "直接 Space") -> str:
+    """``space`` when nothing in the pane stops Space, else what does."""
+    return BLOCKED_SPACE.format(n=int(blockers)) if blockers else space
+
+
 #: How each kind is counted in a mixed header (U2b round 2).
 _KIND_COUNTS: tuple[tuple[str, str], ...] = (
     (api.KIND_ADD_SHAPE, "{n} 个要画回去"),
@@ -130,7 +150,8 @@ _KIND_COUNTS: tuple[tuple[str, str], ...] = (
 
 def card_header(step: Optional[int], neighbour: Optional[int],
                 kinds: Optional[list[str]] = None, first: Optional[int] = None,
-                last: Optional[int] = None, done: Optional[list[bool]] = None) -> str:
+                last: Optional[int] = None, done: Optional[list[bool]] = None,
+                blockers: int = 0) -> str:
     """The sentence above the list: what *this* frame's list is (ruling U2b-3).
 
     Built from the rows' kinds (round 2): "多了…要画回去" over rows that only
@@ -140,6 +161,8 @@ def card_header(step: Optional[int], neighbour: Optional[int],
     forward one (not taken apart yet).  ``done`` runs alongside ``kinds``: the
     start card lists the drawn parts too (round 3), and its header counts what
     is left and what is done rather than calling every row work.
+    ``blockers`` is how many problems in the card's pane stop ``Space``: with
+    any, no header says "直接 Space" (U2d round 2, :func:`space_or_blocked`).
     """
     if step is None:
         return ""
@@ -157,7 +180,8 @@ def card_header(step: Optional[int], neighbour: Optional[int],
         left = [k for k, d in zip(kinds, flags) if k != api.KIND_CONFIRM and not d]
         drawn = len(work) - len(left)
         if not left:
-            return f"第 {step} 帧（{where}）：这一帧的零件都画好了，直接 Space 确认"
+            return (f"第 {step} 帧（{where}）：这一帧的零件都画好了，"
+                    f"{space_or_blocked(blockers, '直接 Space 确认')}")
         # Once, here, rather than on every row of a start card that can list
         # sixty parts (round 1b).
         text = (f"第 {step} 帧（{where}）：把这一帧里还看得到的零件都画出来，"
@@ -167,14 +191,15 @@ def card_header(step: Optional[int], neighbour: Optional[int],
         return text
     present = set(work)
     if not present:
-        return f"第 {step} 帧：这一帧不用画，直接 Space"
+        return f"第 {step} 帧：这一帧不用画，{space_or_blocked(blockers)}"
     if present == {api.KIND_ADD_SHAPE}:
         if int(neighbour) > int(step):
             return (f"第 {step} 帧：比第 {neighbour} 帧多了下面这些零件"
                     f"（刚被拆掉的，要把它画回去）")
         return f"第 {step} 帧：和第 {neighbour} 帧比，下面这些零件多出来了，要画出来"
     if present == {api.KIND_STATE_ONLY}:
-        return f"第 {step} 帧：这一帧只有状态变化（拧紧/插上…），不用画，直接 Space"
+        return (f"第 {step} 帧：这一帧只有状态变化（拧紧/插上…），不用画，"
+                f"{space_or_blocked(blockers)}")
     if present == {api.KIND_SPLIT_KEYFRAME}:
         return (f"第 {step} 帧：下面这些零件的形状从这一帧起变了"
                 f"（画这一帧的新样子，Ctrl+K 提交）")
@@ -193,13 +218,14 @@ START_NOTE = "（被别的零件挡住的部分也算它的，层级程序会处
 
 
 def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
-             start: bool = False) -> dict:
+             start: bool = False, blockers: int = 0) -> dict:
     """What one row shows: title, the log's name, the sentence and the chip.
 
     ``start`` is the start frame, where nothing "comes back in with" a parent:
     that clause is left off there (what a complete shape is, is said once in
-    :func:`card_header`).  Pure, so the tests read exactly what the delegate
-    paints.
+    :func:`card_header`).  ``blockers`` is the header's: a ✔ row does not say
+    "直接 Space" while the pane below lists what stops it (U2d round 2).  Pure,
+    so the tests read exactly what the delegate paints.
     """
     kind = str(row.get("kind", api.KIND_CONFIRM))
     instance = str(row.get("instance", ""))
@@ -210,6 +236,8 @@ def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
         title = instance_label(instance, row.get("cls"), row.get("attrs"))
     raw = " / ".join(dict.fromkeys(str(n) for n in (row.get("raw_names") or []) if n))
     sentence = KIND_SENTENCES.get(kind, str(row.get("text", "")))
+    if kind == api.KIND_CONFIRM and blockers:
+        sentence = f"这一帧不用画，{space_or_blocked(blockers)}"
     transition = row.get("transition")
     if kind == api.KIND_SPLIT_KEYFRAME and transition:
         sentence += f"（{state_zh(transition[0])} → {state_zh(transition[1])}）"
@@ -373,6 +401,9 @@ def _is_code(problem: str) -> bool:
     return bool(sep) and bool(head) and set(head) <= _CODE_CHARS and " " not in head
 
 
+#: The one problem a click answers by starting to draw (U2d).
+MISSING_SHAPE = "missing_shape:"
+
 #: The session writes a "how to fix it" sentence for exactly these codes
 #: (``session_review._how_to_fix``), in the order they appear, so they are the
 #: only ones a sentence may be paired with.  Pairing them with *every* code put
@@ -389,17 +420,24 @@ ROW_CODES = ("missing_shape:", "bench_missing:")
 #: the card's rows do not already ask for (task U2c).
 ARRIVAL_TITLE = "清单以外的问题 / Problems not on the list above"
 REFUSAL_TITLE = "Problems"
+#: The line between what stops ``Space`` and what does not (U2d): the notes
+#: follow it, greyed.  Which codes are which is ``is_blocking``'s answer.
+NOTES_HEADING = "提示（不挡 Space）/ notes -- Space still works"
+NOTE_COLOR = QColor(118, 118, 124)
 
 #: What every other code means, in one place.  ``{what}`` is the part of the
 #: code after the colon -- an instance key, sometimes with a part or a second
-#: key after it -- which is what the annotator has to go and look at.
+#: key after it -- which is what the annotator has to go and look at.  Each
+#: sentence ends with what to do about it (U2d); a click on the line selects
+#: the part, which is where the keys named here act.
 PROBLEM_SENTENCES: tuple[tuple[str, str], ...] = (
     ("bench_missing:", "{what}：已拆到台面上但还没有台面框（按 R 拖一个框）"),
     ("shape_size_mismatch:", "{what}：形状和这一帧的画面尺寸对不上，重画一次"),
-    ("zorder_cycle:", "{what}：层级关系互相矛盾，改掉其中一条"),
-    ("zorder_missing:", "{what}：不在层级顺序里，会被画在最上面"),
-    ("empty_visible:", "{what}：可见部分是空的，可能被完全遮挡或画到了框外"),
-    ("pose_segment_ambiguous:", "{what}：跨了不止一个位姿段，先确认位姿分段"),
+    ("zorder_cycle:", "{what}：上下层级前后说反了（互相矛盾）→ Ctrl+Z 撤销刚才改的层级"),
+    ("zorder_missing:", "{what}：不在层级顺序里，会被画在最上面 → 选中它用 Ctrl+↑/↓ 放到对的层"),
+    ("empty_visible:", "{what}：这一帧里它被完全挡住了 → 选中它按 3（完全遮挡）"),
+    ("pose_segment_ambiguous:", "{what}：跨了不止一个位姿段 → 先定好位姿分段"
+                                "（接受/拒绝断点提示，或 Ctrl+Shift+B）"),
     ("missing_shape:", "{what}：这一帧还缺形状，把它画出来"),
 )
 
@@ -452,6 +490,20 @@ def pair_problems(problems: list[str]) -> list[dict]:
     return rows
 
 
+def _is_note(row: dict) -> bool:
+    """A compiler code the confirmation accepts: shown, but it stops nothing."""
+    return bool(row["code"]) and not is_blocking(row["code"])
+
+
+def _problem_item(row: dict) -> QListWidgetItem:
+    """One line of the pane: the sentence, the code in the tooltip."""
+    item = QListWidgetItem(row["text"])
+    item.setToolTip(row["code"] or row["text"])
+    item.setData(INSTANCE_ROLE, row["instance"])
+    item.setData(CODE_ROLE, row["code"])
+    return item
+
+
 def unlisted_problems(problems: list[str], rows: list[dict]) -> list[str]:
     """The compiler codes of a frame that its card's open rows do not ask for.
 
@@ -477,10 +529,15 @@ class TaskCardPanel(QWidget):
     sigHover = Signal(str)
     #: A row that is not work was clicked; the payload is what it means.
     sigExplain = Signal(str)
-    #: A frame's problems arrived and the pane now lists this many of them
-    #: (``0``: it is hidden).  The status line says "见任务卡" from this and
-    #: from nothing else, so it never points at a pane that is not there.
+    #: A frame's problems arrived, and this many of the pane's lines stop
+    #: ``Space`` (:meth:`problem_count`; ``0``: none do -- the pane is hidden or
+    #: holds only notes).  The status line says "见任务卡" from this and from
+    #: nothing else, so it never points at a pane that is not there, nor at
+    #: notes nothing has to be done about (U2d).
     sigProblemsShown = Signal(int)
+    #: A problem in the pane was clicked: select this part where the keys
+    #: that fix it act -- the instance table (U2d).
+    sigPickInstance = Signal(str)
 
     def __init__(self, session: Optional[api.SessionLike] = None,
                  parent: Optional[QWidget] = None) -> None:
@@ -496,6 +553,11 @@ class TaskCardPanel(QWidget):
         self._editing_bench = False
         #: Is the frame on screen the start frame (no neighbour)?
         self._start = False
+        #: What the header was built from at the last refresh, so that a change
+        #: in the pane can re-say it without asking the session again.
+        self._header_args: dict = {}
+        #: :meth:`problem_count` as the header and the rows last said it.
+        self._blockers = 0
         self._hovered = ""
         #: ``(instance, monotonic time)`` of the last click on a row.
         self._last_click: tuple[str, float] = ("", 0.0)
@@ -590,15 +652,18 @@ class TaskCardPanel(QWidget):
         steps = list(self._session.steps()) if opened else []
         kinds = [str(r.get("kind", api.KIND_CONFIRM)) for r in rows]
         done = [bool(r.get("done", False)) for r in rows]
-        self.header.setText(
-            card_header(step, neighbour, kinds, first=min(steps) if steps else None,
-                        last=max(steps) if steps else None, done=done) if opened else "")
-        self.header.setVisible(bool(self.header.text()))
+        self._header_args = (dict(step=step, neighbour=neighbour, kinds=kinds,
+                                  first=min(steps) if steps else None,
+                                  last=max(steps) if steps else None, done=done)
+                             if opened else {})
+        self._blockers = self.problem_count()
+        self._paint_header()
         first_open = -1
         for i, row in enumerate(rows):
             kind = str(row.get("kind", api.KIND_CONFIRM))
             instance = str(row.get("instance", ""))
-            view = row_view(row, self._editing, self._editing_bench, self._start)
+            view = row_view(row, self._editing, self._editing_bench, self._start,
+                            self._blockers)
             item = QListWidgetItem(plain_text(view))
             item.setData(INSTANCE_ROLE, instance)
             item.setData(KIND_ROLE, kind)
@@ -632,6 +697,42 @@ class TaskCardPanel(QWidget):
         """The sentence above the list."""
         return self.header.text()
 
+    def _paint_header(self) -> None:
+        text = (card_header(**self._header_args, blockers=self._blockers)
+                if self._header_args else "")
+        self.header.setText(text)
+        self.header.setVisible(bool(text))
+
+    def _repaint_rows(self) -> None:
+        """Rewrite the rows whose painted view changed; the list is not rebuilt.
+
+        The items are the card's rows in order (:meth:`refresh` adds one per
+        row), so each is re-derived from the row at its own index.
+        """
+        for index in range(min(self._list.count(), len(self._card))):
+            item = self._list.item(index)
+            old = item.data(VIEW_ROLE)
+            if not isinstance(old, dict):
+                continue
+            view = row_view(self._card[index], self._editing, self._editing_bench,
+                            self._start, self._blockers)
+            if view != old:
+                item.setData(VIEW_ROLE, view)
+                item.setText(plain_text(view))
+
+    def _sync_blockers(self) -> None:
+        """The pane changed: the header and a ✔ row say Space only if nothing blocks it.
+
+        The same :meth:`problem_count` the guide and the status line read
+        (U2d round 2), so all three agree on the frame on screen.
+        """
+        count = self.problem_count()
+        if count == self._blockers:
+            return
+        self._blockers = count
+        self._paint_header()
+        self._repaint_rows()
+
     def rows(self) -> list[dict]:
         """The rows on the card, as the session gave them at the last refresh."""
         return [dict(r) for r in self._card]
@@ -645,18 +746,7 @@ class TaskCardPanel(QWidget):
         if instance == self._editing and bool(bench) == self._editing_bench:
             return
         self._editing, self._editing_bench = instance, bool(bench)
-        for index in range(self._list.count()):
-            item = self._list.item(index)
-            old = item.data(VIEW_ROLE)
-            row = next((r for r in self._card
-                        if str(r.get("instance", "")) == str(item.data(INSTANCE_ROLE))),
-                       None)
-            if row is None or not isinstance(old, dict):
-                continue
-            view = row_view(row, self._editing, self._editing_bench, self._start)
-            if view != old:
-                item.setData(VIEW_ROLE, view)
-                item.setText(plain_text(view))
+        self._repaint_rows()
 
     def editing_instance(self) -> Optional[str]:
         """The row marked as being worked on, or ``None``."""
@@ -723,25 +813,32 @@ class TaskCardPanel(QWidget):
         return ok
 
     def problem_count(self) -> int:
-        """How many things there are to fix -- not how many lines are shown.
+        """How many things in the pane stop ``Space`` -- not how many lines are shown.
 
         The refusal's opening line restates the codes listed under it, so
         counting it as well told the annotator "3 problem(s)" for two missing
-        shapes.  When it is all there is -- an open conflict, which the
-        compiler cannot name -- it *is* the problem, and counts.
+        shapes.  When no code under it blocks -- an open conflict, which the
+        compiler cannot name -- it *is* the problem, and counts.  A code the
+        confirmation accepts (``empty_visible``, ``zorder_missing``, ...) is a
+        note and stops nothing, so it is not counted (U2d): which codes block
+        is :func:`tda.core.truth_verify.is_blocking`, the test
+        ``confirm_frame`` itself applies.
         """
         if not self._problems_list.isVisibleTo(self):
             return 0
-        return len([row for row in self._rows if row["code"]]) or len(self._rows)
+        blocking = [row for row in self._rows if row["code"] and is_blocking(row["code"])]
+        return len(blocking) or len([row for row in self._rows if not row["code"]])
 
     def problems(self) -> list[str]:
         """The problems currently on display (empty when none are shown)."""
         if not self._problems_list.isVisibleTo(self):
             return []
-        return [
-            self._problems_list.item(i).text()
-            for i in range(self._problems_list.count())
-        ]
+        return [item.text() for item in self._problem_items()]
+
+    def _problem_items(self) -> list[QListWidgetItem]:
+        """The pane's lines that are problems: the notes' heading is not one."""
+        items = (self._problems_list.item(i) for i in range(self._problems_list.count()))
+        return [item for item in items if not item.data(NOTES_HEADING_ROLE)]
 
     def problems_visible(self) -> bool:
         """Whether the problem list is on display."""
@@ -845,6 +942,15 @@ class TaskCardPanel(QWidget):
             self._show_problems(shown, ARRIVAL_TITLE)
         else:
             self._hide_problems()
+        self.announce()
+
+    def announce(self) -> None:
+        """Say again what the pane holds that stops Space (:attr:`sigProblemsShown`).
+
+        For a listener that attached after the pane was filled: the window's
+        status line, whose card read the first frame's problems while the
+        window was still being built (U2d).
+        """
         self.sigProblemsShown.emit(self.problem_count())
 
     def _show_problems(self, problems: list[str], title: str = REFUSAL_TITLE) -> None:
@@ -858,25 +964,49 @@ class TaskCardPanel(QWidget):
         bug report, and the instance is what a click jumps to.
         """
         self._problems_list.clear()
-        self._rows = pair_problems(problems)
-        for row in self._rows:
-            item = QListWidgetItem(row["text"])
-            item.setToolTip(row["code"] or row["text"])
-            item.setData(INSTANCE_ROLE, row["instance"])
+        # What stops Space first, then -- under their own heading, greyed --
+        # the notes the confirmation accepts (U2d).  An arrival that listed
+        # ``empty_visible`` above a missing shape read as two equal chores.
+        rows = pair_problems(problems)
+        firsts = [row for row in rows if not _is_note(row)]
+        notes = [row for row in rows if _is_note(row)]
+        self._rows = firsts + notes
+        for row in firsts:
+            self._problems_list.addItem(_problem_item(row))
+        if notes:
+            heading = QListWidgetItem(NOTES_HEADING)
+            heading.setFlags(Qt.ItemFlag.NoItemFlags)
+            heading.setData(NOTES_HEADING_ROLE, True)
+            heading.setForeground(QBrush(NOTE_COLOR))
+            font = heading.font()
+            font.setItalic(True)
+            heading.setFont(font)
+            self._problems_list.addItem(heading)
+        for row in notes:
+            item = _problem_item(row)
+            item.setForeground(QBrush(NOTE_COLOR))
             self._problems_list.addItem(item)
         visible = bool(problems)
         self._problems_label.setText(title)
         self._problems_label.setVisible(visible)
         self._problems_list.setVisible(visible)
+        self._sync_blockers()
 
     def problem_rows(self) -> list[dict]:
-        """``{"text", "code", "instance"}`` per row currently shown."""
-        out = []
-        for i in range(self._problems_list.count()):
-            item = self._problems_list.item(i)
-            out.append({"text": item.text(), "code": item.toolTip(),
-                        "instance": str(item.data(INSTANCE_ROLE) or "")})
-        return out
+        """``{"text", "code", "instance", "note"}`` per problem shown, in order.
+
+        ``note`` is a code the confirmation accepts (U2d): those come last,
+        under :data:`NOTES_HEADING`, which is not a row.
+        """
+        return [{"text": item.text(), "code": item.toolTip(),
+                 "instance": str(item.data(INSTANCE_ROLE) or ""),
+                 "note": _is_note({"code": str(item.data(CODE_ROLE) or "")})}
+                for item in self._problem_items()]
+
+    def notes_heading_shown(self) -> bool:
+        """Is the "提示（不挡 Space）" line between the problems and the notes?"""
+        return any(self._problems_list.item(i).data(NOTES_HEADING_ROLE)
+                   for i in range(self._problems_list.count()))
 
     def activate_problem(self, instance: str) -> None:
         """Jump to the card item a problem is about (a click in the pane)."""
@@ -884,7 +1014,25 @@ class TaskCardPanel(QWidget):
             self.select_instance(instance)
 
     def _on_problem_clicked(self, item: QListWidgetItem) -> None:
-        self.activate_problem(str(item.data(INSTANCE_ROLE) or ""))
+        """One click on a problem goes to deal with it (U2d).
+
+        The guide says "单击一条去处理" when only this pane stands between the
+        annotator and ``Space``, and a click used to do nothing at all for a
+        part the card has no row for -- which is every problem the pane shows
+        on arrival.  A missing shape starts drawing that part, exactly as a
+        card row does; any other problem selects its part (on the card and in
+        the instance table, where the visibility keys, ``Ctrl+↑/↓`` and ``R``
+        act) and says its sentence in the status line.
+        """
+        instance = str(item.data(INSTANCE_ROLE) or "")
+        if not instance:
+            return
+        self.activate_problem(instance)
+        if str(item.data(CODE_ROLE) or "").startswith(MISSING_SHAPE):
+            self.sigRequestEdit.emit(instance)
+            return
+        self.sigPickInstance.emit(instance)
+        self.sigExplain.emit(item.text())
 
     def _on_problem_activated(self, item: QListWidgetItem) -> None:
         """Double click / Enter on a problem: start editing that instance.
@@ -902,3 +1050,4 @@ class TaskCardPanel(QWidget):
         self._rows = []
         self._problems_label.setVisible(False)
         self._problems_list.setVisible(False)
+        self._sync_blockers()

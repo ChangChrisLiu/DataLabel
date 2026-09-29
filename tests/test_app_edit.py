@@ -342,7 +342,9 @@ def test_the_proposal_bar_says_what_the_rectangle_is_for_and_what_to_do(qapp, tm
         text = _roi_bar_text(win)
         assert "机箱范围" in text and "ROI" in text
         assert "差异图" in text and "SAM" in text, "what it is for"
-        assert "Enter" in text and "Esc" in text and "Shift+R" in text
+        assert "Enter" in text and "Esc" in text
+        # Shift+R is the way back *after* Esc, never said over an open editor (U2d)
+        assert "Shift+R" not in text
         assert _shown(win, "save") and _shown(win, "skip")
         assert not _shown(win, "none")
         assert win.roi_label.text().startswith("ROI 未确认")

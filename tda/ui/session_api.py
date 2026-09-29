@@ -28,6 +28,7 @@ __all__ = [
     "RESOLUTIONS",
     "TASK_KINDS",
     "VISIBILITY_VALUES",
+    "Verdict",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -99,6 +100,14 @@ SCOPE_SPLIT = "split"
 
 COMMIT_SCOPES: tuple[str, ...] = (SCOPE_KEYFRAME, SCOPE_FRAME_OVERRIDE, SCOPE_SPLIT)
 
+#: Why ``Alt+Enter`` (:data:`SCOPE_FRAME_OVERRIDE`) is refused on a part no
+#: keyframe applies to at this frame: the compiler reports it
+#: ``missing_shape`` whatever the override holds, so its card row would stay
+#: open and ``Space`` would refuse (U2d).  One sentence for the session's
+#: refusal, the greyed palette button and the key.
+OVERRIDE_NEEDS_SHAPE = ("这个零件在这一帧还没有形状：先用 Enter 画出它"
+                        "（「只改这一帧」是在已有形状上的例外）")
+
 # --------------------------------------------------------------------------- #
 # review mode (spec 4.4)
 # --------------------------------------------------------------------------- #
@@ -120,6 +129,25 @@ RESOLVE_KEEP_OLD = "keep_old"
 RESOLVE_ACCEPT_NEW = "accept_new"
 
 RESOLUTIONS: tuple[str, ...] = (RESOLVE_KEEP_OLD, RESOLVE_ACCEPT_NEW)
+
+
+class Verdict(str):
+    """What :meth:`SessionLike.resolve_conflict` answers: the outcome, and why.
+
+    It *is* the outcome string -- ``"resolved"`` / ``"superseded"`` /
+    ``"refused"`` compare equal to it -- so a caller that only wants the
+    outcome is unchanged.  :attr:`reason` is the sentence a refusal or a
+    supersession came with.  It used to travel only on ``sigProblems``,
+    which no window slot reads since task U2c, so the status line said
+    "conflict 7 refused: " and nothing after it (U2d round 2).
+    """
+
+    reason: str
+
+    def __new__(cls, outcome: str, reason: str = "") -> "Verdict":
+        made = super().__new__(cls, outcome)
+        made.reason = str(reason or "")
+        return made
 
 #: The seven frame-level visibility values of spec 6.2, in the order the
 #: number keys ``1``-``7`` set them in the instance list.
@@ -248,6 +276,9 @@ class SessionLike(Protocol):
         ``{"area_warning_overridden": True}``. Values must be JSON-serialisable
         (the op log is JSON) or it raises :class:`ValueError` before anything is
         written, and it never overwrites the payload's own keys.
+
+        :data:`SCOPE_FRAME_OVERRIDE` on a part no keyframe applies to at this
+        frame raises :class:`SessionRefusal` with :data:`OVERRIDE_NEEDS_SHAPE`.
         """
 
     def preview(self, scope: str) -> dict:
@@ -275,7 +306,11 @@ class SessionLike(Protocol):
         """The four review queues, keyed by :data:`QUEUE_NAMES`."""
 
     def resolve_conflict(self, cid: int, resolution: str) -> str:
-        """Resolve conflict ``cid``; ``"resolved"`` / ``"superseded"`` / ``"refused"``."""
+        """Resolve conflict ``cid``; ``"resolved"`` / ``"superseded"`` / ``"refused"``.
+
+        A :class:`Verdict`: the outcome string, carrying the reason as
+        ``.reason`` (``""`` when resolved).
+        """
 
     def set_unexplained(self, step: int, boxes) -> None:
         """Record the difference-map regions of one frame that nothing explains."""

@@ -7,7 +7,8 @@ flips the list into chronological order for reading.
 Each row carries a coloured bar telling the frame's status at a glance -- grey
 unlabeled, yellow auto, green verified, red conflict or needs-review, and a
 hatched bar for a step this view has no image for, whose row also says
-无图像: it is not work, and it is not counted as "not done".  Thumbnails are
+无图像: it is not work, and it is not counted as "not done".  A step the step
+table types ``ignore`` says 跳过 for the same reason.  Thumbnails are
 read from the cache only when their row is actually on screen and are kept as
 ``QPixmap`` afterwards, so opening a 120-step machine costs no disk I/O.
 
@@ -36,7 +37,7 @@ from PySide6.QtWidgets import (
 from tda.ui import session_api as api
 from tda.ui.panels import session_is_open
 
-__all__ = ["BREAK_COLOR", "BREAK_ROLE", "NO_IMAGE_TEXT", "TimelinePanel",
+__all__ = ["BREAK_COLOR", "BREAK_ROLE", "NO_IMAGE_TEXT", "SKIPPED_TEXT", "TimelinePanel",
            "STATUS_COLORS", "read_thumb", "row_text", "status_brush"]
 
 
@@ -164,12 +165,20 @@ NO_IMAGE_TEXT = "无图像"
 NO_IMAGE_TIP = ("这一帧在这个视角没有图像：不用做，也不算进 [已确认/总数] / "
                 "no image in this view: nothing to do here, and not counted")
 NO_IMAGE_COLOR = QColor(150, 150, 156)
+#: What a step the step table types ``ignore`` says when it *has* an image
+#: (U2d): the navigation skips it and the counts leave it out, so a plain
+#: "Step 13" read as one more frame nobody had done (D66 oak1/oak2/rs).
+SKIPPED_TEXT = "跳过"
+SKIPPED_TIP = ("这一步在步骤表里标了 ignore：不用做，也不算进 [已确认/总数] / "
+               "marked ignore in the step table: nothing to do here, and not counted")
 
 
-def row_text(step: int, status: str) -> str:
-    """A row's label: the step, and "无图像" when the view has no picture of it."""
+def row_text(step: int, status: str, skipped: bool = False) -> str:
+    """A row's label: the step, then "无图像" or "跳过" when it is not work."""
     if status == api.STATUS_MISSING:
         return f"Step {step} · {NO_IMAGE_TEXT}"
+    if skipped:
+        return f"Step {step} · {SKIPPED_TEXT}"
     return f"Step {step}"
 
 
@@ -310,10 +319,11 @@ class TimelinePanel(QWidget):
         self._syncing = True
         try:
             self._list.clear()
+            skipped = self._skipped_steps()
             for step in self._ordered_steps():
                 item = QListWidgetItem(f"Step {step}")
                 item.setData(STEP_ROLE, step)
-                self._set_status(item, step, self._status(step))
+                self._set_status(item, step, self._status(step), step in skipped)
                 item.setData(BREAK_ROLE, step in self._breaks)
                 item.setSizeHint(
                     QSize(self.THUMB_SIZE * 2, self.THUMB_SIZE + 2 * self.BAR_WIDTH)
@@ -565,26 +575,45 @@ class TimelinePanel(QWidget):
         self._list.scrollToItem(item)
 
     def _refresh_statuses(self) -> None:
+        skipped = self._skipped_steps()
         for row in range(self._list.count()):
             item = self._list.item(row)
             step = int(item.data(STEP_ROLE))
-            self._set_status(item, step, self._status(step))
+            self._set_status(item, step, self._status(step), step in skipped)
         self._list.viewport().update()
 
+    def _skipped_steps(self) -> set[int]:
+        """The steps the view's walk leaves out (U2d).
+
+        :meth:`~tda.ui.session_api.SessionLike.available_steps` is
+        :func:`tda.core.truth_inputs.annotatable_steps` -- the walk the
+        navigation and the ``[已确认/总数]`` counts use -- which drops a frame
+        with no image and a step the step table types ``ignore``.  The first
+        kind says 无图像 (its status is ``missing``, which wins); what is left
+        still has an image and says 跳过.
+        """
+        if not session_is_open(self._session):
+            return set()
+        walked = set(self._session.available_steps())
+        return {int(s) for s in self._session.steps() if int(s) not in walked}
+
     @staticmethod
-    def _set_status(item: QListWidgetItem, step: int, status: str) -> None:
-        """The bar's colour, and for a frame with no image, the words and the grey.
+    def _set_status(item: QListWidgetItem, step: int, status: str,
+                    skipped: bool = False) -> None:
+        """The bar's colour, and for a step that is not work, the words and the grey.
 
         The hatched bar alone read as one more shade of "not done yet" (task
-        U2c); the row now says 无图像 and is greyed like the placeholder.
+        U2c); the row now says 无图像 and is greyed like the placeholder.  A
+        step typed ``ignore`` that has an image says 跳过 the same way (U2d).
         """
         item.setData(STATUS_ROLE, status)
-        item.setText(row_text(step, status))
+        item.setText(row_text(step, status, skipped))
         missing = status == api.STATUS_MISSING
+        tip = NO_IMAGE_TIP if missing else SKIPPED_TIP if skipped else None
         # ``None`` clears the role: an empty QBrush would paint no text at all
         item.setData(Qt.ItemDataRole.ForegroundRole,
-                     QBrush(NO_IMAGE_COLOR) if missing else None)
-        item.setData(Qt.ItemDataRole.ToolTipRole, NO_IMAGE_TIP if missing else None)
+                     QBrush(NO_IMAGE_COLOR) if tip else None)
+        item.setData(Qt.ItemDataRole.ToolTipRole, tip)
 
     def _visible_rows(self) -> list[int]:
         viewport = self._list.viewport().rect()
