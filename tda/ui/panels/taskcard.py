@@ -106,7 +106,7 @@ ICON_LEGEND = (
     "≡ 只是状态变了（例如螺丝拧紧），不用画\n"
     "▭ 零件放在台面上：用台面框 R 拖一个框\n"
     "⌫ 零件回到机箱：台面框到这里结束\n"
-    "✔ 这一帧没有要画的：直接 Space 确认\n"
+    "✔ 这一帧没有要画的：Space 确认（任务卡下面列着挡住 Space 的问题时，先处理它们）\n"
     "单击一条就开始画它；鼠标停在一条上，画面上会用虚线框标出它大概在哪。"
 )
 
@@ -126,6 +126,18 @@ def _double_click_s() -> float:
     return max(0.1, interval / 1000.0) + 0.05
 
 
+#: What stands where the card would say "直接 Space" while its own pane lists
+#: problems that make ``Space`` refuse (U2d round 2).  ``n`` is
+#: :meth:`TaskCardPanel.problem_count` -- the number the guide reads too -- so
+#: the header, the ✔ row and the guide cannot disagree about one frame.
+BLOCKED_SPACE = "但下面还有 {n} 个问题挡住 Space（见下方）"
+
+
+def space_or_blocked(blockers: int, space: str = "直接 Space") -> str:
+    """``space`` when nothing in the pane stops Space, else what does."""
+    return BLOCKED_SPACE.format(n=int(blockers)) if blockers else space
+
+
 #: How each kind is counted in a mixed header (U2b round 2).
 _KIND_COUNTS: tuple[tuple[str, str], ...] = (
     (api.KIND_ADD_SHAPE, "{n} 个要画回去"),
@@ -138,7 +150,8 @@ _KIND_COUNTS: tuple[tuple[str, str], ...] = (
 
 def card_header(step: Optional[int], neighbour: Optional[int],
                 kinds: Optional[list[str]] = None, first: Optional[int] = None,
-                last: Optional[int] = None, done: Optional[list[bool]] = None) -> str:
+                last: Optional[int] = None, done: Optional[list[bool]] = None,
+                blockers: int = 0) -> str:
     """The sentence above the list: what *this* frame's list is (ruling U2b-3).
 
     Built from the rows' kinds (round 2): "多了…要画回去" over rows that only
@@ -148,6 +161,8 @@ def card_header(step: Optional[int], neighbour: Optional[int],
     forward one (not taken apart yet).  ``done`` runs alongside ``kinds``: the
     start card lists the drawn parts too (round 3), and its header counts what
     is left and what is done rather than calling every row work.
+    ``blockers`` is how many problems in the card's pane stop ``Space``: with
+    any, no header says "直接 Space" (U2d round 2, :func:`space_or_blocked`).
     """
     if step is None:
         return ""
@@ -165,7 +180,8 @@ def card_header(step: Optional[int], neighbour: Optional[int],
         left = [k for k, d in zip(kinds, flags) if k != api.KIND_CONFIRM and not d]
         drawn = len(work) - len(left)
         if not left:
-            return f"第 {step} 帧（{where}）：这一帧的零件都画好了，直接 Space 确认"
+            return (f"第 {step} 帧（{where}）：这一帧的零件都画好了，"
+                    f"{space_or_blocked(blockers, '直接 Space 确认')}")
         # Once, here, rather than on every row of a start card that can list
         # sixty parts (round 1b).
         text = (f"第 {step} 帧（{where}）：把这一帧里还看得到的零件都画出来，"
@@ -175,14 +191,15 @@ def card_header(step: Optional[int], neighbour: Optional[int],
         return text
     present = set(work)
     if not present:
-        return f"第 {step} 帧：这一帧不用画，直接 Space"
+        return f"第 {step} 帧：这一帧不用画，{space_or_blocked(blockers)}"
     if present == {api.KIND_ADD_SHAPE}:
         if int(neighbour) > int(step):
             return (f"第 {step} 帧：比第 {neighbour} 帧多了下面这些零件"
                     f"（刚被拆掉的，要把它画回去）")
         return f"第 {step} 帧：和第 {neighbour} 帧比，下面这些零件多出来了，要画出来"
     if present == {api.KIND_STATE_ONLY}:
-        return f"第 {step} 帧：这一帧只有状态变化（拧紧/插上…），不用画，直接 Space"
+        return (f"第 {step} 帧：这一帧只有状态变化（拧紧/插上…），不用画，"
+                f"{space_or_blocked(blockers)}")
     if present == {api.KIND_SPLIT_KEYFRAME}:
         return (f"第 {step} 帧：下面这些零件的形状从这一帧起变了"
                 f"（画这一帧的新样子，Ctrl+K 提交）")
@@ -201,13 +218,14 @@ START_NOTE = "（被别的零件挡住的部分也算它的，层级程序会处
 
 
 def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
-             start: bool = False) -> dict:
+             start: bool = False, blockers: int = 0) -> dict:
     """What one row shows: title, the log's name, the sentence and the chip.
 
     ``start`` is the start frame, where nothing "comes back in with" a parent:
     that clause is left off there (what a complete shape is, is said once in
-    :func:`card_header`).  Pure, so the tests read exactly what the delegate
-    paints.
+    :func:`card_header`).  ``blockers`` is the header's: a ✔ row does not say
+    "直接 Space" while the pane below lists what stops it (U2d round 2).  Pure,
+    so the tests read exactly what the delegate paints.
     """
     kind = str(row.get("kind", api.KIND_CONFIRM))
     instance = str(row.get("instance", ""))
@@ -218,6 +236,8 @@ def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
         title = instance_label(instance, row.get("cls"), row.get("attrs"))
     raw = " / ".join(dict.fromkeys(str(n) for n in (row.get("raw_names") or []) if n))
     sentence = KIND_SENTENCES.get(kind, str(row.get("text", "")))
+    if kind == api.KIND_CONFIRM and blockers:
+        sentence = f"这一帧不用画，{space_or_blocked(blockers)}"
     transition = row.get("transition")
     if kind == api.KIND_SPLIT_KEYFRAME and transition:
         sentence += f"（{state_zh(transition[0])} → {state_zh(transition[1])}）"
@@ -533,6 +553,11 @@ class TaskCardPanel(QWidget):
         self._editing_bench = False
         #: Is the frame on screen the start frame (no neighbour)?
         self._start = False
+        #: What the header was built from at the last refresh, so that a change
+        #: in the pane can re-say it without asking the session again.
+        self._header_args: dict = {}
+        #: :meth:`problem_count` as the header and the rows last said it.
+        self._blockers = 0
         self._hovered = ""
         #: ``(instance, monotonic time)`` of the last click on a row.
         self._last_click: tuple[str, float] = ("", 0.0)
@@ -627,15 +652,18 @@ class TaskCardPanel(QWidget):
         steps = list(self._session.steps()) if opened else []
         kinds = [str(r.get("kind", api.KIND_CONFIRM)) for r in rows]
         done = [bool(r.get("done", False)) for r in rows]
-        self.header.setText(
-            card_header(step, neighbour, kinds, first=min(steps) if steps else None,
-                        last=max(steps) if steps else None, done=done) if opened else "")
-        self.header.setVisible(bool(self.header.text()))
+        self._header_args = (dict(step=step, neighbour=neighbour, kinds=kinds,
+                                  first=min(steps) if steps else None,
+                                  last=max(steps) if steps else None, done=done)
+                             if opened else {})
+        self._blockers = self.problem_count()
+        self._paint_header()
         first_open = -1
         for i, row in enumerate(rows):
             kind = str(row.get("kind", api.KIND_CONFIRM))
             instance = str(row.get("instance", ""))
-            view = row_view(row, self._editing, self._editing_bench, self._start)
+            view = row_view(row, self._editing, self._editing_bench, self._start,
+                            self._blockers)
             item = QListWidgetItem(plain_text(view))
             item.setData(INSTANCE_ROLE, instance)
             item.setData(KIND_ROLE, kind)
@@ -669,6 +697,42 @@ class TaskCardPanel(QWidget):
         """The sentence above the list."""
         return self.header.text()
 
+    def _paint_header(self) -> None:
+        text = (card_header(**self._header_args, blockers=self._blockers)
+                if self._header_args else "")
+        self.header.setText(text)
+        self.header.setVisible(bool(text))
+
+    def _repaint_rows(self) -> None:
+        """Rewrite the rows whose painted view changed; the list is not rebuilt.
+
+        The items are the card's rows in order (:meth:`refresh` adds one per
+        row), so each is re-derived from the row at its own index.
+        """
+        for index in range(min(self._list.count(), len(self._card))):
+            item = self._list.item(index)
+            old = item.data(VIEW_ROLE)
+            if not isinstance(old, dict):
+                continue
+            view = row_view(self._card[index], self._editing, self._editing_bench,
+                            self._start, self._blockers)
+            if view != old:
+                item.setData(VIEW_ROLE, view)
+                item.setText(plain_text(view))
+
+    def _sync_blockers(self) -> None:
+        """The pane changed: the header and a ✔ row say Space only if nothing blocks it.
+
+        The same :meth:`problem_count` the guide and the status line read
+        (U2d round 2), so all three agree on the frame on screen.
+        """
+        count = self.problem_count()
+        if count == self._blockers:
+            return
+        self._blockers = count
+        self._paint_header()
+        self._repaint_rows()
+
     def rows(self) -> list[dict]:
         """The rows on the card, as the session gave them at the last refresh."""
         return [dict(r) for r in self._card]
@@ -682,18 +746,7 @@ class TaskCardPanel(QWidget):
         if instance == self._editing and bool(bench) == self._editing_bench:
             return
         self._editing, self._editing_bench = instance, bool(bench)
-        for index in range(self._list.count()):
-            item = self._list.item(index)
-            old = item.data(VIEW_ROLE)
-            row = next((r for r in self._card
-                        if str(r.get("instance", "")) == str(item.data(INSTANCE_ROLE))),
-                       None)
-            if row is None or not isinstance(old, dict):
-                continue
-            view = row_view(row, self._editing, self._editing_bench, self._start)
-            if view != old:
-                item.setData(VIEW_ROLE, view)
-                item.setText(plain_text(view))
+        self._repaint_rows()
 
     def editing_instance(self) -> Optional[str]:
         """The row marked as being worked on, or ``None``."""
@@ -937,6 +990,7 @@ class TaskCardPanel(QWidget):
         self._problems_label.setText(title)
         self._problems_label.setVisible(visible)
         self._problems_list.setVisible(visible)
+        self._sync_blockers()
 
     def problem_rows(self) -> list[dict]:
         """``{"text", "code", "instance", "note"}`` per problem shown, in order.
@@ -996,3 +1050,4 @@ class TaskCardPanel(QWidget):
         self._rows = []
         self._problems_label.setVisible(False)
         self._problems_list.setVisible(False)
+        self._sync_blockers()

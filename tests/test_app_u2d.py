@@ -16,6 +16,13 @@
 8. A step typed ``ignore`` that has an image read as a plain "Step N".
 9. The window opened silent about its first frame's pane: the card emitted
    before anything listened.
+
+Round 2:
+
+R1. The card's header and its ✔ row still said "直接 Space" over a pane of
+    problems that made Space refuse.
+R2. A refused conflict verdict reached the status line as "conflict N
+    refused: " -- the reason travelled only on ``sigProblems``.
 """
 from __future__ import annotations
 
@@ -64,6 +71,7 @@ from tda.ui.panels.taskcard import (
     INSTANCE_ROLE,
     NOTES_HEADING,
     PROBLEM_SENTENCES,
+    VIEW_ROLE,
     TaskCardPanel,
     explain_code,
 )
@@ -613,3 +621,130 @@ def test_an_ignored_step_with_an_image_says_skip(qapp, tmp_path):
         assert skipped.text() == f"Step {IGNORED} · {SKIPPED_TEXT}"
     finally:
         close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# round 2, item 1: no surface says Space while Space would be refused
+# --------------------------------------------------------------------------- #
+#: Reached from 6, step 5 only fastens a screw: its card is one ≡ row, and
+#: its header says "不用画，直接 Space".
+STATE_ONLY_STEP = 5
+
+
+def space_frame(tmp_path: Path, *, blocked: bool, confirm_row: bool = False):
+    """Step 5 of the scene: every part drawn there, or only what step 14 has.
+
+    ``confirm_row`` types the step ``dupli``, whose card is one ✔ row.
+    """
+    from tda.core.model import StepType
+
+    session = make_session(tmp_path)
+    if confirm_row:
+        db = session.db
+        steps = db.steps(DESKTOP)
+        for rec in steps:
+            if rec.step == STATE_ONLY_STEP:
+                rec.step_type = StepType.DUPLI.value
+        db.replace_steps(DESKTOP, steps, db.actions(DESKTOP))
+        session.open(DESKTOP, VIEW)
+    # step 14's parts only: what came back in between has no shape at step 5
+    seed_shapes(session, LAST_STEP if blocked else STATE_ONLY_STEP)
+    session.goto(STATE_ONLY_STEP + 1, force=True)
+    session.goto(STATE_ONLY_STEP, force=True)
+    return session
+
+
+def surfaces(win: MainWindow) -> tuple[str, list[str], G.GuidePlan]:
+    """The card's header, its row sentences, and the guide's plan."""
+    answer_roi(win)
+    QApplication.processEvents()
+    views = [win.task_card.list_widget().item(i).data(VIEW_ROLE)
+             for i in range(win.task_card.list_widget().count())]
+    return win.task_card.header_text(), [v["sentence"] for v in views], win.guide_plan()
+
+
+def says_space(text: str) -> bool:
+    return "直接 Space" in text or "按 Space" in text
+
+
+@pytest.mark.parametrize("confirm_row", [False, True], ids=["state_only", "confirm_row"])
+def test_header_row_and_guide_agree_when_the_pane_blocks_space(qapp, tmp_path,
+                                                                 confirm_row):
+    session = space_frame(tmp_path, blocked=True, confirm_row=confirm_row)
+    win = open_window(tmp_path, session=session)
+    try:
+        header, sentences, plan = surfaces(win)
+        n = win.task_card.problem_count()
+        assert n > 0 and n == win.guide_facts().blockers
+        blocked = f"但下面还有 {n} 个问题挡住 Space（见下方）"
+        assert header.endswith(blocked), header
+        assert not says_space(header)
+        if confirm_row:
+            assert sentences == [f"这一帧不用画，{blocked}"]
+        assert not any(says_space(s) for s in sentences), sentences
+        assert plan.phase == G.PHASE_BLOCKED
+        assert f"{n} 个问题挡住 Space" in plan.now and not says_space(plan.now)
+        assert not any(says_space(text) for _state, text in plan.steps), plan.steps
+        # ... and Space does refuse; afterwards all three still agree
+        assert win.act_confirm() is False
+        m = win.task_card.problem_count()
+        assert win.task_card.header_text().endswith(f"但下面还有 {m} 个问题挡住 Space（见下方）")
+        assert f"{m} 个问题挡住 Space" in win.guide_plan().now
+    finally:
+        close_window(win)
+
+
+@pytest.mark.parametrize("confirm_row", [False, True], ids=["state_only", "confirm_row"])
+def test_header_row_and_guide_say_space_when_nothing_blocks(qapp, tmp_path, confirm_row):
+    session = space_frame(tmp_path, blocked=False, confirm_row=confirm_row)
+    win = open_window(tmp_path, session=session)
+    try:
+        header, sentences, plan = surfaces(win)
+        assert win.task_card.problem_count() == 0 == win.guide_facts().blockers
+        assert header.endswith("直接 Space"), header
+        if confirm_row:
+            assert sentences == ["这一帧不用画，直接 Space"]
+        assert plan.phase == G.PHASE_CONFIRM and "按 Space" in plan.now
+        assert win.act_confirm() is True
+    finally:
+        close_window(win)
+
+
+def test_the_card_resays_itself_when_the_pane_changes(qapp, tmp_path):
+    """The header follows the pane, not only the frame: drawing the last
+    blocker turns "挡住 Space" back into "直接 Space" without leaving the frame."""
+    session = rows_done_but_one_unlisted(tmp_path)
+    session.goto(LAST_STEP, force=True)
+    draw(session, UNLISTED, 41)              # the start frame, every part drawn
+    win = open_window(tmp_path, session=session)
+    try:
+        answer_roi(win)
+        card = win.task_card
+        assert not card.problems_visible()
+        assert card.header_text().endswith("直接 Space 确认"), card.header_text()
+        # what the pane is handed decides, whatever put it there
+        # (a wrong-size shape is a blocker the start card has no row for)
+        card._show_problems(["shape_size_mismatch:chassis/main"], "Problems")
+        assert card.header_text().endswith("但下面还有 1 个问题挡住 Space（见下方）")
+        assert win.guide_plan().phase == G.PHASE_BLOCKED
+        card._show_problems(["empty_visible:chassis"], "Problems")     # a note only
+        assert card.header_text().endswith("直接 Space 确认")
+        assert win.guide_plan().phase == G.PHASE_CONFIRM
+    finally:
+        close_window(win)
+
+
+def test_the_pure_sentences_carry_the_count():
+    from tda.ui.panels.taskcard import card_header, row_view
+
+    assert card_header(5, 6, [api.KIND_STATE_ONLY], blockers=3).endswith(
+        "不用画，但下面还有 3 个问题挡住 Space（见下方）")
+    assert card_header(5, 6, [api.KIND_CONFIRM], blockers=1) == (
+        "第 5 帧：这一帧不用画，但下面还有 1 个问题挡住 Space（见下方）")
+    assert card_header(14, None, [api.KIND_ADD_SHAPE], first=1, last=14, done=[True],
+                       blockers=2).endswith("都画好了，但下面还有 2 个问题挡住 Space（见下方）")
+    assert card_header(5, 6, [api.KIND_CONFIRM]) == "第 5 帧：这一帧不用画，直接 Space"
+    row = {"instance": "step 5", "kind": api.KIND_CONFIRM, "done": False}
+    assert row_view(row)["sentence"] == "这一帧不用画，直接 Space"
+    assert row_view(row, blockers=4)["sentence"] == (
+        "这一帧不用画，但下面还有 4 个问题挡住 Space（见下方）")

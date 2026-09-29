@@ -160,6 +160,8 @@ DRAW_BENCH = "在台面上拖一个框框住它（台面框 R），松手就存�
 COMMIT = "Enter 提交（形状从这帧起变了用 Ctrl+K；只这一帧特殊用 Alt+Enter）"
 COMMIT_SPLIT = "Ctrl+K 提交（从这帧起新版本）— 这一条不要按 Enter"
 CONFIRM = "全部画完：Space 确认整帧，自动退到上一帧"
+#: The same line while the card's pane lists what stops Space (U2d).
+CONFIRM_BLOCKED = "先处理任务卡下面的 {n} 个问题（它们挡住 Space）"
 NOTHING_TO_DRAW = "这一帧不用画"
 
 
@@ -202,14 +204,19 @@ def _open_work(facts: GuideFacts) -> list[CardItem]:
 
 
 def _steps(facts: GuideFacts, at: int, *, pick_text: str = "", draw_text: str = "",
-           commit_text: str = "", confirm_text: str = "", nothing: bool = False) -> tuple:
-    """The five lines, with ``at`` the one being done now (``-1``: none)."""
+           commit_text: str = "", nothing: bool = False) -> tuple:
+    """The five lines, with ``at`` the one being done now (``-1``: none).
+
+    The last one says Space only while nothing in the card's pane stops it,
+    in every phase: "全部画完：Space 确认" over a pane of blockers was a promise
+    the confirmation would break (U2d round 2).
+    """
     texts = [
         None,
         pick_text or PICK,
         draw_text or DRAW,
         commit_text or COMMIT,
-        confirm_text or CONFIRM,
+        CONFIRM_BLOCKED.format(n=facts.blockers) if facts.blockers else CONFIRM,
     ]
     if nothing:
         texts[1] = texts[2] = texts[3] = NOTHING_TO_DRAW
@@ -354,10 +361,7 @@ def _annotate_plan(facts: GuideFacts) -> GuidePlan:
         return GuidePlan(PHASE_BLOCKED, title,
                          f"现在：任务卡做完了，但下面还有 {facts.blockers} 个问题挡住 "
                          f"Space：单击一条去处理",
-                         _steps(facts, 4, nothing=nothing,
-                                confirm_text=f"先处理任务卡下面的 {facts.blockers} 个问题"
-                                             f"（它们挡住 Space）"),
-                         "")
+                         _steps(facts, 4, nothing=nothing), "")
     if facts.frame_confirmed:
         return GuidePlan(PHASE_CONFIRMED, title,
                          "这一帧已经确认 ✓ — 按 PgDn 去上一帧继续；要改哪个零件就在"
