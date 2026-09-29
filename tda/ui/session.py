@@ -402,21 +402,24 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
     def instance_rows(self) -> list[dict]:
         """One row per instance of the current frame, top-most layer first."""
         key = self.current()
+        labelled, drawn = self._frame_overrides_of(key)
         return rows.instance_rows(
             self.compiled(),
             state_of(self.db, self.tax, key.desktop, key.step),
             instances_of(self.db, key.desktop),
             self._hidden,
-            overridden=self._visibility_overrides(key),
+            overridden=labelled,
+            drawn=drawn,
         )
 
-    def _visibility_overrides(self, key: FrameKey) -> frozenset:
-        """Instances whose visibility label was set by hand on this frame."""
+    def _frame_overrides_of(self, key: FrameKey) -> tuple[frozenset, frozenset]:
+        """``(labelled, drawn)``: instances with a hand-set label / pixels on this frame."""
         try:
             found = self.db.frame_overrides(key) or {}
         except Exception:  # noqa: BLE001 - a missing table is "none set"
-            return frozenset()
-        return frozenset(name for name, fo in found.items() if fo.visibility is not None)
+            return frozenset(), frozenset()
+        return (frozenset(name for name, fo in found.items() if fo.visibility is not None),
+                frozenset(name for name, fo in found.items() if fo.visible_rle is not None))
 
     def overlay_layers(self) -> tuple[dict[str, np.ndarray], list[str], dict]:
         """Visible masks, bottom-up paint order and windows for the overlay."""

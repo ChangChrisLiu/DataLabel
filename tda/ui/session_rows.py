@@ -50,14 +50,18 @@ def paint_order(compiled: CompiledFrame) -> list[str]:
 
 def instance_rows(compiled: CompiledFrame, state: FrameState,
                   instances: dict[str, InstanceRec], hidden: set[str],
-                  overridden: frozenset = frozenset()) -> list[dict]:
+                  overridden: frozenset = frozenset(),
+                  drawn: frozenset = frozenset()) -> list[dict]:
     """``{"key","cls","state","placement","visibility","z","hidden"}``, top first.
 
     ``z`` counts from the bottom, so the top-most row carries the highest one and
     the list reads the way the layers are stacked on screen.  Two more keys
     since U2b round 3, so a label set by a stray digit key cannot hide a part
     without a trace: ``vis_override`` (the label was set by hand on this frame,
-    ``overridden``) and ``has_shape`` (a keyframe applies here).
+    ``overridden``) and ``has_shape`` -- a keyframe applies here, or a shape
+    was drawn for this frame only (``drawn``: a frame override with pixels,
+    which the compiled instance does not tell apart from "nothing drawn",
+    because it carries no keyframe id; task U2c).
     """
     bottom_up = paint_order(compiled)
     rows = []
@@ -74,7 +78,7 @@ def instance_rows(compiled: CompiledFrame, state: FrameState,
             "z": z,
             "hidden": instance in hidden,
             "vis_override": instance in overridden,
-            "has_shape": inst.keyframe_id is not None,
+            "has_shape": inst.keyframe_id is not None or instance in drawn,
         })
     rows.reverse()
     return rows

@@ -40,6 +40,7 @@ from tda.core.truth_inputs import annotatable_steps
 from tda.ui import app_actions as A
 from tda.ui import session_api as api
 from tda.ui.app import MainWindow
+from tda.ui.panels.instances import NOT_DRAWN
 from tda.ui.panels.taskcard import instance_of
 
 CHASSIS = "chassis"
@@ -172,3 +173,96 @@ def test_a_failed_recheck_elsewhere_neither_wipes_the_pane_nor_points_at_it(
         assert "见任务卡" not in win.status_message()
     finally:
         close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# item 2: a part nobody has drawn is "—", not "out"
+# --------------------------------------------------------------------------- #
+def vis_cell(win: MainWindow, key: str):
+    table = win.instances.table()
+    line = next(i for i in range(table.rowCount())
+                if table.item(i, 1) is not None and table.item(i, 1).text() == key)
+    return table.item(line, win.instances.COLUMNS.index("Vis"))
+
+
+def row_of(win: MainWindow, key: str) -> dict:
+    return next(r for r in win.instances.rows() if r["key"] == key)
+
+
+#: What the cell shows for the labels a small drawn rectangle compiles to.
+DRAWN_LABELS = {"visible": "vis", "visible_tiny": "v-tiny"}
+
+
+def shows_its_label(win: MainWindow, key: str) -> bool:
+    return vis_cell(win, key).text() == DRAWN_LABELS[row_of(win, key)["visibility"]]
+
+
+def test_an_undrawn_part_shows_a_dash_and_says_why(window):
+    answer_roi(window)
+    window.session.goto(LAST_STEP, force=True)
+    QApplication.processEvents()
+    cell_ = vis_cell(window, CHASSIS)
+    assert cell_.text() == NOT_DRAWN
+    assert "还没画" in cell_.toolTip() and "not drawn yet" in cell_.toolTip()
+    assert cell_.background().style() == Qt.BrushStyle.NoBrush   # not "set by hand"
+    # display only: the value the compiler and the exports use is untouched
+    assert row_of(window, CHASSIS)["visibility"] == "out_of_view"
+    assert row_of(window, CHASSIS)["has_shape"] is False
+
+
+def test_a_drawn_part_shows_its_label(window):
+    answer_roi(window)
+    session = window.session
+    session.goto(LAST_STEP, force=True)
+    session.begin_edit(CHASSIS)
+    session.set_editing_mask(cell(9))
+    session.commit_edit(api.SCOPE_KEYFRAME)
+    session.clear_edit()
+    window.instances.refresh()
+    assert vis_cell(window, CHASSIS).text() != NOT_DRAWN
+    assert shows_its_label(window, CHASSIS)
+
+
+def test_a_label_set_by_hand_on_an_undrawn_part_keeps_its_marked_cell(window):
+    answer_roi(window)
+    window.session.goto(LAST_STEP, force=True)
+    QApplication.processEvents()
+    assert window.instances.select_instance(CHASSIS)
+    press(window, "visibility_2")                          # 部分遮挡
+    cell_ = vis_cell(window, CHASSIS)
+    assert cell_.text() == "occ-p"
+    assert "⚠" not in cell_.text()                         # nothing drawn to hide
+    assert cell_.background().color().alpha() > 0, "the hand-set cell is not marked"
+    assert "手动设的可见性" in cell_.toolTip()
+
+
+def test_a_drawn_part_hidden_by_a_label_still_warns(window):
+    answer_roi(window)
+    session = window.session
+    session.goto(LAST_STEP, force=True)
+    session.begin_edit(CHASSIS)
+    session.set_editing_mask(cell(9))
+    session.commit_edit(api.SCOPE_KEYFRAME)
+    session.clear_edit()
+    window.instances.refresh()
+    assert window.instances.select_instance(CHASSIS)
+    press(window, "visibility_4")                          # 画面外
+    assert vis_cell(window, CHASSIS).text() == "⚠ out"
+
+
+def test_a_shape_drawn_for_this_frame_only_counts_as_drawn(window):
+    """A frame override with pixels carries no keyframe id, and still is a shape."""
+    answer_roi(window)
+    session = window.session
+    session.goto(LAST_STEP, force=True)
+    session.begin_edit(CHASSIS)
+    session.set_editing_mask(cell(9))
+    session.commit_edit(api.SCOPE_FRAME_OVERRIDE)
+    session.clear_edit()
+    window.instances.refresh()
+
+    key = session.current()
+    assert window.db.frame_overrides(key)[CHASSIS].visible_rle is not None
+    assert session.compiled().instances[CHASSIS].keyframe_id is None
+    assert row_of(window, CHASSIS)["has_shape"] is True
+    assert shows_its_label(window, CHASSIS)

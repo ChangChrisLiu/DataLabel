@@ -62,8 +62,19 @@ OVERRIDE_COLOR = QColor(255, 226, 150)
 WARN_COLOR = QColor(170, 60, 0)
 
 
+#: The Vis cell of a part that has no shape on this frame yet (task U2c).
+NOT_DRAWN = "—"
+NOT_DRAWN_TIP = "还没画：这一帧还没有它的形状 / not drawn yet"
+
+
 def _short(value: str) -> str:
     return _SHORT_VIS.get(value, value[:5])
+
+
+def _not_drawn(data: dict, gone: bool) -> bool:
+    """No shape on this frame and no label set by hand: nothing to call visible."""
+    return (not gone and not data.get("vis_override")
+            and not data.get("has_shape", True))
 
 #: Number keys ``1``-``7`` (spec 6.2 order, see :data:`api.VISIBILITY_VALUES`).
 _NUMBER_KEYS = (
@@ -207,9 +218,11 @@ class InstanceListPanel(QWidget):
                 # instance key, so a double click or a checkbox on one reaches
                 # nothing.  There is no z-order, visibility or mask to edit.
                 gone = row >= len(self._rows)
+                vis = (NOT_DRAWN_TIP if _not_drawn(data, gone)
+                       else data.get("visibility", ""))
                 tooltip = (f"{key}\nclass: {data.get('cls', '')}\n"
                            f"placement: {data.get('placement', '')}\n"
-                           f"visibility: {data.get('visibility', '')}\nz {data.get('z', '')}")
+                           f"visibility: {vis}\nz {data.get('z', '')}")
                 swatch = QTableWidgetItem("")
                 if not gone:
                     swatch.setBackground(QBrush(QColor(*palette_color(key))))
@@ -261,9 +274,21 @@ class InstanceListPanel(QWidget):
         DB's chassis was "out of view" on step 42 after a stray ``4``).  A hand-
         set label gets a coloured cell; one that hides a drawn shape (画面外 /
         完全遮挡) gets a ⚠ and says so.
+
+        A part with no shape here and no label set by hand shows ``—`` (task
+        U2c): the compiled default for "no geometry" is ``out_of_view``, and
+        ``out`` next to a part nobody has drawn yet read as "somebody set this
+        out of view" -- the very thing the stray ``4`` did to the chassis.  Only
+        what is *shown* changes; the row's ``visibility`` is still the value
+        the compiler and the exports use.  A session that does not report
+        ``has_shape`` is taken to have drawn it (the cell shows the label).
         """
         value = str(data.get("visibility", ""))
         item = QTableWidgetItem(_short(value))
+        if _not_drawn(data, gone):
+            item.setText(NOT_DRAWN)
+            item.setToolTip(NOT_DRAWN_TIP)
+            return item
         if gone or not data.get("vis_override"):
             return item
         item.setBackground(QBrush(OVERRIDE_COLOR))
