@@ -431,12 +431,10 @@ class RoiMixin:
     def _show_roi_rect(self) -> None:
         """Put the rectangle (or the stored one) on the canvas and in the tool.
 
-        The minimap goes while the rectangle is up. On a frame zoomed to its
-        ROI it sits *inside* the rectangle on screen, and a left drag there
-        re-centred the view instead of moving the rectangle -- "在框里移动只是
-        修改视角", the second trial's report.
+        Nothing sits over the canvas any more (the minimap lives at the foot
+        of the tool palette, U2b round 2), so a left drag inside the
+        rectangle is always the rectangle's.
         """
-        self.canvas.set_minimap_suppressed(bool(self.roi_editing))
         if self.roi_editing:
             self.canvas.set_roi(self.roi_draft, editing=True)
             self.roi_tool.set_rect(self.roi_draft)

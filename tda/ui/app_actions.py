@@ -46,12 +46,20 @@ __all__ = [
     "MODE_ANNOTATE",
     "MODE_REVIEW",
     "MODE_STEPS",
+    "PALETTE_ACTIONS",
+    "PALETTE_REVIEW",
+    "PALETTE_TOOLS",
     "Action",
     "action_for",
+    "action_named",
     "blocks_shortcuts",
     "cheat_sheet_html",
     "combos_of",
+    "key_caption",
+    "mode_cheat_html",
+    "mode_cheat_rows",
     "navigates_a_list",
+    "short_parts",
     "shortcut_markdown",
     "tool_key",
 ]
@@ -98,6 +106,11 @@ class Action:
             size you want) and "commit" (once, however long the finger stays
             down).  Auto-repeat used to be swallowed for *every* binding, which
             made ``]``, ``.`` and ``PgDn`` do nothing at all when held.
+        short: the caption of the action's button on the tool palette (task
+            U2b), ``名字（注释）`` -- the part before ``（`` is the name, the rest
+            a small note under it.  Empty for an action with no button; the
+            button's key is always read from :attr:`keys`, so the palette can
+            never show a key the keyboard does not have.
     """
 
     name: str
@@ -110,6 +123,7 @@ class Action:
     modes: tuple[str, ...] = _ANN
     hold: bool = False
     repeat: bool = False
+    short: str = ""
 
 
 def _view(view: str, key: str, zh: str) -> Action:
@@ -124,8 +138,9 @@ def _visibility(index: int) -> Action:
                   f"可见性设为 {value}", "view", (value,), _ANN)
 
 
-def _tool(name: str, key: str, label: str, zh: str) -> Action:
-    return Action(f"tool_{name}", (key,), "act_tool", label, zh, "tool", (name,), _ANN)
+def _tool(name: str, key: str, label: str, zh: str, short: str) -> Action:
+    return Action(f"tool_{name}", (key,), "act_tool", label, zh, "tool", (name,), _ANN,
+                  short=short)
 
 
 ACTIONS: tuple[Action, ...] = (
@@ -146,23 +161,27 @@ ACTIONS: tuple[Action, ...] = (
            "跳到最后一步", "nav", ("last",), _ANN_REV),
     Action("flash_compare", ("Tab",), "act_flash_compare",
            "Hold: flash the frame the task card is written against",
-           "按住：闪回任务卡对照的那一帧（你来的方向）", "nav", (True,), _ANN, hold=True),
+           "按住：闪回任务卡对照的那一帧（你来的方向）", "nav", (True,), _ANN, hold=True,
+           short="对比上一帧"),
     Action("flash_other", ("Shift+Tab",), "act_flash_other",
            "Hold: flash the frame on the other side",
            "按住：闪回另一侧的那一帧", "nav", (True,), _ANN, hold=True),
     # -- tools --------------------------------------------------------------
-    _tool("brush", "B", "Brush", "画笔（加像素）"),
-    _tool("eraser", "E", "Eraser", "橡皮擦（减像素）"),
-    _tool("sam_point", "S", "SAM point prompt", "SAM 点提示"),
-    _tool("sam_box", "X", "SAM box prompt", "SAM 框提示"),
-    _tool("occluder", "O", "Occluder brush", "遮挡层画笔（手/工具）"),
-    _tool("bench_box", "R", "Bench box", "台面框（拖框标注已拆下的零件）"),
+    _tool("brush", "B", "Brush", "画笔（加像素）", "画笔"),
+    _tool("eraser", "E", "Eraser", "橡皮擦（减像素）", "橡皮擦"),
+    _tool("sam_point", "S", "SAM point prompt", "SAM 点选（在零件上点一下）", "SAM 点选"),
+    _tool("sam_box", "X", "SAM box prompt", "SAM 框选（拖一个框）", "SAM 框选"),
+    _tool("occluder", "O", "Occluder brush", "遮挡层画笔（手/工具）", "遮挡（手/工具）"),
+    # Not the ROI: the trial annotator pressed ``R`` expecting the chassis
+    # rectangle (task U2b).  The label says what the box is *for*.
+    _tool("bench_box", "R", "Bench box", "台面框（已拆下、放在台面上的零件）",
+          "台面框（已拆下、放在台面上的零件）"),
     Action("radius_down", ("[",), "act_radius", "Smaller brush",
            "笔刷变小", "tool", (-1,), _ANN, repeat=True),
     Action("radius_up", ("]",), "act_radius", "Bigger brush",
            "笔刷变大", "tool", (+1,), _ANN, repeat=True),
     Action("cycle_candidate", ("C",), "act_cycle_candidate", "Next SAM candidate",
-           "切换 SAM 候选掩码", "tool", (), _ANN),
+           "切换 SAM 候选掩码", "tool", (), _ANN, short="换候选"),
     Action("cycle_prompt_box", ("Shift+C",), "act_cycle_prompt_box",
            "Next box prompt from the difference map",
            "切换差异图的提示框（第 1 个永远是默认那块）", "tool", (), _ANN),
@@ -174,28 +193,33 @@ ACTIONS: tuple[Action, ...] = (
            "删除小碎块（默认 <16 像素）", "tool", (), _ANN),
     # -- editing ------------------------------------------------------------
     Action("commit", ("Return", "Enter"), "act_commit", "Commit edit",
-           "提交编辑（按建议范围）", "edit", (), _ANN),
+           "提交编辑（按建议范围）", "edit", (), _ANN, short="提交"),
     Action("commit_override", ("Alt+Return", "Alt+Enter"), "act_commit_override",
-           "Commit for this frame only", "只对当前帧生效（帧覆盖）", "edit", (), _ANN),
+           "Commit for this frame only", "只对当前帧生效（帧覆盖）", "edit", (), _ANN,
+           short="只改这一帧"),
     Action("commit_split", ("Ctrl+K",), "act_commit_split", "Split keyframe here",
-           "从这一帧起拆分关键帧", "edit", (), _ANN),
+           "从这一帧起拆分关键帧", "edit", (), _ANN, short="从这帧起新版本"),
     Action("clear_edit", ("Esc",), "act_clear_edit", "Discard the edit",
-           "放弃当前编辑", "edit", (), _ANN),
+           "放弃当前编辑", "edit", (), _ANN, short="放弃编辑"),
     Action("confirm", ("Space",), "act_confirm", "Confirm the frame",
-           "确认当前帧并后退一帧", "edit", (), _ANN),
+           "确认当前帧并后退一帧", "edit", (), _ANN, short="确认整帧"),
     # Review mode: the canvas is read-only, so its two keys are the queue's.
     Action("review_accept", ("Return", "Enter", "Space"), "act_confirm",
            "Accept the frame the queue points at", "接受队列选中的这一帧",
-           "edit", (), (MODE_REVIEW,)),
+           "edit", (), (MODE_REVIEW,), short="接受这一帧"),
     Action("review_rework", ("R",), "act_rework_selected",
            "Rework: open it in Annotate mode", "返工：在标注模式下打开这一帧",
-           "edit", (), (MODE_REVIEW,)),
+           "edit", (), (MODE_REVIEW,), short="返工"),
     Action("review_keep_old", ("K",), "act_resolve", "Conflict: keep the frozen shape",
-           "冲突：保留已冻结的形状", "edit", (api.RESOLVE_KEEP_OLD,), (MODE_REVIEW,)),
+           "冲突：保留已冻结的形状", "edit", (api.RESOLVE_KEEP_OLD,), (MODE_REVIEW,),
+           short="保留旧的（冲突）"),
     Action("review_accept_new", ("N",), "act_resolve", "Conflict: take the edit",
-           "冲突：接受新的编辑", "edit", (api.RESOLVE_ACCEPT_NEW,), (MODE_REVIEW,)),
-    Action("undo", ("Ctrl+Z",), "act_undo", "Undo", "撤销", "edit", (), _ANN),
-    Action("redo", ("Ctrl+Y",), "act_redo", "Redo", "重做", "edit", (), _ANN),
+           "冲突：接受新的编辑", "edit", (api.RESOLVE_ACCEPT_NEW,), (MODE_REVIEW,),
+           short="采用新的（冲突）"),
+    Action("undo", ("Ctrl+Z",), "act_undo", "Undo", "撤销", "edit", (), _ANN,
+           short="撤销"),
+    Action("redo", ("Ctrl+Y",), "act_redo", "Redo", "重做", "edit", (), _ANN,
+           short="重做"),
     Action("toggle_hidden", ("H",), "act_toggle_hidden", "Hide/show instance",
            "隐藏或显示选中实例", "edit", (), _ANN),
     Action("cycle_visibility", ("V",), "act_cycle_visibility", "Cycle visibility",
@@ -205,8 +229,8 @@ ACTIONS: tuple[Action, ...] = (
     Action("zorder_down", ("Ctrl+Down",), "act_move_instance", "One layer down",
            "选中实例下移一层", "edit", (+1,), _ANN, repeat=True),
     Action("edit_roi", ("Shift+R",), "act_edit_roi", "Edit the ROI",
-           "编辑 ROI（机箱范围：已存的框直接拖边/角或整体移动，Esc 不改）",
-           "edit", (), _ANN),
+           "机箱范围 ROI：编辑（已存的框直接拖边/角或整体移动，Esc 不改）",
+           "edit", (), _ANN, short="机箱范围 ROI"),
     Action("split_pose", ("Ctrl+Shift+B",), "act_split_pose",
            "Split pose segment at this frame",
            "从这一帧起断开位姿段（本视角）", "edit", (), _ANN),
@@ -220,7 +244,7 @@ ACTIONS: tuple[Action, ...] = (
     Action("opacity_up", (".",), "act_opacity", "More opaque",
            "图层更不透明", "display", (+1,), _ANN_REV, repeat=True),
     Action("toggle_heat", ("D",), "act_toggle_heat", "Difference heat map",
-           "开关帧间差异热力图", "display", (), _ANN_REV),
+           "开关帧间差异热力图", "display", (), _ANN_REV, short="差异图"),
     Action("fit_roi", ("F",), "act_fit_roi", "Fit the ROI",
            "缩放到 ROI", "display", (), _ANN_REV),
     Action("fit_image", ("Shift+0",), "act_fit_image", "Fit the whole frame",
@@ -301,6 +325,88 @@ def _candidates(key, modifiers) -> list[int]:
         if 0x21 <= code <= 0x3F and not (0x30 <= code <= 0x39):
             out.append(code | (mods & ~_SHIFT))
     return out
+
+
+#: The palette's two columns of buttons (task U2b), top to bottom.  Names, not
+#: copies: every caption, key and tooltip is read off :data:`ACTIONS`.
+PALETTE_TOOLS: tuple[str, ...] = (
+    "tool_brush", "tool_eraser", "tool_sam_point", "tool_sam_box",
+    "tool_occluder", "tool_bench_box", "edit_roi",
+)
+PALETTE_ACTIONS: tuple[str, ...] = (
+    "commit", "commit_override", "commit_split", "confirm", "undo", "redo",
+    "toggle_heat", "flash_compare", "cycle_candidate", "clear_edit",
+)
+#: What the strip keeps in Review mode (U2b round 1): the canvas is read-only,
+#: so no tool and no brush -- only the difference map and the queue's keys.
+PALETTE_REVIEW: tuple[str, ...] = (
+    "review_accept", "review_rework", "review_keep_old", "review_accept_new",
+    "toggle_heat",
+)
+
+
+def action_named(name: str) -> Action:
+    """The one action called ``name``; ``KeyError`` when there is none."""
+    for action in ACTIONS:
+        if action.name == name:
+            return action
+    raise KeyError(name)
+
+
+def short_parts(action: Action) -> tuple[str, str]:
+    """``(name, note)`` of a button caption: ``台面框（已拆下…）`` -> both halves."""
+    text = action.short or action.label_zh
+    head, sep, tail = text.partition("（")
+    if not sep:
+        return (text, "")
+    return (head.strip(), tail.rstrip("）").strip())
+
+
+def key_caption(action: Action) -> str:
+    """The key a button shows: one spelling, and ``按住`` for a held key.
+
+    ``Return / Enter`` are one key, and the annotator's keyboard says Enter.
+    """
+    keys = action.keys
+    pick = next((k for k in keys if "Enter" in k), keys[0]) if keys else ""
+    return f"按住 {pick}" if action.hold else pick
+
+
+def _compact_keys(action: Action) -> str:
+    return " / ".join(k for k in action.keys if k not in ("Return", "Alt+Return"))
+
+
+def mode_cheat_rows(mode: str) -> list[tuple[str, str]]:
+    """``(keys, what)`` for every binding live in ``mode``, in table order.
+
+    The guide panel's collapsible cheat sheet: only what works *here*, and the
+    seven visibility keys as one row -- they are one idea with seven values.
+    """
+    rows: list[tuple[str, str]] = []
+    seen_visibility = False
+    for _group, _title, actions in _by_group():
+        for action in actions:
+            if mode not in action.modes:
+                continue
+            if action.name.startswith("visibility_"):
+                if not seen_visibility:
+                    rows.append(("1–7", "选中实例的可见性"))
+                    seen_visibility = True
+                continue
+            rows.append((_compact_keys(action), action.label_zh + _how_text(action)))
+    return rows
+
+
+def mode_cheat_html(mode: str) -> str:
+    """:func:`mode_cheat_rows` as a compact two-column HTML table."""
+    cells = [f"<td><b>{keys}</b></td><td>{what}</td>" for keys, what in mode_cheat_rows(mode)]
+    half = (len(cells) + 1) // 2
+    rows = []
+    for index in range(half):
+        right = cells[index + half] if index + half < len(cells) else "<td></td><td></td>"
+        rows.append(f"<tr>{cells[index]}<td width='10'></td>{right}</tr>")
+    return ("<table cellspacing='0' cellpadding='1' style='font-size:8pt'>"
+            + "".join(rows) + "</table>")
 
 
 def tool_key(name: str) -> str:

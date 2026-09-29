@@ -4,8 +4,9 @@
 trial. D13/scan already had a stored ROI, drawn only as a thin outline that no
 gesture could reach; the way to edit it was ``Shift+R``, which nobody had told
 them, and the ``R`` they pressed arms the *bench* box. A drag "inside the box"
-then moved the view: on a frame zoomed to its ROI the minimap sits inside the
+then moved the view: on a frame zoomed to its ROI the minimap sat inside the
 rectangle on screen, and a left drag on the minimap re-centres the canvas.
+(U2b round 2 moved the minimap off the canvas, onto the tool palette.)
 
 Every mouse gesture here is a real ``QTest`` event on the canvas viewport, so
 what is tested is what a hand does, not what a slot does when called.
@@ -144,30 +145,46 @@ def test_a_left_drag_inside_moves_the_rectangle_and_never_the_view(qapp, tmp_pat
         close_window(win)
 
 
-def test_the_minimap_cannot_steal_a_drag_on_the_rectangle(qapp, tmp_path):
-    """On a frame zoomed to its ROI the minimap is *inside* the rectangle on
-    screen; a drag that started on it re-centred the view instead."""
+def spots(win: MainWindow, inset: int = 12) -> list[QPoint]:
+    """Nine places across the viewport: its corners, edge middles and centre."""
+    r = win.canvas.viewport().rect()
+    xs = (r.left() + inset, r.center().x(), r.right() - inset)
+    ys = (r.top() + inset, r.center().y(), r.bottom() - inset)
+    return [QPoint(x, y) for y in ys for x in xs]
+
+
+@pytest.mark.parametrize("tool", ["brush", "eraser", "occluder", "sam_point",
+                                  "sam_box", "bench_box", "roi"])
+def test_a_left_drag_anywhere_on_the_canvas_never_pans(qapp, tmp_path, tool):
+    """U2b round 2: nothing floats over the canvas any more (the minimap that
+    turned "a drag inside the ROI" into a pan now lives on the tool palette),
+    so a left drag that starts *anywhere* on the picture -- the bottom-right
+    corner it used to cover included -- is the armed tool's, never a pan."""
     win = open_window(tmp_path, stored={1: STORED})
     try:
-        mini = win.canvas.minimap()
-        assert mini.isVisible(), "the scene should have a minimap to steal the drag"
-        win.act_edit_roi()                 # the bar appears and the canvas shrinks ...
+        if tool == "roi":
+            win.act_edit_roi()             # the bar appears and the canvas shrinks ...
+        else:
+            win._tool_name = tool
+            win._attach_tool()
         QApplication.processEvents()
         zoom_into(win, STORED)             # ... so measure where things are now
-        where = mini.geometry().center()                  # in canvas coordinates
-        spot = win.canvas.viewport().mapFrom(win.canvas, where)
-        x, y = win.canvas.image_pos(QPointF(spot))
-        x0, y0, x1, y1 = STORED
-        assert x0 < x < x1 and y0 < y < y1, "the minimap spot is inside the ROI"
 
-        target = widget_at(win, where)
-        assert target is win.canvas.viewport(), "the minimap is still on top of the ROI"
-        view_before = win.canvas.viewport_image_rect()
-        drag(win, spot, spot - QPoint(40, 40), widget=target)
-        assert win.canvas.viewport_image_rect() == view_before, "the view panned"
-        assert tuple(win.roi_draft) != STORED, "the rectangle did not move"
-        win.act_clear_edit()
-        assert mini.isVisible(), "the minimap comes back after the rectangle"
+        def origin():
+            # The picture point under the viewport's top-left corner, and the
+            # zoom: a pan moves the first. (Not the whole visible rectangle --
+            # the ROI bar's sentence may wrap after a drag and shorten the
+            # viewport, which is not a pan.)
+            corner = win.canvas.mapToScene(QPoint(0, 0))
+            return (round(corner.x(), 3), round(corner.y(), 3), win.canvas.zoom_factor())
+
+        for spot in spots(win):
+            where = win.canvas.viewport().mapTo(win.canvas, spot)
+            assert widget_at(win, where) is win.canvas.viewport(), (
+                f"{tool}: a widget sits over the canvas at {spot}")
+            before = origin()
+            drag(win, spot, spot - QPoint(30, 25))
+            assert origin() == before, f"{tool}: a left drag from {spot} panned"
     finally:
         close_window(win)
 

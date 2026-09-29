@@ -551,7 +551,10 @@ def test_taskcard_lists_items_with_icons_and_highlights_the_first_open_one(
     rows = texts(panel.list_widget())
     assert len(rows) == 3
     assert KIND_ICONS[api.KIND_ADD_SHAPE] in rows[0]
-    assert "cpu_cooler.01" in rows[0] and "Draw the cooler" in rows[0]
+    # Task U2b: the row says what to do in the annotator's words; the
+    # session's own sentence is kept in the tooltip.
+    assert "cpu_cooler.01" in rows[0] and "在这一帧画出它的完整形状" in rows[0]
+    assert "Draw the cooler" in panel.list_widget().item(0).toolTip()
     assert KIND_ICONS[api.KIND_STATE_ONLY] in rows[2]
     assert panel.current_index() == 1  # first not-done item
     assert panel.list_widget().currentRow() == 1
@@ -559,30 +562,19 @@ def test_taskcard_lists_items_with_icons_and_highlights_the_first_open_one(
     assert panel.list_widget().item(1).font().bold() is True
 
 
-def test_taskcard_buttons_only_report(session: StubSession) -> None:
-    """The buttons emit; the window acts.  Calling the session from here let
-    "Confirm" step the frame back over an uncommitted layer."""
-    from tda.ui.panels.taskcard import SUGGESTED
+def test_taskcard_has_no_commit_or_confirm_buttons(session: StubSession) -> None:
+    """Task U2b round 1: the tool palette is the one place for actions.
+
+    The card's four buttons duplicated the palette's (same slots, same keys),
+    and two places for one thing is the confusion the second trial reported.
+    """
+    from PySide6.QtWidgets import QPushButton
 
     panel = TaskCardPanel(session)
-    # Short captions keep the dock narrow; the full sentence is the tooltip.
-    for button, key in ((panel.commit_button, "Enter"),
-                        (panel.override_button, "Alt+Enter"),
-                        (panel.split_button, "Ctrl+K"),
-                        (panel.confirm_button, "Space")):
-        assert key in button.toolTip()
-        assert len(button.text()) <= 20
-
-    scopes: list[str] = []
-    confirms: list[int] = []
-    panel.sigCommit.connect(scopes.append)
-    panel.sigConfirm.connect(lambda: confirms.append(1))
-    panel.commit_button.click()
-    panel.override_button.click()
-    panel.split_button.click()
-    panel.confirm_button.click()
-    assert scopes == [SUGGESTED, api.SCOPE_FRAME_OVERRIDE, api.SCOPE_SPLIT]
-    assert confirms == [1]
+    assert panel.findChildren(QPushButton) == []
+    for name in ("commit_button", "override_button", "split_button",
+                 "confirm_button", "sigCommit", "sigConfirm"):
+        assert not hasattr(panel, name), name
     assert session.calls == []
 
 
@@ -638,7 +630,7 @@ def test_taskcard_problems_do_not_survive_a_frame_change(session: StubSession) -
 
     # a refusal that sends no problems must not resurrect the old list
     session.problems = []
-    panel.confirm_button.click()
+    panel.confirm()          # what Space (and the palette's 确认整帧) calls
     assert panel.problems() == []
 
 
@@ -849,18 +841,22 @@ def test_review_activation_asks_for_the_frame(
     assert session.calls == []
 
 
-def test_review_resolution_buttons_report_the_verdict(session: StubSession) -> None:
-    """A resolution has three outcomes and only the window can tell which."""
+def test_review_has_no_resolution_buttons_of_its_own(session: StubSession) -> None:
+    """Task U2b round 1b: 保留旧的 K / 采用新的 N live on the tool palette.
+
+    The dock's own "Keep old  K" / "Take new  N" duplicated them -- two places
+    for one thing.  The panel still says which conflict is selected; the
+    palette's buttons (tests/test_app_guide.py) resolve it through the window.
+    """
+    from PySide6.QtWidgets import QPushButton
+
     panel = ReviewPanel(session)
-    seen: list[str] = []
-    panel.sigResolve.connect(seen.append)
+    assert panel.findChildren(QPushButton) == []
+    for name in ("keep_old_button", "accept_new_button", "sigResolve"):
+        assert not hasattr(panel, name), name
     lw = panel.list_for(api.QUEUE_CONFLICTS)
     lw.setCurrentRow(0)
-    panel.keep_old_button.click()
-    assert seen == [api.RESOLVE_KEEP_OLD]
     assert panel.selected_conflict() == 7
-    panel.accept_new_button.click()
-    assert seen == [api.RESOLVE_KEEP_OLD, api.RESOLVE_ACCEPT_NEW]
     assert session.calls == []
 
 

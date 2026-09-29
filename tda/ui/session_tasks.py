@@ -15,10 +15,10 @@ actually has an image when the one next door is missing.  ``done`` is always
 evaluated at ``j``: the question is whether the geometry the item asks for
 exists *here*.
 
-The **start frame** has no neighbour.  Nothing has been annotated yet, so its
-card is one item per instance that needs geometry there and has none, ordered
-so the chassis is drawn before the things that sit on top of it, and a single
-``confirm`` once they are all drawn.
+The **start frame** has no neighbour.  Its card is one item per instance that
+needs geometry there, the open ones first -- ordered so the chassis is drawn
+before the things that sit on top of it -- and the drawn ones after them as ✔
+rows (U2b round 3).
 
 Bench work is asked for only where there is a bench to see.  Spec 4.2 says
 若该视角有堆放区 ROI -- *if this view has a staging-area ROI* -- and the scanner
@@ -33,7 +33,7 @@ from typing import Optional
 
 from tda.core.compiler import select_keyframe
 from tda.core.db import Db
-from tda.core.model import FrameKey, InstanceRec
+from tda.core.model import FrameKey, InstanceRec, Visibility
 from tda.core.states import diff_states, needs_geom
 from tda.core.taxonomy import Taxonomy
 from tda.core.truth_inputs import InputCache, instances_of, pose_segment_of, state_of
@@ -60,6 +60,9 @@ SPLIT_TRANSITIONS = frozenset(
 )
 #: ``loosened -> fastened``: the shape carries over untouched.
 STATE_ONLY_TRANSITIONS = frozenset({("loosened", "fastened")})
+#: Visibility labels that say nothing of the instance is visible on a frame:
+#: set there, a ✂ row has nothing to draw (round 3, I-A).
+NOTHING_VISIBLE = frozenset({Visibility.OUT_OF_VIEW.value, Visibility.OCCLUDED_FULL.value})
 
 #: Taxonomy group -> how low it sits in a frame, so the start frame's card can
 #: be drawn from the bottom up: the chassis is behind everything, the parts
@@ -98,6 +101,45 @@ def _has_shape(db: Db, tax: Taxonomy, desktop: int, view: str, instance: str, st
     if chosen is None:
         return False
     return geom_type is None or chosen.geom_type == geom_type
+
+
+def _keyframe_at(db: Db, tax: Taxonomy, key: FrameKey, instance: str,
+                 cache: Optional[InputCache] = None):
+    """The keyframe in force for ``instance`` at ``key``, or ``None``."""
+    seg = pose_segment_of(db, key, cache)
+    placement = placement_of(db, tax, key, instance, cache)
+    return select_keyframe(chain_for(db, key, instance, seg, placement), key.step)
+
+
+def _has_split(db: Db, tax: Taxonomy, desktop: int, view: str, instance: str,
+               step: int, neighbour: int, cache: Optional[InputCache] = None) -> bool:
+    """Is there a shape boundary between ``step`` and ``neighbour`` (U2b round 2)?
+
+    A ✂ row asks for a *new version* of a shape from this frame on.  The old
+    version reaching this frame is exactly what the row is about, so "a shape
+    applies here" -- which is what ``done`` used to test -- was true before
+    anybody did anything, and the guide said "都做完了，按 Space" over a split
+    that did not exist.  Done means the version in force here is not the one in
+    force next door (a keyframe anchored here, in the reverse walk), or a
+    frame override for this frame that settles the question: a drawn
+    per-frame shape, or a label saying nothing of it can be seen here
+    (``out_of_view`` / ``occluded_full`` -- nothing to draw).  Any other label
+    is only a label: pressing ``2`` (部分遮挡) on the row's instance turned it ✔
+    with no shape drawn (round 3, I-A).
+    """
+    here_key = FrameKey(desktop, step, view)
+    try:
+        override = (db.frame_overrides(here_key) or {}).get(instance)
+    except Exception:  # noqa: BLE001 - a missing table is "no override"
+        override = None
+    if override is not None and (override.visible_rle is not None
+                                 or str(override.visibility) in NOTHING_VISIBLE):
+        return True
+    here = _keyframe_at(db, tax, here_key, instance, cache)
+    if here is None:
+        return False
+    there = _keyframe_at(db, tax, FrameKey(desktop, neighbour, view), instance, cache)
+    return there is None or there.id != here.id
 
 
 def _has_bench_chain(db: Db, desktop: int, view: str, instance: str) -> bool:
@@ -198,8 +240,29 @@ def _span_note(span: Optional[list[int]]) -> str:
 
 def _item(instance: str, kind: str, changes: dict, done: bool,
           rec: Optional[InstanceRec], span: Optional[list[int]] = None) -> dict:
-    return {"instance": instance, "kind": kind,
-            "text": item_text(kind, instance, changes, rec, span), "done": bool(done)}
+    """One card row.
+
+    Besides the four keys every reader relies on, a row carries what the card
+    needs to explain itself in the annotator's words (task U2b): the class and
+    its attributes (``cover`` of the CPU cooler is 导风罩), the names the step
+    sheet used for the part, the parent it came back in with, and the state
+    transition behind a split.  All of it is already in hand here, so saying
+    it costs the card nothing it did not already pay.
+    """
+    row = {"instance": instance, "kind": kind,
+           "text": item_text(kind, instance, changes, rec, span), "done": bool(done)}
+    if rec is not None:
+        row["cls"] = str(rec.cls)
+        row["attrs"] = dict(rec.attrs or {})
+        row["raw_names"] = [str(n) for n in (rec.raw_names or [])]
+        if rec.attached and rec.parent:
+            row["parent"] = str(rec.parent)
+    transition = changes.get("state")
+    if transition is not None:
+        row["transition"] = [str(transition[0]), str(transition[1])]
+    if span and len(span) > 1:
+        row["span"] = [int(s) for s in span]
+    return row
 
 
 def _ordered(items: list[dict], instances: dict[str, InstanceRec]) -> list[dict]:
@@ -215,11 +278,15 @@ def _ordered(items: list[dict], instances: dict[str, InstanceRec]) -> list[dict]
 
 def _bottom_up(items: list[dict], instances: dict[str, InstanceRec],
                tax: Taxonomy) -> list[dict]:
-    """Order a start-frame card so the thing everything sits on is drawn first."""
+    """Order a start-frame card so the thing everything sits on is drawn first.
+
+    Open rows first, drawn ones (✔) after them, each bottom-up.
+    """
     def sort_key(item: dict) -> tuple:
         rec = instances.get(item["instance"])
         cls = "" if rec is None else rec.cls
-        return (0 if cls == _CHASSIS_CLASS else 1,
+        return (1 if item.get("done") else 0,
+                0 if cls == _CHASSIS_CLASS else 1,
                 LAYER_RANK.get(tax.group_of(cls), len(LAYER_RANK)),
                 item["instance"])
 
@@ -290,9 +357,13 @@ def task_card_for(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
         wants_box = needs_here.get(instance) in BENCH_KINDS
         if wants_box and kind == api.KIND_ADD_SHAPE:
             kind = api.KIND_ADD_BENCH_BOX
-        done = (True if kind == api.KIND_STATE_ONLY
-                else _has_shape(db, tax, desktop, view, instance, step, cache,
-                                GEOM_BOX if wants_box else None))
+        if kind == api.KIND_STATE_ONLY:
+            done = True
+        elif kind == api.KIND_SPLIT_KEYFRAME:
+            done = _has_split(db, tax, desktop, view, instance, step, neighbour, cache)
+        else:
+            done = _has_shape(db, tax, desktop, view, instance, step, cache,
+                              GEOM_BOX if wants_box else None)
         items.append(_item(instance, kind, changes, done, rec_i, span))
         if (bench and changes.get("placement") == (ON_BENCH, IN_CHASSIS)
                 and _has_bench_chain(db, desktop, view, instance)):
@@ -313,9 +384,11 @@ def _start_card(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
                 confirmed: bool) -> list[dict]:
     """Spec 4.2 step 1: on the start frame everything present has to be drawn.
 
-    Only what is still missing is listed -- an instance already drawn is not
-    work -- so the card empties as the annotator goes and ends as a single
-    confirmation.
+    Every instance that needs geometry here is listed; the ones already drawn
+    are ✔ rows after the open ones (U2b round 3 ruling: "what are the other
+    items on the last frame?" -- hiding the drawn parts took a paragraph to
+    explain).  With nothing that needs geometry at all the card is a single
+    confirmation, as on any frame with nothing to draw.
     """
     state = state_of(db, tax, desktop, step, cache)
     bench_roi = bench_roi_of(db, FrameKey(desktop, step, view), cache)
@@ -324,10 +397,9 @@ def _start_card(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
     for instance, geom_kind in sorted(needs.items()):
         on_bench = geom_kind in BENCH_KINDS
         geom = GEOM_BOX if on_bench else GEOM_MASK
-        if _has_shape(db, tax, desktop, view, instance, step, cache, geom):
-            continue
+        done = _has_shape(db, tax, desktop, view, instance, step, cache, geom)
         kind = api.KIND_ADD_BENCH_BOX if on_bench else api.KIND_ADD_SHAPE
-        items.append(_item(instance, kind, {}, False, instances.get(instance), None))
+        items.append(_item(instance, kind, {}, done, instances.get(instance), None))
     if not items:
         return [_item(f"step {step}", api.KIND_CONFIRM, {}, confirmed, None, None)]
     return _bottom_up(items, instances, tax)

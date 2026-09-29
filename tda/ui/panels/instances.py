@@ -40,7 +40,9 @@ from PySide6.QtWidgets import (
 
 from tda.ui import session_api as api
 from tda.ui.canvas.overlay import palette_color
+from tda.ui.class_names import visibility_zh
 from tda.ui.panels import session_is_open
+from tda.ui.session_rows import HIDING_VISIBILITY
 
 __all__ = ["InstanceListPanel"]
 
@@ -55,6 +57,9 @@ _SHORT_VIS = {"visible": "vis", "occluded_partial": "occ-p", "occluded_full": "o
 
 #: Rows for parts the frame no longer has: shown, but not to be acted on.
 GONE_COLOR = QColor(128, 128, 132)
+#: A visibility label set by hand on this frame, and one hiding a drawn shape.
+OVERRIDE_COLOR = QColor(255, 226, 150)
+WARN_COLOR = QColor(170, 60, 0)
 
 
 def _short(value: str) -> str:
@@ -208,11 +213,12 @@ class InstanceListPanel(QWidget):
                 swatch = QTableWidgetItem("")
                 if not gone:
                     swatch.setBackground(QBrush(QColor(*palette_color(key))))
+                vis_cell = self._vis_cell(data, gone)
                 cells = [
                     swatch,
                     QTableWidgetItem(key),
                     QTableWidgetItem(str(data.get("state", ""))),
-                    QTableWidgetItem(_short(str(data.get("visibility", "")))),
+                    vis_cell,
                 ]
                 hidden = QTableWidgetItem("")
                 if gone:
@@ -231,7 +237,8 @@ class InstanceListPanel(QWidget):
                 cells.append(hidden)
                 for col, item in enumerate(cells):
                     item.setData(KEY_ROLE, "" if gone else key)
-                    item.setToolTip(tooltip)
+                    item.setToolTip(tooltip if item is not vis_cell or not item.toolTip()
+                                    else f"{item.toolTip()}\n\n{tooltip}")
                     if gone:
                         item.setForeground(QBrush(GONE_COLOR))
                         item.setFlags(Qt.ItemFlag.ItemIsEnabled)
@@ -245,6 +252,30 @@ class InstanceListPanel(QWidget):
         # leave H / V / 1-7 acting on a key this frame no longer has.
         if keep is None or not self.select_instance(keep):
             self._table.setCurrentCell(-1, -1)
+
+    @staticmethod
+    def _vis_cell(data: dict, gone: bool) -> QTableWidgetItem:
+        """The Vis cell: marked when the label was set by hand on this frame.
+
+        A digit key used to change it without a word (U2b round 3: the trial
+        DB's chassis was "out of view" on step 42 after a stray ``4``).  A hand-
+        set label gets a coloured cell; one that hides a drawn shape (画面外 /
+        完全遮挡) gets a ⚠ and says so.
+        """
+        value = str(data.get("visibility", ""))
+        item = QTableWidgetItem(_short(value))
+        if gone or not data.get("vis_override"):
+            return item
+        item.setBackground(QBrush(OVERRIDE_COLOR))
+        note = (f"这一帧手动设的可见性：{visibility_zh(value)}"
+                f"（选中后按 1–7 改，Ctrl+Z 撤销）")
+        if data.get("has_shape") and value in HIDING_VISIBILITY:
+            item.setText(f"⚠ {_short(value)}")
+            item.setForeground(QBrush(WARN_COLOR))
+            note = (f"已设为不可见（{visibility_zh(value)}）：它画好了，但这一帧不显示"
+                    f"它的形状；选中后按 1 改回可见，或 Ctrl+Z 撤销")
+        item.setToolTip(note)
+        return item
 
     #: Column widths in pixels; ``None`` means "take what is left" (the key).
     WIDTHS: tuple[Optional[int], ...] = (22, None, 78, 46, 46)

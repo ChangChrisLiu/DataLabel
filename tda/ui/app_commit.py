@@ -18,6 +18,7 @@ from tda.ui import app_compat as compat
 from tda.ui import app_priors
 from tda.ui import app_support as S
 from tda.ui import session_api as api
+from tda.ui.class_names import instance_label, visibility_zh
 
 __all__ = ["CommitMixin"]
 
@@ -188,6 +189,7 @@ class CommitMixin:
         # An edit reaches other frames: those rows change colour now, not when
         # the annotator next happens to stand on one of them.
         self.timeline.refresh_statuses()
+        self.forget_card_hints()          # the hover outlines were read from shapes
         # No re_explain() here: committing re-renders the frame, which clears
         # assist_result, so a re-split would run against nothing.  The real one
         # happens at confirm time, where the answer is actually used.
@@ -252,6 +254,7 @@ class CommitMixin:
         if self.bench_instance is not None:
             self.disarm_bench()
             self.report("bench box cancelled")
+            self.refresh_guidance()
             return
         instance = getattr(self.session, "editing_instance", None)
         if instance is not None:
@@ -419,6 +422,7 @@ class CommitMixin:
         if instance is not None and mask is not None:
             self.queue_sidecar(self.session.current(), instance, mask)
         self.timeline.refresh_statuses()   # it takes back other frames too
+        self.forget_card_hints()
         self.update_status()
         self.report(what)
 
@@ -430,17 +434,52 @@ class CommitMixin:
     # ------------------------------------------------------------ visibility
     @S.guard
     def act_set_visibility(self, value: str) -> None:
-        if not self._editable_row():
+        if not self._editable_row() or not self._visibility_target():
             return
         self.instances.set_visibility(value)
-        self.refresh_overlay()
+        self._after_visibility()
 
     @S.guard
     def act_cycle_visibility(self) -> None:
-        if not self._editable_row():
+        if not self._editable_row() or not self._visibility_target():
             return
         self.instances.cycle_visibility()
+        self._after_visibility()
+
+    def _visibility_target(self) -> bool:
+        """Is an instance selected for ``1``-``7`` / ``V``?  Says so when not.
+
+        The keys acted on the instance table's selection and on nothing else,
+        silently (round 3): with no row selected a digit did nothing and said
+        nothing.
+        """
+        if self.instances.selected_instance():
+            return True
+        self.report("可见性键 1–7 / V 作用于实例表里选中的零件：先在右下实例表点一行 / "
+                    "select a part in the instance table first")
+        return False
+
+    def _after_visibility(self) -> None:
+        """Repaint, and say what changed and how to take it back (round 3).
+
+        A digit key changed a frame's visibility label without a word, which
+        is how the trial DB's chassis came to be "out of view" on step 42: the
+        status line and a short-lived canvas banner now name the part, the new
+        value and ``Ctrl+Z``.
+        """
         self.refresh_overlay()
+        instance = self.instances.selected_instance()
+        row = next((r for r in self.instances.rows() if r.get("key") == instance), None)
+        if row is not None:
+            label = self._label_of(instance)[0] or instance_label(str(instance),
+                                                                  row.get("cls"))
+            note = (f"{label}：这一帧的可见性 → {visibility_zh(row.get('visibility', ''))}"
+                    f"（Ctrl+Z 撤销）")
+            self.report(note)
+            self.flash_visibility_note(note)
+        self.task_card.refresh()         # a ✔ row may now say "已设为不可见"
+        self.timeline.refresh_statuses()
+        self.update_status()
 
     @S.guard
     def act_toggle_hidden(self) -> None:

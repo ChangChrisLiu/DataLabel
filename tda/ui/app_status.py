@@ -100,6 +100,11 @@ class StatusMixin:
         self.tool_label.setText(shown)
         self.tool_label.setToolTip(tip)
         self.sam_label.setText(self.sam_status_text())
+        # The palette's checked button and the guide read the same state the
+        # badge was just written from (task U2b); one place keeps them in step.
+        refresh = getattr(self, "refresh_guidance", None)
+        if refresh is not None:
+            refresh()
 
     def _tool_text(self) -> tuple[str, str]:
         """``工具：画笔 B r=8`` and its English tooltip."""
@@ -137,6 +142,9 @@ class StatusMixin:
         steps = self.session.steps()
         total = max(steps) if steps else key.step
         status = self.session.frame_status(key.step)
+        # Kept for the guide, which is refreshed right after this: asking the
+        # session a second time would be a second round of queries (U2b).
+        self._frame_status_seen = str(status)
         return f"D{key.desktop} · {key.view} · step {key.step}/{total} · {status}"
 
     def _view_counts(self) -> tuple[dict, dict]:

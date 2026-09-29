@@ -812,6 +812,7 @@ class AssistMixin:
         else:
             self.heat_item.setVisible(False)
         self.report("difference heat map " + ("on" if self.heat_visible else "off"))
+        self.refresh_guidance()     # the palette's 差异图 button is checked with it
 
     def _paint_heat(self) -> None:
         payload = self.assist_result

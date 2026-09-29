@@ -46,6 +46,9 @@ class KeysMixin:
         kind = event.type()
         if self.closed:
             return False  # a window on its way out must not eat anybody's keys
+        if kind == QEvent.Type.FocusIn and obj is self.canvas:
+            # The keys are the canvas' again: a "快捷键没生效" line is stale.
+            self.on_canvas_focus()
         if kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             focus = QApplication.focusWidget()
             if focus is None or focus is self or self.isAncestorOf(focus):
@@ -160,10 +163,21 @@ class KeysMixin:
         return focus if focus is not None else self.focusWidget()
 
     def dispatch(self, action: A.Action, *extra) -> None:
-        """Call the window slot an action names."""
+        """Call the window slot an action names.
+
+        A key whose palette button is greyed is refused with the button's own
+        reason (U2b round 3): one guard, :meth:`GuideMixin.key_refusal`, for
+        both.  A held key is only ever refused on its press.
+        """
         slot = getattr(self, action.slot, None)
         if slot is None:
             self.report_error(f"no slot {action.slot!r} for {action.name}")
+            return
+        pressing = not action.hold or bool(extra and extra[0])
+        refusal = getattr(self, "key_refusal", None)
+        why = refusal(action.name) if pressing and refusal is not None else ""
+        if why:
+            self.report(f"{A.short_parts(action)[0]}：{why}")
             return
         slot(*(tuple(extra) if action.hold else tuple(action.args)))
 

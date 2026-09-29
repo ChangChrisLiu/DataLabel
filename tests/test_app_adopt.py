@@ -707,11 +707,12 @@ def test_the_other_commit_keys_are_refused_under_a_ghost(window, slot):
     assert adopt.ADOPT_FIRST in window.status_message()
 
 
-def test_the_task_card_buttons_are_refused_under_a_ghost(window):
+def test_the_commit_buttons_are_refused_under_a_ghost(window):
+    """The palette's buttons (the task card's four until U2b round 1)."""
     seed_cooler_draft(window)
     edit_the_cooler(window)
     window.act_adopt_draft()
-    window.on_panel_commit(api.SCOPE_SPLIT)
+    window.run_palette_action("commit_split")
     assert window.showing_draft_ghost()
     assert adopt.ADOPT_FIRST in window.status_message()
 
