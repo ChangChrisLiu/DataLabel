@@ -220,18 +220,77 @@ def box_sym_diff(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> 
 
 
 def _stored_box(row: dict) -> Optional[tuple[int, int, int, int]]:
-    """The box of a stored row: its own, or the bounding box of its mask."""
+    """The box of a stored row: its own, or the bounding box of its mask.
+
+    Read off the run lengths (:class:`tda.core.masks.RunLengths`), which gives
+    ``bbox(decode_rle(rle))`` without the canvas.
+    """
     if row.get("geom_type") == GEOM_BOX:
         return rounded_box(row.get("box"))
     rle = row.get("visible_rle")
-    return None if rle is None else masks.bbox(masks.decode_rle(rle))
+    return None if rle is None else masks.RunLengths(rle).bbox()
 
 
 def _compiled_box(compiled_inst: CompiledInstance) -> Optional[tuple[int, int, int, int]]:
     """The same for a fresh compilation."""
     if compiled_inst.visible is not None:
-        return masks.bbox(compiled_inst.visible)
+        return _Compiled(compiled_inst).box
     return rounded_box(compiled_inst.box)
+
+
+class _Compiled:
+    """A compiled instance's visible mask, measured inside its window once.
+
+    :attr:`CompiledInstance.window <tda.core.compiler.CompiledInstance.window>`
+    is the compiler's promise that nothing is set outside it -- the same one
+    every truth row is encoded under (:func:`row_values`), checked under
+    :data:`tda.core.masks.CHECK_ENCODE_WINDOW` -- so the tight box is measured
+    in it, and everything after that works inside the box.
+    """
+
+    __slots__ = ("mask", "hw", "box")
+
+    def __init__(self, compiled_inst: CompiledInstance) -> None:
+        self.mask = compiled_inst.visible
+        self.hw = tuple(int(v) for v in self.mask.shape)
+        self.box = masks.bbox_in(self.mask, compiled_inst.window)
+
+    def area(self) -> int:
+        """``area(visible)``, counted inside the tight box."""
+        if self.box is None:
+            return 0
+        x0, y0, x1, y1 = self.box
+        return masks.area(self.mask[y0:y1, x0:x1])
+
+    def encodes_as(self, rle: dict) -> bool:
+        """Is ``rle`` byte for byte what this mask is stored as?
+
+        Same canvas size and the same ``counts`` as :func:`row_values` would
+        write for it (:func:`tda.core.masks.encode_rle_windowed`, pinned to
+        :func:`tda.core.masks.encode_rle` byte for byte).
+        """
+        size = rle.get("size")
+        if size is None or len(size) != 2 or tuple(int(v) for v in size) != self.hw:
+            return False
+        mine = masks.encode_rle_windowed(self.mask, self.box or (0, 0, 0, 0))
+        return masks.rle_counts(rle) == mine["counts"]
+
+
+def _grown(box, reach: int, hw) -> Optional[tuple[int, int, int, int]]:
+    """``box`` grown by ``reach`` on every side, clipped to the canvas."""
+    if box is None:
+        return None
+    height, width = int(hw[0]), int(hw[1])
+    x0, y0, x1, y1 = box
+    return (max(0, x0 - reach), max(0, y0 - reach),
+            min(width, x1 + reach), min(height, y1 + reach))
+
+
+def _union(a, b):
+    """The smallest box holding both (either may be ``None``, for no pixels)."""
+    if a is None or b is None:
+        return b if a is None else a
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
 
 
 # --------------------------------------------------------------------------- #
@@ -249,21 +308,40 @@ def disagreement(row: dict, compiled_inst: CompiledInstance) -> Optional[int]:
     Boxes decide whenever *either* side is a box row -- a part that moved from
     the chassis to the bench between two compilations is compared on its
     rectangle, which is the only thing the two sides still have in common.
+
+    **What it costs is the part's size, not the frame's** (task U2f). This used
+    to decode the stored row onto the whole canvas and compare two 12 MP
+    arrays for every confirmed row of a frame -- 3.1 s of one Enter on a 12 MP
+    frame with 42 parts, for a 20-pixel screw as much as for the chassis, and
+    almost every row unchanged. It gives the same answer, for every input, as
+    that full-canvas comparison (kept as the reference in
+    ``tests/disagreement_oracle.py``; the U2f report has the proofs):
+
+    1. a row stored as exactly the bytes this compilation would be stored as
+       holds the same pixels, and two equal masks never disagree -- so that is
+       settled on the run lengths, without decoding anything;
+    2. otherwise both masks are compared inside the union of their boxes grown
+       by :func:`tda.core.masks.tolerance_reach`: nothing differs outside it,
+       and nothing outside it can move the tolerance band inside it.
     """
     if row.get("geom_type") == GEOM_BOX or is_box(compiled_inst):
         return _box_disagreement(_stored_box(row), _compiled_box(compiled_inst))
     stored_rle = row.get("visible_rle")
-    old = None if stored_rle is None else masks.decode_rle(stored_rle)
-    new = compiled_inst.visible
-    if old is None and new is None:
-        return None
-    if old is None:
-        return masks.area(new)
-    if new is None:
-        return masks.area(old)
-    if old.shape != new.shape:
-        return max(masks.area(old), masks.area(new))
-    return masks.tolerant_sym_diff(old, new) if masks.is_conflict(old, new) else None
+    if stored_rle is None:
+        return None if compiled_inst.visible is None else _Compiled(compiled_inst).area()
+    if compiled_inst.visible is None:
+        return masks.RunLengths(stored_rle).area()
+    new = _Compiled(compiled_inst)
+    if new.encodes_as(stored_rle):
+        return None                              # the same pixels: the same annotation
+    old = masks.RunLengths(stored_rle)
+    if old.hw != new.hw:
+        return max(old.area(), new.area())
+    window = _grown(_union(old.bbox(), new.box), masks.tolerance_reach(), new.hw)
+    if window is None:
+        return None                              # both empty
+    x0, y0, x1, y1 = window
+    return masks.conflict_pixels(old.window(window), new.mask[y0:y1, x0:x1])
 
 
 def row_visibility(row: dict) -> str:
