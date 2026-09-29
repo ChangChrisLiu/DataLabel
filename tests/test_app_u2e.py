@@ -48,7 +48,13 @@ from tda.ui import app_actions as A
 from tda.ui import guide as G
 from tda.ui import session_api as api
 from tda.ui.app import MainWindow
-from tda.ui.panels.taskcard import CONFLICT_SENTENCE, RACE_SENTENCE, VIEW_ROLE
+from tda.ui.panels.taskcard import (
+    CONFIRMED_TAIL,
+    CONFIRMED_TEXT,
+    CONFLICT_SENTENCE,
+    RACE_SENTENCE,
+    VIEW_ROLE,
+)
 
 #: Typed ``dupli``, step 5's card is one ✔ row and its header "这一帧不用画".
 STEP = 5
@@ -232,14 +238,14 @@ def test_a_click_on_the_conflict_opens_review_on_it_and_the_verdict_gives_space_
         win.set_mode(A.MODE_ANNOTATE)
         seen = surfaces(win)
         assert seen["pane"] == [] and seen["count"] == 0
-        assert seen["header"].endswith("直接 Space"), seen["header"]
-        assert seen["rows"] == ["这一帧不用画，直接 Space"]
-        assert seen["tips"][0].startswith("这一帧不用画，直接 Space")
         # taking the new shape re-froze the frame: the guide calls it confirmed,
-        # and Space (which would refuse a blocked frame) goes through
+        # and so do the header and the ✔ row (round 2, item 6) ...
         assert seen["plan"].phase == G.PHASE_CONFIRMED, seen["plan"]
+        assert seen["header"] == f"第 {STEP} 帧：{CONFIRMED_TEXT}", seen["header"]
+        assert seen["rows"] == [f"这一帧不用画，{CONFIRMED_TAIL}"]
+        assert seen["tips"][0].startswith(seen["rows"][0])
         assert "挡住" not in seen["plan"].now
-        assert win.act_confirm() is True
+        assert win.act_confirm() is True              # ... and Space goes through
     finally:
         close_window(win)
 
@@ -667,3 +673,39 @@ def test_the_shortcut_rests_on_the_digest_invariant_and_space_still_holds(qapp, 
             session.truth.verify_frame(KEY5, "tester", session.prepared())
     finally:
         session.close(force=True)
+
+
+# --------------------------------------------------------------------------- #
+# round 2, item 6: a confirmed frame's header says what the guide says
+# --------------------------------------------------------------------------- #
+def test_a_confirmed_frame_says_confirmed_not_space(qapp, tmp_path):
+    session = confirm_row_frame(tmp_path)
+    assert session.confirm_frame() is True
+    win = open_window(tmp_path, session)
+    try:
+        answer_roi(win)
+        session.goto(STEP, force=True)
+        seen = surfaces(win)
+        assert seen["plan"].phase == G.PHASE_CONFIRMED
+        assert seen["header"] == f"第 {STEP} 帧：{CONFIRMED_TEXT}"
+        assert seen["rows"] == [f"这一帧不用画，{CONFIRMED_TAIL}"]
+        assert seen["tips"][0].startswith(seen["rows"][0])
+        for text in [seen["header"], *seen["rows"], *seen["tips"]]:
+            assert "直接 Space" not in text and "confirm the frame" not in text, text
+    finally:
+        close_window(win)
+
+
+def test_the_confirmed_headers_of_the_other_space_frames():
+    from tda.ui.panels.taskcard import card_header
+
+    # the start frame with every part drawn, and a frame of state changes only
+    assert card_header(42, None, [api.KIND_ADD_SHAPE], first=1, last=42, done=[True],
+                       confirmed=True) == f"第 42 帧（起点，已经拆完的样子）：{CONFIRMED_TEXT}"
+    assert card_header(5, 6, [api.KIND_STATE_ONLY], confirmed=True) == \
+        f"第 5 帧：{CONFIRMED_TEXT}"
+    # blockers win: a confirmed frame that something now stops says so
+    assert "挡住 Space" in card_header(5, 6, [api.KIND_STATE_ONLY], blockers=1,
+                                       confirmed=True)
+    # a header that never said Space is left as it is
+    assert "Ctrl+K" in card_header(5, 6, [api.KIND_SPLIT_KEYFRAME], confirmed=True)

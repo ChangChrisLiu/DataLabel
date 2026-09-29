@@ -144,6 +144,12 @@ def space_or_blocked(blockers: int, space: str = "直接 Space") -> str:
     return BLOCKED_SPACE.format(n=int(blockers)) if blockers else space
 
 
+#: What a card that would say "直接 Space" says on a frame already confirmed,
+#: with nothing in the pane: what the guide says there (U2e round 2).
+CONFIRMED_TAIL = "已经确认 ✓（PgDn 下一帧；改了之后再按 Space 重新确认）"
+CONFIRMED_TEXT = "这一帧" + CONFIRMED_TAIL
+
+
 #: How each kind is counted in a mixed header (U2b round 2).
 _KIND_COUNTS: tuple[tuple[str, str], ...] = (
     (api.KIND_ADD_SHAPE, "{n} 个要画回去"),
@@ -157,7 +163,7 @@ _KIND_COUNTS: tuple[tuple[str, str], ...] = (
 def card_header(step: Optional[int], neighbour: Optional[int],
                 kinds: Optional[list[str]] = None, first: Optional[int] = None,
                 last: Optional[int] = None, done: Optional[list[bool]] = None,
-                blockers: int = 0) -> str:
+                blockers: int = 0, confirmed: bool = False) -> str:
     """The sentence above the list: what *this* frame's list is (ruling U2b-3).
 
     Built from the rows' kinds (round 2): "多了…要画回去" over rows that only
@@ -169,6 +175,9 @@ def card_header(step: Optional[int], neighbour: Optional[int],
     is left and what is done rather than calling every row work.
     ``blockers`` is how many problems in the card's pane stop ``Space``: with
     any, no header says "直接 Space" (U2d round 2, :func:`space_or_blocked`).
+    ``confirmed`` is a frame already confirmed: with nothing blocking, where
+    the header would send the annotator to Space it says :data:`CONFIRMED_TEXT`,
+    as the guide does (U2e round 2).
     """
     if step is None:
         return ""
@@ -185,6 +194,8 @@ def card_header(step: Optional[int], neighbour: Optional[int],
             where = "起点"
         left = [k for k, d in zip(kinds, flags) if k != api.KIND_CONFIRM and not d]
         drawn = len(work) - len(left)
+        if not left and confirmed and not blockers:
+            return f"第 {step} 帧（{where}）：{CONFIRMED_TEXT}"
         if not left:
             return (f"第 {step} 帧（{where}）：这一帧的零件都画好了，"
                     f"{space_or_blocked(blockers, '直接 Space 确认')}")
@@ -196,6 +207,8 @@ def card_header(step: Optional[int], neighbour: Optional[int],
             text += f"。还剩 {len(left)} 个，{drawn} 个画好了（✔，排在最后）"
         return text
     present = set(work)
+    if present <= {api.KIND_STATE_ONLY} and confirmed and not blockers:
+        return f"第 {step} 帧：{CONFIRMED_TEXT}"
     if not present:
         return f"第 {step} 帧：这一帧不用画，{space_or_blocked(blockers)}"
     if present == {api.KIND_ADD_SHAPE}:
@@ -224,7 +237,7 @@ START_NOTE = "（被别的零件挡住的部分也算它的，层级程序会处
 
 
 def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
-             start: bool = False, blockers: int = 0) -> dict:
+             start: bool = False, blockers: int = 0, confirmed: bool = False) -> dict:
     """What one row shows: title, the log's name, the sentence and the chip.
 
     ``start`` is the start frame, where nothing "comes back in with" a parent:
@@ -244,6 +257,8 @@ def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
     sentence = KIND_SENTENCES.get(kind, str(row.get("text", "")))
     if kind == api.KIND_CONFIRM and blockers:
         sentence = f"这一帧不用画，{space_or_blocked(blockers)}"
+    elif kind == api.KIND_CONFIRM and confirmed:
+        sentence = f"这一帧不用画，{CONFIRMED_TAIL}"
     transition = row.get("transition")
     if kind == api.KIND_SPLIT_KEYFRAME and transition:
         sentence += f"（{state_zh(transition[0])} → {state_zh(transition[1])}）"
@@ -274,7 +289,7 @@ def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
             "done": done, "editing": chip in (CHIP_EDITING, CHIP_BOXING)}
 
 
-def row_tooltip(row: dict, view: dict, blockers: int = 0) -> str:
+def row_tooltip(row: dict, view: dict, blockers: int = 0, confirmed: bool = False) -> str:
     """The row's tooltip: the session's own words, which name the state
     transition and the program's instruction in full.
 
@@ -285,9 +300,13 @@ def row_tooltip(row: dict, view: dict, blockers: int = 0) -> str:
     kind = str(row.get("kind", api.KIND_CONFIRM))
     if kind != api.KIND_CONFIRM:
         return f"{row.get('text', '')}\n[{kind}]"
-    english = (f"Nothing to draw here, but {blockers} problem(s) below stop Space"
-               if blockers else str(row.get("text") or "Nothing to draw here - confirm "
-                                                         "the frame"))
+    if blockers:
+        english = f"Nothing to draw here, but {blockers} problem(s) below stop Space"
+    elif confirmed:
+        english = ("Nothing to draw here, and the frame is confirmed: PgDn for the next "
+                   "one; after a change, Space confirms it again")
+    else:
+        english = str(row.get("text") or "Nothing to draw here - confirm the frame")
     return f"{view['sentence']}\n{english}"
 
 
@@ -470,8 +489,9 @@ PROBLEM_SENTENCES: tuple[tuple[str, str], ...] = (
     # tda.core.truth_refusals.blocking_reasons).  A conflict line is clicked
     # to Review with that conflict selected; {what} is "#id part".
     (OPEN_CONFLICT, CONFLICT_SENTENCE + "（{what}）"),
-    (FROZEN_DISAGREEMENT, "{what}：确认过的形状后来在别的帧被改了，和这一帧对不上 → 按 F5 把它"
-                          "放进冲突队列，再到 Review → Conflicts：K 保留旧的 / N 采用新的"),
+    # Said after a refused Space too, which has just queued it: true either way.
+    (FROZEN_DISAGREEMENT, "{what}：确认过的形状后来在别的帧被改了，和这一帧对不上 → 到 Review → "
+                          "Conflicts：K 保留旧的 / N 采用新的（冲突队列里还没有它就先按 F5）"),
     (INPUTS_CHANGED, RACE_SENTENCE),
 )
 
@@ -606,6 +626,8 @@ class TaskCardPanel(QWidget):
         self._header_args: dict = {}
         #: :meth:`problem_count` as the header and the rows last said it.
         self._blockers = 0
+        #: Has somebody confirmed the frame on screen (U2e round 2)?
+        self._confirmed = False
         self._hovered = ""
         #: ``(instance, monotonic time)`` of the last click on a row.
         self._last_click: tuple[str, float] = ("", 0.0)
@@ -700,9 +722,13 @@ class TaskCardPanel(QWidget):
         steps = list(self._session.steps()) if opened else []
         kinds = [str(r.get("kind", api.KIND_CONFIRM)) for r in rows]
         done = [bool(r.get("done", False)) for r in rows]
+        # confirmed already: the guide's "已经确认 ✓", and now the header's (U2e)
+        self._confirmed = bool(opened and step is not None and self._session.frame_status(
+            step) in api.CONFIRMED_STATUSES)
         self._header_args = (dict(step=step, neighbour=neighbour, kinds=kinds,
                                   first=min(steps) if steps else None,
-                                  last=max(steps) if steps else None, done=done)
+                                  last=max(steps) if steps else None, done=done,
+                                  confirmed=self._confirmed)
                              if opened else {})
         self._blockers = self.problem_count()
         self._paint_header()
@@ -711,12 +737,12 @@ class TaskCardPanel(QWidget):
             kind = str(row.get("kind", api.KIND_CONFIRM))
             instance = str(row.get("instance", ""))
             view = row_view(row, self._editing, self._editing_bench, self._start,
-                            self._blockers)
+                            self._blockers, self._confirmed)
             item = QListWidgetItem(plain_text(view))
             item.setData(INSTANCE_ROLE, instance)
             item.setData(KIND_ROLE, kind)
             item.setData(VIEW_ROLE, view)
-            item.setToolTip(row_tooltip(row, view, self._blockers))
+            item.setToolTip(row_tooltip(row, view, self._blockers, self._confirmed))
             font = item.font()
             done = bool(row.get("done", False))
             if done:
@@ -761,11 +787,12 @@ class TaskCardPanel(QWidget):
             if not isinstance(old, dict):
                 continue
             view = row_view(self._card[index], self._editing, self._editing_bench,
-                            self._start, self._blockers)
+                            self._start, self._blockers, self._confirmed)
             if view != old:
                 item.setData(VIEW_ROLE, view)
                 item.setText(plain_text(view))
-                item.setToolTip(row_tooltip(self._card[index], view, self._blockers))
+                item.setToolTip(row_tooltip(self._card[index], view, self._blockers,
+                                            self._confirmed))
 
     def _sync_blockers(self) -> None:
         """The pane changed: the header and a ✔ row say Space only if nothing blocks it.

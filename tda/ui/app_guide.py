@@ -103,7 +103,7 @@ def _merge_hints(hints: list) -> list:
 
 _SAM_TOOLS = ("sam_point", "sam_box")
 _NO_EDIT = (None, False, False)
-_VERIFIED = (api.STATUS_VERIFIED, api.STATUS_RECHECK)
+_VERIFIED = api.CONFIRMED_STATUSES
 
 
 class GuideMixin:

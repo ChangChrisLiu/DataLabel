@@ -52,6 +52,10 @@ STATUS_RECHECK = "recheck"
 #: still exist, the frame simply has nothing to draw on (spec 4.2, missing frames).
 STATUS_MISSING = "missing"
 
+#: The statuses of a frame somebody has confirmed: the guide's "已经确认 ✓" and
+#: the task card's header both read this (U2e round 2).
+CONFIRMED_STATUSES: tuple[str, ...] = (STATUS_VERIFIED, STATUS_RECHECK)
+
 FRAME_STATUSES: tuple[str, ...] = (
     STATUS_UNLABELED,
     STATUS_AUTO,
