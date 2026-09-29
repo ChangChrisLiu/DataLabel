@@ -11,6 +11,8 @@
    problems that block it, and the status line said "见任务卡" for either.
 6. A conflict verdict announced a frame change without the frame's problems,
    so the card's pane went empty.
+7. Alt+Enter on a part with no keyframe here wrote an override the compiler
+   still called ``missing_shape``: the row stayed open.
 9. The window opened silent about its first frame's pane: the card emitted
    before anything listened.
 """
@@ -20,15 +22,19 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import re
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from app_scene import (
+    DESKTOP,
     LAST_STEP,
+    VIEW,
     StubSamQueue,
     cell,
     chassis_instances,
@@ -481,5 +487,81 @@ def test_the_pane_survives_a_conflict_verdict(qapp, tmp_path):
         assert pane_codes(win) == [f"missing_shape:{UNLISTED}"]
         assert win.guide_facts().blockers == 1
         assert "conflict 9999 refused" in win.status_message()   # the verdict is said
+    finally:
+        close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# item 7: Alt+Enter (只改这一帧) needs a shape under it
+# --------------------------------------------------------------------------- #
+def paint(win: MainWindow, dx: int = 8) -> None:
+    """One brush stroke across the middle of the canvas (the window is shown)."""
+    if win._tool_name in ("sam_point", "sam_box"):
+        win.act_tool("brush")
+    viewport = win.canvas.viewport()
+    centre = viewport.rect().center()
+    QTest.mousePress(viewport, Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, centre)
+    QTest.mouseMove(viewport, centre + QPoint(dx, 0))
+    QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton,
+                       Qt.KeyboardModifier.NoModifier, centre + QPoint(dx, 0))
+    QApplication.processEvents()
+
+
+def test_the_session_refuses_a_frame_override_with_no_shape_under_it(qapp, tmp_path):
+    session = rows_done_but_one_unlisted(tmp_path)
+    key = session.current()
+    assert session.keyframe_applies(UNLISTED) is False
+    session.begin_edit(UNLISTED)
+    session.set_editing_mask(cell(41))
+    with pytest.raises(api.SessionRefusal, match=re.escape(api.OVERRIDE_NEEDS_SHAPE)):
+        session.commit_edit(api.SCOPE_FRAME_OVERRIDE)
+    assert UNLISTED not in session.db.frame_overrides(key), "nothing was written"
+    assert session.editing_instance == UNLISTED, "the layer is kept"
+
+    session.commit_edit(api.SCOPE_KEYFRAME)          # Enter draws it ...
+    session.clear_edit()
+    assert session.keyframe_applies(UNLISTED) is True
+    draw(session, UNLISTED, 42, api.SCOPE_FRAME_OVERRIDE)   # ... and now it is allowed
+    assert session.db.frame_overrides(key)[UNLISTED].visible_rle is not None
+
+
+def test_alt_enter_on_an_undrawn_part_is_greyed_and_refused_with_one_reason(
+        qapp, tmp_path):
+    session = rows_done_but_one_unlisted(tmp_path)
+    win = open_window(tmp_path, session=session, show=True)
+    try:
+        answer_roi(win)
+        win.on_request_edit(UNLISTED)
+        paint(win)
+        assert win.layer_facts()[2], "the layer holds uncommitted pixels"
+        button = win.palette.button("commit_override")
+        assert not button.isEnabled()
+        assert button.reason() == api.OVERRIDE_NEEDS_SHAPE
+        assert win.palette.button("commit_split").isEnabled()   # only Alt+Enter
+
+        ops = len(win.db.ops(DESKTOP, VIEW, limit=10_000))
+        win.report("")
+        press(win, "commit_override")                    # the key: same guard
+        assert api.OVERRIDE_NEEDS_SHAPE in win.status_message()
+        assert len(win.db.ops(DESKTOP, VIEW, limit=10_000)) == ops, "the key acted"
+        assert session.editing_instance == UNLISTED and win.layer_facts()[2]
+
+        win.act_commit_override()                        # past the guard: the session
+        assert api.OVERRIDE_NEEDS_SHAPE in win.status_message()
+        assert UNLISTED not in win.db.frame_overrides(session.current())
+    finally:
+        close_window(win)
+
+
+def test_alt_enter_is_live_on_a_part_that_has_a_shape_here(qapp, tmp_path):
+    session = rows_done_but_one_unlisted(tmp_path)
+    win = open_window(tmp_path, session=session, show=True)
+    try:
+        answer_roi(win)
+        win.on_request_edit(SPLIT_ROW)                   # drawn on this frame
+        paint(win)
+        button = win.palette.button("commit_override")
+        assert button.isEnabled(), button.reason()
     finally:
         close_window(win)

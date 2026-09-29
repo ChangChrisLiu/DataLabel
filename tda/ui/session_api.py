@@ -99,6 +99,14 @@ SCOPE_SPLIT = "split"
 
 COMMIT_SCOPES: tuple[str, ...] = (SCOPE_KEYFRAME, SCOPE_FRAME_OVERRIDE, SCOPE_SPLIT)
 
+#: Why ``Alt+Enter`` (:data:`SCOPE_FRAME_OVERRIDE`) is refused on a part no
+#: keyframe applies to at this frame: the compiler reports it
+#: ``missing_shape`` whatever the override holds, so its card row would stay
+#: open and ``Space`` would refuse (U2d).  One sentence for the session's
+#: refusal, the greyed palette button and the key.
+OVERRIDE_NEEDS_SHAPE = ("这个零件在这一帧还没有形状：先用 Enter 画出它"
+                        "（「只改这一帧」是在已有形状上的例外）")
+
 # --------------------------------------------------------------------------- #
 # review mode (spec 4.4)
 # --------------------------------------------------------------------------- #
@@ -248,6 +256,9 @@ class SessionLike(Protocol):
         ``{"area_warning_overridden": True}``. Values must be JSON-serialisable
         (the op log is JSON) or it raises :class:`ValueError` before anything is
         written, and it never overwrites the payload's own keys.
+
+        :data:`SCOPE_FRAME_OVERRIDE` on a part no keyframe applies to at this
+        frame raises :class:`SessionRefusal` with :data:`OVERRIDE_NEEDS_SHAPE`.
         """
 
     def preview(self, scope: str) -> dict:

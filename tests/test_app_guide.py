@@ -326,7 +326,10 @@ def test_commit_is_enabled_only_when_there_is_something_to_commit(window):
     window.on_request_edit(instance)
     brush_stroke(window)
     assert commit.isEnabled()
-    assert window.palette.button("commit_override").isEnabled()
+    # 只改这一帧 is an exception on a shape, and a start-frame part has none
+    # yet (U2d): greyed, with the reason its key and the session give
+    override = window.palette.button("commit_override")
+    assert not override.isEnabled() and override.reason() == api.OVERRIDE_NEEDS_SHAPE
     assert window.palette.button("commit_split").isEnabled()
     confirm = window.palette.button("confirm")
     assert not confirm.isEnabled() and "Enter" in confirm.reason()

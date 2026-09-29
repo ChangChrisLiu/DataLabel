@@ -234,6 +234,10 @@ def test_each_commit_button_is_its_key(window, monkeypatch, button, key):
         # Since U2b round 3 the key and the button share one guard, which
         # refuses these two on an untouched layer: give them something to
         # commit, so what is tested is the routing.
+        if button == "commit_override":
+            # ... and 只改这一帧 needs a shape under it (U2d)
+            seed_shapes(window.session, LAST_STEP)
+            window.session.goto(LAST_STEP, force=True)
         start_edit(window)
         paint(window)
     seen: list[str] = []

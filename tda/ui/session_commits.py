@@ -221,6 +221,10 @@ class CommitMixin:
             )
         else:
             self._refuse_mask_on_bench(key, instance)
+            if scope == api.SCOPE_FRAME_OVERRIDE and not self.keyframe_applies(instance):
+                # The override would be written and the part still compiled
+                # as missing: its row open, Space refused (U2d).
+                raise SessionRefusal(api.OVERRIDE_NEEDS_SHAPE)
             result = edit.commit_edit(self.db, self.truth, key, instance, self.layer.mask(),
                                       scope, direction, self.annotator, extra=extra)
             # What was just written is no longer uncommitted: the layer's
@@ -267,6 +271,19 @@ class CommitMixin:
     def _known_instances(self) -> set[str]:
         """The instances this frame has, which a layering gesture may name."""
         return set(self.compiled().instances)
+
+    def keyframe_applies(self, instance: str) -> bool:
+        """Does a keyframe of ``instance`` apply at the open frame?
+
+        The compiler's own answer (``keyframe_id`` of the compiled instance),
+        so it is exactly the question behind ``missing_shape``: a frame
+        override is drawn *on* an existing shape, and one with no keyframe
+        under it leaves the part missing however many pixels it holds (U2d).
+        The window asks it to grey ``Alt+Enter``; :meth:`commit_edit` refuses
+        with the same sentence.
+        """
+        found = self.compiled().instances.get(str(instance))
+        return found is not None and found.keyframe_id is not None
 
     def _refuse_mask_on_bench(self, key: FrameKey, instance: str) -> None:
         """A part on the bench is tracked by a rectangle, not by a mask (spec 4.2)."""
