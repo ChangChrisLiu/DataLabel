@@ -647,7 +647,7 @@ def _open_edit_with_pixels(win: MainWindow) -> str:
 
 def test_confirming_a_refused_proposal_leaves_enter_with_the_edit(qapp, tmp_path):
     """C1: the whole-frame "not found" used to leave Enter aimed at nothing."""
-    from tda.ui.app_roi import NO_CHASSIS_FOUND
+    from tda.ui.app_roi import NO_CHASSIS_CLOSED
 
     win = open_window(tmp_path)
     try:
@@ -665,7 +665,8 @@ def test_confirming_a_refused_proposal_leaves_enter_with_the_edit(qapp, tmp_path
 
         assert (win.roi_editing, win._tool_name, win.active_tool) == before
         assert win.roi() is None
-        assert NO_CHASSIS_FOUND in win.status_message()
+        # the rectangle is closed here (Esc), so the refusal says Shift+R (U2c)
+        assert NO_CHASSIS_CLOSED in win.status_message()
         assert win.canvas.roi_rect() is None
 
         win.act_commit()                                 # Enter still commits
@@ -1291,7 +1292,7 @@ def test_a_full_frame_proposal_is_not_stored_without_a_drag(qapp, tmp_path, monk
                             lambda images, view: (0, 0, 64, 64))
         win.start_roi_edit()
         assert win.wait_for_roi_proposal() is True
-        assert "未能自动找到机箱" in win.status_message()
+        assert "自动没找到机箱：直接在画面上拖一个框" in win.status_message()
 
         win.act_commit()                       # Enter, with nothing dragged
 

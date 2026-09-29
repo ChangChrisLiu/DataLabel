@@ -442,13 +442,20 @@ def _add_backup(sub) -> None:
 # --------------------------------------------------------------------------- #
 # status
 # --------------------------------------------------------------------------- #
-VIEW_CELL_WIDTH = 19  # "frames/miss  kf/ver"
+VIEW_CELL_HEAD = "frames/miss  kf  done/work"
+VIEW_CELL_WIDTH = len(VIEW_CELL_HEAD)
 
 
 def _view_cell(counts: dict) -> str:
-    """One view's ``frames/missing  keyframes/verified`` cell."""
-    return (f"{counts['frames']:>4}/{counts['missing']:<3}"
-            f"{counts['keyframes']:>6}/{counts['verified']:<4}")
+    """One view's ``frames/missing  keyframes  done/work`` cell.
+
+    ``done/work`` is the machine chooser's ``[done/total]``: confirmed frames
+    out of the frames that are work for the view.  A frame with no image is
+    not (task U2c) -- Space is refused there -- so a finished view reads
+    ``n/n`` here exactly as it does in the window.
+    """
+    return (f"{counts['frames']:>4}/{counts['missing']:<3}{counts['keyframes']:>5}"
+            f"{counts['done']:>7}/{counts['work']:<5}")
 
 
 def format_status(rows: list[dict]) -> str:
@@ -457,7 +464,7 @@ def format_status(rows: list[dict]) -> str:
         f"{view:^{VIEW_CELL_WIDTH}}" for view in VIEWS
     )
     lines = [head, f"{'':<20} | " + " | ".join(
-        f"{'frames/miss  kf/ver':^{VIEW_CELL_WIDTH}}" for _ in VIEWS
+        f"{VIEW_CELL_HEAD:^{VIEW_CELL_WIDTH}}" for _ in VIEWS
     ), "-" * len(head)]
     for row in rows:
         lines.append(
@@ -466,7 +473,8 @@ def format_status(rows: list[dict]) -> str:
         )
     pending = sum(sum(r["views"][view].get("rechecks", 0) for view in VIEWS) for r in rows)
     total = {view: {k: sum(r["views"][view][k] for r in rows)
-                    for k in ("frames", "missing", "keyframes", "verified")} for view in VIEWS}
+                    for k in ("frames", "missing", "keyframes", "done", "work")}
+             for view in VIEWS}
     lines.append("-" * len(head))
     lines.append(
         f"{'TOTAL':<8}{sum(r['steps'] for r in rows):>6}"
@@ -488,13 +496,14 @@ def format_desktop(db: Db, row: dict) -> str:
         f"Desktop {row['desktop']}  {row['brand']}",
         f"  steps {row['steps']} ({types or 'none'}), actions {row['actions']}, "
         f"instances {row['instances']}, state events {row['events']}",
-        f"  {'view':<6}{'frames':>8}{'missing':>9}{'keyframes':>11}{'verified':>10}",
+        f"  {'view':<6}{'frames':>8}{'missing':>9}{'keyframes':>11}{'done/work':>12}",
     ]
     for view in VIEWS:
         counts = row["views"][view]
+        # done/work as the window's [done/total]: no-image frames are not work
         lines.append(
             f"  {view:<6}{counts['frames']:>8}{counts['missing']:>9}"
-            f"{counts['keyframes']:>11}{counts['verified']:>10}"
+            f"{counts['keyframes']:>11}{counts['done']:>7}/{counts['work']:<4}"
         )
     for view in VIEWS:
         waiting = row["views"][view].get("rechecks", 0)

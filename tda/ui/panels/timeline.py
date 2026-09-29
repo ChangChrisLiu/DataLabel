@@ -6,9 +6,10 @@ flips the list into chronological order for reading.
 
 Each row carries a coloured bar telling the frame's status at a glance -- grey
 unlabeled, yellow auto, green verified, red conflict or needs-review, and a
-hatched bar for a step this view has no image for.  Thumbnails are read from
-the cache only when their row is actually on screen and are kept as ``QPixmap``
-afterwards, so opening a 120-step machine costs no disk I/O.
+hatched bar for a step this view has no image for, whose row also says
+无图像: it is not work, and it is not counted as "not done".  Thumbnails are
+read from the cache only when their row is actually on screen and are kept as
+``QPixmap`` afterwards, so opening a 120-step machine costs no disk I/O.
 
 The panel never decides anything: a click only reports
 (:attr:`TimelinePanel.sigOpenStep`) and the highlight follows ``sigFrameChanged``
@@ -35,8 +36,8 @@ from PySide6.QtWidgets import (
 from tda.ui import session_api as api
 from tda.ui.panels import session_is_open
 
-__all__ = ["BREAK_COLOR", "BREAK_ROLE", "TimelinePanel", "STATUS_COLORS",
-           "read_thumb", "status_brush"]
+__all__ = ["BREAK_COLOR", "BREAK_ROLE", "NO_IMAGE_TEXT", "TimelinePanel",
+           "STATUS_COLORS", "read_thumb", "row_text", "status_brush"]
 
 
 def read_thumb(path: str, size: int) -> Optional[QImage]:
@@ -155,6 +156,21 @@ STATUS_COLORS: dict[str, QColor] = {
     api.STATUS_RECHECK: QColor(224, 140, 48),
     api.STATUS_MISSING: QColor(150, 150, 156),
 }
+
+
+#: What a row with no image in this view says, and why it is not "not done":
+#: nothing can be confirmed there, so it is not counted either (task U2c).
+NO_IMAGE_TEXT = "无图像"
+NO_IMAGE_TIP = ("这一帧在这个视角没有图像：不用做，也不算进 [已确认/总数] / "
+                "no image in this view: nothing to do here, and not counted")
+NO_IMAGE_COLOR = QColor(150, 150, 156)
+
+
+def row_text(step: int, status: str) -> str:
+    """A row's label: the step, and "无图像" when the view has no picture of it."""
+    if status == api.STATUS_MISSING:
+        return f"Step {step} · {NO_IMAGE_TEXT}"
+    return f"Step {step}"
 
 
 def status_brush(status: str) -> QBrush:
@@ -297,7 +313,7 @@ class TimelinePanel(QWidget):
             for step in self._ordered_steps():
                 item = QListWidgetItem(f"Step {step}")
                 item.setData(STEP_ROLE, step)
-                item.setData(STATUS_ROLE, self._status(step))
+                self._set_status(item, step, self._status(step))
                 item.setData(BREAK_ROLE, step in self._breaks)
                 item.setSizeHint(
                     QSize(self.THUMB_SIZE * 2, self.THUMB_SIZE + 2 * self.BAR_WIDTH)
@@ -551,8 +567,24 @@ class TimelinePanel(QWidget):
     def _refresh_statuses(self) -> None:
         for row in range(self._list.count()):
             item = self._list.item(row)
-            item.setData(STATUS_ROLE, self._status(int(item.data(STEP_ROLE))))
+            step = int(item.data(STEP_ROLE))
+            self._set_status(item, step, self._status(step))
         self._list.viewport().update()
+
+    @staticmethod
+    def _set_status(item: QListWidgetItem, step: int, status: str) -> None:
+        """The bar's colour, and for a frame with no image, the words and the grey.
+
+        The hatched bar alone read as one more shade of "not done yet" (task
+        U2c); the row now says 无图像 and is greyed like the placeholder.
+        """
+        item.setData(STATUS_ROLE, status)
+        item.setText(row_text(step, status))
+        missing = status == api.STATUS_MISSING
+        # ``None`` clears the role: an empty QBrush would paint no text at all
+        item.setData(Qt.ItemDataRole.ForegroundRole,
+                     QBrush(NO_IMAGE_COLOR) if missing else None)
+        item.setData(Qt.ItemDataRole.ToolTipRole, NO_IMAGE_TIP if missing else None)
 
     def _visible_rows(self) -> list[int]:
         viewport = self._list.viewport().rect()

@@ -38,6 +38,7 @@ from tda.ui.panels.taskcard import (
     TaskCardPanel,
     instance_of,
     pair_problems,
+    unlisted_problems,
 )
 from tda.ui.panels.timeline import TimelinePanel, status_brush
 
@@ -632,6 +633,52 @@ def test_taskcard_problems_do_not_survive_a_frame_change(session: StubSession) -
     session.problems = []
     panel.confirm()          # what Space (and the palette's 确认整帧) calls
     assert panel.problems() == []
+
+
+def test_unlisted_problems_leave_out_what_an_open_row_already_is() -> None:
+    """U2c: a missing shape *is* its open row; the card is the to-do list."""
+    rows = [{"instance": "a.01", "kind": api.KIND_ADD_SHAPE, "done": False},
+            {"instance": "b.01", "kind": api.KIND_ADD_SHAPE, "done": True},
+            {"instance": "c.01", "kind": api.KIND_ADD_BENCH_BOX, "done": False},
+            {"instance": "s.01", "kind": api.KIND_SPLIT_KEYFRAME, "done": False}]
+    problems = ["missing_shape:a.01", "missing_shape:d.01", "bench_missing:c.01",
+                "missing_shape:s.01", "empty_visible:a.01",
+                "conflict 3 superseded: the inputs moved on"]
+    # a.01's *other* problem is not what its row asks for, so it stays
+    assert unlisted_problems(problems, rows) == ["missing_shape:d.01",
+                                                 "empty_visible:a.01"]
+
+
+def test_taskcard_arrival_lists_only_what_the_rows_do_not_say(
+        session: StubSession) -> None:
+    """Arriving said "N problem(s) — 见任务卡" over a card with no pane (U2c)."""
+    panel = TaskCardPanel(session)
+    shown: list[int] = []
+    panel.sigProblemsShown.connect(shown.append)
+
+    # screw.cpu_cooler.03 is an open row: its missing shape is that row
+    session.sigProblems.emit(["missing_shape:screw.cpu_cooler.03"])
+    assert panel.problems_visible() is False
+    assert shown == [0]
+
+    session.sigProblems.emit(["missing_shape:screw.cpu_cooler.03",
+                              "missing_shape:psu.01"])
+    assert panel.problems_visible() is True
+    assert [r["code"] for r in panel.problem_rows()] == ["missing_shape:psu.01"]
+    assert shown[-1] == 1 == panel.problem_count()
+
+    # a re-check that failed on another step is not this frame's list: the
+    # window reports it in its own words, and the pane stays as it was
+    session.sigProblems.emit(["step 3: re-check failed: boom"])
+    assert [r["code"] for r in panel.problem_rows()] == ["missing_shape:psu.01"]
+    assert shown == [0, 1]
+
+    # a refused Space still lists everything, the row's own code included
+    session.confirm_result = False
+    panel.confirm()
+    assert [r["code"] for r in panel.problem_rows()] == [
+        "missing_shape:screw.cpu_cooler.03"]
+    assert shown == [0, 1], "a refusal is reported by the window's act_confirm"
 
 
 def test_taskcard_refreshes_on_frame_change(session: StubSession) -> None:

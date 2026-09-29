@@ -740,7 +740,9 @@ def test_the_chooser_count_follows_a_view_switch(window):
     window.act_set_view("oak1")
 
     assert window.session.view == "oak1"
-    assert "[0/2]" in chooser_text(window), chooser_text(window)
+    # the scene's oak1 has two frame rows and no image for either: no work
+    # there, so nothing to count (U2c) -- and the number did change with it
+    assert "[0/0]" in chooser_text(window), chooser_text(window)
 
 
 def test_the_chooser_count_follows_the_sweeper(window, monkeypatch):

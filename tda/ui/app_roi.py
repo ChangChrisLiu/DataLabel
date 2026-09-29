@@ -23,9 +23,12 @@ __all__ = ["RoiMixin", "as_bgr"]
 
 #: What :meth:`SessionLike.instance_rows` calls a part lying in the staging area.
 ON_BENCH = "on_bench"
-#: Shown when the detector returns the whole frame, which means "not found".
-NO_CHASSIS_FOUND = ("未能自动找到机箱：请拖一个框 / could not find the chassis: "
-                    "drag a box around it (Enter stores it)")
+#: Shown when the detector returns the whole frame, which means "not found",
+#: while the rectangle is open: what to do right there (task U2c).  The bar
+#: used to end "请按 Shift+R 自己画" over an editor that was already open.
+NO_CHASSIS_FOUND = ("自动没找到机箱：直接在画面上拖一个框框住机箱（或拖白色小方块），"
+                    "Enter 保存；Esc 先跳过 / no chassis found: drag a box around it, "
+                    "Enter to save, Esc to skip")
 #: Shown when Enter arrives before the segment has been measured.
 ROI_STILL_MEASURING = ("还在找机箱，稍等或直接拖框 / still looking for the chassis "
                        "-- wait a moment, or drag a box yourself")
@@ -70,12 +73,15 @@ ROI_NO_PROPOSAL = ("还没有可确认的框：按 Shift+R 自己画一个 / not
 #: Said when "确认建议框" has to go and measure the segment again first.
 ROI_REMEASURING = ("正在重新测量机箱范围，量到就存 / re-measuring the chassis "
                    "range; it will be stored when it lands")
-#: Appended to the bar when the offered rectangle is one that will not be
-#: stored, so that a button that is going to refuse says so before it is
-#: pressed rather than after (round 2, C1).
-ROI_BAR_UNUSABLE = ("自动框没找到机箱：整幅图不作为 ROI，请按 Shift+R 自己画 / "
-                    "the detector found no chassis; a whole-frame rectangle is "
-                    "never stored -- draw one with Shift+R。")
+#: The detector's "not found" once the rectangle is closed (after ``Esc``):
+#: then, and only then, the way back to it is ``Shift+R``.
+NO_CHASSIS_CLOSED = ("自动框没找到机箱：整幅图不作为 ROI，请按 Shift+R 自己画 / "
+                     "the detector found no chassis; a whole-frame rectangle is "
+                     "never stored -- draw one with Shift+R")
+#: Appended to the reminder bar when the offered rectangle is one that will
+#: not be stored, so that a button that is going to refuse says so before it
+#: is pressed rather than after (round 2, C1).
+ROI_BAR_UNUSABLE = NO_CHASSIS_CLOSED + "。"
 #: Refused: too small to be a chassis.  The floor is the ruled 64 px / 5 % of
 #: the frame's shorter side, capped at half of it so that a small frame (the
 #: 64x64 test scene, a thumbnail) still has usable rectangles at all.
@@ -415,11 +421,13 @@ class RoiMixin:
         own visibility -- agrees about what is storable. A button that refuses
         after it has switched the window into rectangle mode is how ``Enter``
         came to be routed at a rectangle nobody could see (round 2, C1).
+        The whole-frame "not found" is said for where the annotator is: over
+        an open rectangle, drag one here; with none open, ``Shift+R`` (U2c).
         """
         if box is None:
             return ROI_NO_PROPOSAL
         if self._is_whole_frame(box):
-            return NO_CHASSIS_FOUND
+            return NO_CHASSIS_FOUND if self.roi_editing else NO_CHASSIS_CLOSED
         hw = None if self.overlay is None else self.overlay.hw
         floor = roi_min_side(hw)
         x0, y0, x1, y1 = (float(v) for v in box)
@@ -465,14 +473,17 @@ class RoiMixin:
                    else self.roi_proposal_for_segment())
         # A whole-frame "not found" is not something ``确认建议框`` will store,
         # so the bar says so instead of letting the button refuse afterwards.
-        unusable = offered is not None and bool(self.roi_refusal(offered))
+        refusal = "" if offered is None else self.roi_refusal(offered)
+        unusable = bool(refusal)
         if self.roi_editing:
             for name in ("save", "skip"):
                 buttons[name].setVisible(True)
             for name in ("accept", "redraw", "none"):
                 buttons[name].setVisible(False)
             editing = ROI_BAR_EDITING_STORED if self.roi() is not None else ROI_BAR_EDITING
-            self.roi_bar.show_text(editing + (ROI_BAR_UNUSABLE if unusable else ""))
+            # The rectangle is open: the bar says what ``Enter`` would answer,
+            # in the words for right here -- never "press Shift+R" (U2c).
+            self.roi_bar.show_text(editing + refusal)
             return
         if self.roi_unanswered():
             buttons["save"].setVisible(False)
