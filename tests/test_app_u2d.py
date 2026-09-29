@@ -9,6 +9,8 @@
    card's pane made Space refuse -- and a click on one of them did nothing.
 5. The pane listed notes Space accepts (``empty_visible``...) among the
    problems that block it, and the status line said "见任务卡" for either.
+6. A conflict verdict announced a frame change without the frame's problems,
+   so the card's pane went empty.
 9. The window opened silent about its first frame's pane: the card emitted
    before anything listened.
 """
@@ -450,5 +452,34 @@ def test_the_window_opens_quiet_over_notes_alone(qapp, tmp_path):
     try:
         assert win.task_card.problems_visible() and win.task_card.problem_count() == 0
         assert "见任务卡" not in win.status_message()
+    finally:
+        close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# item 6: a conflict verdict leaves the card's pane right
+# --------------------------------------------------------------------------- #
+def test_a_conflict_verdict_announces_the_frame_with_its_problems(qapp, tmp_path):
+    session = rows_done_but_one_unlisted(tmp_path)
+    said: list[list[str]] = []
+    session.sigProblems.connect(said.append)
+    assert session.resolve_conflict(9999, api.RESOLVE_ACCEPT_NEW) == "refused"
+    # the frame's own codes first, the verdict after them
+    assert said[-2] == session.current_problems() == [f"missing_shape:{UNLISTED}"]
+    assert said[-1][0].startswith("conflict 9999 not resolved")
+
+
+def test_the_pane_survives_a_conflict_verdict(qapp, tmp_path):
+    session = rows_done_but_one_unlisted(tmp_path)
+    win = open_window(tmp_path, session=session)
+    try:
+        answer_roi(win)
+        assert pane_codes(win) == [f"missing_shape:{UNLISTED}"]
+        win.resolve_conflict(9999, api.RESOLVE_ACCEPT_NEW)   # K / N in Review
+        QApplication.processEvents()
+        # the frame change emptied the pane and nothing filled it again
+        assert pane_codes(win) == [f"missing_shape:{UNLISTED}"]
+        assert win.guide_facts().blockers == 1
+        assert "conflict 9999 refused" in win.status_message()   # the verdict is said
     finally:
         close_window(win)

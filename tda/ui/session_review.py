@@ -171,25 +171,28 @@ class ReviewMixin:
             the conflict is gone, already settled, or the decision cannot be
             applied to it.
 
-        The reason is emitted on :attr:`sigProblems` for the last two.
+        The reason is emitted on :attr:`sigProblems` for the last two, *after*
+        the frame is announced with its own problems (:meth:`_announce`): a
+        frame change on its own emptied the task card's pane, and nothing
+        filled it again until the annotator moved (U2d).
         """
         if not self.is_open:
             self.sigProblems.emit([f"conflict {cid} not resolved: no view is open"])
             return "refused"
         conflict = self.db.get_conflict(int(cid))
-        outcome = "resolved"
+        outcome, said = "resolved", ""
         try:
             self.truth.resolve_conflict(int(cid), resolution, self.annotator)
         except StaleConflictError as stale:
-            outcome = "superseded"
-            self.sigProblems.emit([f"conflict {cid} superseded: {stale}"])
+            outcome, said = "superseded", f"conflict {cid} superseded: {stale}"
         except (KeyError, ValueError) as refused:
-            outcome = "refused"
-            self.sigProblems.emit([f"conflict {cid} not resolved: {refused}"])
+            outcome, said = "refused", f"conflict {cid} not resolved: {refused}"
         if conflict is not None:
             stats = edit.refresh_steps(self.db, self.truth, self.desktop, self.view,
                                        [conflict["step"]])
             self.review.problems.update(stats["problems"])
         self._invalidate()
-        self.sigFrameChanged.emit(self.current())
+        self._announce()
+        if said:
+            self.sigProblems.emit([said])
         return outcome
