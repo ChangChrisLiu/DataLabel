@@ -123,6 +123,10 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         for name, why in compat.ADAPTED.items():
             self.logger.info("session gap adapted: %s (%s)", name, why)
         self.render_frame()
+        # The card filled its pane for this frame while it was being built,
+        # before the status line listened, and render_frame has just cleared
+        # the line: say it now, in the order every arrival does (U2d).
+        self.task_card.announce()
 
     # ------------------------------------------------------- lazy step table
     @property

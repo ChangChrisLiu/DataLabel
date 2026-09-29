@@ -889,6 +889,15 @@ class TaskCardPanel(QWidget):
             self._show_problems(shown, ARRIVAL_TITLE)
         else:
             self._hide_problems()
+        self.announce()
+
+    def announce(self) -> None:
+        """Say again what the pane holds that stops Space (:attr:`sigProblemsShown`).
+
+        For a listener that attached after the pane was filled: the window's
+        status line, whose card read the first frame's problems while the
+        window was still being built (U2d).
+        """
         self.sigProblemsShown.emit(self.problem_count())
 
     def _show_problems(self, problems: list[str], title: str = REFUSAL_TITLE) -> None:

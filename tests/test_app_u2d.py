@@ -9,6 +9,8 @@
    card's pane made Space refuse -- and a click on one of them did nothing.
 5. The pane listed notes Space accepts (``empty_visible``...) among the
    problems that block it, and the status line said "见任务卡" for either.
+9. The window opened silent about its first frame's pane: the card emitted
+   before anything listened.
 """
 from __future__ import annotations
 
@@ -422,5 +424,31 @@ def test_a_blocker_on_arrival_says_to_fix_it_first(qapp, tmp_path):
         QApplication.processEvents()
         assert win.task_card._problems_label.text() == ARRIVAL_TITLE
         assert "1 个问题要先处理 — 见任务卡" in win.status_message()
+    finally:
+        close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# item 9: the frame the window opens on is an arrival like any other
+# --------------------------------------------------------------------------- #
+def test_the_window_opens_saying_what_blocks_its_first_frame(qapp, tmp_path):
+    """The card filled its pane before the status line listened (as in ``main``)."""
+    session = rows_done_but_one_unlisted(tmp_path)
+    win = open_window(tmp_path, session=session)
+    try:
+        assert pane_codes(win) == [f"missing_shape:{UNLISTED}"]
+        assert "1 个问题要先处理 — 见任务卡" in win.status_message()
+        assert win.guide_facts().blockers == 1          # the ROI question comes first
+    finally:
+        close_window(win)
+
+
+def test_the_window_opens_quiet_over_notes_alone(qapp, tmp_path):
+    session = rows_done_but_one_unlisted(tmp_path)
+    draw(session, UNLISTED, 0)            # covers the first part: a note, no blocker
+    win = open_window(tmp_path, session=session)
+    try:
+        assert win.task_card.problems_visible() and win.task_card.problem_count() == 0
+        assert "见任务卡" not in win.status_message()
     finally:
         close_window(win)
