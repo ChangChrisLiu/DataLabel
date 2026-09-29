@@ -118,8 +118,10 @@ PALETTE_64: tuple[RGB, ...] = _build_palette()
 #: Highlight colour of the instance currently being edited (spec 4.3): one
 #: fixed colour, never a palette entry, so "what am I painting" is unambiguous.
 EDIT_RGB: RGB = (255, 232, 64)
-#: Frame-level occluder layer colour (spec 3.1 ``OccluderMask``).
-OCCLUDER_RGB: RGB = (255, 72, 72)
+#: Frame-level occluder layer colour (spec 3.1 ``OccluderMask``).  Its hue is
+#: one the palette keeps clear of (task U2i), so it is defined with the other
+#: reserved colours.
+OCCLUDER_RGB: RGB = _style.OCCLUDER_RGB
 #: Colour of a proposal nobody has accepted yet -- today the Label Studio draft
 #: on offer (``Shift+A``).  Neither a palette entry nor :data:`EDIT_RGB`: "this
 #: is not yours until you press Enter" has to be visible at a glance.  It is

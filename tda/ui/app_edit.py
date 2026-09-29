@@ -584,7 +584,10 @@ class EditMixin:
         # The panel was activated with a click, so it has the keyboard; give
         # it straight back, or the next ``B`` is a list keystroke.
         self.focus_canvas()
-        self.report(f"editing {instance} / 正在画 {self._edit_label[1] or instance}")
+        # On a frame whose box the gate withheld, the line that said so has
+        # just been replaced by this one: it says it again (task U2i).
+        note = getattr(self, "no_box_note", lambda: "")()
+        self.report(f"editing {instance} / 正在画 {self._edit_label[1] or instance}{note}")
         self.update_status()
 
     @S.guard

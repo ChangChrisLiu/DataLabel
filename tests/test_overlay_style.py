@@ -146,7 +146,7 @@ def test_no_instance_colour_has_an_overlay_hue():
 def test_only_the_roi_band_is_widened_to_25_degrees():
     """U2h: violet and pink 15-18 degrees from the ROI read as the ROI."""
     assert OS.reserved_half_width(OS.ROI_RGB) == OS.ROI_HUE_HALF_WIDTH == 25.0
-    for rgb in (OS.PROMPT_RGB, OS.DRAFT_RGB, OS.SHAPE_RGB):
+    for rgb in (OS.PROMPT_RGB, OS.DRAFT_RGB, OS.SHAPE_RGB, OS.OCCLUDER_RGB):
         assert OS.reserved_half_width(rgb) == OS.RESERVED_HUE_HALF_WIDTH == 15.0
     roi = OS.hue_degrees(OS.ROI_RGB)
     # D13's screw.motherboard.05 under U2g's palette, and the pink next to it
@@ -155,11 +155,23 @@ def test_only_the_roi_band_is_widened_to_25_degrees():
         assert seen not in PALETTE_64
     nearest = min(OS.hue_distance(roi, OS.hue_degrees(p)) for p in PALETTE_64)
     assert nearest >= OS.ROI_HUE_HALF_WIDTH - 1.0, nearest
-    # the palette's wheel: 360 less four bands, the ROI's the wider
+    # the palette's wheel: 360 less five bands, the ROI's the wider
     from tda.ui.canvas.overlay import _free_arcs
 
     free = sum(hi - lo for lo, hi in _free_arcs())
-    assert free == pytest.approx(360.0 - 2 * 25.0 - 3 * 2 * 15.0)
+    assert free == pytest.approx(360.0 - 2 * 25.0 - 4 * 2 * 15.0)
+
+
+def test_no_part_is_the_occluders_red():
+    """U2i: the palette made (242, 92, 92) next to the occluder fill (255, 72, 72)."""
+    from tda.ui.canvas.overlay import OCCLUDER_RGB
+
+    assert OCCLUDER_RGB == OS.OCCLUDER_RGB and OS.OCCLUDER_RGB in OS.RESERVED_RGBS
+    red = OS.hue_degrees(OS.OCCLUDER_RGB)
+    assert OS.hue_distance(red, OS.hue_degrees((242, 92, 92))) < 1.0
+    assert (242, 92, 92) not in PALETTE_64
+    nearest = min(OS.hue_distance(red, OS.hue_degrees(p)) for p in PALETTE_64)
+    assert nearest >= OS.RESERVED_HUE_HALF_WIDTH - 1.0, nearest
 
 
 def test_the_drag_band_is_a_colour_the_palette_cannot_make():

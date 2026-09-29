@@ -718,7 +718,8 @@ class GuideMixin:
     def _frame_diff_box(self, key) -> Optional[tuple]:
         """The box SAM is armed with, else the strongest unexplained change.
 
-        Else nothing, when that change is the box the gate withheld.
+        Else nothing, when that change is the box the gate withheld or the
+        one a click outside it turned down on this frame.
         """
         from tda.ui.app_diff import best_unexplained
 
@@ -730,6 +731,11 @@ class GuideMixin:
         if getattr(self, "_withheld_box", None) is not None:
             # The gate withheld it as not the size of the part (task U2h): a
             # hover pointing at it would be the guess the gate just took back.
+            return None
+        refused = getattr(self, "_box_refused_here", None)
+        if callable(refused) and refused():
+            # ... and a click outside it turned it down (task U2i): the same
+            # guess, which the annotator has just said is wrong.
             return None
         blob = best_unexplained(payload)
         return None if blob is None else tuple(float(v) for v in blob.box)
