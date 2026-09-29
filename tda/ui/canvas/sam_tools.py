@@ -62,10 +62,12 @@ __all__ = [
     "ERR_NO_FRAME_TOKEN",
     "ERR_OUT_OF_BOUNDS",
     "FALLBACK_INSTANCE",
+    "PROMPT_BOX_MARGIN_PX",
     "SamResultBridge",
     "SamToolBase",
     "SamPointTool",
     "SamBoxTool",
+    "box_holds",
     "viewport_crop",
 ]
 
@@ -78,6 +80,22 @@ ERR_OUT_OF_BOUNDS = "SAM result dropped: the crop no longer fits the frame"
 ERR_NO_FRAME_TOKEN = "frame token not set: call set_frame_token(...) on frame change"
 #: Emitted when a prompt is attempted while the canvas is showing another frame.
 ERR_FLASHING = "松开 Tab 再操作 / release Tab first: another frame is on screen"
+
+#: How far outside the armed prompt box, in image pixels, the first positive
+#: click of a prompt may land and still count as a click *in* it (task U2g,
+#: addendum B).  A fixed distance rather than a share of the box: the boxes
+#: that matter here are screws of 20-30 px, where 2 % is under one pixel and a
+#: click on the part's own rim would already miss.  Eight pixels is 2-3 screen
+#: pixels at the 29 % an OAK frame opens at and 9 at the scanner's 109 %.
+PROMPT_BOX_MARGIN_PX = 8.0
+
+
+def box_holds(box: Box, x: float, y: float,
+              margin: float = PROMPT_BOX_MARGIN_PX) -> bool:
+    """Is ``(x, y)`` inside ``box`` grown by ``margin`` (edges included)?"""
+    x0, y0, x1, y1 = (float(v) for v in box)
+    m = float(margin)
+    return (x0 - m) <= float(x) <= (x1 + m) and (y0 - m) <= float(y) <= (y1 + m)
 
 
 
@@ -174,7 +192,12 @@ class SamToolBase(CandidatesMixin, Tool):
         self._cancel()
 
     def _cancel(self) -> None:
-        """Invalidate the in-flight prompt, forget the state, clear the band."""
+        """Invalidate the in-flight prompt, forget the state, clear the drag band.
+
+        Only the *drag* band: the armed prompt box is the window's, it keeps
+        it across a tool switch and :meth:`~tda.ui.app_assist.AssistMixin.rearm_sam`
+        hands it back, so it has to stay on screen too (U2g addendum A).
+        """
         self.reset_prompt()
         rubber_band = getattr(self.canvas, "set_rubber_band", None)
         if rubber_band is not None:
@@ -524,11 +547,28 @@ class SamPointTool(SamToolBase):
     :meth:`~SamToolBase.set_prompt_box` holds a box -- the changed region from
     the difference map, or the last :class:`SamBoxTool` drag -- the click is
     sent as point+box instead, which needs no candidates.
+
+    **Unless the click says the box is wrong** (task U2g, addendum B): the
+    difference map's box is a guess, and on D13/scan 37 it sat on a cable that
+    had moved more than the screw that was taken out.  A first positive click
+    more than :data:`PROMPT_BOX_MARGIN_PX` outside it is the annotator pointing
+    somewhere else, and sending it with the cable's box asked SAM for the
+    cable.  So that prompt goes point-only: the box is not sent,
+    :attr:`sigBoxRefused` asks the window to take it off both tools and the
+    canvas, and no later click of the same prompt brings it back
+    (:attr:`box_refused`).  A first click inside the box is sent exactly as
+    before.
     """
+
+    #: The first positive click of a prompt landed outside the armed box; the
+    #: payload is the box that was not sent.
+    sigBoxRefused = Signal(object)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.points: list[Point] = []
+        #: This prompt turned the armed box down; cleared with the prompt.
+        self.box_refused = False
 
     def on_press(self, x: float, y: float, ev: Any) -> None:
         """Left click = foreground, right click **or ``Alt`` + click** = background.
@@ -538,8 +578,18 @@ class SamPointTool(SamToolBase):
         "hold a modifier" is one hand on a keyboard the annotator already has.
         """
         self._sync_identity()  # the box may belong to the previous target
-        self.points.append((float(x), float(y), 0 if self._is_negative(ev) else 1))
-        self._submit(self.points, box=self.prompt_box)
+        positive = not self._is_negative(ev)
+        if (positive and self.prompt_box is not None and not self.box_refused
+                and not any(int(label) == 1 for _px, _py, label in self.points)
+                and not box_holds(self.prompt_box, x, y)):
+            refused, self.prompt_box = self.prompt_box, None
+            self.box_refused = True
+            log.info("sam prompt: first click (%.1f, %.1f) outside the prompt box %s "
+                     "(margin %.0f px): point only", float(x), float(y),
+                     tuple(int(round(v)) for v in refused), PROMPT_BOX_MARGIN_PX)
+            self.sigBoxRefused.emit(refused)
+        self.points.append((float(x), float(y), 1 if positive else 0))
+        self._submit(self.points, box=None if self.box_refused else self.prompt_box)
 
     @staticmethod
     def _is_negative(ev: Any) -> bool:
@@ -565,9 +615,10 @@ class SamPointTool(SamToolBase):
         self.points = []
 
     def reset_prompt(self) -> None:
-        """Also forget the points: they belong to the prompt, not to the session."""
+        """Also forget the points, and that the box was turned down: both are the prompt's."""
         super().reset_prompt()
         self.clear_points()
+        self.box_refused = False
 
 
 class SamBoxTool(SamToolBase):

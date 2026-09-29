@@ -31,7 +31,8 @@ from tda.ui.app_diff import (
 )
 from tda.ui.app_roi_worker import RoiProposer
 
-__all__ = ["ASSIST_CONFIRM_WAIT", "NO_ALTERNATE", "AssistMixin"]
+__all__ = ["ASSIST_CONFIRM_WAIT", "BOX_REFUSED", "NO_ALTERNATE", "PROMPT_ARMED",
+           "PROMPT_CHIP", "PROMPT_CHIP_RANK", "PROMPT_TOO_BIG", "AssistMixin"]
 
 class _SamLoader(QObject):
     """Carries the outcome of the background SAM load onto the GUI thread."""
@@ -67,6 +68,27 @@ ALT_GHOST = ("草稿幽灵正开着，先 Enter 或 Esc / the draft ghost owns t
 APPLIED_MASK_STAYS = ("；上一个框的掩码已经并进图层，不要就 Ctrl+Z / the "
                       "previous box's mask is part of the layer now: Ctrl+Z "
                       "takes it off")
+#: The armed box's chip on the canvas (task U2g, addendum A): what it is, and
+#: that it is a guess -- on D13/scan 37 it sat on a cable, not on the screw.
+PROMPT_CHIP = "SAM 提示框（程序猜的位置）"
+#: ... and after ``Shift+C``: which of how many.
+PROMPT_CHIP_RANK = "SAM 提示框 {rank}/{total}"
+#: The arrival line, when the difference map arms a box (addendum C).  The
+#: box's coordinates and size go to the log, not here.
+PROMPT_ARMED = ("虚线小框是程序猜的位置（这一帧和下一帧差别最大的地方）：对就直接在零件上点 S；"
+                "不对就直接点零件，框会自动不用，或按 Shift+C 换一个 / the dashed box is "
+                "a guess: click the part; a click outside it drops the box, "
+                "Shift+C offers another")
+#: ... and when the change is too big to be a box at all.
+PROMPT_TOO_BIG = ("这一帧差不多整块机箱范围都变了，这次没有提示框：直接在零件上点 S 就行 / "
+                  "almost the whole chassis range changed: no prompt box this "
+                  "time, just click the part")
+#: The first click of a prompt landed outside the armed box (addendum B).
+BOX_REFUSED = ("你点在提示框外：这次只用你的点，提示框不用了 / clicked outside the "
+               "prompt box: point only")
+#: ... held against SAM's "+N px" line, which lands a fraction of a second
+#: later and would otherwise wipe the one sentence saying why the box went.
+BOX_REFUSED_HOLD_MS = 4000
 
 
 def _covers_most(box, roi, limit: float = MAX_PROMPT_BOX_FRAC) -> bool:
@@ -101,6 +123,9 @@ class AssistMixin:
             # What the annotator has deliberately rubbed out is never put back
             # by an add-only result (ruling E1); the session owns the set.
             tool.erased_provider = self.erased_mask
+        # Direct: the window takes the box off both tools before the click
+        # that turned it down is submitted.
+        self.sam_point.sigBoxRefused.connect(self.on_prompt_box_refused)
 
         self.assist = AssistController(self)
         self.assist.sigBlobs.connect(self._on_blobs)
@@ -202,6 +227,7 @@ class AssistMixin:
         self._rank_one = None
         self._prompt_rank = 0
         self.canvas.set_prompt_point(None)
+        self.canvas.set_rubber_band(None, kind="prompt")
 
     def reset_prompt_rank(self) -> None:
         """Put the armed box back to rank 1 -- the difference map's own offer.
@@ -267,19 +293,38 @@ class AssistMixin:
         return APPLIED_MASK_STAYS if applied else ""
 
     def _arm_prompt_box(self, box: Optional[tuple],
-                        point: Optional[tuple] = None) -> None:
+                        point: Optional[tuple] = None,
+                        label: str = PROMPT_CHIP) -> None:
         """Put one box -- and optionally the pixel to click inside it -- on both tools.
 
         Both, always: ``S`` and ``X`` share the armed box, and arming only the
         tool that happens to be active is how switching to the other one
-        silently downgraded the prompt to point-only.
+        silently downgraded the prompt to point-only.  ``None`` takes it off
+        both, and off the canvas -- the one funnel for that too.
         """
         self._prompt_box = box
         for tool in (self.sam_point, self.sam_box):
             tool.set_prompt_box(box)
-        if not self.roi_editing:
-            self.canvas.set_rubber_band(box)
+        # The difference map's box, not a drag: its own band, colour and chip
+        # saying it is a guess (U2g addendum A).  The canvas keeps it off the
+        # screen by itself while the ROI rectangle is being edited.
+        self.canvas.set_rubber_band(box, kind="prompt", label=label)
         self.canvas.set_prompt_point(point)
+
+    @S.guard
+    def on_prompt_box_refused(self, box: object) -> None:
+        """The first click of a prompt landed outside the armed box: point only.
+
+        :class:`~tda.ui.canvas.sam_tools.SamPointTool` has already left the box
+        out of the click; this takes it off **both** tools and the canvas
+        through :meth:`_arm_prompt_box`, so ``X``, a tool switch
+        (:meth:`rearm_sam`) and the hover all agree that there is no box now.
+        ``Shift+C`` still offers the alternates: it starts a new prompt.
+        """
+        self.logger.info("prompt box %s dropped: the first click was outside it",
+                         None if box is None else tuple(int(round(v)) for v in box))
+        self._arm_prompt_box(None)
+        self.report(BOX_REFUSED, hold_ms=BOX_REFUSED_HOLD_MS)
 
     def rearm_sam(self) -> None:
         """Give a freshly attached SAM tool its frame token and prompt box back.
@@ -318,8 +363,9 @@ class AssistMixin:
             # and re-arming an attached tool may already have set it: say it.
             tool.set_prompt_box(None)
         self.set_sam_instance(getattr(self.session, "editing_instance", None))
-        if not self.roi_editing:
-            self.canvas.set_rubber_band(None)
+        # Both bands: the armed box and any drag were about the frame just left.
+        self.canvas.set_rubber_band(None)
+        self.canvas.set_rubber_band(None, kind="prompt")
         if self._assist_subject() == self._assist_asked:
             # The same two frames, inside the same ROI: the difference between
             # them cannot have changed, so the comparison on hand (or the one
@@ -557,6 +603,11 @@ class AssistMixin:
         roi = self.roi()
         if roi is None:
             return
+        if self.sam_point.box_refused:
+            # The prompt being built has already turned a box down with a
+            # click outside it; a comparison landing late must not put one
+            # back under the annotator's next click (U2g addendum B).
+            return
         box = tuple(float(v) for v in blob.box)
         if _covers_most(box, roi):
             # "Everything changed" is not a prompt: it narrows nothing, and it
@@ -565,16 +616,18 @@ class AssistMixin:
             self.clear_prompt_box()
             for tool in (self.sam_point, self.sam_box):
                 tool.set_prompt_box(None)
-            self.report(f"差异覆盖了 ROI 的整块，不作为框提示 / the changed region "
-                        f"covers most of the ROI: point-only ({blob.area} px)")
+            self.logger.info("the changed region covers most of the ROI: no prompt "
+                             "box, point-only (%d px)", int(blob.area))
+            self.report(PROMPT_TOO_BIG)
             return
         # This is rank 1 by definition: the difference map arming its own blob.
         # Whatever ``Shift+C`` was walking belonged to the previous offer.
         self._rank_one = box
         self._prompt_rank = 0
         self._arm_prompt_box(box)
-        self.report(f"prompt box from the difference map: "
-                    f"{tuple(int(v) for v in blob.box)} ({blob.area} px)")
+        self.logger.info("prompt box from the difference map: %s (%d px)",
+                         tuple(int(v) for v in blob.box), int(blob.area))
+        self.report(PROMPT_ARMED)
 
     # ------------------------------------------------- alternate box prompts
     def prompt_rank(self) -> int:
@@ -651,21 +704,23 @@ class AssistMixin:
         note = self._drop_prompt_for_new_box()
         total = len(alternates) + 1
         self._prompt_rank = (self._prompt_rank + 1) % total
+        chip = PROMPT_CHIP_RANK.format(rank=self._prompt_rank + 1, total=total)
         if self._prompt_rank == 0:
-            self._arm_prompt_box(self._rank_one)
+            self._arm_prompt_box(self._rank_one, label=chip)
             self.report(f"提示框 1/{total}：差异图原本给的那块 / "
                         f"prompt box 1/{total}: the difference map's own{note}")
             return
         part = alternates[self._prompt_rank - 1]
         box = tuple(float(v) for v in part.box)
-        self._arm_prompt_box(box, part.point)
+        self._arm_prompt_box(box, part.point, label=chip)
         self.logger.info("prompt box %d/%d box=%s point=%s area=%d",
                          self._prompt_rank + 1, total,
                          tuple(int(v) for v in part.box), part.point, part.area)
-        self.report(f"提示框 {self._prompt_rank + 1}/{total}："
-                    f"{tuple(int(v) for v in part.box)}（{part.area} 像素，"
-                    f"在十字处点一下）/ prompt box {self._prompt_rank + 1}/{total} "
-                    f"from the split difference map{note}")
+        # Where and how big is in the log line above; the status line says
+        # what to do (U2g addendum C).
+        self.report(f"提示框 {self._prompt_rank + 1}/{total}：差异图拆出的另一块，"
+                    f"在十字处点一下 / prompt box {self._prompt_rank + 1}/{total} "
+                    f"from the split difference map: click the cross{note}")
 
     def unexplained_boxes(self) -> list[Box]:
         """Boxes of the changes nothing on this frame accounts for."""

@@ -150,7 +150,7 @@ class GuidePlan:
 # --------------------------------------------------------------------------- #
 # the five steps of a frame
 # --------------------------------------------------------------------------- #
-ROI_NOW = "回答机箱范围（ROI）：拖黄框的白色小方块调整，Enter 保存 / Esc 先跳过"
+ROI_NOW = "回答机箱范围（ROI）：拖紫红框的白色小方块调整，Enter 保存 / Esc 先跳过"
 #: A stored ROI opened to check it: Esc keeps it, it skips nothing (round 2).
 ROI_EDIT_NOW = "机箱范围（ROI）：拖白色小方块调整，Enter 保存 / Esc 不改"
 ROI_DONE = "机箱范围（ROI）✓"
@@ -301,7 +301,7 @@ def _annotate_plan(facts: GuideFacts) -> GuidePlan:
         # keeps what is stored (U2b round 2 -- D13/scan already has one).
         now = ("现在：拖边 / 角调整已存的机箱范围（框里按住整体挪），按 Enter 保存；"
                "不改按 Esc（保持原来的）" if facts.roi_stored else
-               "现在：调好黄框（拖白色小方块），按 Enter 保存；暂时不想管就按 Esc")
+               "现在：调好紫红框（拖白色小方块），按 Enter 保存；暂时不想管就按 Esc")
         return GuidePlan(PHASE_ROI, title, now, _steps(facts, 0), "commit")
     if facts.bench:
         return GuidePlan(PHASE_BENCH, title,

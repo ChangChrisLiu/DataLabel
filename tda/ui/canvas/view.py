@@ -38,12 +38,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from tda.ui.canvas import overlay_style as OS
 from tda.ui.canvas.overlay import LabelOverlay
 
 __all__ = ["CURSOR_MAX_PX", "ImageCanvas", "MiniMap", "OverlayItem", "ToolCursor",
            "circle_cursor"]
 
 Rect = tuple[int, int, int, int]
+
+
+def _same_box(a, b, tol: float = 0.5) -> bool:
+    """Two ``(x0, y0, x1, y1)`` boxes within ``tol`` image px of each other."""
+    return all(abs(float(p) - float(q)) <= tol for p, q in zip(a, b))
 
 #: Largest ring a circle cursor is drawn at, in screen pixels.  Above this the
 #: platform's cursor would be scaled down (Windows) or refused, so the cursor
@@ -118,16 +124,20 @@ def circle_cursor(diameter: int, rgb: tuple[int, int, int], dashed: bool,
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     box = QRectF(3.0, 3.0, float(size - 6), float(size - 6))
-    halo = QPen(QColor(0, 0, 0, 170), 3.0)
+    # The canvas' outline style (U2g), in the pixmap's logical pixels: a dark
+    # halo two pixels wider than the opaque ring on top of it.
+    ring = OS.CURSOR_RING_PX
+    halo = QPen(QColor(0, 0, 0, OS.UNDER_ALPHA), ring + OS.UNDER_EXTRA_PX)
     painter.setPen(halo)
     painter.drawEllipse(box)
-    pen = QPen(QColor(*rgb), 1.6)
+    pen = QPen(QColor(*rgb), ring)
     if dashed:
-        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setDashPattern([3.0, 2.0])
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
     painter.setPen(pen)
     painter.drawEllipse(box)
     centre = size / 2.0
-    painter.setPen(QPen(QColor(0, 0, 0, 200), 3.0))
+    painter.setPen(QPen(QColor(0, 0, 0, OS.UNDER_ALPHA), 3.0))
     painter.drawPoint(QPointF(centre, centre))
     painter.setPen(QPen(QColor(*rgb), 1.0))
     painter.drawPoint(QPointF(centre, centre))
@@ -217,7 +227,7 @@ class MiniMap(QWidget):
     #: Where on the image the annotator asked to look, in image pixels.
     sigCentreOn = Signal(float, float)
 
-    #: The viewport's outline on the thumbnail. **Not** the ROI's yellow: the
+    #: The viewport's outline on the thumbnail. **Not** the ROI's colour: the
     #: second trial took this frame for the chassis rectangle and dragged it.
     VIEW_RGB = (90, 200, 255)
 
@@ -350,7 +360,19 @@ class ImageCanvas(QGraphicsView):
         self.overlay_outline = True
         self._panning = False
         self._pan_origin = QPointF()
-        self._rubber_band: Optional[tuple[float, float, float, float]] = None
+        #: Two bands, never one slot for both (U2g addendum A): a box being
+        #: dragged right now, and the difference map's box SAM is armed with.
+        #: They used to share one attribute, so any drag -- or a SAM tool
+        #: detaching on a tool switch -- wiped the armed box off the screen
+        #: while the tools kept sending it with every click.
+        self._drag_band: Optional[tuple[float, float, float, float]] = None
+        self._prompt_band: Optional[tuple[float, float, float, float]] = None
+        self._prompt_band_label = ""
+        #: The label chips as last laid out, viewport coordinates; a pan has to
+        #: repaint the ones pinned to the viewport's edge (see
+        #: :meth:`scrollContentsBy`).
+        self._chip_rects: list = []
+        self._chip_cache: dict[tuple, QPixmap] = {}
         #: The chassis-range rectangle, and whether it is being edited.  Drawn
         #: in :meth:`drawForeground` like the rubber band rather than into the
         #: overlay image: it changes on every mouse move of a drag and the
@@ -519,12 +541,56 @@ class ImageCanvas(QGraphicsView):
                 alpha=self.overlay_alpha, outline=self.overlay_outline, clip=box
             )
 
+    #: The two bands' looks (:mod:`tda.ui.canvas.overlay_style`).
+    BAND_STYLES = {"drag": OS.DRAG_BAND, "prompt": OS.PROMPT_BOX}
+
     def set_rubber_band(
-        self, box: Optional[tuple[float, float, float, float]]
+        self, box: Optional[tuple[float, float, float, float]], kind: str = "drag",
+        label: str = "",
     ) -> None:
-        """Show (or clear) a dashed box, e.g. while dragging a SAM box prompt."""
-        self._rubber_band = box
+        """Show (or clear, with ``None``) one of the two dashed bands.
+
+        ``kind`` says which: ``"drag"`` -- a box being dragged right now (SAM
+        box, bench box), white -- or ``"prompt"`` -- the difference map's box
+        SAM is armed with, orange, with ``label`` on a chip at its corner.
+        Each kind has its own slot: clearing a drag leaves the armed box alone.
+        """
+        if kind not in self.BAND_STYLES:
+            raise ValueError(f"unknown rubber band kind {kind!r}")
+        value = None if box is None else tuple(float(v) for v in box)
+        if kind == "drag":
+            if value == self._drag_band:
+                return
+            self._drag_band = value
+        else:
+            text = str(label or "") if value is not None else ""
+            if value == self._prompt_band and text == self._prompt_band_label:
+                return
+            self._prompt_band, self._prompt_band_label = value, text
         self.viewport().update()
+
+    @property
+    def _rubber_band(self) -> Optional[tuple[float, float, float, float]]:
+        """The band on top: the drag in progress, else the armed prompt box."""
+        return self._drag_band if self._drag_band is not None else self._prompt_band
+
+    def rubber_band_kind(self) -> str:
+        """``"drag"``, ``"prompt"`` or ``""``: which band :attr:`_rubber_band` is."""
+        if self._drag_band is not None:
+            return "drag"
+        return "prompt" if self._prompt_band is not None else ""
+
+    def prompt_band(self) -> tuple[Optional[tuple], str]:
+        """``(box, chip text)`` of the armed prompt box; ``(None, "")`` when none."""
+        return self._prompt_band, self._prompt_band_label
+
+    def _prompt_band_shown(self) -> bool:
+        """The armed box is drawn -- except while the ROI is being edited.
+
+        It was computed inside the rectangle being replaced, and the editor
+        owns the canvas until it is answered; it comes back with ``Esc``.
+        """
+        return self._prompt_band is not None and not self._roi_editing
 
     # -- the chassis range --------------------------------------------------
     #: Half-width, in screen pixels, of a resize handle's square.
@@ -542,9 +608,10 @@ class ImageCanvas(QGraphicsView):
         """Show the chassis-range rectangle (``None`` clears it).
 
         ``editing`` draws the thick dashed outline with its eight handles and
-        dims everything outside it; otherwise a stored rectangle gets a thin,
-        subtle outline that says where the difference map and the SAM prompt
-        boxes are being computed without competing with the masks.
+        dims everything outside it; otherwise a stored rectangle gets a
+        thinner outline that says where the difference map and the SAM prompt
+        boxes are being computed.  Both are :data:`~overlay_style.ROI_RGB`
+        over a dark under-stroke, and both carry the ``机箱范围 ROI`` chip.
         """
         value = None if box is None else tuple(float(v) for v in box)
         if value == self._roi and bool(editing) == self._roi_editing:
@@ -564,20 +631,19 @@ class ImageCanvas(QGraphicsView):
         return {name: (x0 + (x1 - x0) * fx, y0 + (y1 - y0) * fy)
                 for name, fx, fy in self.HANDLES}
 
-    def _draw_roi(self, painter: QPainter) -> None:
+    def roi_shown(self) -> bool:
+        """Is the rectangle on screen?  Hidden with ``A`` unless being edited."""
+        return self._roi is not None and (self._roi_editing or self.roi_outline_visible)
+
+    def _draw_roi(self, painter: QPainter, dpr: float,
+                  exposed: Optional[QRectF] = None) -> None:
         """The rectangle, its handles and the dimmed surround (ruling U-ROI-2)."""
-        if self._roi is None:
-            return
-        if not self._roi_editing and not self.roi_outline_visible:
+        if not self.roi_shown():
             return
         x0, y0, x1, y1 = self._roi
         box = QRectF(x0, y0, x1 - x0, y1 - y0)
         if not self._roi_editing:
-            pen = QPen(QColor(255, 232, 64, 150), 1, Qt.PenStyle.DashLine)
-            pen.setCosmetic(True)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(box)
+            OS.draw_outline_rect(painter, box, OS.ROI_STORED, dpr, exposed=exposed)
             return
         # Everything outside the rectangle goes dark, so "inside" is a thing
         # you can see rather than a thing you have to trace with your eye.
@@ -591,20 +657,10 @@ class ImageCanvas(QGraphicsView):
                              QColor(0, 0, 0, self.DIM_ALPHA))
         # Two strokes: a dark one under a bright dashed one, so the outline is
         # visible both on the dark chassis and on the white scan bed.
-        under = QPen(QColor(0, 0, 0, 220), 5)
-        under.setCosmetic(True)
-        painter.setPen(under)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(box)
-        over = QPen(QColor(255, 232, 64), 3, Qt.PenStyle.DashLine)
-        over.setCosmetic(True)
-        painter.setPen(over)
-        painter.drawRect(box)
+        OS.draw_outline_rect(painter, box, OS.ROI_EDITING, dpr)
         # Handles, sized in screen pixels so they stay grabbable at any zoom.
         half = self.HANDLE_PX / max(self.zoom_factor(), 1e-6)
-        edge = QPen(QColor(0, 0, 0, 230), 1)
-        edge.setCosmetic(True)
-        painter.setPen(edge)
+        painter.setPen(OS.HANDLE_EDGE.over_pen(dpr))
         painter.setBrush(QColor(255, 255, 255))
         for _name, (hx, hy) in self.roi_handle_points().items():
             painter.drawRect(QRectF(hx - half, hy - half, 2 * half, 2 * half))
@@ -733,6 +789,15 @@ class ImageCanvas(QGraphicsView):
         if target is not None:
             self.viewport().update(target)
             self.viewport().update(target.translated(dx, dy))
+        # A chip pinned to the viewport's edge (its box's corner is off
+        # screen) is carried by the blit like the banner: repaint where it
+        # was carried to and where it belongs now.
+        if self._chip_rects:
+            for chip in self._chip_rects:
+                self.viewport().update(chip.translated(dx, dy).toAlignedRect()
+                                       .adjusted(-1, -1, 1, 1))
+            for _text, chip, _pixmap in self.chip_layout():
+                self.viewport().update(chip.toAlignedRect().adjusted(-1, -1, 1, 1))
 
     def set_hint_boxes(self, hints) -> None:
         """Outline where something probably is; ``[]`` takes them away.
@@ -752,25 +817,110 @@ class ImageCanvas(QGraphicsView):
         """The outlines on screen (a copy)."""
         return list(self._hints)
 
-    def _draw_hints(self, painter: QPainter) -> None:
-        if not self._hints:
-            return
-        painter.setBrush(Qt.BrushStyle.NoBrush)
+    def _draw_hints(self, painter: QPainter, dpr: float,
+                    exposed: Optional[QRectF] = None) -> None:
+        """The hover outlines; their labels are chips (:meth:`chip_layout`)."""
         for (x0, y0, x1, y1), _label, rgb in self._hints:
-            pen = QPen(QColor(rgb[0], rgb[1], rgb[2], 190), 2, Qt.PenStyle.DashLine)
-            pen.setCosmetic(True)
-            painter.setPen(pen)
-            painter.drawRect(QRectF(x0, y0, max(1.0, x1 - x0), max(1.0, y1 - y0)))
+            # Outside the box: the part it points at stays uncovered.
+            OS.draw_outline_rect(
+                painter, QRectF(x0, y0, max(1.0, x1 - x0), max(1.0, y1 - y0)),
+                OS.hint_style(rgb), dpr, outside=True, exposed=exposed)
+
+    # -- label chips (task U2g) ---------------------------------------------
+    def _chip_specs(self) -> list[tuple[str, tuple, QRectF, float, float]]:
+        """``(text, rgb, scene box, stroke half-width, extra gap)`` per chip.
+
+        The ROI's first: it is always there, so the others are the ones that
+        make room.  Then the armed prompt box -- unless a hover hint sits on
+        the very same box, whose chip already says what it is -- and every
+        hint with a label.
+        """
+        specs: list[tuple[str, tuple, QRectF, float, float]] = []
+        if self.roi_shown():
+            x0, y0, x1, y1 = self._roi
+            style = OS.ROI_EDITING if self._roi_editing else OS.ROI_STORED
+            # While editing, the corner handle sticks out above the edge.
+            extra = float(self.HANDLE_PX) if self._roi_editing else 0.0
+            specs.append((OS.ROI_CHIP, style.rgb, QRectF(x0, y0, x1 - x0, y1 - y0),
+                          style.under_width / 2.0, extra))
+        if self._prompt_band_shown() and self._prompt_band_label:
+            band = self._prompt_band
+            if not any(_same_box(box, band) for box, label, _rgb in self._hints if label):
+                x0, y0, x1, y1 = band
+                # drawn outside the box: the whole stroke is beyond its edge
+                specs.append((self._prompt_band_label, OS.PROMPT_BOX.rgb,
+                              QRectF(x0, y0, x1 - x0, y1 - y0),
+                              OS.PROMPT_BOX.under_width, 0.0))
+        for (x0, y0, x1, y1), label, rgb in self._hints:
+            if label:
+                specs.append((label, tuple(rgb), QRectF(x0, y0, x1 - x0, y1 - y0),
+                              OS.HINT_PX + OS.UNDER_EXTRA_PX, 0.0))
+        return specs
+
+    def _chip_pixmap(self, text: str, rgb: tuple, dpr: float) -> QPixmap:
+        """One chip, rendered once per text, colour, font and pixel ratio."""
+        font = self.font()
+        key = (text, tuple(rgb), round(dpr, 3), font.key())
+        pixmap = self._chip_cache.get(key)
+        if pixmap is None:
+            if len(self._chip_cache) > 64:
+                self._chip_cache.clear()
+            pixmap = OS.chip_pixmap(text, rgb, font, dpr)
+            self._chip_cache[key] = pixmap
+        return pixmap
+
+    def chip_layout(self, dpr: Optional[float] = None) -> list[tuple[str, QRectF, QPixmap]]:
+        """``[(text, rect, pixmap)]``: every label chip, in viewport coordinates.
+
+        Laid out in one pass so that chips never cover one another or the
+        banner, nor -- where there is room -- another small outlined box: on
+        a board with five screws a label lying across the next screw's box
+        hides the very outline it is next to.  Boxes a quarter of the view or
+        bigger (the ROI, a "whole chassis changed" difference box) are not
+        obstacles: every other chip is inside them.  A chip whose box is off
+        screen is not laid out at all.
+        """
+        specs = self._chip_specs()
+        if not specs:
+            return []
+        dpr = float(self.devicePixelRatioF() or 1.0) if dpr is None else float(dpr)
+        view = QRectF(self.viewport().rect())
+        taken: list[QRectF] = []
+        banner = self._banner_target()
+        if banner is not None:
+            taken.append(QRectF(banner))
+        outers = []
+        for _text, _rgb, box, half, _extra in specs:
+            shown = QRectF(self.mapFromScene(box).boundingRect())
+            outers.append(shown.adjusted(-half, -half, half, half))
+        small = 0.25 * view.width() * view.height()
+        out: list[tuple[str, QRectF, QPixmap]] = []
+        for index, (text, rgb, _box, _half, extra) in enumerate(specs):
+            outer = outers[index]
+            others = [o for i, o in enumerate(outers)
+                      if i != index and o.width() * o.height() < small]
+            pixmap = self._chip_pixmap(text, rgb, dpr)
+            ratio = pixmap.devicePixelRatio() or 1.0
+            size = (pixmap.width() / ratio, pixmap.height() / ratio)
+            rect = OS.place_chip(size, outer, view, taken + others,
+                                 gap=OS.CHIP_GAP + extra)
+            if rect is None:
+                continue
+            taken.append(rect)
+            out.append((text, rect, pixmap))
+        return out
+
+    def _draw_chips(self, painter: QPainter, rect: QRectF, dpr: float) -> None:
+        layout = self.chip_layout(dpr)
+        self._chip_rects = [chip for _t, chip, _p in layout]
+        if not layout:
+            return
+        exposed = QRectF(self.mapFromScene(rect).boundingRect()).adjusted(-1, -1, 1, 1)
         painter.save()
         painter.resetTransform()
-        for (x0, y0, _x1, _y1), label, rgb in self._hints:
-            if not label:
-                continue
-            at = self.mapFromScene(QPointF(x0, y0))
-            painter.setPen(QColor(0, 0, 0, 200))
-            painter.drawText(at.x() + 4, at.y() - 3, label)
-            painter.setPen(QColor(rgb[0], rgb[1], rgb[2]))
-            painter.drawText(at.x() + 3, at.y() - 4, label)
+        for _text, chip, pixmap in layout:
+            if chip.intersects(exposed):   # a brush dab elsewhere pays nothing
+                painter.drawPixmap(chip.topLeft(), pixmap)
         painter.restore()
 
     # -- the armed tool, under the mouse ------------------------------------
@@ -1046,31 +1196,42 @@ class ImageCanvas(QGraphicsView):
 
     def drawForeground(self, painter: QPainter, rect: QRectF) -> None:  # noqa: D102
         super().drawForeground(painter, rect)
-        self._draw_roi(painter)
-        self._draw_hints(painter)
-        if self._rubber_band is not None:
-            x0, y0, x1, y1 = self._rubber_band
-            pen = QPen(QColor(255, 232, 64), 1, Qt.PenStyle.DashLine)
-            pen.setCosmetic(True)
-            painter.setPen(pen)
-            painter.drawRect(QRectF(x0, y0, x1 - x0, y1 - y0))
-        if self._prompt_point is not None:
+        # Every outline is in the one style of :mod:`overlay_style`, with its
+        # widths in *logical* pixels: a cosmetic pen's width is device pixels,
+        # so on the annotator's 150 % screen a "1 px" line was two thirds of
+        # one.  The painter's own ratio, so a grab is drawn like the screen.
+        dpr = float(painter.device().devicePixelRatioF() or 1.0)
+        self._draw_roi(painter, dpr, rect)
+        if self._prompt_band_shown():
+            x0, y0, x1, y1 = self._prompt_band
+            OS.draw_outline_rect(painter, QRectF(x0, y0, x1 - x0, y1 - y0),
+                                 OS.PROMPT_BOX, dpr, outside=True, exposed=rect)
+        self._draw_hints(painter, dpr, rect)
+        if self._drag_band is not None:
+            # Last of the boxes: what the hand is doing now is on top.
+            x0, y0, x1, y1 = self._drag_band
+            OS.draw_outline_rect(painter, QRectF(x0, y0, x1 - x0, y1 - y0),
+                                 OS.DRAG_BAND, dpr, exposed=rect)
+        if self._prompt_point is not None and not self._roi_editing:
             # A cross with a hole in the middle, sized in *screen* pixels, so
             # the marked pixel itself stays visible at 800 % and the mark stays
             # findable at 20 %.
             cx, cy = self._prompt_point[0] + 0.5, self._prompt_point[1] + 0.5
-            arm = 9.0 / max(self.zoom_factor(), 1e-6)
+            arm = 10.0 / max(self.zoom_factor(), 1e-6)
             gap = arm / 3.0
-            pen = QPen(QColor(255, 232, 64), 1)
-            pen.setCosmetic(True)
-            painter.setPen(pen)
-            painter.drawLines([
+            lines = [
                 QLineF(cx - arm, cy, cx - gap, cy),
                 QLineF(cx + gap, cy, cx + arm, cy),
                 QLineF(cx, cy - arm, cx, cy - gap),
                 QLineF(cx, cy + gap, cx, cy + arm),
-            ])
+            ]
+            painter.setPen(OS.PROMPT_POINT.under_pen(dpr))
+            painter.drawLines(lines)
+            painter.setPen(OS.PROMPT_POINT.over_pen(dpr))
+            painter.drawLines(lines)
         self._draw_grid(painter, rect)
+        # Over every line, so a label is never crossed out by another outline.
+        self._draw_chips(painter, rect, dpr)
         # Last, over everything else: it is the one thing on the canvas that
         # is about the annotator rather than about the image.
         self._draw_banner(painter, rect)

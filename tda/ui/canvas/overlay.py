@@ -23,6 +23,7 @@ import numpy as np
 from PySide6.QtGui import QImage
 
 from tda.core import masks as _masks
+from tda.ui.canvas import overlay_style as _style
 
 __all__ = [
     "PALETTE_64",
@@ -42,17 +43,68 @@ RGB = tuple[int, int, int]
 OCCLUDER_TYPES: tuple[str, ...] = ("hand", "arm", "body", "tool", "cable", "other")
 
 
+def _free_arcs() -> list[tuple[float, float]]:
+    """The hue arcs (degrees, ``lo < hi`` inside [0, 360]) an instance may use.
+
+    The complement of :func:`tda.ui.canvas.overlay_style.reserved_hue_bands`:
+    the canvas' outlines -- the ROI, the prompt box, the hover hints -- each
+    own a hue, and a mask of that hue under one of them is how an outline
+    disappears (task U2g: the stored ROI was yellow and the D13 chassis was
+    painted olive-yellow).
+    """
+    cuts: list[tuple[float, float]] = []
+    for lo, hi in _style.reserved_hue_bands():
+        if lo < 0.0:
+            cuts += [(lo + 360.0, 360.0), (0.0, hi)]
+        elif hi > 360.0:
+            cuts += [(lo, 360.0), (0.0, hi - 360.0)]
+        else:
+            cuts.append((lo, hi))
+    merged: list[list[float]] = []
+    for lo, hi in sorted(cuts):
+        if merged and lo <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    arcs, start = [], 0.0
+    for lo, hi in merged:
+        if lo > start:
+            arcs.append((start, lo))
+        start = max(start, hi)
+    if start < 360.0:
+        arcs.append((start, 360.0))
+    return arcs
+
+
+def _free_hue(u: float, arcs: list[tuple[float, float]]) -> float:
+    """``u`` in [0, 1) laid onto the free arcs, end to end; a hue in [0, 1).
+
+    Monotonic and proportional, so the golden-ratio spacing below survives:
+    the instances only lose the reserved bands, not their separation.
+    """
+    total = sum(hi - lo for lo, hi in arcs)
+    left = (u % 1.0) * total
+    for lo, hi in arcs:
+        if left < hi - lo:
+            return ((lo + left) / 360.0) % 1.0
+        left -= hi - lo
+    return (arcs[-1][1] / 360.0) % 1.0
+
+
 def _build_palette() -> tuple[RGB, ...]:
-    """64 distinct, evenly separated colours.
+    """64 distinct, evenly separated colours, none of an overlay's hue.
 
     Hues advance by the golden ratio so that neighbouring indices -- and any
     two instances of one frame -- land far apart on the wheel; saturation and
     value alternate on a 2x2 pattern to keep the colours apart when printed or
-    seen by a colour-deficient eye.
+    seen by a colour-deficient eye.  The wheel they advance on is the hue
+    circle with the overlays' bands cut out (:func:`_free_arcs`), so a mask can
+    never be the colour of the outline drawn over it.
     """
+    arcs = _free_arcs()
     colors: list[RGB] = []
     for i in range(64):
-        hue = (i * 0.6180339887498949) % 1.0
+        hue = _free_hue((i * 0.6180339887498949) % 1.0, arcs)
         sat = 0.62 + 0.26 * ((i >> 1) & 1)
         val = 0.95 - 0.22 * (i & 1)
         r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
@@ -70,8 +122,10 @@ EDIT_RGB: RGB = (255, 232, 64)
 OCCLUDER_RGB: RGB = (255, 72, 72)
 #: Colour of a proposal nobody has accepted yet -- today the Label Studio draft
 #: on offer (``Shift+A``).  Neither a palette entry nor :data:`EDIT_RGB`: "this
-#: is not yours until you press Enter" has to be visible at a glance.
-GHOST_RGB: RGB = (96, 208, 255)
+#: is not yours until you press Enter" has to be visible at a glance.  It is
+#: the drafts' overlay colour, whose hue the palette keeps clear of (U2g), so
+#: the hover hint and the ghost of one draft are the same colour.
+GHOST_RGB: RGB = _style.DRAFT_RGB
 
 #: How many separate stale regions are tracked before they are collapsed into
 #: the one box that covers them all.  Collapsing only ever composites pixels
