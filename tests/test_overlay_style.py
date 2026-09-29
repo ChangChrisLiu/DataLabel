@@ -140,7 +140,26 @@ def test_no_instance_colour_has_an_overlay_hue():
         hue = OS.hue_degrees(rgb)
         nearest = min(OS.hue_distance(hue, OS.hue_degrees(p)) for p in PALETTE_64)
         # RGB rounding moves a hue by a fraction of a degree
-        assert nearest >= OS.RESERVED_HUE_HALF_WIDTH - 1.0, (rgb, nearest)
+        assert nearest >= OS.reserved_half_width(rgb) - 1.0, (rgb, nearest)
+
+
+def test_only_the_roi_band_is_widened_to_25_degrees():
+    """U2h: violet and pink 15-18 degrees from the ROI read as the ROI."""
+    assert OS.reserved_half_width(OS.ROI_RGB) == OS.ROI_HUE_HALF_WIDTH == 25.0
+    for rgb in (OS.PROMPT_RGB, OS.DRAFT_RGB, OS.SHAPE_RGB):
+        assert OS.reserved_half_width(rgb) == OS.RESERVED_HUE_HALF_WIDTH == 15.0
+    roi = OS.hue_degrees(OS.ROI_RGB)
+    # D13's screw.motherboard.05 under U2g's palette, and the pink next to it
+    for seen in ((217, 92, 242), (242, 29, 160)):
+        assert OS.hue_distance(roi, OS.hue_degrees(seen)) < OS.ROI_HUE_HALF_WIDTH - 1.0
+        assert seen not in PALETTE_64
+    nearest = min(OS.hue_distance(roi, OS.hue_degrees(p)) for p in PALETTE_64)
+    assert nearest >= OS.ROI_HUE_HALF_WIDTH - 1.0, nearest
+    # the palette's wheel: 360 less four bands, the ROI's the wider
+    from tda.ui.canvas.overlay import _free_arcs
+
+    free = sum(hi - lo for lo, hi in _free_arcs())
+    assert free == pytest.approx(360.0 - 2 * 25.0 - 3 * 2 * 15.0)
 
 
 def test_the_drag_band_is_a_colour_the_palette_cannot_make():
@@ -154,10 +173,12 @@ def test_the_palette_is_still_64_distinct_colours():
 
 
 def test_every_overlay_kind_has_its_own_colour():
-    hues = [OS.hue_degrees(rgb) for rgb in OS.RESERVED_RGBS]
-    for i, a in enumerate(hues):
-        for b in hues[i + 1:]:
-            assert OS.hue_distance(a, b) >= 2 * OS.RESERVED_HUE_HALF_WIDTH
+    rgbs = list(OS.RESERVED_RGBS)
+    for i, a in enumerate(rgbs):
+        for b in rgbs[i + 1:]:
+            # the two bands do not overlap
+            assert (OS.hue_distance(OS.hue_degrees(a), OS.hue_degrees(b))
+                    >= OS.reserved_half_width(a) + OS.reserved_half_width(b))
     assert OS.DRAG_RGB not in OS.RESERVED_RGBS
 
 

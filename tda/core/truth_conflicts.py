@@ -246,6 +246,17 @@ class _Compiled:
     every truth row is encoded under (:func:`row_values`), checked under
     :data:`tda.core.masks.CHECK_ENCODE_WINDOW` -- so the tight box is measured
     in it, and everything after that works inside the box.
+
+    **The comparison is only as right as that promise.**  A ``window``
+    smaller than the visible pixels would make a real disagreement read
+    "agree": the box is measured short, :meth:`encodes_as` encodes only what
+    is inside it, and a frozen row that differs from the compilation *outside*
+    the window is found byte-identical -- no conflict is queued for a change
+    nobody confirmed.  Nothing here re-checks the window, because re-checking
+    it is the whole-canvas pass this class exists to avoid.  Running with
+    ``TDA_CHECK_ENCODE_WINDOW=1`` (on for the whole test suite,
+    ``tests/conftest.py``) catches it: :func:`tda.core.masks.bbox_in` raises
+    on the first pixel outside the window instead of measuring short.
     """
 
     __slots__ = ("mask", "hw", "box")
@@ -268,6 +279,13 @@ class _Compiled:
         Same canvas size and the same ``counts`` as :func:`row_values` would
         write for it (:func:`tda.core.masks.encode_rle_windowed`, pinned to
         :func:`tda.core.masks.encode_rle` byte for byte).
+
+        Encoded inside the tight box, which is measured inside the compiler's
+        window: a ``CompiledInstance.window`` smaller than the visible pixels
+        leaves the ones outside it out of *this* encoding, so a stored row
+        holding only the pixels inside the window would compare equal to a
+        compilation that has more -- a real disagreement read as "agree".  ``TDA_CHECK_ENCODE_WINDOW=1`` catches it (the class
+        docstring says where).
         """
         size = rle.get("size")
         if size is None or len(size) != 2 or tuple(int(v) for v in size) != self.hw:

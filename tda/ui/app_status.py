@@ -145,7 +145,25 @@ class StatusMixin:
         # Kept for the guide, which is refreshed right after this: asking the
         # session a second time would be a second round of queries (U2b).
         self._frame_status_seen = str(status)
+        # ... and what a queue signal compares against to decide whether the
+        # frame on screen moved (U2h): out of the memo the status just filled.
+        self._conflicts_seen = self._open_conflicts_here(key.step)
         return f"D{key.desktop} · {key.view} · step {key.step}/{total} · {status}"
+
+    def _open_conflicts_here(self, step: int) -> Optional[int]:
+        """Open conflicts about ``step``, or ``None`` for a session that cannot say.
+
+        Read from the session's per-change memo of the view's open conflicts
+        -- the same read that says whether the frame is a conflict at all --
+        so asking costs no query of its own.
+        """
+        counter = getattr(self.session, "open_conflict_count", None)
+        if not callable(counter):
+            return None
+        try:
+            return int(counter(int(step)))
+        except Exception:  # noqa: BLE001 - a count is never worth a failure
+            return None
 
     def _view_counts(self) -> tuple[dict, dict]:
         """``(done, work)`` per ``(desktop, view)``; two whole-table scans.

@@ -814,6 +814,15 @@ BUDGET_CONFIRMED_REFUSED_SPACE = round(MAIN_CONFIRMED_REFUSED_SPACE * 1.15, 3)
 MAIN_CONFIRMED_COMMIT = 3.561
 U2F_CONFIRMED_COMMIT = 0.19
 BUDGET_CONFIRMED_COMMIT = round(U2F_CONFIRMED_COMMIT * 1.3, 3)
+#: Arrival at the confirmed frame, best of five: the window's frame-change
+#: budget (0.12 s) was too tight for this one measurement *inside a full-suite
+#: run*.  It failed there intermittently on main as well as on branches --
+#: main 0.121 s, U2g's branch 0.124 s and 0.134 s at best -- while the same
+#: test run alone measured 0.099 s (U2g report, section 7): the gesture had not
+#: regressed, the machine had a suite's worth of other work in it.  Raised to
+#: 0.15 s for the best-of only (task U2h); its median is still held to the
+#: window budget below, and every other budget is unchanged.
+BUDGET_CONFIRMED_ARRIVAL = 0.15
 
 
 def _behind(session, key) -> bool:
@@ -926,9 +935,11 @@ def test_window_budgets_on_a_confirmed_behind_but_agreeing_12mp_frame(
 
     print(f"\nconfirmed 12 MP frame: arrival {arrival_runs}, commit {commit_runs}, "
           f"refused Space {space_runs}")
+    _under(BUDGET_CONFIRMED_ARRIVAL, "arrival at a confirmed frame (window)",
+           arrival_runs)
+    _median_under(BUDGET_WINDOW_FRAME_CHANGE, "arrival at a confirmed frame (window)",
+                  arrival_runs)
     for check in (_under, _median_under):
-        check(BUDGET_WINDOW_FRAME_CHANGE, "arrival at a confirmed frame (window)",
-              arrival_runs)
         check(BUDGET_CONFIRMED_COMMIT, "Enter on a confirmed frame (window)", commit_runs)
         check(BUDGET_CONFIRMED_REFUSED_SPACE, "Space refused by a conflict (window)",
               space_runs)

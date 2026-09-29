@@ -21,6 +21,13 @@ from tda.core import masks as _masks  # noqa: E402
 
 _masks.CHECK_ENCODE_WINDOW = True
 
+# The "no box when unsure" gate (task U2h, ``tda.ui.prompt_gate``) is off for
+# the suite.  It is on for the scan view, and the shared window scene *is* a
+# scan view -- of 64 x 64 synthetic frames whose parts have no real size, so
+# the shipped pixel bands would withhold or keep its boxes by accident.  The
+# tests that are about the gate load ``configs/prompt_gate.yaml`` themselves.
+os.environ["TDA_PROMPT_GATE"] = "off"
+
 
 @pytest.fixture
 def tmp_db_path(tmp_path: Path) -> str:

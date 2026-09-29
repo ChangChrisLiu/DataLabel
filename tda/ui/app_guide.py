@@ -716,7 +716,10 @@ class GuideMixin:
         return _merge_hints(self._diff_hint(key, row) + list(shape) + list(drafts))
 
     def _frame_diff_box(self, key) -> Optional[tuple]:
-        """The box SAM is armed with, else the strongest unexplained change."""
+        """The box SAM is armed with, else the strongest unexplained change.
+
+        Else nothing, when that change is the box the gate withheld.
+        """
         from tda.ui.app_diff import best_unexplained
 
         payload = self.assist_result
@@ -724,6 +727,10 @@ class GuideMixin:
             return None
         if self._prompt_box is not None:
             return tuple(float(v) for v in self._prompt_box)
+        if getattr(self, "_withheld_box", None) is not None:
+            # The gate withheld it as not the size of the part (task U2h): a
+            # hover pointing at it would be the guess the gate just took back.
+            return None
         blob = best_unexplained(payload)
         return None if blob is None else tuple(float(v) for v in blob.box)
 
