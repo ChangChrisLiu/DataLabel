@@ -36,7 +36,7 @@ NO_CHASSIS_FOUND = ("自动没找到机箱：直接在画面上拖一个框框�
 #: previous drag earned is out of date the moment this one lands (U2d).
 ROI_BOX_READY = "框好了：Enter 保存 / Esc 放弃 / box ready: Enter to save"
 #: Shown when Enter arrives before the segment has been measured.
-ROI_STILL_MEASURING =("还在找机箱，稍等或直接拖框 / still looking for the chassis "
+ROI_STILL_MEASURING = ("还在找机箱，稍等或直接拖框 / still looking for the chassis "
                        "-- wait a moment, or drag a box yourself")
 
 #: What the ROI bar says while the rectangle is on screen: what it is, what it

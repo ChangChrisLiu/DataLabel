@@ -47,6 +47,7 @@ def is_blocking(problem: str) -> bool:
     """
     return str(problem).startswith(BLOCKING_PROBLEMS)
 
+
 VERIFIED = "verified"
 NEEDS_REVIEW = "needs_review"
 ON_BENCH = Placement.ON_BENCH.value
