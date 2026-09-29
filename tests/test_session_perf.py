@@ -798,13 +798,22 @@ def test_window_gesture_budgets_on_a_12mp_frame_best_and_median_of_five(
 # --------------------------------------------------------------------------- #
 # a confirmed frame the inputs moved under (U2e round 2)
 # --------------------------------------------------------------------------- #
-#: Measured on main (``0b58e5c``, before U2e) with this very test, median of
-#: five on this machine; the budgets are those medians + 15 %.  The arrival
-#: keeps the window's frame-change budget.
-MAIN_CONFIRMED_COMMIT = 3.573
+#: Measured with this very test, median of five on this machine.  The refused
+#: Space: main before U2e (``0b58e5c``), budget + 15 %.  The arrival keeps the
+#: window's frame-change budget.
 MAIN_CONFIRMED_REFUSED_SPACE = 0.0745
-BUDGET_CONFIRMED_COMMIT = round(MAIN_CONFIRMED_COMMIT * 1.15, 3)
 BUDGET_CONFIRMED_REFUSED_SPACE = round(MAIN_CONFIRMED_REFUSED_SPACE * 1.15, 3)
+#: Enter on the confirmed frame.  Main at ``df8333d`` (U2e): 3.561 s and
+#: 2.555 s, two rounds interleaved with U2f's branch (before U2e, ``0b58e5c``:
+#: 3.573 s).  All of it but 0.2 s was ``truth_conflicts.disagreement``
+#: decoding each of the 42 confirmed rows onto the full 12 MP canvas and
+#: comparing two C-ordered copies of it -- for a 20-pixel screw as for the
+#: chassis, and nearly every row unchanged.  U2f compares inside each part and settles an unchanged row on its
+#: run lengths: 0.189 s and 0.194 s in the same two rounds.  The budget is that
+#: median + 30 %.
+MAIN_CONFIRMED_COMMIT = 3.561
+U2F_CONFIRMED_COMMIT = 0.19
+BUDGET_CONFIRMED_COMMIT = round(U2F_CONFIRMED_COMMIT * 1.3, 3)
 
 
 def _behind(session, key) -> bool:
@@ -829,9 +838,10 @@ def test_window_budgets_on_a_confirmed_behind_but_agreeing_12mp_frame(
     which is how that got through.
 
     Arrival is measured in steady state -- after the re-check stamped the
-    frame's digest -- against the window's frame-change budget; Enter and the
-    refused Space against main's medians + 15 %.  Best and median of five, as
-    the window test above.
+    frame's digest -- against the window's frame-change budget; the refused
+    Space against main's median + 15 %, and Enter against U2f's + 30 % (it was
+    3.6 s on main: see :data:`MAIN_CONFIRMED_COMMIT`).  Best and median of five,
+    as the window test above.
     """
     session = make_session(tmp_path, last_step=BOARD_STEP, hw=OAK_HW)
     session.goto(OAK_STEP)

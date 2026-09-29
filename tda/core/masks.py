@@ -41,11 +41,13 @@ __all__ = [
     "BoxedMask",
     "CHECK_ENCODE_WINDOW",
     "DECODE_CACHE_BYTES",
+    "RunLengths",
     "clear_decode_cache",
     "decode_cache_stats",
     "encode_rle",
     "encode_rle_boxed",
     "encode_rle_patch",
+    "encode_rle_windowed",
     "decode_rle",
     "decode_rle_shared",
     "rle_area",
@@ -56,12 +58,15 @@ __all__ = [
     "rle_iou",
     "rle_overlap",
     "bbox",
+    "bbox_in",
     "min_side",
     "rle_min_side",
     "area",
     "fill_holes",
     "remove_small_components",
     "tolerant_sym_diff",
+    "tolerance_reach",
+    "conflict_pixels",
     "is_conflict",
     "mask_to_polygons",
     "polygons_to_mask",
@@ -130,18 +135,23 @@ _scratch = threading.local()
 CHECK_ENCODE_WINDOW = os.environ.get("TDA_CHECK_ENCODE_WINDOW", "") not in ("", "0")
 
 
-def _refuse_pixels_outside(arr: np.ndarray, window: Box) -> None:
-    """Raise when ``arr`` has a set pixel outside ``window`` (:data:`CHECK_ENCODE_WINDOW`)."""
-    x0, y0, x1, y1 = window
+def _refuse_pixels_outside(arr: np.ndarray, window: Box, who: str = "encode_rle",
+                           loss: str = "the run lengths would be missing them") -> None:
+    """Raise when ``arr`` has a set pixel outside ``window`` (:data:`CHECK_ENCODE_WINDOW`).
+
+    ``who`` and ``loss`` name the caller trusting the window and what a wrong
+    one would cost it; the encoders keep the words they always had.
+    """
+    x0, y0, x1, y1 = (int(v) for v in window)
     height, width = arr.shape
     x0, y0 = max(0, min(x0, width)), max(0, min(y0, height))
     x1, y1 = max(x0, min(x1, width)), max(y0, min(y1, height))
     for band in (arr[:y0, :], arr[y1:, :], arr[y0:y1, :x0], arr[y0:y1, x1:]):
         if band.size and band.any():
             raise ValueError(
-                f"encode_rle was given the window {tuple(window)!r}, but the "
-                f"mask has pixels outside it: the run lengths would be missing "
-                f"them. Only a caller that produced the mask may pass a window."
+                f"{who} was given the window {tuple(window)!r}, but the "
+                f"mask has pixels outside it: {loss}. Only a caller that "
+                f"produced the mask may pass a window."
             )
 
 
@@ -229,6 +239,58 @@ def encode_rle_patch(patch: np.ndarray, box: Box, hw: HW) -> dict:
         "size": [int(rle["size"][0]), int(rle["size"][1])],
         "counts": rle["counts"].decode("ascii"),
     }
+
+
+def encode_rle_windowed(mask: np.ndarray, window: Optional[Box]) -> dict:
+    """:func:`encode_rle`'s bytes for ``(mask, window)``, from the window alone.
+
+    ``encode_rle`` hands pycocotools the whole canvas, so even a windowed
+    encode walks all 12 MP of an OAK frame: 2.4 ms whatever the part's size.
+    This finds the run lengths inside the window -- where a column of the
+    window changes value, as positions in the column-major order the counts
+    are written in -- and gives them to pycocotools' own string writer
+    (``frUncompressedRLE``, the ``rleToString`` that ``encode`` ends in), so
+    the cost is the window's and the bytes are the same ones.
+    ``tests/test_disagreement_window.py`` pins that byte for byte.
+
+    ``window`` is the same promise as :func:`encode_rle`'s: the mask is empty
+    outside it (checked under :data:`CHECK_ENCODE_WINDOW`). ``None`` measures
+    the box instead (:func:`bbox`). Task U2f: what the frozen-row comparison
+    encodes a compiled instance with before it decides anything else.
+    """
+    arr = _as_bool(mask)
+    height, width = arr.shape
+    total = height * width
+    if window is None:
+        window = bbox(arr) or (0, 0, 0, 0)
+    elif CHECK_ENCODE_WINDOW:
+        _refuse_pixels_outside(arr, window, "encode_rle_windowed")
+    if total == 0:
+        return encode_rle(arr)
+    clipped = _clip_box(window, (height, width))
+    positions = np.empty(0, dtype=np.int64)
+    if clipped is not None:
+        x0, y0, x1, y1 = clipped
+        span = y1 - y0
+        # one row per column of the window, padded with the background above
+        # and below it: a change of value is a run boundary
+        padded = np.zeros((x1 - x0, span + 2), dtype=np.uint8)
+        padded[:, 1:-1] = arr.T[x0:x1, y0:y1].view(np.uint8)
+        changes = np.flatnonzero(padded[:, 1:] != padded[:, :-1])
+        column, row = np.divmod(changes, span + 1)
+        positions = (column + x0) * height + (row + y0)
+        if y0 == 0 and y1 == height and positions.size > 1:
+            # a run that goes on from the bottom of one column into the top of
+            # the next ended and began at the same position: it is one run
+            seam = np.flatnonzero(positions[1:] == positions[:-1])
+            if seam.size:
+                positions = np.delete(positions, np.concatenate((seam, seam + 1)))
+        if positions.size and positions[-1] == total:
+            positions = positions[:-1]  # the canvas ends there, not a run
+    counts = np.diff(np.concatenate(([0], positions, [total]))).astype(np.uint32)
+    rle = _low_level.frUncompressedRLE(
+        [{"counts": counts, "size": [height, width]}], height, width)[0]
+    return {"size": [int(height), int(width)], "counts": rle["counts"].decode("ascii")}
 
 
 class BoxedMask:
@@ -502,6 +564,180 @@ def decode_rle(rle: dict) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# run lengths without the canvas (task U2f)
+# ---------------------------------------------------------------------------
+#: The longest value :func:`_read_counts` reads, in characters. Six characters
+#: carry thirty bits, a canvas of half a billion pixels; a longer value is left
+#: to pycocotools.
+_MAX_VALUE_CHARS = 6
+
+
+def _read_counts(rle: dict, total: int) -> Optional[np.ndarray]:
+    """The run lengths a COCO ``counts`` string spells, or ``None``.
+
+    pycocotools' ``rleFrString`` (``maskApi.c``) done with numpy, so that the
+    lengths can be read without decoding the canvas they describe. Each value
+    is written five bits per character, least significant first, as
+    ``chr(48 + bits)`` with ``0x20`` set on every character but the last and
+    ``0x10`` of the last one the sign; from the fourth value on (index 3) each
+    is stored as the difference to the value two before it.
+
+    ``None`` whenever this reader could not promise pycocotools' answer: counts
+    that are not a string, a character outside the 48..111 alphabet, a value
+    cut off or longer than :data:`_MAX_VALUE_CHARS`, a negative length, or
+    lengths that do not add up to the canvas. The caller then decodes with
+    pycocotools after all (:class:`RunLengths`), so an odd RLE costs time and
+    never a different answer.
+    """
+    counts = rle.get("counts")
+    if isinstance(counts, str):
+        if not counts.isascii():
+            return None
+        raw = counts.encode("ascii")
+    elif isinstance(counts, (bytes, bytearray)):
+        raw = bytes(counts)
+    else:
+        return None
+    if not raw:
+        return None
+    chars = np.frombuffer(raw, dtype=np.uint8).astype(np.int64) - 48
+    if chars.min() < 0 or chars.max() > 63:
+        return None
+    last = (chars & 0x20) == 0          # the last character of its value
+    if not last[-1]:
+        return None
+    ends = np.flatnonzero(last)
+    starts = np.concatenate(([0], ends[:-1] + 1))
+    length = ends - starts + 1
+    if int(length.max()) > _MAX_VALUE_CHARS:
+        return None
+    place = np.arange(chars.size) - np.repeat(starts, length)
+    values = np.add.reduceat((chars & 0x1F) << (5 * place), starts)
+    negative = (chars[ends] & 0x10) != 0
+    values[negative] -= np.left_shift(1, 5 * length[negative])
+    # index 0, 1 and 2 are written as they are; from 3 on, as the step from
+    # the value two places back -- so odd and even places are running sums
+    values[1::2] = np.cumsum(values[1::2])
+    values[2::2] = np.cumsum(values[2::2])
+    if values.min() < 0 or int(values.sum()) != int(total):
+        return None
+    return values
+
+
+class RunLengths:
+    """One COCO RLE, answered off its run lengths instead of its canvas.
+
+    :func:`decode_rle` builds the whole frame -- 12 MB and 8 ms on an OAK frame
+    -- to say anything about a part that may be twenty pixels across. This
+    reads the counts string once (:func:`_read_counts`) and answers the three
+    questions a comparison asks without that canvas: how many pixels
+    (:meth:`area`), where (:meth:`bbox`), and which ones inside a window
+    (:meth:`window`). Each is the answer ``decode_rle(rle)`` would give:
+
+    * the counts alternate background and foreground runs in column-major
+      order, starting with background, so the foreground is exactly the
+      odd-numbered runs ``[start, end)`` of that order;
+    * pixel ``(x, y)`` is position ``x * h + y``.
+
+    An RLE the reader cannot read exactly is decoded by pycocotools instead,
+    and every answer is then taken off that canvas -- which is what the caller
+    did before, so an odd RLE costs time and never a different answer.
+    ``hw`` is the canvas either way. Task U2f.
+    """
+
+    __slots__ = ("hw", "_starts", "_ends", "_full")
+
+    def __init__(self, rle: dict) -> None:
+        height, width = int(rle["size"][0]), int(rle["size"][1])
+        self.hw = (height, width)
+        self._full: Optional[np.ndarray] = None
+        counts = _read_counts(rle, height * width) if height * width > 0 else None
+        if counts is None:
+            self._full = decode_rle(rle)
+            self.hw = (int(self._full.shape[0]), int(self._full.shape[1]))
+            self._starts = self._ends = np.empty(0, dtype=np.int64)
+            return
+        ends = np.cumsum(counts)
+        starts = ends - counts
+        # the foreground runs, without the empty ones a hand-made RLE may carry
+        keep = counts[1::2] > 0
+        self._starts, self._ends = starts[1::2][keep], ends[1::2][keep]
+
+    @property
+    def decoded(self) -> bool:
+        """Did this RLE need pycocotools after all? (Tests.)"""
+        return self._full is not None
+
+    def area(self) -> int:
+        """``area(decode_rle(rle))``: the foreground runs' lengths added up."""
+        if self._full is not None:
+            return area(self._full)
+        return int((self._ends - self._starts).sum())
+
+    def bbox(self) -> Optional[Box]:
+        """``bbox(decode_rle(rle))``: columns from the runs, rows too unless one wraps.
+
+        A run that goes on past the bottom of a column covers that column's
+        last row and the next column's first, so any such run makes the box
+        the canvas' full height; otherwise every run lies in one column and
+        the rows are its own.
+        """
+        if self._full is not None:
+            return bbox(self._full)
+        if not self._starts.size:
+            return None
+        height = self.hw[0]
+        first = self._starts // height
+        last = (self._ends - 1) // height
+        x0, x1 = int(first.min()), int(last.max()) + 1
+        if bool((last > first).any()):
+            return (x0, 0, x1, height)
+        y0 = int((self._starts - first * height).min())
+        y1 = int((self._ends - 1 - last * height).max()) + 1
+        return (x0, y0, x1, y1)
+
+    def window(self, box: Box) -> np.ndarray:
+        """``decode_rle(rle)[y0:y1, x0:x1]`` for ``box`` clipped to the canvas.
+
+        **Fortran-ordered**, like :func:`decode_rle`, and built at the window's
+        size: every foreground run is cut into the columns it crosses, each
+        piece is cut to the window's rows, and the pieces are painted as
+        ``+1`` at their top and ``-1`` below their bottom and summed down each
+        column. The runs never overlap, so the sum is 0 or 1 everywhere.
+        """
+        height, width = self.hw
+        x0, y0, x1, y1 = (int(v) for v in box)
+        x0, y0 = max(0, min(x0, width)), max(0, min(y0, height))
+        x1, y1 = max(x0, min(x1, width)), max(y0, min(y1, height))
+        if self._full is not None:
+            return self._full[y0:y1, x0:x1]
+        across, down = x1 - x0, y1 - y0
+        paint = np.zeros((across, down + 1), dtype=np.int8)
+        if across and down and self._starts.size:
+            starts = np.maximum(self._starts, x0 * height)
+            ends = np.minimum(self._ends, x1 * height)
+            inside = ends > starts
+            starts, ends = starts[inside], ends[inside]
+            first = starts // height
+            last = (ends - 1) // height
+            columns = last - first + 1
+            run = np.repeat(np.arange(starts.size), columns)
+            column = first[run] + (np.arange(run.size)
+                                   - np.repeat(np.cumsum(columns) - columns, columns))
+            top = np.where(column == first[run], starts[run] - column * height, 0)
+            bottom = np.where(column == last[run], ends[run] - column * height, height)
+            top = np.clip(top, y0, y1) - y0
+            bottom = np.clip(bottom, y0, y1) - y0
+            kept = bottom > top
+            row = (column[kept] - x0) * (down + 1)
+            flat = paint.reshape(-1)
+            flat[row + top[kept]] = 1
+            flat[row + bottom[kept]] -= 1
+            np.cumsum(paint, axis=1, dtype=np.int8, out=paint)
+        return paint[:, :down].view(bool).T
+
+
+# ---------------------------------------------------------------------------
 # the decode memo
 # ---------------------------------------------------------------------------
 #: How many bytes of decoded shapes :func:`decode_rle_shared` keeps.
@@ -598,6 +834,31 @@ def bbox(mask: np.ndarray) -> Optional[Box]:
     return (int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1)
 
 
+def bbox_in(mask: np.ndarray, window: Optional[Box]) -> Optional[Box]:
+    """:func:`bbox` of a mask known to be empty outside ``window``.
+
+    Measured inside the window and put back in frame coordinates, so the cost
+    is the window's rather than the canvas'. ``window`` is the promise
+    :attr:`tda.core.compiler.CompiledInstance.window` makes, checked under
+    :data:`CHECK_ENCODE_WINDOW` like an encode's; ``None`` measures the whole
+    mask. Task U2f.
+    """
+    arr = _as_bool(mask)
+    if window is None:
+        return bbox(arr)
+    if CHECK_ENCODE_WINDOW:
+        _refuse_pixels_outside(arr, window, "bbox_in",
+                               "its bounding box would be measured short")
+    clipped = _clip_box(window, arr.shape)
+    if clipped is None:
+        return None
+    x0, y0, x1, y1 = clipped
+    found = bbox(arr[y0:y1, x0:x1])
+    if found is None:
+        return None
+    return (found[0] + x0, found[1] + y0, found[2] + x0, found[3] + y0)
+
+
 def min_side(mask: np.ndarray) -> int:
     """Shorter side of the bounding box in pixels (0 for an empty mask)."""
     box = bbox(mask)
@@ -677,16 +938,77 @@ def tolerant_sym_diff(a: np.ndarray, b: np.ndarray, tol_px: int = 2) -> int:
     them measures the difference against the other silhouette's tolerance.
 
     Returns the number of XOR pixels left outside the band.
+
+    **Nothing is copied on the way in** (task U2f). Every mask the truth table
+    compares is column-major -- :func:`decode_rle` and the compiler both make
+    Fortran order, and a window of one is column-major too -- and cv2 reads
+    rows, so the old ``np.ascontiguousarray(mask.astype(np.uint8))`` made two
+    12 MB copies per side, 84 of them per 12 MP refresh: 2.4 s of the 3.1 s
+    it spent comparing. Two column-major masks are compared **transposed**
+    instead, which is free, and gives the same number: the kernels are
+    squares centred on their pixel and the border is 0 on every side, so
+    eroding or dilating the transpose is transposing the erosion or the
+    dilation, and XOR and a count do not care which way the grid is read.
+    ``bool`` is read as ``uint8`` in place (:func:`_u8_pair`), and the count
+    is cv2's saturating subtraction -- ``xor - band`` is 1 exactly where the
+    XOR is set and the band is not -- instead of two casts and a mask.
     """
-    am, bm = _as_u8(a), _as_u8(b)
-    if am.shape != bm.shape:
-        raise ValueError(f"shape mismatch: {am.shape!r} vs {bm.shape!r}")
+    am, bm = _u8_pair(a, b)
     xor = cv2.bitwise_xor(am, bm)
     if not xor.any():
         return 0
     tol = max(0, int(tol_px))
     band = cv2.dilate(_boundary(am), _square_kernel(2 * tol + 1), borderValue=0)
-    return int(np.count_nonzero(xor.astype(bool) & ~band.astype(bool)))
+    return int(cv2.countNonZero(cv2.subtract(xor, band)))
+
+
+def _u8_pair(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Two masks as 0/1 ``uint8`` arrays cv2 can read where they are.
+
+    Same shape or ``ValueError`` (the message :func:`tolerant_sym_diff` always
+    raised). A ``bool`` is one byte holding 0 or 1 (see :func:`encode_rle`), so
+    it is viewed as ``uint8`` rather than cast; when both masks are laid out a
+    column at a time, both are transposed -- a view -- so that cv2 reads them
+    along their rows without making a C-ordered copy. Whether to transpose
+    only decides what it costs: :func:`tolerant_sym_diff` gives the same
+    number either way. Not :func:`_as_u8`, whose contiguous copy its other
+    callers are written against.
+    """
+    am, bm = _as_bool(a), _as_bool(b)
+    if am.shape != bm.shape:
+        raise ValueError(f"shape mismatch: {am.shape!r} vs {bm.shape!r}")
+    if am.strides[0] < am.strides[1] and bm.strides[0] < bm.strides[1]:
+        am, bm = am.T, bm.T
+    return am.view(np.uint8), bm.view(np.uint8)
+
+
+def tolerance_reach(tol_px: int = 2) -> int:
+    """How far from a pixel :func:`tolerant_sym_diff` looks to decide it.
+
+    The band is ``boundary(a)`` dilated by ``tol_px``, and the boundary of a
+    pixel depends on its 3x3 neighbourhood: ``tol_px + 1``. A window around
+    both masks grown by this much sees every pixel the full-canvas answer
+    depends on (task U2f; the proof is in the U2f report).
+    """
+    return max(0, int(tol_px)) + 1
+
+
+def conflict_pixels(
+    old: np.ndarray,
+    new: np.ndarray,
+    area_frac: float = 0.02,
+    min_px: int = 20,
+    tol_px: int = 2,
+) -> Optional[int]:
+    """:func:`tolerant_sym_diff` when :func:`is_conflict` holds, else ``None``.
+
+    The frozen-row comparison needs both the verdict and the pixel count, and
+    asked for them as ``tolerant_sym_diff(old, new) if is_conflict(old, new)``
+    -- the whole comparison twice for every disagreement (task U2f).
+    """
+    threshold = max(area_frac * area(old), float(min_px))
+    diff = tolerant_sym_diff(old, new, tol_px=tol_px)
+    return diff if diff > threshold else None
 
 
 def is_conflict(
@@ -704,8 +1026,7 @@ def is_conflict(
     symmetric difference; ``min_px`` is the floor that keeps tiny
     instances from tripping the check on a couple of pixels.
     """
-    threshold = max(area_frac * area(old), float(min_px))
-    return tolerant_sym_diff(old, new, tol_px=tol_px) > threshold
+    return conflict_pixels(old, new, area_frac, min_px, tol_px) is not None
 
 
 # ---------------------------------------------------------------------------

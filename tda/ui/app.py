@@ -569,9 +569,31 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         The timeline only ever repainted on a frame change, so a frame that
         became a conflict while the annotator worked two steps away kept its
         old colour until they happened to visit it.
+
+        The frame on screen can be that frame: a re-check the sweeper finishes
+        while the annotator stands on it demotes it, or turns it into a
+        conflict, and the task card and the guide kept saying "已经确认 ✓" until
+        the next frame change. Its status is read once more -- one row, the
+        queue memos the timeline just filled -- and only a status that
+        actually moved rewrites the status line, the guide and the card's
+        header, with the frame's refusal reasons read again beside it (a
+        conflict the re-check queued stops Space); the card is not rebuilt
+        (task U2f).
         """
         self.review.refresh()
         self.timeline.refresh_statuses()
+        self._follow_frame_status()
+
+    def _follow_frame_status(self) -> None:
+        """Re-say the open frame's status where it is said, if it moved (U2f)."""
+        if not compat.is_open(self.session):
+            return
+        status = str(self.session.frame_status(self.session.current().step))
+        if status == getattr(self, "_frame_status_seen", None):
+            return
+        finder = getattr(self.session, "current_problems", None)
+        self.task_card.follow_status(status, list(finder()) if callable(finder) else None)
+        self.update_status()                # the frame label, then the guide
 
     @S.guard
     def _on_card_problems(self, count: int) -> None:
