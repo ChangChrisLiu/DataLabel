@@ -214,7 +214,8 @@ def resolve_conflict(session: Any, cid: int, resolution: str) -> tuple[str, str]
     except ValueError as exc:
         return REFUSED, str(exc)
     if isinstance(outcome, str):
-        return outcome, ""
+        # A ``Verdict`` carries its reason (U2d round 2); a bare string has none.
+        return str(outcome), str(getattr(outcome, "reason", "") or "")
     _note("resolve_conflict", "verdict derived from the raised exception type")
     return RESOLVED, ""
 

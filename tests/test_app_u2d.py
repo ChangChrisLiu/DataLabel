@@ -748,3 +748,70 @@ def test_the_pure_sentences_carry_the_count():
     assert row_view(row)["sentence"] == "这一帧不用画，直接 Space"
     assert row_view(row, blockers=4)["sentence"] == (
         "这一帧不用画，但下面还有 4 个问题挡住 Space（见下方）")
+
+
+# --------------------------------------------------------------------------- #
+# round 2, item 2: a refused or superseded verdict says why
+# --------------------------------------------------------------------------- #
+def superseded_conflict(tmp_path: Path) -> tuple:
+    """A real queued conflict whose inputs moved on before anybody settled it."""
+    session = make_session(tmp_path)
+    session.sweeper_enabled = False          # the re-check is run here, in order
+    seed_shapes(session, LAST_STEP - 1)
+    session.goto(LAST_STEP, force=True)
+    session.goto(LAST_STEP - 1, force=True)
+    draw(session, SPLIT_ROW, 40, api.SCOPE_SPLIT)
+    assert session.confirm_frame() is True                # step 13 verified
+    session.goto(LAST_STEP - 1, force=True)
+    draw(session, "chassis", 50)                          # disagrees with it
+    session.truth.run_pending_rechecks(DESKTOP, VIEW)
+    cid = session.queues()[api.QUEUE_CONFLICTS][0]["id"]
+    draw(session, "chassis", 51)                          # ... and moves on again
+    return session, cid
+
+
+def test_the_verdict_carries_its_reason(qapp, tmp_path):
+    session, cid = superseded_conflict(tmp_path)
+    verdict = session.resolve_conflict(cid, api.RESOLVE_ACCEPT_NEW)
+    assert verdict == "superseded" and isinstance(verdict, api.Verdict)
+    assert "stale" in verdict.reason
+    again = session.resolve_conflict(cid, api.RESOLVE_ACCEPT_NEW)
+    assert again == "refused" and "already resolved" in again.reason
+    unknown = session.resolve_conflict(9999, api.RESOLVE_ACCEPT_NEW)
+    assert unknown == "refused" and unknown.reason
+
+
+def test_a_refused_verdict_shows_its_reason_in_the_status_line(qapp, tmp_path):
+    session, cid = superseded_conflict(tmp_path)
+    win = open_window(tmp_path, session=session)
+    try:
+        answer_roi(win)
+        win.resolve_conflict(cid, api.RESOLVE_ACCEPT_NEW)          # N in Review
+        said = win.status_message()
+        assert said.startswith(f"conflict {cid}: superseded and re-queued"), said
+        assert "stale" in said, "the reason reached the status line"
+
+        win.resolve_conflict(cid, api.RESOLVE_ACCEPT_NEW)          # the same again
+        said = win.status_message()
+        assert said.startswith(f"conflict {cid} refused: "), said
+        assert said != f"conflict {cid} refused: " and "already resolved" in said
+        assert "见任务卡" not in said
+    finally:
+        close_window(win)
+
+
+def test_a_failed_recheck_still_says_so_in_the_status_line(qapp, tmp_path):
+    """The other non-code line that went out on sigProblems: it has its own
+    signal (``sigSweepError``), and U2c took away the slot that buried it."""
+    session = rows_done_but_one_unlisted(tmp_path)
+    win = open_window(tmp_path, session=session)
+    try:
+        answer_roi(win)
+        session._on_sweep_error(3, "the truth service fell over")
+        QApplication.processEvents()
+        said = win.status_message()
+        assert "re-check of step 3 failed: the truth service fell over" in said, said
+        assert "F5" in said and "见任务卡" not in said
+        assert pane_codes(win) == [f"missing_shape:{UNLISTED}"]   # the pane is untouched
+    finally:
+        close_window(win)
