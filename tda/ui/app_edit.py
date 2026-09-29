@@ -234,14 +234,15 @@ class EditMixin:
         so a re-wire that is forgotten loses a gesture instead of letting one
         through.
         """
-        self.review.sigResolve.connect(self.resolve_selected)
         self.review.sigOpenStep.connect(self.timeline_goto)
         self.timeline.sigOpenStep.connect(self.timeline_goto)
         self.instances.sigReorder.connect(self.move_instance)
         self.instances.sigHiddenToggled.connect(self.on_hidden_toggled)
-        # The task card's commit / confirm buttons are gone (U2b round 1): the
-        # tool palette is the one place for actions, and its buttons dispatch
-        # through ACTIONS exactly like the keys (``run_palette_action``).
+        # The task card's commit / confirm buttons and the Review dock's Keep
+        # old / Take new are gone (U2b rounds 1 and 1b): the tool palette is
+        # the one place for actions, and its buttons dispatch through ACTIONS
+        # exactly like the keys (``run_palette_action``) -- K / N reach
+        # ``resolve_selected`` through ``act_resolve``.
         self._panel_move = lambda d: (self.instances.move_up() if d < 0
                                       else self.instances.move_down())
 

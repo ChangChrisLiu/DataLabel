@@ -5,11 +5,17 @@ tab whose label carries the queue's size, so the remaining work is visible
 without opening anything.  Activating an entry asks for its frame; ``Enter``
 confirms the frame that is open and ``R`` marks it for rework.
 
-The panel decides nothing: the buttons and the lists **report**
-(:attr:`ReviewPanel.sigResolve`, :attr:`ReviewPanel.sigOpenStep`,
-:attr:`ReviewPanel.sigRework`) and the window acts.  A resolution has three
-possible outcomes and opening another frame can be refused; neither answer is
-the panel's to give.  The queues are then re-read, never patched locally.
+The panel decides nothing: the lists **report**
+(:attr:`ReviewPanel.sigOpenStep`, :attr:`ReviewPanel.sigRework`) and the window
+acts.  Opening another frame can be refused, and a resolution has three
+possible outcomes; neither answer is the panel's to give.  The queues are then
+re-read, never patched locally.
+
+It has **no buttons** of its own (task U2b round 1b): the "Keep old K" / "Take
+new N" pair duplicated the tool palette's 保留旧的 / 采用新的, and two places for
+one thing is the confusion the second trial reported.  The panel says which
+conflict is selected (:meth:`ReviewPanel.selected_conflict`); the palette's
+buttons and the keys resolve it through the window.
 """
 from __future__ import annotations
 
@@ -17,12 +23,9 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QPushButton,
-    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -62,7 +65,7 @@ def _entry_text(queue: str, entry: dict) -> str:
 
 
 class ReviewPanel(QWidget):
-    """Queue tabs with the accept / rework / resolve actions of review mode."""
+    """Queue tabs of review mode; the actions are the window's (keys, palette)."""
 
     #: The annotator marked a step for rework.
     sigRework = Signal(int)
@@ -70,8 +73,6 @@ class ReviewPanel(QWidget):
     #: the gate.  The panel used to call ``session.goto`` itself, un-forced, and
     #: an uncommitted layer then made it raise out of a Qt slot.
     sigOpenStep = Signal(int)
-    #: A resolution button was pressed; the payload is one of :data:`api.RESOLUTIONS`.
-    sigResolve = Signal(str)
 
     def __init__(self, session: Optional[api.SessionLike] = None,
                  parent: Optional[QWidget] = None) -> None:
@@ -89,28 +90,6 @@ class ReviewPanel(QWidget):
             lw.itemActivated.connect(self._on_item_activated)
             self._lists[queue] = lw
             self._tabs.addTab(lw, QUEUE_TITLES[queue])
-        self._tabs.currentChanged.connect(lambda _i: self._sync_buttons())
-
-        # Short captions and a tooltip, like the task card's: the row of long
-        # labels below used to make this panel ask for 642 px of dock, and one
-        # trip through Review mode took a third of the canvas away for good.
-        self.keep_old_button = QPushButton("Keep old  K")
-        self.accept_new_button = QPushButton("Take new  N")
-        self.keep_old_button.setToolTip("Keep the frozen shape, discard the "
-                                        "conflicting edit (K)")
-        self.accept_new_button.setToolTip("Take the edit and re-freeze the "
-                                          "affected frames (N)")
-        for button in (self.keep_old_button, self.accept_new_button):
-            button.setMinimumWidth(1)
-            button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        # Report, do not act: a resolution has three possible outcomes and only
-        # the window can say which one the annotator got.
-        self.keep_old_button.clicked.connect(
-            lambda: self.sigResolve.emit(api.RESOLVE_KEEP_OLD)
-        )
-        self.accept_new_button.clicked.connect(
-            lambda: self.sigResolve.emit(api.RESOLVE_ACCEPT_NEW)
-        )
 
         self._problems_label = QLabel("Problems")
         self._problems_list = QListWidget()
@@ -118,16 +97,13 @@ class ReviewPanel(QWidget):
         self._problems_label.setVisible(False)
         self._problems_list.setVisible(False)
 
-        buttons = QHBoxLayout()
-        buttons.setContentsMargins(4, 0, 4, 4)
-        buttons.addWidget(self.keep_old_button)
-        buttons.addWidget(self.accept_new_button)
-        # The two other keys live in the tooltip and in the cheat sheet, not in
-        # a 384 px label that decides how wide the dock has to be.
+        # The keys live on the tool palette, in the tooltip and in the cheat
+        # sheet, not in a 384 px label that decides how wide the dock has to be.
         self.setToolTip(
             "Enter: open the selected entry's frame and accept it\n"
             "R: rework it in Annotate mode\n"
-            "K: keep the frozen shape    N: take the edit"
+            "K: keep the frozen shape    N: take the edit\n"
+            "(左边工具面板上的「接受这一帧 / 返工 / 保留旧的 / 采用新的」是同样的键)"
         )
 
         layout = QVBoxLayout(self)
@@ -136,7 +112,6 @@ class ReviewPanel(QWidget):
         layout.addWidget(self._tabs, 1)
         layout.addWidget(self._problems_label)
         layout.addWidget(self._problems_list)
-        layout.addLayout(buttons)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         if session is not None:
@@ -188,7 +163,6 @@ class ReviewPanel(QWidget):
             if 0 <= keep < lw.count():
                 lw.setCurrentRow(keep)
             self._tabs.setTabText(index, f"{QUEUE_TITLES[queue]} ({len(entries)})")
-        self._sync_buttons()
 
     def problems(self) -> list[str]:
         """Problems of the last refused confirmation (empty after a good one)."""
@@ -257,11 +231,6 @@ class ReviewPanel(QWidget):
 
     def _on_problems(self, problems: list) -> None:
         self._problems = [str(p) for p in problems]
-
-    def _sync_buttons(self) -> None:
-        is_conflicts = self.current_queue() == api.QUEUE_CONFLICTS
-        self.keep_old_button.setEnabled(is_conflicts)
-        self.accept_new_button.setEnabled(is_conflicts)
 
     def _show_problems(self, problems: list[str]) -> None:
         self._problems_list.clear()

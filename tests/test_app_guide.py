@@ -368,6 +368,25 @@ def test_review_mode_keeps_only_what_works_there(window):
                if n not in A.PALETTE_ACTIONS)
 
 
+@pytest.mark.parametrize("name,verdict", [("review_keep_old", api.RESOLVE_KEEP_OLD),
+                                          ("review_accept_new", api.RESOLVE_ACCEPT_NEW)])
+def test_the_palettes_k_and_n_resolve_the_selected_conflict(window, monkeypatch,
+                                                              name, verdict):
+    """Round 1b: the Review dock's own Keep old / Take new are gone; these are
+    the one place, and they settle exactly the conflict the queue selected."""
+    resolved: list[tuple] = []
+    monkeypatch.setattr(window, "resolve_conflict",
+                        lambda cid, resolution: resolved.append((cid, resolution)))
+    monkeypatch.setattr(window.review, "selected_conflict", lambda: 7)
+    window.set_mode(A.MODE_REVIEW)
+    window.refresh_guidance()
+    button = window.palette.button(name)
+    assert button.isEnabled(), button.reason()
+    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    QApplication.processEvents()
+    assert resolved == [(7, verdict)]
+
+
 @pytest.mark.parametrize("name", ["review_accept", "review_rework",
                                   "review_keep_old", "review_accept_new"])
 def test_the_review_buttons_are_the_review_keys(window, name):
@@ -576,7 +595,8 @@ def test_the_cheat_sheet_lists_only_this_modes_keys(window):
 # --------------------------------------------------------------------------- #
 def test_the_header_says_what_the_frame_is():
     assert card_header(42, None) == ("第 42 帧（起点，已经拆完的样子）："
-                                     "把这一帧里还看得到的零件都画出来")
+                                     "把这一帧里还看得到的零件都画出来，每个都画完整形状"
+                                     "（被别的零件挡住的部分也算它的，层级程序会处理）")
     assert card_header(40, 41) == ("第 40 帧：比第 41 帧多了下面这些零件"
                                    "（刚被拆掉的，要把它画回去）")
 
@@ -600,18 +620,21 @@ def test_a_row_names_the_part_the_log_and_what_to_do(window):
     assert "[待画]" in texts[cover]
 
 
-def test_the_start_frame_says_what_a_complete_shape_is(window):
-    """Round 1, item 6: "完整形状" meant nothing to a first-time annotator."""
+def test_the_start_frame_says_what_a_complete_shape_is_once(window):
+    """Round 1 item 6, round 1b: "完整形状" meant nothing to a first-time
+    annotator -- said once, in the start frame's header, not on every row."""
     note = "（被别的零件挡住的部分也算它的，层级程序会处理）"
-    assert all(note in text for text, row in zip(window.task_card.row_texts(),
-                                                  window.task_card.rows())
-               if row["kind"] == api.KIND_ADD_SHAPE)
+    assert window.task_card.header_text().count(note) == 1
+    assert "完整形状" + note in window.task_card.header_text()
+    assert not any(note in text for text in window.task_card.row_texts())
     answer_roi(window)
     window.act_step(-1)                   # not the start frame any more
+    assert note not in window.task_card.header_text()
     assert not any(note in text for text in window.task_card.row_texts())
     view = row_view({"instance": "chassis", "kind": api.KIND_ADD_SHAPE, "done": False,
-                     "cls": "chassis"}, start=True)
-    assert view["sentence"] == f"在这一帧画出它的完整形状{note}"
+                     "cls": "chassis", "parent": "motherboard.01"}, start=True)
+    # nothing "comes back in with" a parent on the start frame
+    assert view["sentence"] == "在这一帧画出它的完整形状"
 
 
 @pytest.mark.parametrize("kind,sentence", [

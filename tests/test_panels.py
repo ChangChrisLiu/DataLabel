@@ -841,18 +841,22 @@ def test_review_activation_asks_for_the_frame(
     assert session.calls == []
 
 
-def test_review_resolution_buttons_report_the_verdict(session: StubSession) -> None:
-    """A resolution has three outcomes and only the window can tell which."""
+def test_review_has_no_resolution_buttons_of_its_own(session: StubSession) -> None:
+    """Task U2b round 1b: 保留旧的 K / 采用新的 N live on the tool palette.
+
+    The dock's own "Keep old  K" / "Take new  N" duplicated them -- two places
+    for one thing.  The panel still says which conflict is selected; the
+    palette's buttons (tests/test_app_guide.py) resolve it through the window.
+    """
+    from PySide6.QtWidgets import QPushButton
+
     panel = ReviewPanel(session)
-    seen: list[str] = []
-    panel.sigResolve.connect(seen.append)
+    assert panel.findChildren(QPushButton) == []
+    for name in ("keep_old_button", "accept_new_button", "sigResolve"):
+        assert not hasattr(panel, name), name
     lw = panel.list_for(api.QUEUE_CONFLICTS)
     lw.setCurrentRow(0)
-    panel.keep_old_button.click()
-    assert seen == [api.RESOLVE_KEEP_OLD]
     assert panel.selected_conflict() == 7
-    panel.accept_new_button.click()
-    assert seen == [api.RESOLVE_KEEP_OLD, api.RESOLVE_ACCEPT_NEW]
     assert session.calls == []
 
 

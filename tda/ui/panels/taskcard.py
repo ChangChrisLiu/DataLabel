@@ -121,15 +121,18 @@ def card_header(step: Optional[int], neighbour: Optional[int]) -> str:
     if step is None:
         return ""
     if neighbour is None:
-        return f"第 {step} 帧（起点，已经拆完的样子）：把这一帧里还看得到的零件都画出来"
+        # Once, here, rather than on every row of a start card that can list
+        # sixty parts (round 1b).
+        return (f"第 {step} 帧（起点，已经拆完的样子）：把这一帧里还看得到的零件都画出来，"
+                f"每个都画完整形状{START_NOTE}")
     if int(neighbour) > int(step):
         return (f"第 {step} 帧：比第 {neighbour} 帧多了下面这些零件"
                 f"（刚被拆掉的，要把它画回去）")
     return f"第 {step} 帧：和第 {neighbour} 帧比，下面这些零件变了"
 
 
-#: What "完整形状" means, said once on the start frame, where every part is
-#: drawn for the first time (round 1, item 6).
+#: What "完整形状" means, said once -- in the start frame's header -- where
+#: every part is drawn for the first time (round 1 item 6, round 1b).
 START_NOTE = "（被别的零件挡住的部分也算它的，层级程序会处理）"
 
 
@@ -137,9 +140,9 @@ def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
              start: bool = False) -> dict:
     """What one row shows: title, the log's name, the sentence and the chip.
 
-    ``start`` is the start frame, where every shape is drawn for the first
-    time: the sentence says what a complete shape is, and nothing "comes back
-    in with" a parent there.  Pure, so the tests read exactly what the delegate
+    ``start`` is the start frame, where nothing "comes back in with" a parent:
+    that clause is left off there (what a complete shape is, is said once in
+    :func:`card_header`).  Pure, so the tests read exactly what the delegate
     paints.
     """
     kind = str(row.get("kind", api.KIND_CONFIRM))
@@ -154,9 +157,7 @@ def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
     transition = row.get("transition")
     if kind == api.KIND_SPLIT_KEYFRAME and transition:
         sentence += f"（{transition[0]} → {transition[1]}）"
-    if kind == api.KIND_ADD_SHAPE and start:
-        sentence += START_NOTE
-    elif kind == api.KIND_ADD_SHAPE and row.get("parent"):
+    if kind == api.KIND_ADD_SHAPE and row.get("parent") and not start:
         sentence += f"（跟 {row['parent']} 一起装回来的）"
     span = row.get("span")
     if span:
