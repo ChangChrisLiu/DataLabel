@@ -807,7 +807,7 @@ class TaskCardPanel(QWidget):
         self._paint_header()
         self._repaint_rows()
 
-    def follow_status(self, status: str) -> None:
+    def follow_status(self, status: str, problems: Optional[list] = None) -> None:
         """The frame on screen now has ``status``: re-say "已经确认 ✓" only if it holds.
 
         :meth:`refresh` reads whether the frame is confirmed once per frame, and
@@ -816,7 +816,16 @@ class TaskCardPanel(QWidget):
         window hands the new status over when a queue moves (task U2f); the
         header and the rows are re-derived from what the card already holds,
         without asking the session for the card again.
+
+        ``problems`` is what the frame would be refused for now
+        (``session.current_problems()``), read with the status: a re-check
+        that queued a conflict about this frame is a reason Space refuses, and
+        without it in the pane the header would drop "已经确认 ✓" for "直接
+        Space" -- a promise Space would break.
         """
+        if problems is not None and not self._confirming:
+            self._problems = [str(p) for p in problems]
+            self._show_arrival(self._problems)
         confirmed = bool(self._header_args) and str(status) in api.CONFIRMED_STATUSES
         if confirmed == self._confirmed:
             return

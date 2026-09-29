@@ -21,17 +21,19 @@ import threading
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from app_scene import DESKTOP, VIEW, close_window
+from app_scene import DESKTOP, LAST_STEP, VIEW, cell, close_window
 from test_app_u2e import (
     KEY5,
     STEP,
     answer_roi,
     confirm_row_frame,
     confirmed_five,
+    no_space_promise,
     open_window,
     surfaces,
 )
-from tda.core.model import ZOrderRec
+from tda.core import masks
+from tda.core.model import ShapeKeyframe, ShapePart, ZOrderRec
 from tda.ui import guide as G
 from tda.ui import session_api as api
 from tda.ui.panels.taskcard import CONFIRMED_TAIL, CONFIRMED_TEXT
@@ -128,6 +130,20 @@ def _count(monkeypatch, obj, name) -> list:
     return calls
 
 
+def _recheck_queues_a_conflict(session) -> None:
+    """What the sweeper does to the frame on screen: the chassis moved elsewhere.
+
+    A new version of its shape reaches step 5 (written the way an edit on
+    another frame, or another writer, writes it), and the re-check of step 5
+    queues the disagreement -- no frame change, no announce.
+    """
+    session.db.add_keyframe(ShapeKeyframe(
+        id=None, instance="chassis", desktop=DESKTOP, view=VIEW, pose_segment=1,
+        anchor_step=LAST_STEP, placement="in_chassis", geom_type="mask", version=9,
+        parts=[ShapePart("main", masks.encode_rle(cell(60)))]))
+    assert session.truth.refresh(KEY5)["conflicts"] == 1
+
+
 @pytest.mark.parametrize("verdict", ["demoted", "conflict"])
 def test_the_card_stops_saying_confirmed_when_a_recheck_moves_the_frame_on_screen(
         confirmed_on_screen, monkeypatch, verdict):
@@ -138,7 +154,7 @@ def test_the_card_stops_saying_confirmed_when_a_recheck_moves_the_frame_on_scree
         session.truth.demote_frame(KEY5, "the verified frame gained connector.99")
         expected = api.STATUS_NEEDS_REVIEW
     else:
-        monkeypatch.setattr(session.review, "conflicted_steps", lambda: {STEP})
+        _recheck_queues_a_conflict(session)
         expected = api.STATUS_CONFLICT
     session._on_queues_changed()        # what the sweeper's queue signal runs
     QApplication.processEvents()
@@ -150,6 +166,11 @@ def test_the_card_stops_saying_confirmed_when_a_recheck_moves_the_frame_on_scree
     assert not any(CONFIRMED_TAIL in row for row in seen["rows"]), seen["rows"]
     assert seen["plan"].phase != G.PHASE_CONFIRMED
     assert expected in win.frame_label.text()
+    if verdict == "conflict":
+        # Space refuses now, and everything on screen says why instead of "Space"
+        assert [c for c in seen["pane"] if c.startswith("open_conflict:")], seen["pane"]
+        no_space_promise(seen)
+        assert not session.confirm_frame()
 
 
 def test_a_queue_change_that_leaves_the_status_alone_repaints_nothing(

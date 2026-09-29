@@ -576,7 +576,9 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         the next frame change. Its status is read once more -- one row, the
         queue memos the timeline just filled -- and only a status that
         actually moved rewrites the status line, the guide and the card's
-        header (task U2f); the card is not rebuilt.
+        header, with the frame's refusal reasons read again beside it (a
+        conflict the re-check queued stops Space); the card is not rebuilt
+        (task U2f).
         """
         self.review.refresh()
         self.timeline.refresh_statuses()
@@ -589,7 +591,8 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         status = str(self.session.frame_status(self.session.current().step))
         if status == getattr(self, "_frame_status_seen", None):
             return
-        self.task_card.follow_status(status)
+        finder = getattr(self.session, "current_problems", None)
+        self.task_card.follow_status(status, list(finder()) if callable(finder) else None)
         self.update_status()                # the frame label, then the guide
 
     @S.guard
