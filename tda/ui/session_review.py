@@ -14,6 +14,7 @@ import logging
 
 from tda.core.truth import StaleConflictError
 from tda.core.truth_inputs import instances_of
+from tda.core.truth_refusals import RACE
 from tda.ui.session_coverage import coverage
 from tda.ui import session_api as api
 from tda.ui import session_edit as edit
@@ -52,7 +53,14 @@ class ReviewMixin:
             self.truth.verify_frame(key, self.annotator, self.prepared())
         except ValueError as refused:
             self._invalidate()
-            problems = [str(refused)] + list(self.compiled().problems)
+            compiled = self.compiled()
+            # After the refusal, as on arrival: the compiler's codes and every
+            # other reason the *next* Space would meet -- a frozen disagreement
+            # the refusal has just queued is now an open conflict (U2e).  The
+            # race is only known from the refusal itself.
+            races = [b.code for b in getattr(refused, "blockers", ()) if b.kind == RACE]
+            problems = ([str(refused)] + list(compiled.problems)
+                        + self._refusal_codes(key, compiled) + races)
             self.review.problems[key.step] = problems
             self.sigProblems.emit(problems + self._how_to_fix(problems))
             return False

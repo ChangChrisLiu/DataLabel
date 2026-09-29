@@ -155,6 +155,8 @@ class GuideMixin:
         # A problem clicked in the card's pane selects its part where the
         # keys that fix it act (U2d: the guide says "单击一条去处理").
         self.task_card.sigPickInstance.connect(self.instances.select_instance)
+        # ... and a conflict line opens Review on that conflict (U2e).
+        self.task_card.sigOpenConflict.connect(self.open_conflict_in_review)
         for bar in (self.warn_bar, self.scope_bar, self.restore_bar, self.roi_bar,
                     getattr(self, "raw_bar", None)):
             if bar is not None:
@@ -428,6 +430,7 @@ class GuideMixin:
             items=items,
             # What the card's pane holds that makes Space refuse (U2d).
             blockers=self.task_card.problem_count() if opened else 0,
+            blocker_hint=self.task_card.blocker_hint() if opened else "",
         )
 
     def _card_kind(self, instance: Optional[str]) -> str:

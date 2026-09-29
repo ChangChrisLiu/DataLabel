@@ -29,6 +29,8 @@ from tda.core.model import FrameKey
 from tda.core.taxonomy import Taxonomy
 from tda.core.truth import TruthService
 from tda.core.truth_inputs import instances_of, state_of
+from tda.core.truth_refusals import PROBLEM as REFUSED_BY_PROBLEM
+from tda.core.truth_refusals import blocking_reasons
 from tda.ui import session_edit as edit
 from tda.ui.commands import Op, UndoStack
 from tda.ui.session_api import SessionRefusal
@@ -559,11 +561,24 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
         return self._current_problems() if self.is_open else []
 
     def _current_problems(self) -> list[str]:
-        """The compiler's problems for the open frame, or none when it has no image."""
+        """The open frame's problems, or none when it has no image.
+
+        The compiler's, and every other reason ``verify_frame`` would refuse
+        Space for right now -- an open conflict about the frame, a confirmed
+        row the inputs no longer produce -- as the codes
+        :func:`tda.core.truth_refusals.blocking_reasons` gives them (U2e).
+        Those two used to surface only as the refusal, after Space.
+        """
         key = self.current()
         if key.step not in self._available or self.image_path(key.step) is None:
             return []
-        return list(self.compiled().problems)
+        compiled = self.compiled()
+        return list(compiled.problems) + self._refusal_codes(key, compiled)
+
+    def _refusal_codes(self, key: FrameKey, compiled: CompiledFrame) -> list[str]:
+        """The reasons Space would refuse that are not compiler problems."""
+        return [b.code for b in blocking_reasons(self.db, key, compiled)
+                if b.kind != REFUSED_BY_PROBLEM]
 
     def _refresh_dirty(self) -> None:
         """Set the unsaved-changes flag from where the history now stands."""

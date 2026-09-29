@@ -396,10 +396,14 @@ def test_every_sentence_says_what_to_do():
         "zorder_cycle:": "Ctrl+Z", "zorder_missing:": "Ctrl+↑/↓",
         "empty_visible:": "选中它按 3（完全遮挡）", "pose_segment_ambiguous:": "Ctrl+Shift+B",
         "missing_shape:": "画出来",
+        # U2e: the refusals that are not compiler problems
+        "open_conflict:": "K 保留旧的 / N 采用新的", "frozen_disagreement:": "按 F5",
+        "inputs_changed:": "再按一次 Space",
     }
     assert {prefix for prefix, _ in PROBLEM_SENTENCES} == set(wants)
     for prefix, fix in wants.items():
-        assert fix in explain_code(prefix + "x.01"), prefix
+        assert fix in explain_code(prefix + ("7/x.01" if prefix == "open_conflict:"
+                                             else "x.01")), prefix
     assert "完全挡住" in explain_code("empty_visible:x.01")
 
 

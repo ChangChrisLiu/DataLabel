@@ -126,6 +126,9 @@ class GuideFacts:
     #: ``confirm_frame`` refuses on (``tda.core.truth_verify.is_blocking``),
     #: never the notes it accepts.  The window reads it off the card (U2d).
     blockers: int = 0
+    #: When no blocking line in the pane can be clicked, the first one's own
+    #: instruction ("输入刚变了：再按一次 Space"); ``""`` when one can (U2e).
+    blocker_hint: str = ""
 
 
 @dataclass(frozen=True)
@@ -357,11 +360,13 @@ def _annotate_plan(facts: GuideFacts) -> GuidePlan:
     nothing = not any(item.kind in _WORK_KINDS for item in facts.items)
     if facts.blockers:
         # The rows are done, and Space would still say no: the pane under the
-        # card is the list, and no button is the next one (U2d).
-        return GuidePlan(PHASE_BLOCKED, title,
-                         f"现在：任务卡做完了，但下面还有 {facts.blockers} 个问题挡住 "
-                         f"Space：单击一条去处理",
-                         _steps(facts, 4, nothing=nothing), "")
+        # card is the list, and no button is the next one (U2d).  "单击一条"
+        # only while a click on one goes somewhere; otherwise the line's own
+        # instruction (U2e).
+        now = (f"现在：{facts.blocker_hint}" if facts.blocker_hint else
+               f"现在：任务卡做完了，但下面还有 {facts.blockers} 个问题挡住 "
+               f"Space：单击一条去处理")
+        return GuidePlan(PHASE_BLOCKED, title, now, _steps(facts, 4, nothing=nothing), "")
     if facts.frame_confirmed:
         return GuidePlan(PHASE_CONFIRMED, title,
                          "这一帧已经确认 ✓ — 按 PgDn 去上一帧继续；要改哪个零件就在"

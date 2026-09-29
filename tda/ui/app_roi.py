@@ -15,6 +15,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 
 from tda.core.cache import ROI_SAMPLE_FRAMES, suggest_roi, suggest_roi_over
+from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 from tda.ui import session_api as api
@@ -840,6 +841,28 @@ class RoiMixin:
         self.refresh_overlay()
 
     # ---------------------------------------------------------------- review
+    @S.guard
+    def open_conflict_in_review(self, cid: int) -> None:
+        """A conflict line of the task card was clicked: Review, that conflict.
+
+        An open conflict is the one refusal only Review settles (U2e), and
+        ``K`` / ``N`` act on the conflict its queue has selected -- so the click
+        goes there with it selected.  Leaving Annotate goes through the same
+        gate as the mode tab; when it keeps the window where it is, it has
+        said why.
+        """
+        self.set_mode(A.MODE_REVIEW)
+        if self.mode != A.MODE_REVIEW:
+            return
+        self.review.refresh()
+        if self.review.select_conflict(int(cid)):
+            self.report(f"冲突 #{cid} 已选中：K 保留旧的 / N 采用新的 / "
+                        f"conflict {cid} selected: K keeps the old, N takes the new")
+        else:
+            self.report(f"在 Review → Conflicts 里找冲突 #{cid}：K 保留旧的 / N 采用新的 / "
+                        f"conflict {cid} is not in the queue any more")
+        self.refresh_guidance()
+
     @S.guard
     def resolve_selected(self, resolution: str) -> None:
         """Resolve the conflict the review panel has selected."""
