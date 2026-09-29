@@ -176,7 +176,8 @@ class FreshMixin:
             return False
         if stored["compiler_version"] != self.compiler_version:
             return False
-        return int(stored["n_rows"]) == len(self.db.compiled(key))
+        # counted, not read: the display asks this on every announce (U2e)
+        return int(stored["n_rows"]) == self.db.compiled_count(key)
 
     def ensure_fresh(self, desktop: int, view: str, only_verified: bool = False,
                      force: bool = False) -> dict:

@@ -103,7 +103,7 @@ def _merge_hints(hints: list) -> list:
 
 _SAM_TOOLS = ("sam_point", "sam_box")
 _NO_EDIT = (None, False, False)
-_VERIFIED = (api.STATUS_VERIFIED, api.STATUS_RECHECK)
+_VERIFIED = api.CONFIRMED_STATUSES
 
 
 class GuideMixin:
@@ -155,6 +155,8 @@ class GuideMixin:
         # A problem clicked in the card's pane selects its part where the
         # keys that fix it act (U2d: the guide says "单击一条去处理").
         self.task_card.sigPickInstance.connect(self.instances.select_instance)
+        # ... and a conflict line opens Review on that conflict (U2e).
+        self.task_card.sigOpenConflict.connect(self.open_conflict_in_review)
         for bar in (self.warn_bar, self.scope_bar, self.restore_bar, self.roi_bar,
                     getattr(self, "raw_bar", None)):
             if bar is not None:
@@ -428,6 +430,7 @@ class GuideMixin:
             items=items,
             # What the card's pane holds that makes Space refuse (U2d).
             blockers=self.task_card.problem_count() if opened else 0,
+            blocker_hint=self.task_card.blocker_hint() if opened else "",
         )
 
     def _card_kind(self, instance: Optional[str]) -> str:
@@ -505,7 +508,14 @@ class GuideMixin:
         self.guide.show_plan(plan, self._cheat_for(self.mode))
         self.palette.setVisible(self.mode != A.MODE_STEPS)
         self.palette.set_mode(self.mode)
-        self.palette.apply_states(self.palette_states(facts), plan.action)
+        states = self.palette_states(facts)
+        self.palette.apply_states(states, plan.action)
+        # The scope bar's 仅本帧 is the same action: the same grey, the same why (U2e).
+        enabled, _checked, why = states.get("commit_override", (True, False, ""))
+        button = getattr(self, "scope_override_button", None)
+        if button is not None:
+            button.setEnabled(bool(enabled))
+            button.setToolTip("" if enabled else str(why))
         self.palette.set_radius(self.brush.radius)
         self.canvas.set_banner(self.banner_text(facts))
         editing = getattr(self.session, "editing_instance", None)

@@ -19,34 +19,25 @@ from typing import Optional
 
 from tda.core.compiler import CompiledFrame
 from tda.core.model import FrameKey, Placement
-from tda.core.truth_conflicts import (
-    disagreement,
-    geom_payload,
-    label_changes,
-    label_text,
-    row_payload,
-    row_values,
-)
+from tda.core.truth_conflicts import row_values
 from tda.core.truth_fresh import digest_of, hash_of_inputs
 from tda.core.truth_inputs import gather
+# The reasons live in one module that the window reads too (task U2e); the
+# names stay importable from here, where they were first defined.
+from tda.core.truth_refusals import (
+    BLOCKING_PROBLEMS,
+    CONFLICT,
+    FROZEN,
+    PROBLEM,
+    Blocker,
+    VerifyRefused,
+    blocking_reasons,
+    inputs_changed,
+    is_blocking,
+)
 
-__all__ = ["BLOCKING_PROBLEMS", "VerifyMixin", "is_blocking", "usable"]
-
-#: Problem prefixes that stop a frame from being verified (spec 3.3 step 3).
-#: Everything else -- ``bench_missing``, ``zorder_missing``, ``empty_visible``,
-#: ``pose_segment_ambiguous`` -- is a warning the annotator may accept.
-BLOCKING_PROBLEMS = ("missing_shape:", "zorder_cycle:", "shape_size_mismatch:")
-
-
-def is_blocking(problem: str) -> bool:
-    """Does this compiler problem stop the frame from being verified?
-
-    The one test :meth:`VerifyMixin.verify_frame` applies, and the one the task
-    card and the guide ask when they say what stands between the annotator and
-    ``Space`` (task U2d) -- so the two can never name different sets.
-    """
-    return str(problem).startswith(BLOCKING_PROBLEMS)
-
+__all__ = ["BLOCKING_PROBLEMS", "VerifyMixin", "VerifyRefused", "blocking_reasons",
+           "is_blocking", "usable"]
 
 VERIFIED = "verified"
 NEEDS_REVIEW = "needs_review"
@@ -130,27 +121,38 @@ class VerifyMixin:
         flag and op log -- against the inputs it was compiled from, or not at
         all. An edit that landed while it was being compiled raises the same
         ordinary ``ValueError`` and writes nothing.
+
+        The reasons are :func:`~tda.core.truth_refusals.blocking_reasons` --
+        the list the window shows before Space is pressed (task U2e) -- and
+        each refusal is a :class:`~tda.core.truth_refusals.VerifyRefused`, a
+        ``ValueError`` carrying the :class:`Blocker` items it refused for.
         """
         refused = f"frame {key.desktop}/{key.view}/step {key.step} cannot be verified: "
-        open_ids = self._open_conflict_ids(key)
-        if open_ids:
-            raise ValueError(
+        made: dict = {}
+
+        def frame() -> tuple:
+            # asked only once no open conflict has refused: that refusal costs
+            # no compilation and no decode, as it always did
+            made["inputs"] = inputs = gather(self.db, self.tax, key, cache_dir=self.cache_dir)
+            made["compiled"] = (prepared if usable(prepared, key, inputs, self.compiler_version)
+                                else self._compile_inputs(key, inputs))
+            made["stored"] = self.db.compiled(key)
+            return made["compiled"], inputs.frame_overrides, made["stored"]
+
+        reasons = blocking_reasons(self.db, key, frame, thorough=True)
+        kind = reasons[0].kind if reasons else None
+        if kind == CONFLICT:
+            raise VerifyRefused(
                 refused + "conflict(s) "
-                + ", ".join(str(cid) for cid in open_ids)
-                + " are still open; settle them in the review queue first"
-            )
-        inputs = gather(self.db, self.tax, key, cache_dir=self.cache_dir)
-        compiled = (prepared if usable(prepared, key, inputs, self.compiler_version)
-                    else self._compile_inputs(key, inputs))
-        blocking = [p for p in compiled.problems if is_blocking(p)]
-        if blocking:
-            raise ValueError(refused + ", ".join(blocking))
-        stored = self.db.compiled(key)
-        gone = sorted(set(stored) - set(compiled.instances))
-        disputed = self._queue_frozen_disagreements(key, stored, compiled, inputs, gone)
-        if disputed:
-            raise ValueError(refused + "; ".join(disputed)
-                             + "; the disagreement is now in the review queue")
+                + ", ".join(str(b.conflict_id) for b in reasons)
+                + " are still open; settle them in the review queue first", reasons)
+        if kind == PROBLEM:
+            raise VerifyRefused(refused + ", ".join(b.code for b in reasons), reasons)
+        if kind == FROZEN:
+            self._queue_frozen_disagreements(key, reasons)
+            raise VerifyRefused(refused + "; ".join(b.text for b in reasons)
+                                + "; the disagreement is now in the review queue", reasons)
+        inputs, compiled, stored = made["inputs"], made["compiled"], made["stored"]
         previous = self._review_status(key)
         digest = digest_of(inputs, self.compiler_version)
         with self.db.transaction():
@@ -161,8 +163,8 @@ class VerifyMixin:
             # describe inputs nobody has any more. `refresh` guards its own
             # write the same way.
             if self.inputs_digest(key) != digest:
-                raise ValueError(refused + "the inputs changed while confirming; "
-                                 "press Space again")
+                race = inputs_changed()
+                raise VerifyRefused(refused + race.text, [race])
             for instance in sorted(compiled.instances):
                 row = stored.get(instance)
                 if row is not None and row["status"] == VERIFIED:
@@ -177,7 +179,7 @@ class VerifyMixin:
                     key, instance, row_values(compiled.instances[instance]),
                     VERIFIED, compiled.input_hash, verified_by=annotator,
                 )
-            for instance in gone:
+            for instance in sorted(set(stored) - set(compiled.instances)):
                 # `auto` only: the guard above turned every frozen one away
                 self.db.delete_compiled(key, instance)
             self._mark_bench(key, compiled)
@@ -190,6 +192,24 @@ class VerifyMixin:
                 {"kind": "set_review_status", "step": key.step, "review_status": previous},
                 annotator,
             )
+
+    def disagreement_ruled_out(self, key: FrameKey, compiled: CompiledFrame) -> bool:
+        """Can no confirmed row of this frame disagree with ``compiled``?
+
+        True when ``compiled`` is what the frame's current inputs make and the
+        frame's stored digest is current for those inputs.  A digest is stamped
+        only when no frozen disagreement stands -- a refresh with nothing left
+        standing, a confirmation that got through -- and it is cleared whenever
+        one is queued and whenever a verdict is written, so a current digest
+        means none can stand, and nothing has to be decoded to know it.
+
+        The display's gate (U2e round 2), for :func:`blocking_reasons` with
+        ``thorough=False``; ``verify_frame`` never takes it.
+        """
+        inputs = gather(self.db, self.tax, key, cache_dir=self.cache_dir)
+        if not usable(compiled, key, inputs, self.compiler_version):
+            return False
+        return self._digest_is_current(key, digest_of(inputs, self.compiler_version))
 
     def demote_frame(self, key: FrameKey, reason: str) -> None:
         """Send a frame back to the review queue (spec 3.4, "需复核")."""
@@ -204,17 +224,8 @@ class VerifyMixin:
 
     # --------------------------------------------------------------- internals
 
-    def _open_conflict_ids(self, key: FrameKey) -> list[int]:
-        """Ids of the open disagreements about one frame, ascending."""
-        return sorted(
-            int(row["id"])
-            for row in self.db.conflicts(key.desktop, key.view, open_only=True)
-            if int(row["step"]) == int(key.step)
-        )
-
-    def _queue_frozen_disagreements(self, key: FrameKey, stored: dict[str, dict],
-                                    compiled, inputs, gone: list[str]) -> list[str]:
-        """Queue every frozen row this compilation disagrees with; say which.
+    def _queue_frozen_disagreements(self, key: FrameKey, disputed: list[Blocker]) -> None:
+        """Queue the frozen disagreements :func:`blocking_reasons` found.
 
         Exactly the entries :meth:`~tda.core.truth.TruthService.refresh` would
         have made, written in one transaction of their own, so the refusal the
@@ -223,51 +234,16 @@ class VerifyMixin:
         The frame's digest goes with them: the rows keep their frozen values and
         therefore do not describe these inputs -- stamping it here is what used
         to turn the queued re-check into a no-op.
-
-        Returns one sentence per instance, in key order, or ``[]`` when nothing
-        a human signed is in dispute.
-
-        A row whose stored ``input_hash`` is this compilation's cannot disagree
-        with it -- it *is* this compilation -- so it is skipped without decoding
-        anything, which is the same short-circuit
-        :meth:`~tda.core.truth.TruthService._write_refresh` makes. Comparing
-        masks means decoding them, and Space on a forty-row frame at 1600x1600
-        was spending half a second of the GUI thread proving rows agree with
-        inputs they were derived from.
         """
-        reasons: list[tuple[str, str, Optional[dict], Optional[dict], int]] = []
-        for instance in gone:
-            if stored[instance]["status"] != VERIFIED:
-                continue
-            payload = row_payload(stored[instance])
-            reasons.append((instance, f"{instance} is no longer in this frame",
-                            payload, None, self._payload_area(payload)))
-        for instance in sorted(set(stored) & set(compiled.instances)):
-            row = stored[instance]
-            if row["status"] != VERIFIED or row["input_hash"] == compiled.input_hash:
-                continue
-            compiled_inst = compiled.instances[instance]
-            diff = disagreement(row, compiled_inst)
-            labels = label_changes(row, compiled_inst,
-                                   inputs.frame_overrides.get(instance))
-            if diff is None and not labels:
-                continue
-            what = label_text(labels) if labels else f"{diff} px differ"
-            values = row_values(compiled_inst)
-            reasons.append((
-                instance, f"the confirmed {instance} no longer agrees ({what})",
-                row_payload(row),
-                geom_payload(values.visible_rle, values.box, labels), int(diff or 0),
-            ))
-        if not reasons:
-            return []
         queued: Optional[list[dict]] = None
         with self.db.transaction():
-            for instance, _text, old, new, pixels in reasons:
-                queued, _new = self._queue_conflict(key, instance, old, new,
+            for blocker in disputed:
+                old, new, pixels = blocker.queue
+                if pixels is None:          # the part left the frame: its whole area
+                    pixels = self._payload_area(old)
+                queued, _new = self._queue_conflict(key, blocker.instance, old, new,
                                                     pixels, queued)
             self.db.clear_frame_digest(key)
-        return [text for _inst, text, *_rest in reasons]
 
     def _review_status(self, key: FrameKey) -> Optional[str]:
         frame = self.db.get_frame(key)

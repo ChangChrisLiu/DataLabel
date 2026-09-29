@@ -184,6 +184,21 @@ class ReviewPanel(QWidget):
         cid = None if item is None else item.data(CID_ROLE)
         return None if cid is None else int(cid)
 
+    def select_conflict(self, cid: int) -> bool:
+        """Put the Conflicts tab on top with conflict ``cid`` selected.
+
+        What a click on a conflict line of the task card asks for (U2e), so
+        that ``K`` / ``N`` act on that one.  ``False`` when the queue does not
+        list it (it was settled meanwhile).
+        """
+        lw = self._lists[api.QUEUE_CONFLICTS]
+        self._tabs.setCurrentIndex(list(api.QUEUE_NAMES).index(api.QUEUE_CONFLICTS))
+        for row in range(lw.count()):
+            if lw.item(row).data(CID_ROLE) is not None and int(lw.item(row).data(CID_ROLE)) == int(cid):
+                lw.setCurrentRow(row)
+                return True
+        return False
+
     def select_current_step(self) -> None:
         """Put the highlight back on the frame that is open, after a refusal.
 

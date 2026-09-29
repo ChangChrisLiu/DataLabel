@@ -47,7 +47,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from tda.core.truth_verify import is_blocking
+from tda.core.truth_refusals import (
+    FROZEN_DISAGREEMENT,
+    INPUTS_CHANGED,
+    OPEN_CONFLICT,
+    conflict_of,
+    is_blocking,
+)
 from tda.ui import session_api as api
 from tda.ui.class_names import instance_label, state_zh, visibility_zh
 from tda.ui.panels import session_is_open
@@ -138,6 +144,12 @@ def space_or_blocked(blockers: int, space: str = "直接 Space") -> str:
     return BLOCKED_SPACE.format(n=int(blockers)) if blockers else space
 
 
+#: What a card that would say "直接 Space" says on a frame already confirmed,
+#: with nothing in the pane: what the guide says there (U2e round 2).
+CONFIRMED_TAIL = "已经确认 ✓（PgDn 下一帧；改了之后再按 Space 重新确认）"
+CONFIRMED_TEXT = "这一帧" + CONFIRMED_TAIL
+
+
 #: How each kind is counted in a mixed header (U2b round 2).
 _KIND_COUNTS: tuple[tuple[str, str], ...] = (
     (api.KIND_ADD_SHAPE, "{n} 个要画回去"),
@@ -151,7 +163,7 @@ _KIND_COUNTS: tuple[tuple[str, str], ...] = (
 def card_header(step: Optional[int], neighbour: Optional[int],
                 kinds: Optional[list[str]] = None, first: Optional[int] = None,
                 last: Optional[int] = None, done: Optional[list[bool]] = None,
-                blockers: int = 0) -> str:
+                blockers: int = 0, confirmed: bool = False) -> str:
     """The sentence above the list: what *this* frame's list is (ruling U2b-3).
 
     Built from the rows' kinds (round 2): "多了…要画回去" over rows that only
@@ -163,6 +175,9 @@ def card_header(step: Optional[int], neighbour: Optional[int],
     is left and what is done rather than calling every row work.
     ``blockers`` is how many problems in the card's pane stop ``Space``: with
     any, no header says "直接 Space" (U2d round 2, :func:`space_or_blocked`).
+    ``confirmed`` is a frame already confirmed: with nothing blocking, where
+    the header would send the annotator to Space it says :data:`CONFIRMED_TEXT`,
+    as the guide does (U2e round 2).
     """
     if step is None:
         return ""
@@ -179,6 +194,8 @@ def card_header(step: Optional[int], neighbour: Optional[int],
             where = "起点"
         left = [k for k, d in zip(kinds, flags) if k != api.KIND_CONFIRM and not d]
         drawn = len(work) - len(left)
+        if not left and confirmed and not blockers:
+            return f"第 {step} 帧（{where}）：{CONFIRMED_TEXT}"
         if not left:
             return (f"第 {step} 帧（{where}）：这一帧的零件都画好了，"
                     f"{space_or_blocked(blockers, '直接 Space 确认')}")
@@ -190,6 +207,8 @@ def card_header(step: Optional[int], neighbour: Optional[int],
             text += f"。还剩 {len(left)} 个，{drawn} 个画好了（✔，排在最后）"
         return text
     present = set(work)
+    if present <= {api.KIND_STATE_ONLY} and confirmed and not blockers:
+        return f"第 {step} 帧：{CONFIRMED_TEXT}"
     if not present:
         return f"第 {step} 帧：这一帧不用画，{space_or_blocked(blockers)}"
     if present == {api.KIND_ADD_SHAPE}:
@@ -218,7 +237,7 @@ START_NOTE = "（被别的零件挡住的部分也算它的，层级程序会处
 
 
 def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
-             start: bool = False, blockers: int = 0) -> dict:
+             start: bool = False, blockers: int = 0, confirmed: bool = False) -> dict:
     """What one row shows: title, the log's name, the sentence and the chip.
 
     ``start`` is the start frame, where nothing "comes back in with" a parent:
@@ -238,6 +257,8 @@ def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
     sentence = KIND_SENTENCES.get(kind, str(row.get("text", "")))
     if kind == api.KIND_CONFIRM and blockers:
         sentence = f"这一帧不用画，{space_or_blocked(blockers)}"
+    elif kind == api.KIND_CONFIRM and confirmed:
+        sentence = f"这一帧不用画，{CONFIRMED_TAIL}"
     transition = row.get("transition")
     if kind == api.KIND_SPLIT_KEYFRAME and transition:
         sentence += f"（{state_zh(transition[0])} → {state_zh(transition[1])}）"
@@ -266,6 +287,27 @@ def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
     return {"icon": KIND_ICONS.get(kind, "•"), "title": title,
             "raw": f"日志：{raw}" if raw else "", "sentence": sentence, "chip": chip,
             "done": done, "editing": chip in (CHIP_EDITING, CHIP_BOXING)}
+
+
+def row_tooltip(row: dict, view: dict, blockers: int = 0, confirmed: bool = False) -> str:
+    """The row's tooltip: the session's own words, which name the state
+    transition and the program's instruction in full.
+
+    Except on a ✔ row, where the session's English ends "… - confirm the
+    frame": Chinese first there, the row's own sentence, and the English
+    saying the same thing -- not "confirm" over a pane that blocks it (U2e).
+    """
+    kind = str(row.get("kind", api.KIND_CONFIRM))
+    if kind != api.KIND_CONFIRM:
+        return f"{row.get('text', '')}\n[{kind}]"
+    if blockers:
+        english = f"Nothing to draw here, but {blockers} problem(s) below stop Space"
+    elif confirmed:
+        english = ("Nothing to draw here, and the frame is confirmed: PgDn for the next "
+                   "one; after a change, Space confirms it again")
+    else:
+        english = str(row.get("text") or "Nothing to draw here - confirm the frame")
+    return f"{view['sentence']}\n{english}"
 
 
 def plain_text(view: dict) -> str:
@@ -424,6 +466,10 @@ REFUSAL_TITLE = "Problems"
 #: follow it, greyed.  Which codes are which is ``is_blocking``'s answer.
 NOTES_HEADING = "提示（不挡 Space）/ notes -- Space still works"
 NOTE_COLOR = QColor(118, 118, 124)
+#: An open conflict about the frame on screen, and how to settle it (U2e).
+CONFLICT_SENTENCE = "这一帧有未处理的冲突：点顶部 Review → Conflicts，K 保留旧的 / N 采用新的"
+#: The input race: an edit landed while Space was confirming.  Transient.
+RACE_SENTENCE = "输入刚变了：再按一次 Space"
 
 #: What every other code means, in one place.  ``{what}`` is the part of the
 #: code after the colon -- an instance key, sometimes with a part or a second
@@ -439,21 +485,41 @@ PROBLEM_SENTENCES: tuple[tuple[str, str], ...] = (
     ("pose_segment_ambiguous:", "{what}：跨了不止一个位姿段 → 先定好位姿分段"
                                 "（接受/拒绝断点提示，或 Ctrl+Shift+B）"),
     ("missing_shape:", "{what}：这一帧还缺形状，把它画出来"),
+    # The refusals that are not the compiler's (U2e,
+    # tda.core.truth_refusals.blocking_reasons).  A conflict line is clicked
+    # to Review with that conflict selected; {what} is "#id part".
+    (OPEN_CONFLICT, CONFLICT_SENTENCE + "（{what}）"),
+    # Said after a refused Space too, which has just queued it: true either way.
+    (FROZEN_DISAGREEMENT, "{what}：确认过的形状后来在别的帧被改了，和这一帧对不上 → 到 Review → "
+                          "Conflicts：K 保留旧的 / N 采用新的（冲突队列里还没有它就先按 F5）"),
+    (INPUTS_CHANGED, RACE_SENTENCE),
 )
 
 
 def explain_code(code: str) -> str:
     """The human sentence for a problem code, or the code itself when unknown."""
+    found = conflict_of(code)
     for prefix, template in PROBLEM_SENTENCES:
         if code.startswith(prefix):
-            return template.format(what=code[len(prefix):])
+            what = f"#{found[0]} {found[1]}".strip() if found else code[len(prefix):]
+            return template.format(what=what)
     return code
 
 
 def instance_of(code: str) -> str:
-    """The instance key a code is about: before any ``/`` part or ``,`` partner."""
+    """The instance key a code is about: before any ``/`` part or ``,`` partner.
+
+    A conflict line is about the conflict, not a part to select: ``""``.
+    """
+    if conflict_of(code) is not None:
+        return ""
     tail = code.split(":", 1)[1] if ":" in code else ""
     return tail.split("/", 1)[0].split(",", 1)[0].strip()
+
+
+def _clickable(row: dict) -> bool:
+    """Does a click on this pane line go somewhere (a part, or a conflict)?"""
+    return bool(row["instance"]) or conflict_of(row["code"]) is not None
 
 
 def pair_problems(problems: list[str]) -> list[dict]:
@@ -538,6 +604,8 @@ class TaskCardPanel(QWidget):
     #: A problem in the pane was clicked: select this part where the keys
     #: that fix it act -- the instance table (U2d).
     sigPickInstance = Signal(str)
+    #: A conflict line in the pane was clicked: open Review on this conflict (U2e).
+    sigOpenConflict = Signal(int)
 
     def __init__(self, session: Optional[api.SessionLike] = None,
                  parent: Optional[QWidget] = None) -> None:
@@ -558,6 +626,8 @@ class TaskCardPanel(QWidget):
         self._header_args: dict = {}
         #: :meth:`problem_count` as the header and the rows last said it.
         self._blockers = 0
+        #: Has somebody confirmed the frame on screen (U2e round 2)?
+        self._confirmed = False
         self._hovered = ""
         #: ``(instance, monotonic time)`` of the last click on a row.
         self._last_click: tuple[str, float] = ("", 0.0)
@@ -652,9 +722,13 @@ class TaskCardPanel(QWidget):
         steps = list(self._session.steps()) if opened else []
         kinds = [str(r.get("kind", api.KIND_CONFIRM)) for r in rows]
         done = [bool(r.get("done", False)) for r in rows]
+        # confirmed already: the guide's "已经确认 ✓", and now the header's (U2e)
+        self._confirmed = bool(opened and step is not None and self._session.frame_status(
+            step) in api.CONFIRMED_STATUSES)
         self._header_args = (dict(step=step, neighbour=neighbour, kinds=kinds,
                                   first=min(steps) if steps else None,
-                                  last=max(steps) if steps else None, done=done)
+                                  last=max(steps) if steps else None, done=done,
+                                  confirmed=self._confirmed)
                              if opened else {})
         self._blockers = self.problem_count()
         self._paint_header()
@@ -663,14 +737,12 @@ class TaskCardPanel(QWidget):
             kind = str(row.get("kind", api.KIND_CONFIRM))
             instance = str(row.get("instance", ""))
             view = row_view(row, self._editing, self._editing_bench, self._start,
-                            self._blockers)
+                            self._blockers, self._confirmed)
             item = QListWidgetItem(plain_text(view))
             item.setData(INSTANCE_ROLE, instance)
             item.setData(KIND_ROLE, kind)
             item.setData(VIEW_ROLE, view)
-            # The session's own words stay reachable: they name the state
-            # transition and the program's instruction in full.
-            item.setToolTip(f"{row.get('text', '')}\n[{kind}]")
+            item.setToolTip(row_tooltip(row, view, self._blockers, self._confirmed))
             font = item.font()
             done = bool(row.get("done", False))
             if done:
@@ -715,10 +787,12 @@ class TaskCardPanel(QWidget):
             if not isinstance(old, dict):
                 continue
             view = row_view(self._card[index], self._editing, self._editing_bench,
-                            self._start, self._blockers)
+                            self._start, self._blockers, self._confirmed)
             if view != old:
                 item.setData(VIEW_ROLE, view)
                 item.setText(plain_text(view))
+                item.setToolTip(row_tooltip(self._card[index], view, self._blockers,
+                                            self._confirmed))
 
     def _sync_blockers(self) -> None:
         """The pane changed: the header and a ✔ row say Space only if nothing blocks it.
@@ -828,6 +902,22 @@ class TaskCardPanel(QWidget):
             return 0
         blocking = [row for row in self._rows if row["code"] and is_blocking(row["code"])]
         return len(blocking) or len([row for row in self._rows if not row["code"]])
+
+    def blocker_hint(self) -> str:
+        """What to say instead of "单击一条去处理" when no blocking line is clickable.
+
+        ``""`` when a click on one of them goes somewhere -- a part, or a
+        conflict in Review.  Otherwise the first one's own instruction: after
+        an input race that is "输入刚变了：再按一次 Space", and clicking it
+        would do nothing (U2e).
+        """
+        if not self._problems_list.isVisibleTo(self):
+            return ""
+        blocking = [row for row in self._rows if row["code"] and is_blocking(row["code"])]
+        if any(_clickable(row) for row in blocking):
+            return ""
+        lines = blocking or [row for row in self._rows if not row["code"]]
+        return lines[0]["text"] if lines else ""
 
     def problems(self) -> list[str]:
         """The problems currently on display (empty when none are shown)."""
@@ -1025,6 +1115,11 @@ class TaskCardPanel(QWidget):
         act) and says its sentence in the status line.
         """
         instance = str(item.data(INSTANCE_ROLE) or "")
+        conflict = conflict_of(str(item.data(CODE_ROLE) or ""))
+        if conflict is not None:
+            # Settled in Review, where K / N act on the selected conflict (U2e).
+            self.sigOpenConflict.emit(conflict[0])
+            return
         if not instance:
             return
         self.activate_problem(instance)

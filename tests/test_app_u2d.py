@@ -51,7 +51,7 @@ from app_scene import (
     make_session,
     seed_shapes,
 )
-from tda.core import truth_verify
+from tda.core import truth_refusals
 from tda.ui import app_actions as A
 from tda.ui import guide as G
 from tda.ui import session_api as api
@@ -326,7 +326,8 @@ def test_the_guide_and_confirm_read_one_list_of_blocking_codes(qapp, tmp_path,
     try:
         answer_roi(win)
         assert win.guide_plan().phase == G.PHASE_BLOCKED
-        monkeypatch.setattr(truth_verify, "BLOCKING_PROBLEMS",
+        # the list lives with the other refusals since U2e (truth_refusals)
+        monkeypatch.setattr(truth_refusals, "BLOCKING_PROBLEMS",
                             ("zorder_cycle:", "shape_size_mismatch:"))
         session.goto(LAST_STEP - 1, force=True)         # arrive again
         QApplication.processEvents()
@@ -395,10 +396,14 @@ def test_every_sentence_says_what_to_do():
         "zorder_cycle:": "Ctrl+Z", "zorder_missing:": "Ctrl+↑/↓",
         "empty_visible:": "选中它按 3（完全遮挡）", "pose_segment_ambiguous:": "Ctrl+Shift+B",
         "missing_shape:": "画出来",
+        # U2e: the refusals that are not compiler problems
+        "open_conflict:": "K 保留旧的 / N 采用新的", "frozen_disagreement:": "按 F5",
+        "inputs_changed:": "再按一次 Space",
     }
     assert {prefix for prefix, _ in PROBLEM_SENTENCES} == set(wants)
     for prefix, fix in wants.items():
-        assert fix in explain_code(prefix + "x.01"), prefix
+        assert fix in explain_code(prefix + ("7/x.01" if prefix == "open_conflict:"
+                                             else "x.01")), prefix
     assert "完全挡住" in explain_code("empty_visible:x.01")
 
 

@@ -795,6 +795,135 @@ def test_window_gesture_budgets_on_a_12mp_frame_best_and_median_of_five(
     _median_under(BUDGET_WINDOW_REPAINT, "zoom repaint", zoom_runs)
 
 
+# --------------------------------------------------------------------------- #
+# a confirmed frame the inputs moved under (U2e round 2)
+# --------------------------------------------------------------------------- #
+#: Measured on main (``0b58e5c``, before U2e) with this very test, median of
+#: five on this machine; the budgets are those medians + 15 %.  The arrival
+#: keeps the window's frame-change budget.
+MAIN_CONFIRMED_COMMIT = 3.573
+MAIN_CONFIRMED_REFUSED_SPACE = 0.0745
+BUDGET_CONFIRMED_COMMIT = round(MAIN_CONFIRMED_COMMIT * 1.15, 3)
+BUDGET_CONFIRMED_REFUSED_SPACE = round(MAIN_CONFIRMED_REFUSED_SPACE * 1.15, 3)
+
+
+def _behind(session, key) -> bool:
+    """Does a confirmed row of ``key`` carry another compilation's input_hash?"""
+    now = session.truth.compile(key).input_hash
+    return any(row["status"] == "verified" and row["input_hash"] != now
+               for row in session.db.compiled(key).values())
+
+
+@pytest.mark.slow
+def test_window_budgets_on_a_confirmed_behind_but_agreeing_12mp_frame(
+    qapp, tmp_path, as_shipped
+):
+    """Arrival, Enter and a refused Space on a frame somebody confirmed.
+
+    The normal reverse walk leaves every confirmed frame *behind but agreeing*:
+    the first commit of any new part moves the segment's layer order, the
+    re-check finds the pixels unchanged and -- on purpose -- leaves the rows
+    with their old ``input_hash``.  U2e's first cut compared those rows again
+    on every announce: 2.1 s per 12 MP arrival, and 6.7 s for a Space refused by
+    an open conflict.  None of the budgets above stands on a confirmed frame,
+    which is how that got through.
+
+    Arrival is measured in steady state -- after the re-check stamped the
+    frame's digest -- against the window's frame-change budget; Enter and the
+    refused Space against main's medians + 15 %.  Best and median of five, as
+    the window test above.
+    """
+    session = make_session(tmp_path, last_step=BOARD_STEP, hw=OAK_HW)
+    session.goto(OAK_STEP)
+    drawn = seed_shapes(session, OAK_STEP, grid=7, anchor=BOARD_STEP, refresh=False)
+    assert len(drawn) >= 40, f"the scene has only {len(drawn)} instances"
+    session.compiled()
+    key = FrameKey(DESKTOP, OAK_STEP, VIEW)
+    assert session.confirm_frame() is True              # confirmed; now on k-1
+    # the layer order moves and no pixel does: the re-check agrees
+    session.set_zorder_move(drawn[1], drawn[2])
+    session.drain_sweeper(timeout=300.0)
+    assert session.frame_status(OAK_STEP) == api.STATUS_VERIFIED
+    assert _behind(session, key), "the confirmed rows are not behind; wrong scene"
+    window = _open_window(session, tmp_path)
+    try:
+        assert session.sweeper_enabled is True
+        window.canvas.set_zoom(OAK_ZOOM)
+
+        # -- arriving at it, in steady state ----------------------------------
+        def before_arrival(attempt: int) -> None:
+            session.goto(OAK_STEP + 1, force=True)
+            session.drain_prefetch(timeout=120.0)
+            _settle(window)
+
+        def arrival(attempt: int) -> None:
+            window.act_step(-1)
+            _settle(window)
+
+        before_arrival(-1)
+        arrival(-1)                                     # the first visit, untimed
+        _, arrival_runs = best_of(arrival, before_arrival, times=BEST_OF_12MP)
+        assert session.current().step == OAK_STEP
+        assert not session.db.conflicts(DESKTOP, VIEW, open_only=True)
+
+        # -- Enter on it -------------------------------------------------------
+        def before_commit(attempt: int) -> None:
+            window.act_clear_edit()
+            session.clear_edit()
+            session.goto(OAK_STEP, force=True)
+            _settle(window)
+            window.on_request_edit(CHASSIS)
+            mask = session.editing_mask()
+            painted = (np.zeros(OAK_HW, dtype=bool) if mask is None else mask.copy())
+            # inside the chassis's own rectangle, where nothing covers it: the
+            # confirmed chassis really changes, so the commit raises a conflict
+            painted[100:300, 100 + attempt:300 + attempt] ^= True
+            window.set_editing_mask(painted, undoable=True)
+            _settle(window)
+
+        def commit(attempt: int) -> None:
+            window.act_commit()
+            for _ in range(2):
+                if not (window.warn_bar.isVisible() or window.scope_bar.isVisible()):
+                    break
+                window.act_commit()
+            _settle(window)
+
+        _, commit_runs = best_of(commit, before_commit, times=BEST_OF_12MP)
+        assert session.editing_instance is None, "the commit was refused"
+
+        # -- Space, refused by the open conflict the commits raised ------------
+        window.act_clear_edit()
+        session.clear_edit()
+        session.drain_sweeper(timeout=300.0)            # the re-check that raises it
+        assert [c for c in session.db.conflicts(DESKTOP, VIEW, open_only=True)
+                if int(c["step"]) == OAK_STEP], "no open conflict: not a refused Space"
+
+        def before_space(attempt: int) -> None:
+            session.goto(OAK_STEP, force=True)
+            _settle(window)
+
+        def space(attempt: int) -> None:
+            assert window.act_confirm() is False
+            _settle(window)
+
+        _, space_runs = best_of(space, before_space, times=BEST_OF_12MP)
+    finally:
+        window.shutdown()
+        window.hide()
+        QApplication.processEvents()
+        session.close(force=True)
+
+    print(f"\nconfirmed 12 MP frame: arrival {arrival_runs}, commit {commit_runs}, "
+          f"refused Space {space_runs}")
+    for check in (_under, _median_under):
+        check(BUDGET_WINDOW_FRAME_CHANGE, "arrival at a confirmed frame (window)",
+              arrival_runs)
+        check(BUDGET_CONFIRMED_COMMIT, "Enter on a confirmed frame (window)", commit_runs)
+        check(BUDGET_CONFIRMED_REFUSED_SPACE, "Space refused by a conflict (window)",
+              space_runs)
+
+
 def _count_compiles_in(monkeypatch) -> list:
     """Record every pixel compilation made on **this** thread from now on.
 

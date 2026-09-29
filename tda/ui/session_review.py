@@ -14,6 +14,7 @@ import logging
 
 from tda.core.truth import StaleConflictError
 from tda.core.truth_inputs import instances_of
+from tda.core.truth_refusals import PROBLEM as REFUSED_BY_PROBLEM
 from tda.ui.session_coverage import coverage
 from tda.ui import session_api as api
 from tda.ui import session_edit as edit
@@ -52,7 +53,13 @@ class ReviewMixin:
             self.truth.verify_frame(key, self.annotator, self.prepared())
         except ValueError as refused:
             self._invalidate()
-            problems = [str(refused)] + list(self.compiled().problems)
+            # The compiler's codes, and the refusal's own reasons beyond them --
+            # an open conflict, a frozen disagreement (queued by this very
+            # refusal), the race -- as it carries them: nothing is compared a
+            # second time (U2e round 2).
+            carried = [b.code for b in getattr(refused, "blockers", ())
+                       if b.kind != REFUSED_BY_PROBLEM]
+            problems = [str(refused)] + list(self.compiled().problems) + carried
             self.review.problems[key.step] = problems
             self.sigProblems.emit(problems + self._how_to_fix(problems))
             return False
@@ -195,6 +202,8 @@ class ReviewMixin:
                                        [conflict["step"]])
             self.review.problems.update(stats["problems"])
         self._invalidate()
+        if conflict is not None and int(conflict["step"]) == int(self.current().step):
+            self._truth_settled()     # that refresh just compared this frame's rows
         self._announce()
         if outcome != "resolved":
             verb = "superseded" if outcome == "superseded" else "not resolved"

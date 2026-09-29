@@ -15,6 +15,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 
 from tda.core.cache import ROI_SAMPLE_FRAMES, suggest_roi, suggest_roi_over
+from tda.ui import app_actions as A
 from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 from tda.ui import session_api as api
@@ -34,7 +35,11 @@ NO_CHASSIS_FOUND = ("自动没找到机箱：直接在画面上拖一个框框�
                     "Enter to save, Esc to skip")
 #: Said when a drag leaves a rectangle ``Enter`` would store: the refusal a
 #: previous drag earned is out of date the moment this one lands (U2d).
-ROI_BOX_READY = "框好了：Enter 保存 / Esc 放弃 / box ready: Enter to save"
+#: The same keys, in the same words, as the bar's ending (U2e): over a stored
+#: rectangle Esc keeps what is stored.
+ROI_BOX_READY = "框好了：Enter 保存 / Esc 先跳过 / box ready: Enter saves, Esc skips"
+ROI_BOX_READY_STORED = ("框好了：Enter 保存 / Esc 不改 / box ready: Enter saves, "
+                        "Esc keeps it as it was")
 #: Shown when Enter arrives before the segment has been measured.
 ROI_STILL_MEASURING = ("还在找机箱，稍等或直接拖框 / still looking for the chassis "
                        "-- wait a moment, or drag a box yourself")
@@ -567,7 +572,8 @@ class RoiMixin:
         self.refresh_roi_bar()
         # Every drag answers in the status line: a good one replaces the
         # "too small" / "no chassis" the last one left there (U2d).
-        self.report(self.roi_refusal(self.roi_draft) or ROI_BOX_READY)
+        ready = ROI_BOX_READY_STORED if self.roi() is not None else ROI_BOX_READY
+        self.report(self.roi_refusal(self.roi_draft) or ready)
 
     @S.guard
     def accept_roi(self) -> None:
@@ -840,6 +846,28 @@ class RoiMixin:
         self.refresh_overlay()
 
     # ---------------------------------------------------------------- review
+    @S.guard
+    def open_conflict_in_review(self, cid: int) -> None:
+        """A conflict line of the task card was clicked: Review, that conflict.
+
+        An open conflict is the one refusal only Review settles (U2e), and
+        ``K`` / ``N`` act on the conflict its queue has selected -- so the click
+        goes there with it selected.  Leaving Annotate goes through the same
+        gate as the mode tab; when it keeps the window where it is, it has
+        said why.
+        """
+        self.set_mode(A.MODE_REVIEW)
+        if self.mode != A.MODE_REVIEW:
+            return
+        self.review.refresh()
+        if self.review.select_conflict(int(cid)):
+            self.report(f"冲突 #{cid} 已选中：K 保留旧的 / N 采用新的 / "
+                        f"conflict {cid} selected: K keeps the old, N takes the new")
+        else:
+            self.report(f"在 Review → Conflicts 里找冲突 #{cid}：K 保留旧的 / N 采用新的 / "
+                        f"conflict {cid} is not in the queue any more")
+        self.refresh_guidance()
+
     @S.guard
     def resolve_selected(self, resolution: str) -> None:
         """Resolve the conflict the review panel has selected."""

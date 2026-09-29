@@ -73,18 +73,38 @@ class TruthCacheMixin:
         if key.step not in self._available:
             return
         held = self._compiled.get(key.step)
-        if held is not None and held[0] == self._epoch:
-            stored = self.db.compiled(key)
-            if stored and all(row["input_hash"] == held[1].input_hash
-                              for row in stored.values()):
-                return  # the sweeper already brought this frame up to date
+        current = held[1] if held is not None and held[0] == self._epoch else None
+        if current is not None and self.db.rows_all_from(key, current.input_hash):
+            self._truth_settled()
+            return  # the sweeper already brought this frame up to date
         # one compilation for the whole visit: the refresh hands back the frame
         # it made its decisions from, which is the one the panels are about to
-        # ask for -- compiling it twice is what made arriving cost 0.9 s
-        stats = self.truth.refresh(key, want_compiled=True)
+        # ask for -- compiling it twice is what made arriving cost 0.9 s.  A
+        # frame this epoch already compiled is not compiled again when its
+        # digest says the rows describe these inputs: a confirmed frame the
+        # layer order moved under keeps its rows *behind* on purpose, and used
+        # to pay a 12 MP compilation on every arrival for nothing (U2e).
+        stats = self.truth.refresh(key, want_compiled=current is None)
         self.review.problems[key.step] = list(stats["problems"])
         self.review.invalidate()
-        self._keep_compiled(key.step, self._epoch, stats["compiled"])
+        self._keep_compiled(key.step, self._epoch, stats["compiled"] or current)
+        self._truth_settled()
+
+    def _truth_settled(self) -> None:
+        """The open frame's truth was just brought up to date for this epoch.
+
+        A refresh of it compared every confirmed row with this epoch's
+        compilation and queued each disagreement it found -- or found the
+        frame's digest current, which means none stands.  Either way no frozen
+        disagreement *without* an open conflict can stand until the epoch
+        moves, so the display need not compare the rows again: it would drop
+        every one it found in favour of its conflict (U2e round 2).
+        """
+        self._settled_for = (self._step, self._epoch)
+
+    def _truth_is_settled(self) -> bool:
+        """Is :meth:`_truth_settled` still true of the frame on screen?"""
+        return getattr(self, "_settled_for", None) == (self._step, self._epoch)
 
     def _keep_compiled(self, step: int, epoch: int, compiled: CompiledFrame) -> None:
         """Remember one compilation and its problems."""
