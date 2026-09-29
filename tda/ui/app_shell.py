@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
@@ -324,6 +324,21 @@ class ShellMixin:
             self._layout_checked = True
             if self.settings.value("state") is not None:
                 self._reject_a_starved_canvas()
+            # The first frame was fitted in the constructor, to a canvas that
+            # had never been laid out: the view came up at whatever zoom that
+            # guess gave and a stored ROI was not framed (round 3).  Once, and
+            # deferred, so the docks have their sizes; later resizes keep the
+            # annotator's view.
+            QTimer.singleShot(0, self._startup_fit)
+
+    def _startup_fit(self) -> None:
+        """Frame the stored ROI (the whole picture without one), once."""
+        if getattr(self, "_startup_fitted", False) or self.closed:
+            return
+        self._startup_fitted = True
+        if not compat.is_open(self.session) or not self.tools_enabled:
+            return
+        self._restore_view(False, 0.0, None)
 
     def _reject_a_starved_canvas(self) -> None:
         """Throw a saved layout away when it leaves the canvas too little.

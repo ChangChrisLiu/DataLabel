@@ -230,6 +230,12 @@ def test_each_commit_button_is_its_key(window, monkeypatch, button, key):
     The four buttons were the task card's; since U2b round 1 they are the tool
     palette's, the one place for actions.
     """
+    if button in ("commit_override", "commit_split"):
+        # Since U2b round 3 the key and the button share one guard, which
+        # refuses these two on an untouched layer: give them something to
+        # commit, so what is tested is the routing.
+        start_edit(window)
+        paint(window)
     seen: list[str] = []
     monkeypatch.setattr(window, key, lambda *a: seen.append(key) or False)
     click_enabled(window.palette.button(button))

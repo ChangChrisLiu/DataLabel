@@ -700,12 +700,16 @@ def test_the_task_card_has_no_action_buttons_of_its_own(window):
     assert not hasattr(window, "on_panel_commit")
 
 
-def test_a_row_that_is_not_work_explains_itself(window):
+def test_a_row_that_is_not_work_explains_itself(window, monkeypatch):
+    # A frame with nothing to draw.  (Not the drawn start frame any more: since
+    # round 3 it lists its drawn parts as ✔ rows instead of one ✔ 这一帧 row.)
     window.show()
     QApplication.processEvents()
     answer_roi(window)
-    seed_shapes(window.session, LAST_STEP)
-    window.session.goto(LAST_STEP, force=True)
+    nothing = [{"instance": f"step {LAST_STEP - 1}", "kind": api.KIND_CONFIRM,
+                "text": "Nothing to draw here", "done": False}]
+    monkeypatch.setattr(window.session, "task_card", lambda: [dict(r) for r in nothing])
+    window.task_card.refresh()
     rows = window.task_card.rows()
     assert [r["kind"] for r in rows] == [api.KIND_CONFIRM]
     click_row(window, 0)

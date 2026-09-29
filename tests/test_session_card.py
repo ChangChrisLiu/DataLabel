@@ -125,21 +125,30 @@ def test_the_start_frame_lists_everything_that_still_needs_a_shape(session):
     assert listed.index("motherboard.01") < listed.index("cpu_socket_lever.01")
 
 
-def test_a_drawn_instance_leaves_the_start_frame_card(session):
+def test_a_drawn_instance_shows_done_and_sorts_last_on_the_start_card(session):
+    # U2b round 3 ruling: the start card lists drawn parts too, as ✔ rows after
+    # the open ones ("what are the other items on the last frame?").
     session.begin_edit(CHASSIS)
     session.set_editing_mask(cell(1))
     session.commit_edit(api.SCOPE_KEYFRAME)
-    assert CHASSIS not in card(session)
+    items = session.task_card()
+    listed = [item["instance"] for item in items]
+    assert card(session)[CHASSIS]["done"] is True
+    assert card(session)[CHASSIS]["kind"] == api.KIND_ADD_SHAPE
+    assert listed[-1] == CHASSIS
+    assert all(item["done"] is False for item in items[:-1])
 
 
-def test_the_start_frame_asks_for_a_confirmation_once_it_is_drawn(qapp, tmp_path):
+def test_the_start_frame_lists_every_drawn_part_once_it_is_all_drawn(qapp, tmp_path):
     # the scanner sees no staging area, so the card asks for no bench box and
     # none may be drawn (`commit_box` refuses): the chassis masks are all of it
     session = make_session(tmp_path)
     seed_shapes(session, LAST_STEP)
 
-    kinds = {item["kind"] for item in session.task_card()}
-    assert kinds == {api.KIND_CONFIRM}
+    items = session.task_card()
+    assert {item["kind"] for item in items} == {api.KIND_ADD_SHAPE}
+    assert all(item["done"] is True for item in items)
+    assert items[0]["instance"] == CHASSIS        # still bottom-up among the done
     session.close()
 
 

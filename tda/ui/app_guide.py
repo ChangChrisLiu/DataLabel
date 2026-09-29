@@ -35,10 +35,11 @@ from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 from tda.ui import guide as G
 from tda.ui import session_api as api
+from tda.ui.app_roi import BENCH_NEEDS_ITEM, ON_BENCH
 from tda.ui.class_names import instance_label
 from tda.ui.panels.palette import RADIUS_MAX, RADIUS_MIN
 
-__all__ = ["BANNER_EMPTY", "BANNER_PIXELS", "GuideMixin", "HINT_DWELL_MS"]
+__all__ = ["BANNER_EMPTY", "BANNER_PIXELS", "GuideMixin", "HINT_DWELL_MS", "VIS_NOTE_MS"]
 
 #: The banner's two endings (ruling U2b-4).
 BANNER_EMPTY = "用 S 在零件上点一下，或 X 拖框"
@@ -52,6 +53,15 @@ BANNER_LOADED_SPLIT = "这是前一版的形状：画出这一帧的样子，Ctr
 #: How long the pointer rests on a card row before its outline is looked up.
 #: Passing over rows on the way to another one should not cost a query each.
 HINT_DWELL_MS = 120
+#: How long a "可见性 → …（Ctrl+Z 撤销）" note stays across the canvas.
+VIS_NOTE_MS = 4000
+#: ``Alt+Enter`` / ``Ctrl+K``: refused on an untouched layer with the greyed
+#: button's own reason (round 3, item 6).
+_SCOPE_KEYS = frozenset({"commit_override", "commit_split"})
+#: Keys :meth:`GuideMixin.key_refusal` looks at: the drawing and committing
+#: ones.  Undo, redo and Esc are never refused by it.
+_KEY_GUARD_NAMES = frozenset(A.PALETTE_TOOLS) | _SCOPE_KEYS | frozenset(
+    {"commit", "confirm", "toggle_heat", "flash_compare", "cycle_candidate"})
 #: At most this many old Label Studio drafts are outlined for one hover: a
 #: thirty-screw frame must not become a mess (round 1, item 4).
 HINT_MAX_DRAFTS = 5
@@ -116,6 +126,13 @@ class GuideMixin:
         self._hint_timer.setInterval(HINT_DWELL_MS)
         self._hint_timer.timeout.connect(self._show_card_hint)
         self._cheat_cache: dict[str, str] = {}
+        #: ``(text, frame)``: what a visibility key just did, on the canvas for
+        #: :data:`VIS_NOTE_MS` (round 3, item 5).
+        self._vis_note: tuple = ("", None)
+        self._vis_note_timer = QTimer(self)
+        self._vis_note_timer.setSingleShot(True)
+        self._vis_note_timer.setInterval(VIS_NOTE_MS)
+        self._vis_note_timer.timeout.connect(self.expire_visibility_note)
         self.palette.sigAction.connect(self.run_palette_action)
         self.palette.sigRadius.connect(self.set_brush_radius)
         self.palette.sigRadiusTyped.connect(self._on_radius_typed)
@@ -129,6 +146,10 @@ class GuideMixin:
             self.review.list_for(queue).currentItemChanged.connect(
                 lambda *_a: self.refresh_guidance())
         self.review.tabs().currentChanged.connect(lambda *_a: self.refresh_guidance())
+        # 台面框 R is live only with a part on the bench selected (round 3).
+        self.instances.table().itemSelectionChanged.connect(self.refresh_guidance)
+        self.task_card.list_widget().currentItemChanged.connect(
+            lambda *_a: self.refresh_guidance())
         self.task_card.sigHover.connect(self.on_card_hover)
         self.task_card.sigExplain.connect(self.report)
         for bar in (self.warn_bar, self.scope_bar, self.restore_bar, self.roi_bar,
@@ -153,6 +174,18 @@ class GuideMixin:
 
         if self.status_message() == KEY_SWALLOWED:
             self.report("")
+
+    def flash_visibility_note(self, text: str) -> None:
+        """Show ``text`` across the canvas for a few seconds (round 3, item 5)."""
+        self._vis_note = (str(text), self.session.current())
+        self._vis_note_timer.start()
+        self.refresh_guidance()
+
+    def expire_visibility_note(self) -> None:
+        """Take the visibility note off the canvas; the banner is the guide's again."""
+        self._vis_note = ("", None)
+        self._vis_note_timer.stop()
+        self.refresh_guidance()
 
     def forget_card_hints(self) -> None:
         """Drop the hover outlines looked up for this frame: a commit or an
@@ -226,6 +259,9 @@ class GuideMixin:
                        f"右下角出现 SAM ready 后就能用")
             elif tool == "roi" and facts.layer_dirty:
                 enabled, why = False, "编辑层有未提交的像素：先 Enter 提交或 Esc 放弃"
+            elif tool == "bench_box" and not self._bench_box_usable():
+                # U2a's own sentence for a bare R, on the button too (round 3).
+                enabled, why = False, BENCH_NEEDS_ITEM
             states[name] = (enabled, armed == tool, why)
 
         dirty = facts.layer_dirty
@@ -278,6 +314,41 @@ class GuideMixin:
         states["review_keep_old"] = (bool(conflict), False, why_conflict)
         states["review_accept_new"] = (bool(conflict), False, why_conflict)
         return states
+
+    def _bench_box_usable(self) -> bool:
+        """Is there a part on the bench for ``R`` to box (armed, or selected)?
+
+        What :meth:`act_tool` checks before arming the box, read off the rows
+        the panels already hold -- this runs on every refresh.
+        """
+        if getattr(self, "bench_instance", None):
+            return True
+        instance = (self.instances.selected_instance()
+                    or self.task_card.current_instance())
+        if not instance:
+            return False
+        return any(str(row.get("key")) == instance and row.get("placement") == ON_BENCH
+                   for row in self.instances.rows())
+
+    def key_refusal(self, name: str) -> str:
+        """Why the key of palette action ``name`` must not run now; ``""`` if it may.
+
+        One guard for the key and its greyed button (round 3): both read
+        :meth:`palette_states`.  It applies on a frame with no image (every
+        drawing and committing key) and to ``Alt+Enter`` / ``Ctrl+K`` on an
+        untouched layer, where the button was grey with one reason and the
+        key answered with another.
+        """
+        if not getattr(self, "_guidance_ready", False) or name not in _KEY_GUARD_NAMES:
+            return ""
+        facts = self.guide_facts()
+        no_image = not (facts.is_open and facts.has_image)
+        untouched = (name in _SCOPE_KEYS and not facts.layer_dirty and not facts.ghost
+                     and not facts.roi_editing and not facts.scope and not facts.warning)
+        if not (no_image or untouched):
+            return ""
+        enabled, _checked, why = self.palette_states(facts).get(name, (True, False, ""))
+        return "" if enabled else (why or "现在不能用")
 
     # --------------------------------------------------------- the guide
     def guide_facts(self) -> G.GuideFacts:
@@ -434,6 +505,9 @@ class GuideMixin:
         facts = facts or self.guide_facts()
         if self.mode != A.MODE_ANNOTATE or not facts.has_image or facts.flashing:
             return ""
+        note, where = getattr(self, "_vis_note", ("", None))
+        if note and where == self.session.current():
+            return note       # a visibility just changed: said, briefly (round 3)
         instance = getattr(self.session, "editing_instance", None)
         if instance:
             _inst, label, raw = self._edit_label

@@ -312,13 +312,19 @@ def _annotate_plan(facts: GuideFacts) -> GuidePlan:
             # A stored shape, loaded and untouched: Enter has nothing to write
             # and says so; the next thing is to change it or leave it.
             nxt = "画好了按 Ctrl+K（从这帧起新版本）" if split else "改完 Enter"
+            # An open ✂ row loads the *old* version: it needs drawing, so no
+            # button is the next one to press -- not Esc (round 3, item 6).
+            open_split = split and not any(
+                item.done for item in facts.items
+                if editing in (item.label, item.instance)
+                and item.kind == api.KIND_SPLIT_KEYFRAME)
             return GuidePlan(PHASE_LOADED, title,
                              f"现在：这是已存的形状：要改就画，{nxt}；不改按 Esc"
                              f"（或直接点下一条）",
                              _steps(facts, 2, pick_text=picked,
                                     draw_text=f"这是已存的形状：要改就画（{nxt}），"
                                               f"不改按 Esc"),
-                             "clear_edit")
+                             "" if open_split else "clear_edit")
         if facts.sam_ready:
             now = (f"现在：按 S，在「{editing}」上点一下（或按 X 拖一个框），"
                    f"SAM 会给出形状")

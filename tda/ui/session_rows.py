@@ -15,10 +15,11 @@ from typing import Optional
 import numpy as np
 
 from tda.core.compiler import CompiledFrame, Window
-from tda.core.model import InstanceRec, Placement
+from tda.core.model import InstanceRec, Placement, Visibility
 from tda.core.states import FrameState
 
-__all__ = ["instance_rows", "overlay_layers", "paint_order", "painted"]
+__all__ = ["HIDING_VISIBILITY", "hidden_by_label", "instance_rows", "mark_invisible",
+           "overlay_layers", "paint_order", "painted"]
 
 IN_CHASSIS = Placement.IN_CHASSIS.value
 ON_BENCH = Placement.ON_BENCH.value
@@ -48,11 +49,15 @@ def paint_order(compiled: CompiledFrame) -> list[str]:
 
 
 def instance_rows(compiled: CompiledFrame, state: FrameState,
-                  instances: dict[str, InstanceRec], hidden: set[str]) -> list[dict]:
+                  instances: dict[str, InstanceRec], hidden: set[str],
+                  overridden: frozenset = frozenset()) -> list[dict]:
     """``{"key","cls","state","placement","visibility","z","hidden"}``, top first.
 
     ``z`` counts from the bottom, so the top-most row carries the highest one and
-    the list reads the way the layers are stacked on screen.
+    the list reads the way the layers are stacked on screen.  Two more keys
+    since U2b round 3, so a label set by a stray digit key cannot hide a part
+    without a trace: ``vis_override`` (the label was set by hand on this frame,
+    ``overridden``) and ``has_shape`` (a keyframe applies here).
     """
     bottom_up = paint_order(compiled)
     rows = []
@@ -68,9 +73,38 @@ def instance_rows(compiled: CompiledFrame, state: FrameState,
             "visibility": inst.visibility,
             "z": z,
             "hidden": instance in hidden,
+            "vis_override": instance in overridden,
+            "has_shape": inst.keyframe_id is not None,
         })
     rows.reverse()
     return rows
+
+
+#: Labels under which a drawn shape is not shown on the frame at all.
+HIDING_VISIBILITY = frozenset({Visibility.OUT_OF_VIEW.value,
+                               Visibility.OCCLUDED_FULL.value})
+
+
+def hidden_by_label(inst) -> Optional[str]:
+    """The label hiding a drawn shape on this frame, or ``None``."""
+    if inst is None or inst.keyframe_id is None:
+        return None
+    return str(inst.visibility) if str(inst.visibility) in HIDING_VISIBILITY else None
+
+
+def mark_invisible(card: list[dict], compiled: Optional[CompiledFrame]) -> list[dict]:
+    """Add ``"invisible": label`` to card rows whose drawn shape a label hides.
+
+    The trial DB's chassis vanished from step 42 after a stray ``4`` (round
+    3): the row said ✔ and the canvas showed nothing.  The row now says why.
+    """
+    if compiled is None:
+        return card
+    for row in card:
+        label = hidden_by_label(compiled.instances.get(str(row.get("instance", ""))))
+        if label is not None:
+            row["invisible"] = label
+    return card
 
 
 def overlay_layers(

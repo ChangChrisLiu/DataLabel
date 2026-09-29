@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
 )
 
 from tda.ui import session_api as api
-from tda.ui.class_names import instance_label, state_zh
+from tda.ui.class_names import instance_label, state_zh, visibility_zh
 from tda.ui.panels import session_is_open
 
 __all__ = ["CHIP_DONE", "CHIP_EDITING", "CHIP_TODO", "KIND_ICONS", "KIND_SENTENCES",
@@ -128,18 +128,22 @@ _KIND_COUNTS: tuple[tuple[str, str], ...] = (
 
 def card_header(step: Optional[int], neighbour: Optional[int],
                 kinds: Optional[list[str]] = None, first: Optional[int] = None,
-                last: Optional[int] = None) -> str:
+                last: Optional[int] = None, done: Optional[list[bool]] = None) -> str:
     """The sentence above the list: what *this* frame's list is (ruling U2b-3).
 
     Built from the rows' kinds (round 2): "多了…要画回去" over rows that only
     change a state was an instruction the rows contradicted.  ``first`` /
     ``last`` are the view's first and last step, which is what tells the start
     frame of the reverse walk (the machine taken apart) from the start of a
-    forward one (not taken apart yet).
+    forward one (not taken apart yet).  ``done`` runs alongside ``kinds``: the
+    start card lists the drawn parts too (round 3), and its header counts what
+    is left and what is done rather than calling every row work.
     """
     if step is None:
         return ""
     kinds = [str(k) for k in (kinds if kinds is not None else [api.KIND_ADD_SHAPE])]
+    flags = [bool(d) for d in (done if done is not None else [False] * len(kinds))]
+    flags += [False] * (len(kinds) - len(flags))
     work = [k for k in kinds if k != api.KIND_CONFIRM]
     if neighbour is None:
         if last is not None and int(step) == int(last):
@@ -148,12 +152,17 @@ def card_header(step: Optional[int], neighbour: Optional[int],
             where = "起点，还没开始拆的样子"
         else:
             where = "起点"
-        if not work:
+        left = [k for k, d in zip(kinds, flags) if k != api.KIND_CONFIRM and not d]
+        drawn = len(work) - len(left)
+        if not left:
             return f"第 {step} 帧（{where}）：这一帧的零件都画好了，直接 Space 确认"
         # Once, here, rather than on every row of a start card that can list
         # sixty parts (round 1b).
-        return (f"第 {step} 帧（{where}）：把这一帧里还看得到的零件都画出来，"
+        text = (f"第 {step} 帧（{where}）：把这一帧里还看得到的零件都画出来，"
                 f"每个都画完整形状{START_NOTE}")
+        if drawn:
+            text += f"。还剩 {len(left)} 个，{drawn} 个画好了（✔，排在最后）"
+        return text
     present = set(work)
     if not present:
         return f"第 {step} 帧：这一帧不用画，直接 Space"
@@ -207,6 +216,12 @@ def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
     span = row.get("span")
     if span:
         sentence += f"（这一条跨了第 {span[0]}–{span[-1]} 步：中间的帧没有图像）"
+    invisible = row.get("invisible")
+    if invisible:
+        # A shape exists and a label hides it on this frame (round 3): the trial
+        # DB's chassis vanished from step 42 that way, after a stray "4".
+        sentence += (f" ⚠ 已设为不可见（{visibility_zh(invisible)}）：这一帧不显示它的"
+                     f"形状；选中后按 1 改回可见，或 Ctrl+Z 撤销")
     if editing is not None and instance == editing:
         chip = CHIP_BOXING if bench else CHIP_EDITING
     elif kind in (api.KIND_STATE_ONLY, api.KIND_REMOVE_BENCH_BOX):
@@ -535,9 +550,10 @@ class TaskCardPanel(QWidget):
         self._start = opened and neighbour is None
         steps = list(self._session.steps()) if opened else []
         kinds = [str(r.get("kind", api.KIND_CONFIRM)) for r in rows]
+        done = [bool(r.get("done", False)) for r in rows]
         self.header.setText(
             card_header(step, neighbour, kinds, first=min(steps) if steps else None,
-                        last=max(steps) if steps else None) if opened else "")
+                        last=max(steps) if steps else None, done=done) if opened else "")
         self.header.setVisible(bool(self.header.text()))
         first_open = -1
         for i, row in enumerate(rows):

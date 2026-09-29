@@ -15,7 +15,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-__all__ = ["CLASS_ZH", "STATE_ZH", "class_zh", "instance_label", "state_zh"]
+__all__ = ["CLASS_ZH", "STATE_ZH", "VISIBILITY_ZH", "class_zh", "instance_label",
+           "state_zh", "visibility_zh"]
 
 #: The taxonomy's states as an annotator says them (U2b round 2): a ✂ row read
 #: ``open → closed``, which is the state machine's vocabulary, not theirs.
@@ -38,6 +39,25 @@ STATE_ZH: dict[str, str] = {
 def state_zh(state: str) -> str:
     """The Chinese word for a state; the state itself when there is none."""
     return STATE_ZH.get(str(state), str(state))
+
+
+#: The seven visibility labels (spec 6.2) as the digit keys' cheat sheet and
+#: the status line say them (U2b round 3: a digit key used to change one
+#: without a word).
+VISIBILITY_ZH: dict[str, str] = {
+    "visible": "可见",
+    "occluded_partial": "部分遮挡",
+    "occluded_full": "完全遮挡",
+    "out_of_view": "画面外",
+    "too_small": "太小",
+    "visible_tiny": "很小但可见",
+    "motion_blur": "运动模糊",
+}
+
+
+def visibility_zh(value: str) -> str:
+    """The Chinese name of a visibility label; the label itself when unknown."""
+    return VISIBILITY_ZH.get(str(value), str(value))
 
 CLASS_ZH: dict[str, str] = {
     "chassis": "机箱",

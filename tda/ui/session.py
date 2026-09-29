@@ -407,7 +407,16 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
             state_of(self.db, self.tax, key.desktop, key.step),
             instances_of(self.db, key.desktop),
             self._hidden,
+            overridden=self._visibility_overrides(key),
         )
+
+    def _visibility_overrides(self, key: FrameKey) -> frozenset:
+        """Instances whose visibility label was set by hand on this frame."""
+        try:
+            found = self.db.frame_overrides(key) or {}
+        except Exception:  # noqa: BLE001 - a missing table is "none set"
+            return frozenset()
+        return frozenset(name for name, fo in found.items() if fo.visibility is not None)
 
     def overlay_layers(self) -> tuple[dict[str, np.ndarray], list[str], dict]:
         """Visible masks, bottom-up paint order and windows for the overlay."""
@@ -422,8 +431,16 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
         back in the machine on the image being looked at.
         """
         key = self.current()
-        return edit.task_card_for(self.db, self.tax, key.desktop, key.view, key.step,
+        card = edit.task_card_for(self.db, self.tax, key.desktop, key.view, key.step,
                                   neighbour=self.task_neighbour(), span=self.task_span())
+        return rows.mark_invisible(card, self._compiled_or_none())
+
+    def _compiled_or_none(self) -> Optional[CompiledFrame]:
+        """The compiled frame (cached), or ``None`` when it cannot be had."""
+        try:
+            return self.compiled()
+        except Exception:  # noqa: BLE001 - no image, no frame row: nothing to mark
+            return None
 
     def task_neighbour(self) -> Optional[int]:
         """The annotated frame :meth:`task_card` is diffed against, or ``None``.
