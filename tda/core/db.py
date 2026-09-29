@@ -631,6 +631,18 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
         ).fetchall()
         return {r["instance"]: R.json_row(r, "visible_rle", "box") for r in rows}
 
+    def frozen_rows_behind(self, key: FrameKey, input_hash: str) -> bool:
+        """Does a verified row of this frame come from inputs other than these?
+
+        The cheap question before :meth:`compiled`: only such a row can
+        disagree with a compilation of ``input_hash``, and most frames have none.
+        """
+        return self.conn.execute(
+            "SELECT 1 FROM compiled_mask WHERE desktop=? AND step=? AND view=? "
+            "AND status='verified' AND input_hash IS NOT ? LIMIT 1",
+            (key.desktop, key.step, key.view, input_hash),
+        ).fetchone() is not None
+
     def delete_compiled(self, key: FrameKey, instance: str) -> None:
         """Drop one compiled-truth row; a row that is not there is not an error."""
         with self._tx():
@@ -660,6 +672,18 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
             sql += " AND status='open'"
         rows = self.conn.execute(sql + " ORDER BY id", args).fetchall()
         return [R.json_row(r, "old_rle", "new_rle") for r in rows]
+
+    def open_conflicts_at(self, key: FrameKey) -> list[tuple[int, str]]:
+        """``(id, instance)`` of the open conflicts about one frame, oldest first.
+
+        No geometry is decoded: this is asked on every arrival (task U2e).
+        """
+        rows = self.conn.execute(
+            "SELECT id, instance FROM conflict WHERE desktop=? AND view=? AND step=? "
+            "AND status='open' ORDER BY id",
+            (key.desktop, key.view, key.step),
+        ).fetchall()
+        return [(int(r["id"]), str(r["instance"] or "")) for r in rows]
 
     def get_conflict(self, cid: int) -> Optional[dict]:
         """One conflict by id, or ``None``."""

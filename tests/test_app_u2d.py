@@ -51,7 +51,7 @@ from app_scene import (
     make_session,
     seed_shapes,
 )
-from tda.core import truth_verify
+from tda.core import truth_refusals
 from tda.ui import app_actions as A
 from tda.ui import guide as G
 from tda.ui import session_api as api
@@ -326,7 +326,8 @@ def test_the_guide_and_confirm_read_one_list_of_blocking_codes(qapp, tmp_path,
     try:
         answer_roi(win)
         assert win.guide_plan().phase == G.PHASE_BLOCKED
-        monkeypatch.setattr(truth_verify, "BLOCKING_PROBLEMS",
+        # the list lives with the other refusals since U2e (truth_refusals)
+        monkeypatch.setattr(truth_refusals, "BLOCKING_PROBLEMS",
                             ("zorder_cycle:", "shape_size_mismatch:"))
         session.goto(LAST_STEP - 1, force=True)         # arrive again
         QApplication.processEvents()
