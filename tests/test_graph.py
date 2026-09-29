@@ -273,6 +273,9 @@ def test_legal_actions_in_the_initial_state(bench, tax):
         ("remove", "connector.sata_data.01"),
         ("remove", "connector.sata_data.02"),
         ("remove", "cover.01"),
+        # a PSU bracket can be taken out by hand (task U2a: D13 step 33); the
+        # board-moulded ram_latch and cpu_socket_lever cannot
+        ("remove", "psu_latch.01"),
         # its two SATA plugs gate taking the drive away, not sliding it out of
         # the cage: `connected_to` gates `remove` only
         ("displace", "storage_drive.hdd.01"),
