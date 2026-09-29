@@ -13,6 +13,7 @@
    so the card's pane went empty.
 7. Alt+Enter on a part with no keyframe here wrote an override the compiler
    still called ``missing_shape``: the row stayed open.
+8. A step typed ``ignore`` that has an image read as a plain "Step N".
 9. The window opened silent about its first frame's pane: the card emitted
    before anything listened.
 """
@@ -563,5 +564,52 @@ def test_alt_enter_is_live_on_a_part_that_has_a_shape_here(qapp, tmp_path):
         paint(win)
         button = win.palette.button("commit_override")
         assert button.isEnabled(), button.reason()
+    finally:
+        close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# item 8: a step typed ignore that has an image says 跳过
+# --------------------------------------------------------------------------- #
+FEW_STEPS = 5
+IGNORED, IGNORED_AND_MISSING = 2, 4
+
+
+def test_an_ignored_step_with_an_image_says_skip(qapp, tmp_path):
+    """D66 oak1/oak2/rs step 13: navigation and counts skip it, the row said "Step 13"."""
+    from tda.core.model import StepType
+    from tda.core.truth_inputs import annotatable_steps
+    from tda.ui.panels.timeline import NO_IMAGE_TEXT, SKIPPED_TEXT, SKIPPED_TIP, STEP_ROLE
+
+    session = make_session(tmp_path, last_step=FEW_STEPS, missing=(IGNORED_AND_MISSING,))
+    db = session.db
+    steps = db.steps(DESKTOP)
+    for rec in steps:
+        if rec.step in (IGNORED, IGNORED_AND_MISSING):
+            rec.step_type = StepType.IGNORE.value
+    db.replace_steps(DESKTOP, steps, db.actions(DESKTOP))
+    session.open(DESKTOP, VIEW)                      # the walk is read on open
+    walked = annotatable_steps(db, DESKTOP, VIEW, session.steps())
+    assert walked == session.available_steps() == [1, 3, 5]
+    assert session.image_path(IGNORED) is not None, "it has an image"
+
+    win = open_window(tmp_path, session=session)
+    try:
+        timeline = win.timeline.list_widget()
+        items = {int(timeline.item(i).data(STEP_ROLE)): timeline.item(i)
+                 for i in range(timeline.count())}
+        skipped = items[IGNORED]
+        assert skipped.text() == f"Step {IGNORED} · {SKIPPED_TEXT}"
+        assert skipped.toolTip() == SKIPPED_TIP
+        assert "标了 ignore" in SKIPPED_TIP and "不算进 [已确认/总数]" in SKIPPED_TIP
+        assert skipped.foreground().color().getRgb()[:3] == (150, 150, 156)
+        # no image wins: that row says why it has nothing to draw
+        assert NO_IMAGE_TEXT in items[IGNORED_AND_MISSING].text()
+        # every step the walk takes is a plain row
+        for step in walked:
+            assert items[step].text() == f"Step {step}" and items[step].toolTip() == ""
+        # ... and it stays so when the statuses are re-read
+        win.timeline.refresh_statuses()
+        assert skipped.text() == f"Step {IGNORED} · {SKIPPED_TEXT}"
     finally:
         close_window(win)
