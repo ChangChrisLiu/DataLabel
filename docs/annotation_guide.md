@@ -248,7 +248,7 @@ D:\Anaconda\envs\tda\python.exe -m tda.cli check --desktop 13 --view scan
 | `V` | 循环切换可见性取值 | 编辑与提交 |
 | `Ctrl+Up` | 选中实例上移一层（可长按） | 编辑与提交 |
 | `Ctrl+Down` | 选中实例下移一层（可长按） | 编辑与提交 |
-| `Shift+R` | 重新框定 ROI（机箱范围） | 编辑与提交 |
+| `Shift+R` | 编辑 ROI（机箱范围：已存的框直接拖边/角或整体移动，Esc 不改） | 编辑与提交 |
 | `Ctrl+Shift+B` | 从这一帧起断开位姿段（本视角） | 编辑与提交 |
 | `A` | 开关全部标注图层 | 显示 |
 | `Q` | 轮廓线与半透明填充切换 | 显示 |

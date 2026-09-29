@@ -166,6 +166,8 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         segment = self._pose_segment(key)
         keep = (self._segment == segment and self.canvas.image_rgb() is not None)
         zoom, centre = self.canvas.zoom_factor(), self._canvas_centre()
+        exact = self.canvas.view_state()
+        same_size = image is not None and self.canvas.image_hw() == tuple(image.shape[:2])
 
         self.tools_enabled = image is not None
         self.clear_prompt_box()  # before _attach_tool re-arms a SAM tool
@@ -190,7 +192,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
             # leaves the canvas fitted to the whole frame: compositing there
             # and then zooming back to the ROI paid for all 12 MP to show a
             # sixth of it, on every frame change.
-            self._restore_view(keep, zoom, centre)
+            self._restore_view(keep, zoom, centre, exact if same_size else None)
             # Edit layer first, committed masks second: one composite per frame.
             self._sync_editing_layer(repaint=False)
             self.refresh_overlay()
@@ -235,9 +237,18 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         point = self.canvas.mapToScene(rect.center())
         return (point.x(), point.y())
 
-    def _restore_view(self, keep: bool, zoom: float, centre) -> None:
-        """Keep the zoom inside a pose segment, reset to the ROI across one."""
+    def _restore_view(self, keep: bool, zoom: float, centre, exact=None) -> None:
+        """Keep the zoom inside a pose segment, reset to the ROI across one.
+
+        ``exact`` (:meth:`~tda.ui.canvas.view.ImageCanvas.view_state` taken on
+        a frame of the same size) puts the view back to the pixel; re-centring
+        on ``centre`` crept a pixel per repaint, so every occluder stroke --
+        which commits, and so repaints the frame -- nudged the view.
+        """
         if keep and zoom > 0:
+            if exact is not None:
+                self.canvas.restore_view_state(exact)
+                return
             self.canvas.set_zoom(zoom)
             self.canvas.center_on(centre)
             return

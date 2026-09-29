@@ -217,13 +217,23 @@ class MiniMap(QWidget):
     #: Where on the image the annotator asked to look, in image pixels.
     sigCentreOn = Signal(float, float)
 
+    #: The viewport's outline on the thumbnail. **Not** the ROI's yellow: the
+    #: second trial took this frame for the chassis rectangle and dragged it.
+    VIEW_RGB = (90, 200, 255)
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.image_hw: tuple[int, int] = (0, 0)
         self.view_rect: Rect = (0, 0, 0, 0)
         self._thumb = QPixmap()
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("小地图：点一下移动视野（不是 ROI）/ minimap: click to move "
+                        "the view (this is not the ROI)")
         self.setVisible(False)
+
+    def thumbnail(self) -> QPixmap:
+        """The scaled picture it draws; null before the first frame."""
+        return self._thumb
 
     # -- navigation ---------------------------------------------------------
     def mousePressEvent(self, event) -> None:  # noqa: D102 - Qt override
@@ -270,7 +280,7 @@ class MiniMap(QWidget):
             sx = self._thumb.width() / w
             sy = self._thumb.height() / h
             x0, y0, x1, y1 = self.view_rect
-            painter.setPen(QPen(QColor(255, 232, 64), 1))
+            painter.setPen(QPen(QColor(*self.VIEW_RGB), 1))
             painter.drawRect(
                 QRectF(x0 * sx, y0 * sy, max(1.0, (x1 - x0) * sx), max(1.0, (y1 - y0) * sy))
             )
@@ -374,6 +384,9 @@ class ImageCanvas(QGraphicsView):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+        #: The minimap is kept off screen while this is set (the ROI rectangle
+        #: is being edited): see :meth:`set_minimap_suppressed`.
+        self._minimap_suppressed = False
         self._minimap.raise_()
         self._minimap.sigCentreOn.connect(lambda x, y: self.center_on((x, y)))
         for bar in (self.horizontalScrollBar(), self.verticalScrollBar()):
@@ -396,6 +409,8 @@ class ImageCanvas(QGraphicsView):
         self._overlay_item.set_image(None)
         self.setSceneRect(QRectF(0, 0, w, h))
         self._minimap.set_image(pixmap, (h, w))
+        if self._minimap_suppressed:
+            self._minimap.hide()
         self._place_minimap()  # the thumbnail's size just changed
         self.fit_image()
 
@@ -421,6 +436,19 @@ class ImageCanvas(QGraphicsView):
 
     def minimap(self) -> MiniMap:
         return self._minimap
+
+    def set_minimap_suppressed(self, suppressed: bool) -> None:
+        """Hide the minimap (``True``) or give it back (``False``).
+
+        The minimap is a widget *on top of* the viewport, and a left press on it
+        re-centres the view. While the ROI rectangle is up the whole viewport
+        belongs to the rectangle -- on a frame zoomed to its ROI the minimap
+        sits inside it on screen -- so a drag there moved the view instead of
+        the rectangle (task U2a, trial #2).
+        """
+        self._minimap_suppressed = bool(suppressed)
+        has_picture = not self._minimap.thumbnail().isNull()
+        self._minimap.setVisible(has_picture and not self._minimap_suppressed)
 
     def refresh(self, rect: Optional[Rect] = None) -> None:
         """Recomposite the overlay, invalidating only what actually changed.
@@ -724,6 +752,25 @@ class ImageCanvas(QGraphicsView):
     def center_on(self, xy: tuple[float, float]) -> None:
         """Centre the view on an image point."""
         self.centerOn(float(xy[0]), float(xy[1]))
+        self._sync_minimap()
+
+    def view_state(self) -> tuple:
+        """Exactly where the view is: the transform and both scroll positions."""
+        return (QTransform(self.transform()), self.horizontalScrollBar().value(),
+                self.verticalScrollBar().value())
+
+    def restore_view_state(self, state: tuple) -> None:
+        """Put the view back exactly where :meth:`view_state` found it.
+
+        Through the transform and the scroll bars rather than through the
+        centre point: :meth:`centerOn` rounds to whole scroll steps, and a frame
+        that was drawn again and re-centred crept by a pixel each time -- which
+        is a pan nobody asked for (task U2a).
+        """
+        transform, h, v = state
+        self.setTransform(transform)
+        self.horizontalScrollBar().setValue(int(h))
+        self.verticalScrollBar().setValue(int(v))
         self._sync_minimap()
 
     def _clamp_zoom(self, factor: float) -> float:
