@@ -128,25 +128,31 @@ class VerifyMixin:
         ``ValueError`` carrying the :class:`Blocker` items it refused for.
         """
         refused = f"frame {key.desktop}/{key.view}/step {key.step} cannot be verified: "
-        inputs = gather(self.db, self.tax, key, cache_dir=self.cache_dir)
-        compiled = (prepared if usable(prepared, key, inputs, self.compiler_version)
-                    else self._compile_inputs(key, inputs))
-        stored = self.db.compiled(key)
-        reasons = blocking_reasons(self.db, key, compiled, inputs.frame_overrides, stored)
-        conflicts = [b for b in reasons if b.kind == CONFLICT]
-        if conflicts:
+        made: dict = {}
+
+        def frame() -> tuple:
+            # asked only once no open conflict has refused: that refusal costs
+            # no compilation and no decode, as it always did
+            made["inputs"] = inputs = gather(self.db, self.tax, key, cache_dir=self.cache_dir)
+            made["compiled"] = (prepared if usable(prepared, key, inputs, self.compiler_version)
+                                else self._compile_inputs(key, inputs))
+            made["stored"] = self.db.compiled(key)
+            return made["compiled"], inputs.frame_overrides, made["stored"]
+
+        reasons = blocking_reasons(self.db, key, frame, thorough=True)
+        kind = reasons[0].kind if reasons else None
+        if kind == CONFLICT:
             raise VerifyRefused(
                 refused + "conflict(s) "
-                + ", ".join(str(b.conflict_id) for b in conflicts)
-                + " are still open; settle them in the review queue first", conflicts)
-        blocking = [b for b in reasons if b.kind == PROBLEM]
-        if blocking:
-            raise VerifyRefused(refused + ", ".join(b.code for b in blocking), blocking)
-        disputed = [b for b in reasons if b.kind == FROZEN]
-        if disputed:
-            self._queue_frozen_disagreements(key, disputed)
-            raise VerifyRefused(refused + "; ".join(b.text for b in disputed)
-                                + "; the disagreement is now in the review queue", disputed)
+                + ", ".join(str(b.conflict_id) for b in reasons)
+                + " are still open; settle them in the review queue first", reasons)
+        if kind == PROBLEM:
+            raise VerifyRefused(refused + ", ".join(b.code for b in reasons), reasons)
+        if kind == FROZEN:
+            self._queue_frozen_disagreements(key, reasons)
+            raise VerifyRefused(refused + "; ".join(b.text for b in reasons)
+                                + "; the disagreement is now in the review queue", reasons)
+        inputs, compiled, stored = made["inputs"], made["compiled"], made["stored"]
         previous = self._review_status(key)
         digest = digest_of(inputs, self.compiler_version)
         with self.db.transaction():
@@ -186,6 +192,24 @@ class VerifyMixin:
                 {"kind": "set_review_status", "step": key.step, "review_status": previous},
                 annotator,
             )
+
+    def disagreement_ruled_out(self, key: FrameKey, compiled: CompiledFrame) -> bool:
+        """Can no confirmed row of this frame disagree with ``compiled``?
+
+        True when ``compiled`` is what the frame's current inputs make and the
+        frame's stored digest is current for those inputs.  A digest is stamped
+        only when no frozen disagreement stands -- a refresh with nothing left
+        standing, a confirmation that got through -- and it is cleared whenever
+        one is queued and whenever a verdict is written, so a current digest
+        means none can stand, and nothing has to be decoded to know it.
+
+        The display's gate (U2e round 2), for :func:`blocking_reasons` with
+        ``thorough=False``; ``verify_frame`` never takes it.
+        """
+        inputs = gather(self.db, self.tax, key, cache_dir=self.cache_dir)
+        if not usable(compiled, key, inputs, self.compiler_version):
+            return False
+        return self._digest_is_current(key, digest_of(inputs, self.compiler_version))
 
     def demote_frame(self, key: FrameKey, reason: str) -> None:
         """Send a frame back to the review queue (spec 3.4, "需复核")."""

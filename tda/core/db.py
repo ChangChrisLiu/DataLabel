@@ -631,6 +631,22 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
         ).fetchall()
         return {r["instance"]: R.json_row(r, "visible_rle", "box") for r in rows}
 
+    def compiled_count(self, key: FrameKey) -> int:
+        """How many truth rows one frame has -- ``len(compiled(key))``, unread."""
+        return int(self.conn.execute(
+            "SELECT COUNT(*) FROM compiled_mask WHERE desktop=? AND step=? AND view=?",
+            (key.desktop, key.step, key.view),
+        ).fetchone()[0])
+
+    def rows_all_from(self, key: FrameKey, input_hash: str) -> bool:
+        """Has the frame rows, every one derived from ``input_hash``?  Unread."""
+        count, other = self.conn.execute(
+            "SELECT COUNT(*), SUM(input_hash IS NOT ?) FROM compiled_mask "
+            "WHERE desktop=? AND step=? AND view=?",
+            (input_hash, key.desktop, key.step, key.view),
+        ).fetchone()
+        return int(count) > 0 and not int(other or 0)
+
     def frozen_rows_behind(self, key: FrameKey, input_hash: str) -> bool:
         """Does a verified row of this frame come from inputs other than these?
 

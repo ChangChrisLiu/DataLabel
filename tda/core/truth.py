@@ -61,14 +61,11 @@ from tda.core.truth_verify import BLOCKING_PROBLEMS, VerifyMixin
 from tda.core.truth_conflicts import (
     BOX_TOL_PX,
     GEOM_BOX,
-    disagreement,
-    geom_payload,
-    label_changes,
     payload_geometry,
     payload_labels,
-    row_payload,
     row_values,
 )
+from tda.core.truth_refusals import frozen_disagreements
 from tda.core.truth_inputs import (
     FrameInputs,
     InputCache,
@@ -196,7 +193,7 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
             # to derive and, since nothing moved, nothing a frozen row could
             # disagree with either
             result = {"updated": 0, "conflicts": 0, "standing": 0,
-                      "skipped": len(self.db.compiled(key)),
+                      "skipped": self.db.compiled_count(key),
                       "problems": [], "compiled": None, "stale": False}
             if want_compiled:
                 result["compiled"] = self._compile_inputs(key, inputs)
@@ -241,6 +238,11 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
 
         verified_frame = self._frame_is_verified(key, stored)
         queued: Optional[list[dict]] = None
+        # The one comparison of frozen rows with this compilation, the same one
+        # verify_frame refuses on (U2e round 2); queued here in this pass's own
+        # order -- moved parts, then departed ones -- as it always was.
+        disputed = {b.instance: b for b in frozen_disagreements(
+            self.db, key, compiled, overrides, stored)}
 
         for instance in sorted(fresh):
             compiled_inst = compiled.instances[instance]
@@ -249,17 +251,13 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
                 result["skipped"] += 1
                 continue
             if row is not None and row["status"] == VERIFIED:
-                diff = disagreement(row, compiled_inst)
-                labels = label_changes(row, compiled_inst, overrides.get(instance))
-                if diff is None and not labels:
+                found = disputed.get(instance)
+                if found is None:
                     result["skipped"] += 1
                     continue
-                values = row_values(compiled_inst)
-                queued, inserted = self._queue_conflict(
-                    key, instance, row_payload(row),
-                    geom_payload(values.visible_rle, values.box, labels),
-                    int(diff or 0), queued,
-                )
+                old, new, pixels = found.queue
+                queued, inserted = self._queue_conflict(key, instance, old, new,
+                                                        pixels, queued)
                 result["conflicts"] += int(inserted)
                 result["standing"] += 1
                 continue
@@ -269,7 +267,7 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
         for instance in sorted(known - fresh):
             row = stored[instance]
             if row["status"] == VERIFIED:
-                old_payload = row_payload(row)
+                old_payload = disputed[instance].queue[0]
                 queued, inserted = self._queue_conflict(
                     key, instance, old_payload, None, self._payload_area(old_payload), queued
                 )
@@ -301,7 +299,7 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
         and the next pass looks at it again.
         """
         self.db.set_frame_digest(key, digest, self.compiler_version,
-                                 len(self.db.compiled(key)))
+                                 self.db.compiled_count(key))
 
     def refresh_range(self, desktop: int, view: str, steps: Iterable[int],
                       per_step: bool = False, ignore_digest: bool = False) -> dict:

@@ -19,6 +19,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 from PySide6.QtWidgets import QApplication
 
@@ -34,10 +35,11 @@ from app_scene import (
     seed_shapes,
 )
 from tda.core import masks
-from tda.core.model import FrameKey, ShapeKeyframe, ShapePart, StepType
+from tda.core.model import FrameKey, FrameOverride, ShapeKeyframe, ShapePart, StepType
 from tda.core.truth_refusals import (
     CONFLICT,
     FROZEN,
+    PROBLEM,
     RACE,
     VerifyRefused,
     blocking_reasons,
@@ -108,6 +110,18 @@ def confirmed_then_changed(tmp_path: Path):
     return session
 
 
+def thorough(session, key, compiled) -> list:
+    """What ``verify_frame`` refuses for (its mode of the one function)."""
+    return blocking_reasons(session.db, key, lambda: (compiled, None, None), thorough=True)
+
+
+def shown(session, key, compiled) -> list:
+    """What the window lists (the display's mode, digest-gated)."""
+    return blocking_reasons(
+        session.db, key, lambda: (compiled, None, None), thorough=False,
+        ruled_out=lambda made: session.truth.disagreement_ruled_out(key, made))
+
+
 def surfaces(win: MainWindow) -> dict:
     """What the frame on screen says about Space, everywhere it says it."""
     QApplication.processEvents()
@@ -152,16 +166,18 @@ def test_a_frozen_disagreement_is_a_reason_until_its_conflict_is_queued(qapp, tm
     draw(session, "chassis", 50)                      # step 5's chassis moved
     key = FrameKey(DESKTOP, STEP, VIEW)
     compiled = session.truth.compile(key)
-    reasons = blocking_reasons(session.db, key, compiled)
+    reasons = thorough(session, key, compiled)
     assert [(b.kind, b.code) for b in reasons] == [(FROZEN, "frozen_disagreement:chassis")]
+    assert shown(session, key, compiled) == reasons    # the display agrees
 
     # verify_frame reads the same list, refuses for it, and queues the conflict
     with pytest.raises(VerifyRefused) as refused:
         session.truth.verify_frame(key, "tester", compiled)
-    assert [b.kind for b in refused.value.blockers] == [FROZEN]
-    after = blocking_reasons(session.db, key, compiled)
-    assert [b.kind for b in after] == [CONFLICT], "named once: as the conflict"
+    assert refused.value.blockers == reasons
+    after = thorough(session, key, compiled)
+    assert [b.kind for b in after] == [CONFLICT]
     assert after[0].code.startswith("open_conflict:") and after[0].instance == "chassis"
+    assert shown(session, key, compiled) == after, "named once: as the conflict"
     with pytest.raises(VerifyRefused) as again:
         session.truth.verify_frame(key, "tester", compiled)
     assert again.value.blockers == after
@@ -256,9 +272,14 @@ def test_a_frozen_disagreement_is_on_screen_and_space_turns_it_into_a_conflict(
 
         assert win.act_confirm() is False             # Space refuses and queues it
         codes = [r["code"] for r in win.task_card.problem_rows()]
-        assert any(c.startswith("open_conflict:") for c in codes), codes
-        assert "frozen_disagreement:chassis" not in codes, "named once, as the conflict"
+        # the refusal's own reasons, carried rather than looked for again
+        assert "frozen_disagreement:chassis" in codes, codes
+        assert "now in the review queue" in win.task_card.problems()[0]
         no_space_promise(surfaces(win))
+        session._announce()                           # the next arrival or edit
+        codes = [r["code"] for r in win.task_card.problem_rows()]
+        assert [c for c in codes if c.startswith("open_conflict:")] and \
+            "frozen_disagreement:chassis" not in codes, "named once, as the conflict"
     finally:
         close_window(win)
 
@@ -390,3 +411,259 @@ def test_box_ready_says_esc_as_the_bar_does(qapp, tmp_path):
         assert "Esc 不改" in ROI_BOX_READY_STORED and "Esc 不改" in ROI_BAR_KEYS_STORED
     finally:
         close_window(win)
+
+
+# =========================================================================== #
+# round 2: the display's mode and verify's mode of the one function agree
+# =========================================================================== #
+MOVED, DEPARTED, LABELLED, BROKEN = "chassis", "connector.06", "connector.03", "connector.04"
+KEY5 = FrameKey(DESKTOP, STEP, VIEW)
+
+
+def confirmed_five(tmp_path: Path, confirm: bool = True, skip=()):
+    """Step 5, every part drawn (but ``skip``), confirmed; the session on step 4."""
+    session = make_session(tmp_path)
+    session.sweeper_enabled = False           # re-checks run where a scenario says
+    seed_shapes(session, STEP, skip=skip)
+    session.goto(STEP + 1, force=True)
+    session.goto(STEP, force=True)
+    if confirm:
+        assert session.confirm_frame() is True
+        assert session.current().step == STEP - 1
+    return session
+
+
+def retrace(session, instance: str, index: int) -> None:
+    """Enter on step 4: the keyframe in force reaches step 5."""
+    draw(session, instance, index)
+
+
+def with_conflict(session) -> int:
+    retrace(session, MOVED, 50)
+    session.truth.run_pending_rechecks(DESKTOP, VIEW)
+    (cid, _inst), = session.db.open_conflicts_at(KEY5)
+    return cid
+
+
+def wrong_size(session, instance: str) -> None:
+    """A keyframe of the wrong canvas size: ``shape_size_mismatch`` (blocking)."""
+    session.db.add_keyframe(ShapeKeyframe(
+        id=None, instance=instance, desktop=DESKTOP, view=VIEW, pose_segment=1,
+        anchor_step=LAST_STEP, placement="in_chassis", geom_type="mask", version=9,
+        parts=[ShapePart("main", masks.encode_rle(np.ones((32, 32), dtype=bool)))]))
+    session._invalidate()
+
+
+def s_clean(tmp_path):
+    return confirmed_five(tmp_path, confirm=False)
+
+
+def s_code(tmp_path):
+    return confirmed_five(tmp_path, confirm=False, skip=(DEPARTED,))
+
+
+def s_behind_agreeing(tmp_path):
+    session = confirmed_five(tmp_path)
+    # the layer order moves (a new version), the pixels do not: the re-check
+    # agrees and leaves step 5's rows with their old input_hash on purpose
+    session.set_zorder_move("connector.01", "connector.02")
+    session.truth.run_pending_rechecks(DESKTOP, VIEW)
+    return session
+
+
+def s_conflict(tmp_path):
+    session = confirmed_five(tmp_path)
+    with_conflict(session)
+    return session
+
+
+def s_conflict_code_frozen_other(tmp_path):
+    session = confirmed_five(tmp_path)
+    with_conflict(session)
+    wrong_size(session, BROKEN)                # a blocking code (its empty shape is
+    retrace(session, LABELLED, 52)             # within the re-trace tolerance) ...
+    return session                             # ... and another part moved
+
+
+def s_conflict_frozen_same(tmp_path):
+    session = confirmed_five(tmp_path)
+    with_conflict(session)
+    retrace(session, MOVED, 51)                # moved again, not re-checked
+    return session
+
+
+def s_conflict_frozen_other(tmp_path):
+    session = confirmed_five(tmp_path)
+    with_conflict(session)
+    retrace(session, LABELLED, 52)             # another part moved, not re-checked
+    return session
+
+
+def s_frozen_alone(tmp_path):
+    session = confirmed_five(tmp_path)
+    retrace(session, MOVED, 50)                # nobody has looked since
+    return session
+
+
+def s_departed_and_moved(tmp_path):
+    session = confirmed_five(tmp_path)
+    session.db.delete_instance(DESKTOP, DEPARTED)   # the part leaves the frame
+    retrace(session, MOVED, 50)
+    return session
+
+
+def s_label_only(tmp_path):
+    session = confirmed_five(tmp_path)
+    session.db.set_frame_override(FrameOverride(KEY5, LABELLED, None, "occluded_partial"))
+    session._invalidate()
+    return session
+
+
+def s_keep_old(tmp_path):
+    session = confirmed_five(tmp_path)
+    cid = with_conflict(session)
+    session.resolve_conflict(cid, api.RESOLVE_KEEP_OLD)
+    return session
+
+
+def s_accept_new(tmp_path):
+    session = confirmed_five(tmp_path)
+    cid = with_conflict(session)
+    session.resolve_conflict(cid, api.RESOLVE_ACCEPT_NEW)
+    return session
+
+
+#: What each scenario shows before anybody looks: ``(kind, instance)`` per line.
+SCENARIOS = {
+    "clean": (s_clean, []),
+    "code": (s_code, [(PROBLEM, "")]),
+    "behind_agreeing": (s_behind_agreeing, []),
+    "conflict": (s_conflict, [(CONFLICT, MOVED)]),
+    "conflict_code_frozen_other": (s_conflict_code_frozen_other,
+                                   [(CONFLICT, MOVED), (PROBLEM, ""), (FROZEN, LABELLED)]),
+    "conflict_frozen_same": (s_conflict_frozen_same, [(CONFLICT, MOVED)]),
+    "conflict_frozen_other": (s_conflict_frozen_other,
+                              [(CONFLICT, MOVED), (FROZEN, LABELLED)]),
+    "frozen_alone": (s_frozen_alone, [(FROZEN, MOVED)]),
+    "departed_and_moved": (s_departed_and_moved, [(FROZEN, DEPARTED), (FROZEN, MOVED)]),
+    "label_only": (s_label_only, [(FROZEN, LABELLED)]),
+    "keep_old": (s_keep_old, []),
+    "accept_new": (s_accept_new, []),
+}
+
+
+def modes_agree(session, compiled) -> tuple[list, list]:
+    """verify's answer is the display's first category; both are empty together."""
+    th = thorough(session, KEY5, compiled)
+    sh = shown(session, KEY5, compiled)
+    if not th:
+        assert sh == [], sh
+    else:
+        assert [b for b in sh if b.kind == th[0].kind] == th, (th, sh)
+    return th, sh
+
+
+@pytest.mark.parametrize("name", list(SCENARIOS))
+def test_the_display_and_verify_modes_agree(qapp, tmp_path, name):
+    build, expected = SCENARIOS[name]
+    session = build(tmp_path)
+    try:
+        # as the inputs stand, before anybody looks
+        th, sh = modes_agree(session, session.truth.compile(KEY5))
+        assert [(b.kind, b.instance) for b in sh] == expected, sh
+        # arriving: the visit refresh runs first, then the frame is announced
+        session.goto(STEP, force=True)
+        th, sh = modes_agree(session, session.compiled())
+        assert {b.code for b in sh if b.kind != PROBLEM} <= set(session.current_problems())
+        # Space: verify_frame's own refusal is the thorough answer, word for word
+        if th:
+            with pytest.raises(VerifyRefused) as refused:
+                session.truth.verify_frame(KEY5, "tester", session.prepared())
+            assert refused.value.blockers == th
+        else:
+            session.truth.verify_frame(KEY5, "tester", session.prepared())
+    finally:
+        session.close(force=True)
+
+
+def test_departed_parts_are_queued_first_as_verify_always_did(qapp, tmp_path):
+    session = s_departed_and_moved(tmp_path)
+    try:
+        with pytest.raises(VerifyRefused):
+            session.truth.verify_frame(KEY5, "tester")
+        queued = [inst for _cid, inst in session.db.open_conflicts_at(KEY5)]
+        assert queued == [DEPARTED, MOVED]
+    finally:
+        session.close(force=True)
+
+
+def test_a_behind_but_agreeing_frame_is_not_decoded_on_arrival(qapp, tmp_path, monkeypatch):
+    """The reviewer's case: the digest rules it out, nothing is compared."""
+    import tda.core.truth_refusals as refusals
+
+    session = s_behind_agreeing(tmp_path)
+    try:
+        session.goto(STEP, force=True)                 # the visit refresh stamps it
+        assert session.db.frozen_rows_behind(KEY5, session.compiled().input_hash)
+        assert session.truth.disagreement_ruled_out(KEY5, session.compiled())
+        compared: list = []
+        real = refusals.frozen_disagreements
+        monkeypatch.setattr(refusals, "frozen_disagreements",
+                            lambda *a, **k: compared.append(a[1]) or real(*a, **k))
+        session.goto(STEP + 1, force=True)
+        session.goto(STEP, force=True)                 # steady state: the second arrival
+        assert compared == [], "the display decoded a frame its digest rules out"
+        session.truth.verify_frame(KEY5, "tester", session.prepared())
+        assert compared, "verify_frame compares, whatever the digest says"
+    finally:
+        session.close(force=True)
+
+
+def test_what_a_refresh_just_compared_is_not_compared_again(qapp, tmp_path, monkeypatch):
+    """Enter on a confirmed frame: the commit's own refresh compared every
+    frozen row and queued the disagreement; the announce that follows shows
+    the conflict without decoding a row (at 12 MP that doubled the commit)."""
+    import tda.core.truth_refusals as refusals
+
+    session = confirmed_five(tmp_path)
+    try:
+        session.goto(STEP, force=True)                 # standing on the confirmed frame
+        compared: list = []
+        real = refusals.frozen_disagreements
+        monkeypatch.setattr(refusals, "frozen_disagreements",
+                            lambda *a, **k: compared.append(a[1]) or real(*a, **k))
+        retrace(session, MOVED, 50)                    # Enter here: a conflict is queued
+        codes = session.current_problems()
+        assert [c for c in codes if c.startswith("open_conflict:")], codes
+        assert session.db.frame_digest(KEY5) is None, "the digest cannot help here"
+        assert compared == [], "the announce compared what the refresh just had"
+        # anything that moves the inputs outside the session's own writes does
+        session._invalidate()
+        session._announce()
+        assert compared, "a new epoch is compared again"
+    finally:
+        session.close(force=True)
+
+
+def test_the_shortcut_rests_on_the_digest_invariant_and_space_still_holds(qapp, tmp_path):
+    """Break the invariant on purpose: a writer that changes a confirmed row
+    behind the truth service's back, leaving the digest current.  The display
+    then misses the disagreement -- that is the one assumption it makes -- and
+    Space still refuses, because verify never takes the shortcut."""
+    session = s_behind_agreeing(tmp_path)
+    try:
+        session.goto(STEP, force=True)
+        row = session.db.compiled(KEY5)[MOVED]
+        other = masks.encode_rle(cell(60))
+        session.db.put_compiled(KEY5, MOVED, other, 0.0, row["visibility"],
+                                row["placement"], "verified", row["input_hash"],
+                                verified_by="somebody else")
+        compiled = session.compiled()
+        assert session.truth.disagreement_ruled_out(KEY5, compiled), \
+            "the digest is current although a disagreement now stands"
+        assert shown(session, KEY5, compiled) == []            # the blind spot
+        assert [b.kind for b in thorough(session, KEY5, compiled)] == [FROZEN]
+        with pytest.raises(VerifyRefused):
+            session.truth.verify_frame(KEY5, "tester", session.prepared())
+    finally:
+        session.close(force=True)

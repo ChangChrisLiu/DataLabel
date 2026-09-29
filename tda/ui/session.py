@@ -512,6 +512,9 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
         self._invalidate()
         if isinstance(frame, CompiledFrame) and frame.key.step == self._step:
             self._keep_compiled(frame.key.step, self._epoch, frame)
+            # the write's own refresh of this frame made that compilation
+            # (``settle``): its frozen rows were compared with it (U2e)
+            self._truth_settled()
 
     def _hand_to_sweeper(self, steps) -> None:
         """Let the background worker know which frozen frames are owed a check.
@@ -576,9 +579,18 @@ class AnnotationSession(CommitMixin, ReviewMixin, TruthCacheMixin, QObject):
         return list(compiled.problems) + self._refusal_codes(key, compiled)
 
     def _refusal_codes(self, key: FrameKey, compiled: CompiledFrame) -> list[str]:
-        """The reasons Space would refuse that are not compiler problems."""
-        return [b.code for b in blocking_reasons(self.db, key, compiled)
-                if b.kind != REFUSED_BY_PROBLEM]
+        """The reasons Space would refuse that are not compiler problems.
+
+        The display's mode (U2e round 2): the confirmed rows are compared only
+        when the frame's digest does not already rule a disagreement out -- in
+        the reverse walk every confirmed frame is behind but agreeing, and
+        decoding them on every announce put 2 s on a 12 MP arrival.
+        """
+        reasons = blocking_reasons(
+            self.db, key, lambda: (compiled, None, None), thorough=False,
+            ruled_out=lambda made: (self._truth_is_settled()
+                                    or self.truth.disagreement_ruled_out(key, made)))
+        return [b.code for b in reasons if b.kind != REFUSED_BY_PROBLEM]
 
     def _refresh_dirty(self) -> None:
         """Set the unsaved-changes flag from where the history now stands."""
