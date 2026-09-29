@@ -298,7 +298,8 @@ class GuideMixin:
         if editing:
             self.task_card.set_editing(editing)
         else:
-            self.task_card.set_editing(self.bench_instance, bench=True)
+            self.task_card.set_editing(self.bench_instance,
+                                       bench=self.bench_instance is not None)
 
     def guide_plan(self) -> G.GuidePlan:
         """The plan the panel is showing (for the tests and the report)."""

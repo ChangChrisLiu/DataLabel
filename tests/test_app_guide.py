@@ -27,11 +27,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import time
 from pathlib import Path
 
-import numpy as np
 import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QSlider, QSpinBox
+from PySide6.QtWidgets import QApplication
 
 from app_scene import (
     DESKTOP,
@@ -53,7 +52,6 @@ from tda.ui.app import MainWindow
 from tda.ui.app_guide import BANNER_EMPTY, BANNER_PIXELS, HINT_DWELL_MS
 from tda.ui.app_view import TOOL_LABELS
 from tda.ui.panels.palette import (
-    PaletteButton,
     RADIUS_MAX,
     RADIUS_MIN,
     radius_to_slider,
@@ -781,6 +779,20 @@ def test_a_stroke_that_adopts_the_card_item_keeps_the_brush(window):
     assert window._tool_name == "brush"
     assert window.session.editing_instance is not None
     assert window.overlay.editing.any()
+
+
+def test_an_armed_bench_box_is_named_on_the_canvas_the_card_and_the_guide(window):
+    answer_roi(window)
+    window.begin_bench_box("cover.01")
+    assert window.canvas.banner_text().startswith("正在框：导风罩 cover.01")
+    assert phase(window) == G.PHASE_BENCH
+    assert window.palette.button("tool_bench_box").isChecked()
+    rows = window.task_card.rows()
+    index = next(i for i, r in enumerate(rows) if r["instance"] == "cover.01")
+    assert "✎ 正在框" in window.task_card.row_texts()[index]
+    window.act_clear_edit()             # Esc disarms it
+    assert window.canvas.banner_text() == ""
+    assert "✎" not in window.task_card.row_texts()[index]
 
 
 def test_the_banner_never_takes_a_click(window):
