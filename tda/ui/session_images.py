@@ -19,9 +19,11 @@ from typing import Iterable, Optional
 import cv2
 import numpy as np
 
+from tda.core import rawroot
 from tda.core.cache import cached_image_path
 from tda.core.db import Db
 from tda.core.model import FrameKey
+from tda.core.rawroot import resolve_raw
 
 __all__ = ["IMAGE_BUDGET_BYTES", "IMAGE_CACHE_SIZE", "ImageCache", "thumb_path"]
 
@@ -75,14 +77,68 @@ class ImageCache:
         answer -- the same one :func:`tda.core.truth_inputs.frame_hw` measures
         the canvas from, so the two cannot look in different places. The frame
         row's own path is the fallback for a database whose images were never
-        copied into the local cache.
+        copied into the local cache -- which today is every view but ``scan``.
+
+        The two stored paths are **recorded** paths: ``F:/PHD Data Backup/...``
+        is wherever that drive is today, and only
+        :func:`tda.core.rawroot.resolve_raw` knows where that is. Reading them
+        as written left ``oak1``, ``oak2`` and ``rs`` blank the day the drive
+        came back as ``G:``.
+        """
+        return _first_readable(self._candidates(key))
+
+    def _candidates(self, key: FrameKey) -> list[Optional[str]]:
+        """Where this frame's pixels may be, as files to open *now*."""
+        row = self.db.get_frame(key) or {}
+        return [
+            cached_image_path(self.cache_dir, key),
+            resolve_raw((row.get("aux") or {}).get("cache_path")),
+            resolve_raw(row.get("path")),
+        ]
+
+    def why_unreadable(self, key: FrameKey) -> Optional[str]:
+        """Why a frame that *should* have pixels has none, or ``None``.
+
+        ``None`` for a frame with nothing to read (``missing``, no stored path)
+        and for one that reads fine; otherwise one bilingual line naming the
+        file that could not be opened -- or, with the raw drive unplugged,
+        saying so. "No image in this view" was the only thing the window could
+        say, and it said it about three views of a frame that was on disk.
         """
         row = self.db.get_frame(key) or {}
-        return _first_readable([
-            cached_image_path(self.cache_dir, key),
-            (row.get("aux") or {}).get("cache_path"),
-            row.get("path"),
-        ])
+        if row.get("missing") or not row.get("path"):
+            return None
+        if _first_readable(self._candidates(key)) is not None:
+            return None
+        found = resolve_raw(row.get("path"))
+        raw = rawroot.current()
+        if found is None and raw is not None:
+            return f"{raw.message} — {row.get('path')}"
+        return (f"这一视角的原图读不到：{found} / this view's source image "
+                f"cannot be read: {found}")
+
+    def view_problem(self, desktop: int, view: str) -> Optional[str]:
+        """Why a whole view shows nothing, or ``None`` when it has pixels.
+
+        Three frames are tried -- the first, middle and last that should have an
+        image -- and one readable frame is enough: a view whose drive is gone
+        has none, and a view with a single broken file is not a view with no
+        pictures. A view with no frame to read at all is not a problem either;
+        the view buttons already refuse it.
+        """
+        rows = [r for r in self.db.frames_for(int(desktop), str(view))
+                if not r.get("missing") and r.get("path")]
+        if not rows:
+            return None
+        picks = {0, len(rows) // 2, len(rows) - 1}
+        first_reason: Optional[str] = None
+        for index in sorted(picks):
+            key = FrameKey(int(desktop), int(rows[index]["step"]), str(view))
+            reason = self.why_unreadable(key)
+            if reason is None:
+                return None
+            first_reason = first_reason or reason
+        return first_reason
 
     def thumb_path(self, key: FrameKey) -> Optional[str]:
         """The timeline thumbnail, falling back to the full image."""

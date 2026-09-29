@@ -148,6 +148,9 @@ def env(tmp_path: Path, d13_steps: int) -> dict:
         "raw_logs_dir": str(tmp_path / "raw_logs"),
         "weights_dir": str(tmp_path / "weights"),
     }
+    # A backup_dir off the raw drive is never created for us: it has to exist
+    # (tda.core.rawroot.backup_target).
+    (tmp_path / "backups").mkdir()
     paths_yaml = tmp_path / "paths.yaml"
     paths_yaml.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     return {

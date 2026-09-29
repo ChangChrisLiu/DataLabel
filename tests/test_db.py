@@ -479,7 +479,12 @@ def test_op_log_returns_newest_first_and_honours_limit(db: Db):
 def test_backup_creates_readable_copy(db: Db, tmp_path: Path):
     db.upsert_desktop(13, {"brand": "Dell"})
     db.upsert_frame(FrameKey(13, 1, "scan"), "s1.png", {"w": 1}, None)
-    dest = tmp_path / "backups" / "nested"  # must be created by backup()
+    # The leaf is created by backup(), nothing above it (task U2a): a missing
+    # parent is a backup_dir on a volume that is not there, not a folder to make.
+    with pytest.raises(OSError):
+        db.backup(str(tmp_path / "backups" / "nested"))
+    assert not (tmp_path / "backups").exists()
+    dest = tmp_path / "backups"
     out = db.backup(str(dest))
 
     assert Path(out).exists()

@@ -83,6 +83,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                     help="INI file to use (default: a temporary one, so the run "
                          "never touches the annotator's own window state)")
     ap.add_argument("--keep-db", action="store_true", help="leave the copy behind")
+    ap.add_argument("--work-dir", default=None,
+                    help="where the database copy, the backups and the window state "
+                         "go (default: <cache_dir>/../.cache/tmp); a second run in "
+                         "parallel needs its own")
     args = ap.parse_args(argv)
     if args.draw is None:
         args.draw = list(DEFAULT_DRAW) if int(args.desktop) == 13 else []
@@ -140,13 +144,20 @@ class Smoke:
         from PySide6.QtWidgets import QApplication
 
         from tda import pipeline as P
+        from tda.core import rawroot
         from tda.core.taxonomy import load_taxonomy
         from tda.core.truth import TruthService
         from tda.ui.app import MainWindow
         from tda.ui.session import AnnotationSession
 
         config = P.load_paths(self.args.paths)
-        tmp = Path(P.require(config, "cache_dir")).parent / ".cache" / "tmp"
+        # Before the session: a stored F:/... path means wherever the raw
+        # drive is today, and opening the session already reads a frame.
+        raw = rawroot.configure(config)
+        self.report["raw_root"] = {"status": raw.status, "resolved": raw.resolved}
+        note(raw.log_line or "raw root: not configured")
+        tmp = (Path(self.args.work_dir) if self.args.work_dir
+               else Path(P.require(config, "cache_dir")).parent / ".cache" / "tmp")
         copy = tmp / "tda_smoke.sqlite"
         note("copying the database")
         self.report["db_mb"] = copy_database(P.require(config, "db_path"), copy)
@@ -154,6 +165,9 @@ class Smoke:
         # the sidecars go to a directory of their own: a smoke run must not
         # move the annotator's last frame or their window layout.
         state = Path(self.args.settings) if self.args.settings else tmp / "state"
+        # A backup_dir off the raw drive is never created for us, and a smoke
+        # run's exit backup must not land on the raw drive either.
+        (tmp / "backups").mkdir(parents=True, exist_ok=True)
         config = dict(config, db_path=str(copy), backup_dir=str(tmp / "backups"),
                       app_dir=str(state))
         self.report["app_state_dir"] = str(state)

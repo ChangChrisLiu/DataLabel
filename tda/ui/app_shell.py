@@ -141,6 +141,8 @@ class ShellMixin:
             "no image for this step in this view\n本视图在该步骤没有图像"
         )
         self.placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # it may name a long path on the raw drive (tda.ui.app_rawdata)
+        self.placeholder_label.setWordWrap(True)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.canvas)
         self.stack.addWidget(self.placeholder_label)
@@ -437,10 +439,28 @@ class ShellMixin:
         return True
 
     def _backup_on_exit(self) -> None:
-        """Back the database up and *verify* it; a failure warns, never blocks."""
-        dest = self.paths.get("backup_dir")
-        if not dest:
+        """Back the database up and *verify* it; a failure warns, never blocks.
+
+        Where it goes is :func:`tda.pipeline.ready_backup_dest`'s answer: the
+        raw drive's ``TDA_backups`` at the letter that drive has *today*. With
+        the drive unplugged there is no such place, and the backup is skipped
+        with a line that says so -- it used to build ``F:/PHD Data Backup/...``
+        on whatever other drive was ``F:`` that day.
+        """
+        from tda import pipeline as P
+        from tda.core.rawroot import BackupUnavailable
+
+        if not self.paths.get("backup_dir"):
             self.report_error("no backup_dir in paths.yaml: no exit backup was made")
+            return
+        try:
+            dest = P.ready_backup_dest(self.paths)
+        except BackupUnavailable as exc:
+            self.logger.warning("exit backup skipped: %s", exc)
+            self.report(f"退出备份已跳过 / exit backup skipped: {exc}")
+            return
+        except Exception as exc:  # noqa: BLE001 - the annotator still gets to leave
+            self.report_error(f"exit backup failed: {exc}")
             return
         try:
             keep = self._backup_keep()
@@ -590,7 +610,12 @@ def main(paths: str = "configs/paths.yaml", desktop: Optional[int] = None,
     from tda.ui import app as app_module
     from tda.ui.session import AnnotationSession
 
+    from tda.core import rawroot
+
     config = P.load_paths(paths)
+    # Before the session: opening it already reads the first frame, and a
+    # stored ``F:/...`` means wherever the raw drive is today.
+    rawroot.configure(config)
     who = annotator or "annotator"
     db_path = db or P.require(config, "db_path")
     app = QApplication.instance() or QApplication(sys.argv[:1])

@@ -68,6 +68,7 @@ def workspace(tmp_path: Path) -> Path:
         "backup_dir": str(tmp_path / "backups"),
         "raw_logs_dir": str(tmp_path / "raw_logs"),
     }
+    (tmp_path / "backups").mkdir()   # off the raw drive it must already exist
     (tmp_path / "paths.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
     from tda.core.db import Db

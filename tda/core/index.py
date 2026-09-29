@@ -530,8 +530,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--fixes", default=DEFAULT_FIXES_PATH)
     args = ap.parse_args(argv)
 
+    from tda.core import rawroot
+
     cfg = _load_yaml(args.paths)
-    roots = {k: cfg[k] for k in ("oak_root", "scanner_root", "rs_root")}
+    raw = rawroot.configure(cfg)
+    # scanned where the raw drive is today; the index records what it finds
+    roots = {k: rawroot.resolve_raw(cfg[k]) for k in ("oak_root", "scanner_root", "rs_root")}
+    if any(v is None for v in roots.values()):
+        print(f"[index] {raw.message}; nothing was scanned")
+        return 1
+    if raw.status == rawroot.MOVED:
+        print(f"[index] {raw.log_line}")
     cache_dir = cfg.get("cache_dir", "cache")
     out = args.out or os.path.join(cache_dir, "index.json")
     report = args.report or os.path.join(cache_dir, "index_report.md")
