@@ -126,7 +126,7 @@ def test_a_problem_no_row_mentions_is_in_the_pane_and_the_status_points_at_it(
         assert f"missing_shape:{UNLISTED}" in session.current_problems()
         assert win.task_card.problems_visible()
         assert pane_codes(win) == [f"missing_shape:{UNLISTED}"]
-        assert "1 problem(s) — 见任务卡" in win.status_message()
+        assert "1 个问题要先处理 — 见任务卡" in win.status_message()   # U2d wording
         # nothing an open row already asks for is said twice
         assert not {instance_of(c) for c in pane_codes(win)} & open_rows(win)
     finally:

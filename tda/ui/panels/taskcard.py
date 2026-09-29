@@ -16,6 +16,8 @@ confusion the second trial reported.  When ``confirm_frame`` refuses, the
 problems that came with ``sigProblems`` are shown instead of any local check.
 On arriving at a frame the pane lists only what the rows do not already say
 (task U2c): a missing shape *is* its row, and the card is the to-do list.
+What stops ``Space`` comes first; the notes the confirmation accepts follow
+under their own greyed heading, 提示（不挡 Space） (task U2d).
 
 **A card that explains itself** (task U2b).  The second trial's annotator stood
 on the start frame, read "Draw cover.02 (cover) on this frame" four times and
@@ -59,6 +61,9 @@ VIEW_ROLE = INSTANCE_ROLE + 1
 KIND_ROLE = INSTANCE_ROLE + 2
 #: The compiler code a row of the problems pane stands for (``""``: none).
 CODE_ROLE = INSTANCE_ROLE + 3
+#: ``True`` on the pane's one line that is not a problem: the heading of the
+#: notes the confirmation accepts (U2d).
+NOTES_HEADING_ROLE = INSTANCE_ROLE + 4
 
 #: One glyph per task kind (spec 4.2), so the list can be skimmed vertically.
 KIND_ICONS: dict[str, str] = {
@@ -395,17 +400,24 @@ ROW_CODES = ("missing_shape:", "bench_missing:")
 #: the card's rows do not already ask for (task U2c).
 ARRIVAL_TITLE = "清单以外的问题 / Problems not on the list above"
 REFUSAL_TITLE = "Problems"
+#: The line between what stops ``Space`` and what does not (U2d): the notes
+#: follow it, greyed.  Which codes are which is ``is_blocking``'s answer.
+NOTES_HEADING = "提示（不挡 Space）/ notes -- Space still works"
+NOTE_COLOR = QColor(118, 118, 124)
 
 #: What every other code means, in one place.  ``{what}`` is the part of the
 #: code after the colon -- an instance key, sometimes with a part or a second
-#: key after it -- which is what the annotator has to go and look at.
+#: key after it -- which is what the annotator has to go and look at.  Each
+#: sentence ends with what to do about it (U2d); a click on the line selects
+#: the part, which is where the keys named here act.
 PROBLEM_SENTENCES: tuple[tuple[str, str], ...] = (
     ("bench_missing:", "{what}：已拆到台面上但还没有台面框（按 R 拖一个框）"),
     ("shape_size_mismatch:", "{what}：形状和这一帧的画面尺寸对不上，重画一次"),
-    ("zorder_cycle:", "{what}：层级关系互相矛盾，改掉其中一条"),
-    ("zorder_missing:", "{what}：不在层级顺序里，会被画在最上面"),
-    ("empty_visible:", "{what}：可见部分是空的，可能被完全遮挡或画到了框外"),
-    ("pose_segment_ambiguous:", "{what}：跨了不止一个位姿段，先确认位姿分段"),
+    ("zorder_cycle:", "{what}：上下层级前后说反了（互相矛盾）→ Ctrl+Z 撤销刚才改的层级"),
+    ("zorder_missing:", "{what}：不在层级顺序里，会被画在最上面 → 选中它用 Ctrl+↑/↓ 放到对的层"),
+    ("empty_visible:", "{what}：这一帧里它被完全挡住了 → 选中它按 3（完全遮挡）"),
+    ("pose_segment_ambiguous:", "{what}：跨了不止一个位姿段 → 先定好位姿分段"
+                                "（接受/拒绝断点提示，或 Ctrl+Shift+B）"),
     ("missing_shape:", "{what}：这一帧还缺形状，把它画出来"),
 )
 
@@ -458,6 +470,20 @@ def pair_problems(problems: list[str]) -> list[dict]:
     return rows
 
 
+def _is_note(row: dict) -> bool:
+    """A compiler code the confirmation accepts: shown, but it stops nothing."""
+    return bool(row["code"]) and not is_blocking(row["code"])
+
+
+def _problem_item(row: dict) -> QListWidgetItem:
+    """One line of the pane: the sentence, the code in the tooltip."""
+    item = QListWidgetItem(row["text"])
+    item.setToolTip(row["code"] or row["text"])
+    item.setData(INSTANCE_ROLE, row["instance"])
+    item.setData(CODE_ROLE, row["code"])
+    return item
+
+
 def unlisted_problems(problems: list[str], rows: list[dict]) -> list[str]:
     """The compiler codes of a frame that its card's open rows do not ask for.
 
@@ -483,9 +509,11 @@ class TaskCardPanel(QWidget):
     sigHover = Signal(str)
     #: A row that is not work was clicked; the payload is what it means.
     sigExplain = Signal(str)
-    #: A frame's problems arrived and the pane now lists this many of them
-    #: (``0``: it is hidden).  The status line says "见任务卡" from this and
-    #: from nothing else, so it never points at a pane that is not there.
+    #: A frame's problems arrived, and this many of the pane's lines stop
+    #: ``Space`` (:meth:`problem_count`; ``0``: none do -- the pane is hidden or
+    #: holds only notes).  The status line says "见任务卡" from this and from
+    #: nothing else, so it never points at a pane that is not there, nor at
+    #: notes nothing has to be done about (U2d).
     sigProblemsShown = Signal(int)
     #: A problem in the pane was clicked: select this part where the keys
     #: that fix it act -- the instance table (U2d).
@@ -752,10 +780,12 @@ class TaskCardPanel(QWidget):
         """The problems currently on display (empty when none are shown)."""
         if not self._problems_list.isVisibleTo(self):
             return []
-        return [
-            self._problems_list.item(i).text()
-            for i in range(self._problems_list.count())
-        ]
+        return [item.text() for item in self._problem_items()]
+
+    def _problem_items(self) -> list[QListWidgetItem]:
+        """The pane's lines that are problems: the notes' heading is not one."""
+        items = (self._problems_list.item(i) for i in range(self._problems_list.count()))
+        return [item for item in items if not item.data(NOTES_HEADING_ROLE)]
 
     def problems_visible(self) -> bool:
         """Whether the problem list is on display."""
@@ -872,12 +902,27 @@ class TaskCardPanel(QWidget):
         bug report, and the instance is what a click jumps to.
         """
         self._problems_list.clear()
-        self._rows = pair_problems(problems)
-        for row in self._rows:
-            item = QListWidgetItem(row["text"])
-            item.setToolTip(row["code"] or row["text"])
-            item.setData(INSTANCE_ROLE, row["instance"])
-            item.setData(CODE_ROLE, row["code"])
+        # What stops Space first, then -- under their own heading, greyed --
+        # the notes the confirmation accepts (U2d).  An arrival that listed
+        # ``empty_visible`` above a missing shape read as two equal chores.
+        rows = pair_problems(problems)
+        firsts = [row for row in rows if not _is_note(row)]
+        notes = [row for row in rows if _is_note(row)]
+        self._rows = firsts + notes
+        for row in firsts:
+            self._problems_list.addItem(_problem_item(row))
+        if notes:
+            heading = QListWidgetItem(NOTES_HEADING)
+            heading.setFlags(Qt.ItemFlag.NoItemFlags)
+            heading.setData(NOTES_HEADING_ROLE, True)
+            heading.setForeground(QBrush(NOTE_COLOR))
+            font = heading.font()
+            font.setItalic(True)
+            heading.setFont(font)
+            self._problems_list.addItem(heading)
+        for row in notes:
+            item = _problem_item(row)
+            item.setForeground(QBrush(NOTE_COLOR))
             self._problems_list.addItem(item)
         visible = bool(problems)
         self._problems_label.setText(title)
@@ -885,13 +930,20 @@ class TaskCardPanel(QWidget):
         self._problems_list.setVisible(visible)
 
     def problem_rows(self) -> list[dict]:
-        """``{"text", "code", "instance"}`` per row currently shown."""
-        out = []
-        for i in range(self._problems_list.count()):
-            item = self._problems_list.item(i)
-            out.append({"text": item.text(), "code": item.toolTip(),
-                        "instance": str(item.data(INSTANCE_ROLE) or "")})
-        return out
+        """``{"text", "code", "instance", "note"}`` per problem shown, in order.
+
+        ``note`` is a code the confirmation accepts (U2d): those come last,
+        under :data:`NOTES_HEADING`, which is not a row.
+        """
+        return [{"text": item.text(), "code": item.toolTip(),
+                 "instance": str(item.data(INSTANCE_ROLE) or ""),
+                 "note": _is_note({"code": str(item.data(CODE_ROLE) or "")})}
+                for item in self._problem_items()]
+
+    def notes_heading_shown(self) -> bool:
+        """Is the "提示（不挡 Space）" line between the problems and the notes?"""
+        return any(self._problems_list.item(i).data(NOTES_HEADING_ROLE)
+                   for i in range(self._problems_list.count()))
 
     def activate_problem(self, instance: str) -> None:
         """Jump to the card item a problem is about (a click in the pane)."""

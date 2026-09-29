@@ -7,6 +7,8 @@
 3. A good drag after a refused one left the refusal in the status line.
 4. With every card row done the guide said "按 Space" while problems in the
    card's pane made Space refuse -- and a click on one of them did nothing.
+5. The pane listed notes Space accepts (``empty_visible``...) among the
+   problems that block it, and the status line said "见任务卡" for either.
 """
 from __future__ import annotations
 
@@ -18,18 +20,21 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from app_scene import (
     LAST_STEP,
     StubSamQueue,
     cell,
+    chassis_instances,
     close_window,
     make_paths,
     make_session,
     seed_shapes,
 )
 from tda.core import truth_verify
+from tda.ui import app_actions as A
 from tda.ui import guide as G
 from tda.ui import session_api as api
 from tda.ui.app import MainWindow
@@ -43,7 +48,14 @@ from tda.ui.app_roi import (
     ROI_TOO_SMALL,
     roi_min_side,
 )
-from tda.ui.panels.taskcard import INSTANCE_ROLE
+from tda.ui.panels.taskcard import (
+    ARRIVAL_TITLE,
+    INSTANCE_ROLE,
+    NOTES_HEADING,
+    PROBLEM_SENTENCES,
+    TaskCardPanel,
+    explain_code,
+)
 
 
 @pytest.fixture(scope="session")
@@ -75,6 +87,18 @@ def answer_roi(win: MainWindow) -> None:
 
 def pane_codes(win: MainWindow) -> list[str]:
     return [r["code"] for r in win.task_card.problem_rows()]
+
+
+def pane_item(win: MainWindow, instance: str):
+    """The line of the card's problems pane about ``instance``."""
+    lw = win.task_card._problems_list
+    return next(lw.item(i) for i in range(lw.count())
+                if lw.item(i).data(INSTANCE_ROLE) == instance)
+
+
+def press(win: MainWindow, name: str) -> None:
+    win.dispatch(A.action_named(name))
+    QApplication.processEvents()
 
 
 #: At LAST_STEP - 1 nothing about the PSU changes, so no card row names it;
@@ -261,10 +285,7 @@ def test_rows_done_and_a_blocker_left_the_window_does_not_say_space(qapp, tmp_pa
         assert win.act_confirm() is False              # ... and Space does refuse
 
         # a click on the problem goes to deal with it: here, drawing psu.01
-        lw = win.task_card._problems_list
-        missing = next(lw.item(i) for i in range(lw.count())
-                       if lw.item(i).data(INSTANCE_ROLE) == UNLISTED)
-        lw.itemClicked.emit(missing)
+        win.task_card._problems_list.itemClicked.emit(pane_item(win, UNLISTED))
         QApplication.processEvents()
         assert session.editing_instance == UNLISTED
         win.act_clear_edit()
@@ -306,11 +327,100 @@ def test_a_click_on_a_problem_that_is_not_a_missing_shape_selects_its_part(
         answer_roi(win)
         card = win.task_card
         card._show_problems([f"empty_visible:{SPLIT_ROW}"], "Problems")
-        lw = card._problems_list
-        lw.itemClicked.emit(lw.item(0))
+        item = pane_item(win, SPLIT_ROW)
+        card._problems_list.itemClicked.emit(item)
         QApplication.processEvents()
         assert win.instances.selected_instance() == SPLIT_ROW
         assert session.editing_instance is None, "nothing to draw for this one"
-        assert win.status_message() == lw.item(0).text()
+        assert win.status_message() == item.text()
+    finally:
+        close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# item 5: blockers first, notes under their own heading, "见任务卡" for blockers
+# --------------------------------------------------------------------------- #
+def test_notes_follow_the_blockers_under_their_own_heading(qapp):
+    panel = TaskCardPanel()
+    shown: list[int] = []
+    panel.sigProblemsShown.connect(shown.append)
+    panel._show_arrival(["empty_visible:a.01", "missing_shape:psu.01",
+                         "zorder_missing:b.01/main", "zorder_cycle:c.01,d.01",
+                         "bench_missing:e.01", "pose_segment_ambiguous:f.01",
+                         "shape_size_mismatch:g.01/main"])
+    rows = panel.problem_rows()
+    assert [r["code"] for r in rows] == [
+        "missing_shape:psu.01", "zorder_cycle:c.01,d.01", "shape_size_mismatch:g.01/main",
+        "empty_visible:a.01", "zorder_missing:b.01/main", "bench_missing:e.01",
+        "pose_segment_ambiguous:f.01"]
+    assert [r["note"] for r in rows] == [False] * 3 + [True] * 4
+    lw = panel._problems_list
+    lines = [lw.item(i).text() for i in range(lw.count())]
+    assert lines.index(NOTES_HEADING) == 3, "the heading sits between the two"
+    assert NOTES_HEADING.startswith("提示（不挡 Space）")
+    assert lw.item(3).flags() == Qt.ItemFlag.NoItemFlags   # not a problem to pick
+    assert NOTES_HEADING not in panel.problems()
+    assert shown == [3] and panel.problem_count() == 3
+
+    panel._show_arrival(["empty_visible:a.01"])            # notes alone
+    assert panel.problems_visible() and panel.notes_heading_shown()
+    assert shown[-1] == 0 and panel.problem_count() == 0
+
+    panel._show_arrival(["missing_shape:psu.01"])          # blockers alone
+    assert not panel.notes_heading_shown()
+
+
+def test_every_sentence_says_what_to_do():
+    wants = {
+        "bench_missing:": "按 R", "shape_size_mismatch:": "重画",
+        "zorder_cycle:": "Ctrl+Z", "zorder_missing:": "Ctrl+↑/↓",
+        "empty_visible:": "选中它按 3（完全遮挡）", "pose_segment_ambiguous:": "Ctrl+Shift+B",
+        "missing_shape:": "画出来",
+    }
+    assert {prefix for prefix, _ in PROBLEM_SENTENCES} == set(wants)
+    for prefix, fix in wants.items():
+        assert fix in explain_code(prefix + "x.01"), prefix
+    assert "完全挡住" in explain_code("empty_visible:x.01")
+
+
+def test_notes_alone_neither_point_the_status_line_nor_block_space(qapp, tmp_path):
+    session = rows_done_but_one_unlisted(tmp_path)
+    covered = [k for k in chassis_instances(session, LAST_STEP - 1) if k != UNLISTED][0]
+    draw(session, UNLISTED, 0)            # on top of `covered`'s rectangle
+    win = open_window(tmp_path, session=session)
+    try:
+        answer_roi(win)
+        session.goto(LAST_STEP, force=True)
+        session.goto(LAST_STEP - 1, force=True)
+        QApplication.processEvents()
+        assert session.current_problems() == [f"empty_visible:{covered}"]
+        rows = win.task_card.problem_rows()
+        assert [(r["code"], r["note"]) for r in rows] == [(f"empty_visible:{covered}", True)]
+        assert win.task_card.notes_heading_shown()
+        assert win.task_card.problems_visible()
+        assert "见任务卡" not in win.status_message()
+        assert win.guide_plan().phase == G.PHASE_CONFIRM   # a note blocks nothing
+
+        # the fix its sentence names: select it (a click on the line) and press 3
+        win.task_card._problems_list.itemClicked.emit(pane_item(win, covered))
+        assert win.instances.selected_instance() == covered
+        press(win, "visibility_3")
+        assert f"empty_visible:{covered}" not in session.current_problems()
+        assert not win.task_card.problems_visible()
+        assert win.act_confirm() is True
+    finally:
+        close_window(win)
+
+
+def test_a_blocker_on_arrival_says_to_fix_it_first(qapp, tmp_path):
+    session = rows_done_but_one_unlisted(tmp_path)
+    win = open_window(tmp_path, session=session)
+    try:
+        answer_roi(win)
+        session.goto(LAST_STEP, force=True)
+        session.goto(LAST_STEP - 1, force=True)
+        QApplication.processEvents()
+        assert win.task_card._problems_label.text() == ARRIVAL_TITLE
+        assert "1 个问题要先处理 — 见任务卡" in win.status_message()
     finally:
         close_window(win)
