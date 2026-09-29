@@ -15,7 +15,29 @@ from __future__ import annotations
 
 from typing import Optional
 
-__all__ = ["CLASS_ZH", "class_zh", "instance_label"]
+__all__ = ["CLASS_ZH", "STATE_ZH", "class_zh", "instance_label", "state_zh"]
+
+#: The taxonomy's states as an annotator says them (U2b round 2): a ✂ row read
+#: ``open → closed``, which is the state machine's vocabulary, not theirs.
+STATE_ZH: dict[str, str] = {
+    "present": "在",
+    "installed": "装着",
+    "displaced": "挪开",
+    "removed": "拆下",
+    "closed": "关上",
+    "open": "打开",
+    "fastened": "拧紧",
+    "loosened": "拧松",
+    "plugged": "插上",
+    "unplugged": "拔掉",
+    "routed": "走线",
+    "released": "松开",
+}
+
+
+def state_zh(state: str) -> str:
+    """The Chinese word for a state; the state itself when there is none."""
+    return STATE_ZH.get(str(state), str(state))
 
 CLASS_ZH: dict[str, str] = {
     "chassis": "机箱",

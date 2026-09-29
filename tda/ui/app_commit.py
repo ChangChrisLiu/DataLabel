@@ -188,6 +188,7 @@ class CommitMixin:
         # An edit reaches other frames: those rows change colour now, not when
         # the annotator next happens to stand on one of them.
         self.timeline.refresh_statuses()
+        self.forget_card_hints()          # the hover outlines were read from shapes
         # No re_explain() here: committing re-renders the frame, which clears
         # assist_result, so a re-split would run against nothing.  The real one
         # happens at confirm time, where the answer is actually used.
@@ -420,6 +421,7 @@ class CommitMixin:
         if instance is not None and mask is not None:
             self.queue_sidecar(self.session.current(), instance, mask)
         self.timeline.refresh_statuses()   # it takes back other frames too
+        self.forget_card_hints()
         self.update_status()
         self.report(what)
 

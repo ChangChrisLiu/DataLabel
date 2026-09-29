@@ -17,6 +17,7 @@ the previous one before it repaints anything.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -43,14 +44,24 @@ PHASE_ROI = "roi"
 PHASE_BENCH = "bench"
 PHASE_DRAW_EMPTY = "draw_empty"
 PHASE_DRAW_PIXELS = "draw_pixels"
+#: A stored shape loaded and not touched: ``Enter`` has nothing to commit.
+PHASE_LOADED = "loaded"
 PHASE_PICK = "pick"
 PHASE_CONFIRM = "confirm"
 PHASE_CONFIRMED = "confirmed"
 PHASES: tuple[str, ...] = (
     PHASE_STEPS, PHASE_REVIEW, PHASE_CLOSED, PHASE_RAW_MISSING, PHASE_NO_IMAGE,
     PHASE_FLASH, PHASE_GHOST, PHASE_WARNING, PHASE_SCOPE, PHASE_ROI, PHASE_BENCH,
-    PHASE_DRAW_EMPTY, PHASE_DRAW_PIXELS, PHASE_PICK, PHASE_CONFIRM, PHASE_CONFIRMED,
+    PHASE_DRAW_EMPTY, PHASE_DRAW_PIXELS, PHASE_LOADED, PHASE_PICK, PHASE_CONFIRM,
+    PHASE_CONFIRMED,
 )
+
+#: The key and the palette action of each commit scope, for the lines that
+#: have to name the *right* one (a ✂ row is committed with ``Ctrl+K``).
+_SCOPE_KEYS: dict[str, tuple[str, str]] = {
+    api.SCOPE_SPLIT: ("Ctrl+K", "commit_split"),
+    api.SCOPE_FRAME_OVERRIDE: ("Alt+Enter", "commit_override"),
+}
 
 #: Card kinds that are work to *do* on the canvas.  ``state_only`` and
 #: ``confirm`` items are never "the next part to click".
@@ -81,17 +92,27 @@ class GuideFacts:
     step: Optional[int] = None
     #: The frame the card is diffed against; ``None`` on the start frame.
     neighbour: Optional[int] = None
+    #: The start frame is the *first* step (browsing forward): the machine
+    #: whole, not taken apart (U2b round 2, I3).
+    forward_start: bool = False
     frame_confirmed: bool = False
     roi_stored: bool = False
     roi_editing: bool = False
     roi_unanswered: bool = False
     #: Label of the instance being edited, or ``None``.
     editing: Optional[str] = None
+    #: The task-card kind of the row being edited (``""`` when it is not on
+    #: the card): a ✂ row is committed with ``Ctrl+K``, never ``Enter``.
+    editing_kind: str = ""
     layer_pixels: bool = False
     layer_dirty: bool = False
     warning: bool = False
+    #: The scope the area warning was raised for (its second press repeats it).
+    warning_scope: str = ""
     #: The scope the non-modal bar is suggesting, or ``""``.
     scope: str = ""
+    #: That scope in the annotator's words (``它在 机箱 chassis 上面（层级）``).
+    scope_text: str = ""
     ghost: bool = False
     #: Label of the part the bench box is armed for, or ``None``.
     bench: Optional[str] = None
@@ -120,6 +141,8 @@ class GuidePlan:
 # the five steps of a frame
 # --------------------------------------------------------------------------- #
 ROI_NOW = "回答机箱范围（ROI）：拖黄框的白色小方块调整，Enter 保存 / Esc 先跳过"
+#: A stored ROI opened to check it: Esc keeps it, it skips nothing (round 2).
+ROI_EDIT_NOW = "机箱范围（ROI）：拖白色小方块调整，Enter 保存 / Esc 不改"
 ROI_DONE = "机箱范围（ROI）✓"
 ROI_NONE = "机箱范围（ROI）：这一段不用 ✓"
 ROI_WARN = ("机箱范围（ROI）还没确认：画布下方点「确认建议框」，或 Shift+R 重画"
@@ -128,6 +151,7 @@ PICK = "在右边任务卡上单击一个零件"
 DRAW = "画：S 在零件上点一下 / X 拖框；B 画笔补、E 橡皮修边"
 DRAW_BENCH = "在台面上拖一个框框住它（台面框 R），松手就存好"
 COMMIT = "Enter 提交（形状从这帧起变了用 Ctrl+K；只这一帧特殊用 Alt+Enter）"
+COMMIT_SPLIT = "Ctrl+K 提交（从这帧起新版本）— 这一条不要按 Enter"
 CONFIRM = "全部画完：Space 确认整帧，自动退到上一帧"
 NOTHING_TO_DRAW = "这一帧不用画"
 
@@ -136,18 +160,29 @@ def _label(item: CardItem) -> str:
     return item.label or item.instance
 
 
+_BILINGUAL_SPLIT = re.compile(r"\s*/ (?=[A-Za-z])")
+_CJK = re.compile(r"[一-鿿]")
+
+
+def _chinese_half(text: str) -> str:
+    """``"中文 / English — path"`` -> ``"中文"``; anything else unchanged."""
+    head = _BILINGUAL_SPLIT.split(text, 1)[0].strip()
+    return head if _CJK.search(head) else text
+
+
 def _title(facts: GuideFacts) -> str:
     step = facts.step
     if step is None:
         return "现在做什么"
     if facts.neighbour is None:
-        return f"第 {step} 帧（起点：已经拆完的样子）"
+        look = "还没开始拆的样子" if facts.forward_start else "已经拆完的样子"
+        return f"第 {step} 帧（起点：{look}）"
     return f"第 {step} 帧（对照第 {facts.neighbour} 帧）"
 
 
 def _roi_line(facts: GuideFacts) -> tuple[str, str]:
     if facts.roi_editing:
-        return (NOW, ROI_NOW)
+        return (NOW, ROI_EDIT_NOW if facts.roi_stored else ROI_NOW)
     if facts.roi_stored:
         return (DONE, ROI_DONE)
     if facts.roi_unanswered:
@@ -196,8 +231,14 @@ def plan_for(facts: GuideFacts) -> GuidePlan:
         return GuidePlan(PHASE_CLOSED, "现在做什么",
                          "这台机器的这个视角没有帧：在顶部换一台机器或换视角（F1–F4）")
     if not facts.has_image and facts.raw_missing:
+        # The resolver's own sentence already says what to plug in and that
+        # F5 looks again; saying it twice was noise (round 2).  It is
+        # bilingual ("中文 / English — path"): the guide speaks Chinese, and the
+        # raw-drive bar above the canvas keeps the whole sentence and the path.
+        reason = _chinese_half(facts.raw_missing)
+        advice = "" if "F5" in reason else " — 接上数据盘后按 F5"
         return GuidePlan(PHASE_RAW_MISSING, _title(facts),
-                         f"读不到原始图像：{facts.raw_missing} — 接上数据盘后按 F5")
+                         f"读不到原始图像：{reason}{advice}")
     if not facts.has_image:
         return GuidePlan(PHASE_NO_IMAGE, _title(facts),
                          f"这一帧在 {facts.view} 视角没有图像 — 按 PgDn / PgUp "
@@ -223,23 +264,28 @@ def _annotate_plan(facts: GuideFacts) -> GuidePlan:
                                 draw_text="旧草稿预览：Enter 采纳 / Esc 取消"),
                          "commit")
     if facts.warning:
+        key, action = _SCOPE_KEYS.get(facts.warning_scope, ("Enter", "commit"))
         return GuidePlan(PHASE_WARNING, title,
-                         "现在：面积和这类零件差得多 — 确认没画错就再按一次 Enter，"
-                         "否则 Esc 回去改",
+                         f"现在：面积和这类零件差得多 — 确认没画错就再按一次 {key}，"
+                         f"否则 Esc 回去改",
                          _steps(facts, 3, pick_text=f"已选中：{editing}" if editing else "",
-                                commit_text="面积提示：再按一次 Enter 仍然提交 / Esc 回去改"),
-                         "commit")
+                                commit_text=f"面积提示：再按一次 {key} 仍然提交 / Esc 回去改"),
+                         action)
     if facts.scope:
+        said = facts.scope_text or facts.scope
         return GuidePlan(PHASE_SCOPE, title,
-                         f"现在：看画布下方的提示条 — Enter 接受建议（{facts.scope}），"
+                         f"现在：看画布下方的提示条 — Enter 接受建议（{said}），"
                          f"Alt+Enter 只改这一帧，Ctrl+K 从这帧起新版本",
                          _steps(facts, 3, pick_text=f"已选中：{editing}" if editing else "",
                                 commit_text="提交范围建议：Enter / Alt+Enter / Ctrl+K"),
                          "commit")
     if facts.roi_editing:
-        return GuidePlan(PHASE_ROI, title,
-                         "现在：调好黄框（拖白色小方块），按 Enter 保存；暂时不想管就按 Esc",
-                         _steps(facts, 0), "commit")
+        # Opening a stored ROI to check it is not a proposal to put off: Esc
+        # keeps what is stored (U2b round 2 -- D13/scan already has one).
+        now = ("现在：拖边 / 角调整已存的机箱范围（框里按住整体挪），按 Enter 保存；"
+               "不改按 Esc（保持原来的）" if facts.roi_stored else
+               "现在：调好黄框（拖白色小方块），按 Enter 保存；暂时不想管就按 Esc")
+        return GuidePlan(PHASE_ROI, title, now, _steps(facts, 0), "commit")
     if facts.bench:
         return GuidePlan(PHASE_BENCH, title,
                          f"现在：在台面上拖一个框框住「{facts.bench}」— 松手就存好",
@@ -248,11 +294,31 @@ def _annotate_plan(facts: GuideFacts) -> GuidePlan:
                          "tool_bench_box")
     if editing:
         picked = f"已选中：{editing}"
-        if facts.layer_pixels:
+        split = facts.editing_kind == api.KIND_SPLIT_KEYFRAME
+        if facts.layer_dirty and split:
+            # Enter would rewrite the version in force -- the neighbour's shape
+            # too -- which is exactly what a ✂ row must not do (U2b round 2, I1).
+            return GuidePlan(PHASE_DRAW_PIXELS, title,
+                             f"现在：「{editing}」的形状从这一帧起变了 — 画好了按 Ctrl+K"
+                             f"（从这帧起新版本）提交；Enter 会连前后帧里的旧样子一起改掉",
+                             _steps(facts, 3, pick_text=picked, commit_text=COMMIT_SPLIT),
+                             "commit_split")
+        if facts.layer_dirty:
             return GuidePlan(PHASE_DRAW_PIXELS, title,
                              f"现在：「{editing}」的形状对了就按 Enter 提交；边缘不对用 "
                              f"B 补 / E 擦，不想要就 Esc",
                              _steps(facts, 3, pick_text=picked), "commit")
+        if facts.layer_pixels:
+            # A stored shape, loaded and untouched: Enter has nothing to write
+            # and says so; the next thing is to change it or leave it.
+            nxt = "画好了按 Ctrl+K（从这帧起新版本）" if split else "改完 Enter"
+            return GuidePlan(PHASE_LOADED, title,
+                             f"现在：这是已存的形状：要改就画，{nxt}；不改按 Esc"
+                             f"（或直接点下一条）",
+                             _steps(facts, 2, pick_text=picked,
+                                    draw_text=f"这是已存的形状：要改就画（{nxt}），"
+                                              f"不改按 Esc"),
+                             "clear_edit")
         if facts.sam_ready:
             now = (f"现在：按 S，在「{editing}」上点一下（或按 X 拖一个框），"
                    f"SAM 会给出形状")

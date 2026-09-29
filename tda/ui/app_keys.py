@@ -46,6 +46,9 @@ class KeysMixin:
         kind = event.type()
         if self.closed:
             return False  # a window on its way out must not eat anybody's keys
+        if kind == QEvent.Type.FocusIn and obj is self.canvas:
+            # The keys are the canvas' again: a "快捷键没生效" line is stale.
+            self.on_canvas_focus()
         if kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             focus = QApplication.focusWidget()
             if focus is None or focus is self or self.isAncestorOf(focus):

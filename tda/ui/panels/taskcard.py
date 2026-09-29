@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
 )
 
 from tda.ui import session_api as api
-from tda.ui.class_names import instance_label
+from tda.ui.class_names import instance_label, state_zh
 from tda.ui.panels import session_is_open
 
 __all__ = ["CHIP_DONE", "CHIP_EDITING", "CHIP_TODO", "KIND_ICONS", "KIND_SENTENCES",
@@ -78,9 +78,9 @@ KIND_SENTENCES: dict[str, str] = {
     api.KIND_REMOVE_BENCH_BOX: "它回到机箱里了：台面框到这一帧为止，不用画",
     api.KIND_CONFIRM: "这一帧不用画，直接 Space",
 }
-#: Kinds a click starts work on; the others only explain themselves.
-EDITABLE_KINDS = (api.KIND_ADD_SHAPE, api.KIND_SPLIT_KEYFRAME,
-                  api.KIND_ADD_BENCH_BOX, api.KIND_REMOVE_BENCH_BOX)
+#: Kinds a click starts work on; the others only explain themselves.  A ⌫
+#: row (the bench box ends here) is not a mask to draw (U2b round 2).
+EDITABLE_KINDS = (api.KIND_ADD_SHAPE, api.KIND_SPLIT_KEYFRAME, api.KIND_ADD_BENCH_BOX)
 
 CHIP_TODO = "待画"
 CHIP_EDITING = "✎ 正在画"
@@ -116,19 +116,64 @@ def _double_click_s() -> float:
     return max(0.1, interval / 1000.0) + 0.05
 
 
-def card_header(step: Optional[int], neighbour: Optional[int]) -> str:
-    """The sentence above the list: what *this* frame's list is (ruling U2b-3)."""
+#: How each kind is counted in a mixed header (U2b round 2).
+_KIND_COUNTS: tuple[tuple[str, str], ...] = (
+    (api.KIND_ADD_SHAPE, "{n} 个要画回去"),
+    (api.KIND_SPLIT_KEYFRAME, "{n} 个形状变了"),
+    (api.KIND_STATE_ONLY, "{n} 个只是状态变了"),
+    (api.KIND_ADD_BENCH_BOX, "{n} 个要用台面框框出来"),
+    (api.KIND_REMOVE_BENCH_BOX, "{n} 个台面框到这里结束"),
+)
+
+
+def card_header(step: Optional[int], neighbour: Optional[int],
+                kinds: Optional[list[str]] = None, first: Optional[int] = None,
+                last: Optional[int] = None) -> str:
+    """The sentence above the list: what *this* frame's list is (ruling U2b-3).
+
+    Built from the rows' kinds (round 2): "多了…要画回去" over rows that only
+    change a state was an instruction the rows contradicted.  ``first`` /
+    ``last`` are the view's first and last step, which is what tells the start
+    frame of the reverse walk (the machine taken apart) from the start of a
+    forward one (not taken apart yet).
+    """
     if step is None:
         return ""
+    kinds = [str(k) for k in (kinds if kinds is not None else [api.KIND_ADD_SHAPE])]
+    work = [k for k in kinds if k != api.KIND_CONFIRM]
     if neighbour is None:
+        if last is not None and int(step) == int(last):
+            where = "起点，已经拆完的样子"
+        elif first is not None and int(step) == int(first):
+            where = "起点，还没开始拆的样子"
+        else:
+            where = "起点"
+        if not work:
+            return f"第 {step} 帧（{where}）：这一帧的零件都画好了，直接 Space 确认"
         # Once, here, rather than on every row of a start card that can list
         # sixty parts (round 1b).
-        return (f"第 {step} 帧（起点，已经拆完的样子）：把这一帧里还看得到的零件都画出来，"
+        return (f"第 {step} 帧（{where}）：把这一帧里还看得到的零件都画出来，"
                 f"每个都画完整形状{START_NOTE}")
-    if int(neighbour) > int(step):
-        return (f"第 {step} 帧：比第 {neighbour} 帧多了下面这些零件"
-                f"（刚被拆掉的，要把它画回去）")
-    return f"第 {step} 帧：和第 {neighbour} 帧比，下面这些零件变了"
+    present = set(work)
+    if not present:
+        return f"第 {step} 帧：这一帧不用画，直接 Space"
+    if present == {api.KIND_ADD_SHAPE}:
+        if int(neighbour) > int(step):
+            return (f"第 {step} 帧：比第 {neighbour} 帧多了下面这些零件"
+                    f"（刚被拆掉的，要把它画回去）")
+        return f"第 {step} 帧：和第 {neighbour} 帧比，下面这些零件多出来了，要画出来"
+    if present == {api.KIND_STATE_ONLY}:
+        return f"第 {step} 帧：这一帧只有状态变化（拧紧/插上…），不用画，直接 Space"
+    if present == {api.KIND_SPLIT_KEYFRAME}:
+        return (f"第 {step} 帧：下面这些零件的形状从这一帧起变了"
+                f"（画这一帧的新样子，Ctrl+K 提交）")
+    if present == {api.KIND_ADD_BENCH_BOX}:
+        return f"第 {step} 帧：下面这些零件放在台面上，用台面框 R 框出来"
+    if present == {api.KIND_REMOVE_BENCH_BOX}:
+        return f"第 {step} 帧：下面这些零件回到机箱里了，台面框到这里结束，不用画"
+    counts = [template.format(n=work.count(kind)) for kind, template in _KIND_COUNTS
+              if kind in present]
+    return f"第 {step} 帧（对照第 {neighbour} 帧）：" + "、".join(counts)
 
 
 #: What "完整形状" means, said once -- in the start frame's header -- where
@@ -156,7 +201,7 @@ def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
     sentence = KIND_SENTENCES.get(kind, str(row.get("text", "")))
     transition = row.get("transition")
     if kind == api.KIND_SPLIT_KEYFRAME and transition:
-        sentence += f"（{transition[0]} → {transition[1]}）"
+        sentence += f"（{state_zh(transition[0])} → {state_zh(transition[1])}）"
     if kind == api.KIND_ADD_SHAPE and row.get("parent") and not start:
         sentence += f"（跟 {row['parent']} 一起装回来的）"
     span = row.get("span")
@@ -164,7 +209,8 @@ def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
         sentence += f"（这一条跨了第 {span[0]}–{span[-1]} 步：中间的帧没有图像）"
     if editing is not None and instance == editing:
         chip = CHIP_BOXING if bench else CHIP_EDITING
-    elif kind == api.KIND_STATE_ONLY:
+    elif kind in (api.KIND_STATE_ONLY, api.KIND_REMOVE_BENCH_BOX):
+        # Neither is drawing: a state that changed, a bench box that ends.
         chip = CHIP_NOTHING
     elif done:
         chip = CHIP_DONE
@@ -487,7 +533,11 @@ class TaskCardPanel(QWidget):
         self._card = [dict(r) for r in rows]
         step, neighbour = self._frame_pair() if opened else (None, None)
         self._start = opened and neighbour is None
-        self.header.setText(card_header(step, neighbour) if opened else "")
+        steps = list(self._session.steps()) if opened else []
+        kinds = [str(r.get("kind", api.KIND_CONFIRM)) for r in rows]
+        self.header.setText(
+            card_header(step, neighbour, kinds, first=min(steps) if steps else None,
+                        last=max(steps) if steps else None) if opened else "")
         self.header.setVisible(bool(self.header.text()))
         first_open = -1
         for i, row in enumerate(rows):
@@ -659,6 +709,10 @@ class TaskCardPanel(QWidget):
         last, at = self._last_click
         if last == instance and _now() - at <= _double_click_s():
             return
+        kind = item.data(KIND_ROLE)
+        if kind is not None and str(kind) not in EDITABLE_KINDS:
+            self._explain(item, instance)
+            return
         self.sigRequestEdit.emit(instance)
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
@@ -675,6 +729,10 @@ class TaskCardPanel(QWidget):
         if kind in EDITABLE_KINDS:
             self.sigRequestEdit.emit(instance)
             return
+        self._explain(item, instance)
+
+    def _explain(self, item: QListWidgetItem, instance: str) -> None:
+        """Say what a row that is not work means (a click, or a double-click)."""
         view = item.data(VIEW_ROLE)
         sentence = view.get("sentence", "") if isinstance(view, dict) else ""
         self.sigExplain.emit(f"{instance}：{sentence}" if sentence else instance)

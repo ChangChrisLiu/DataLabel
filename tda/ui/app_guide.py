@@ -44,6 +44,11 @@ __all__ = ["BANNER_EMPTY", "BANNER_PIXELS", "GuideMixin", "HINT_DWELL_MS"]
 BANNER_EMPTY = "用 S 在零件上点一下，或 X 拖框"
 BANNER_EMPTY_NO_SAM = "用 B 画笔涂出它（SAM 还没准备好）"
 BANNER_PIXELS = "Enter 提交 / Esc 放弃"
+#: A ✂ row: the new version is committed with Ctrl+K (U2b round 2, I1).
+BANNER_SPLIT = "Ctrl+K 从这帧起新版本 / Esc 放弃"
+#: A stored shape, loaded and untouched: Enter has nothing to write (item 2).
+BANNER_LOADED = "这是已存的形状：要改就画，改完 Enter；不改按 Esc"
+BANNER_LOADED_SPLIT = "这是前一版的形状：画出这一帧的样子，Ctrl+K 提交；不改按 Esc"
 #: How long the pointer rests on a card row before its outline is looked up.
 #: Passing over rows on the way to another one should not cost a query each.
 HINT_DWELL_MS = 120
@@ -87,7 +92,6 @@ def _merge_hints(hints: list) -> list:
 
 
 _SAM_TOOLS = ("sam_point", "sam_box")
-_DRAW_TOOLS = ("brush", "eraser", "sam_point", "sam_box")
 _NO_EDIT = (None, False, False)
 _VERIFIED = (api.STATUS_VERIFIED, api.STATUS_RECHECK)
 
@@ -102,8 +106,9 @@ class GuideMixin:
         self._edit_facts: tuple = _NO_EDIT
         #: ``(instance, label, raw names)`` of the instance being edited.
         self._edit_label: tuple = (None, "", "")
-        #: The last tool the annotator drew with (ruling U2b-4).
-        self._last_draw_tool: Optional[str] = None
+        #: The SAM tool a new shape starts with: the last one chosen, S until
+        #: then (ruling U2b-4, round 2).
+        self._last_sam_tool = "sam_point"
         self._hint_for = ""
         self._hint_cache: dict = {}
         self._hint_timer = QTimer(self)
@@ -114,6 +119,10 @@ class GuideMixin:
         self.palette.sigAction.connect(self.run_palette_action)
         self.palette.sigRadius.connect(self.set_brush_radius)
         self.palette.sigRadiusTyped.connect(self._on_radius_typed)
+        self.palette.sigRefused.connect(self._on_palette_refused)
+        # The minimap lives at the foot of the palette now, off the canvas
+        # (round 2, item 5): nothing is drawn over the image any more.
+        self.palette.set_minimap(self.canvas.minimap())
         # K / N are live only with a conflict selected: the queue's selection
         # is state the palette's greying depends on.
         for queue in api.QUEUE_NAMES:
@@ -122,9 +131,33 @@ class GuideMixin:
         self.review.tabs().currentChanged.connect(lambda *_a: self.refresh_guidance())
         self.task_card.sigHover.connect(self.on_card_hover)
         self.task_card.sigExplain.connect(self.report)
-        for bar in (self.warn_bar, self.scope_bar, self.restore_bar, self.roi_bar):
-            bar.sigVisible.connect(self._on_bar_visible)
+        for bar in (self.warn_bar, self.scope_bar, self.restore_bar, self.roi_bar,
+                    getattr(self, "raw_bar", None)):
+            if bar is not None:
+                bar.sigVisible.connect(self._on_bar_visible)
         self._guidance_ready = True
+
+    @S.guard
+    def _on_palette_refused(self, name: str, reason: str) -> None:
+        """A click on a greyed button: say why in the status bar (round 2).
+
+        The tooltip said it already, but only to somebody who hovered; a click
+        that does nothing and says nothing is a click repeated, harder.
+        """
+        head = A.short_parts(A.action_named(name))[0]
+        self.report(f"{head}：{reason}" if reason else f"{head}：现在不能用")
+
+    def on_canvas_focus(self) -> None:
+        """The canvas has the keyboard again: a "快捷键没生效" line is now stale."""
+        from tda.ui.app_keys import KEY_SWALLOWED
+
+        if self.status_message() == KEY_SWALLOWED:
+            self.report("")
+
+    def forget_card_hints(self) -> None:
+        """Drop the hover outlines looked up for this frame: a commit or an
+        undo changed the shapes they were read from (round 2)."""
+        self._hint_cache.clear()
 
     # -------------------------------------------------------- the palette
     @S.guard
@@ -265,21 +298,32 @@ class GuideMixin:
         roi_editing = bool(self.roi_editing)
         has_image = bool(self.tools_enabled) if opened else False
         roi_stored = bool(opened and has_image and self.roi() is not None)
+        scope = str(self._pending_scope or "")
+        warning = self._pending_warning
+        neighbour = compat.task_neighbour(self.session) if opened else None
+        forward_start = False
+        if opened and key is not None and neighbour is None:
+            steps = self.session.steps()
+            forward_start = bool(steps) and int(key.step) == min(steps) != max(steps)
         return G.GuideFacts(
             mode=self.mode, is_open=opened, has_image=has_image,
             raw_missing="" if has_image or not opened else self._raw_missing_reason(),
             view=str(getattr(self.session, "view", "")),
             step=None if key is None else int(key.step),
-            neighbour=compat.task_neighbour(self.session) if opened else None,
+            neighbour=neighbour,
+            forward_start=forward_start,
             frame_confirmed=getattr(self, "_frame_status_seen", "") in _VERIFIED,
             roi_stored=roi_stored,
             roi_editing=roi_editing,
             roi_unanswered=bool(opened and has_image and not roi_stored
                                 and not roi_editing and self.roi_unanswered()),
             editing=self._edit_label[1] if editing else None,
+            editing_kind=self._card_kind(editing),
             layer_pixels=bool(pixels), layer_dirty=bool(dirty),
-            warning=self._pending_warning is not None,
-            scope=str(self._pending_scope or ""),
+            warning=warning is not None,
+            warning_scope=str(warning[0]) if warning is not None else "",
+            scope=scope,
+            scope_text=self.scope_text(scope),
             ghost=self.showing_draft_ghost(),
             bench=self._label_of(self.bench_instance)[0] if self.bench_instance else None,
             flashing=self.is_flashing(),
@@ -287,42 +331,60 @@ class GuideMixin:
             items=items,
         )
 
-    def _raw_missing_reason(self) -> str:
-        """Why this frame's pixels cannot be read, when task U2a can say.
+    def _card_kind(self, instance: Optional[str]) -> str:
+        """The task-card kind of ``instance`` on this frame, ``""`` when not listed."""
+        if not instance:
+            return ""
+        for row in self.task_card.rows():
+            if str(row.get("instance")) == str(instance):
+                return str(row.get("kind", ""))
+        return ""
 
-        Called only for a frame with no image, and read through ``getattr`` so
-        the guide works before U2a is merged and after:
+    def scope_text(self, scope: str) -> str:
+        """A commit scope as a sentence: ``zorder:above:chassis`` -> 它在 机箱 chassis 上面.
 
-        1. ``session.images.why_unreadable(key)`` -- U2a's per-frame answer: the
-           raw drive's own sentence plus the path, or the file that could not
-           be opened; ``None`` for a step that simply has no image;
-        2. the window's ``raw_root`` (U2a's resolver result): configured and
-           not connected means the drive is not there, and its ``message`` says
-           which;
-        3. the two names this module first looked for, in case either appears.
+        The scope bar speaks the session's vocabulary; the guide speaks the
+        annotator's (U2b round 2).  ``""`` for no scope; a scope this does not
+        know is given back as it is.
         """
-        images = getattr(self.session, "images", None)
-        why = getattr(images, "why_unreadable", None)
-        if callable(why) and compat.is_open(self.session):
+        scope = str(scope or "")
+        if not scope:
+            return ""
+        split, _, rest = scope.partition("split+")
+        body = rest if _ else scope
+        prefix = "从这帧起新版本，并且" if _ else ""
+        for token, where in (("zorder:above:", "上面"), ("zorder:below:", "下面")):
+            if body.startswith(token):
+                other = body[len(token):]
+                return f"{prefix}它在 {self._label_of(other)[0] or other} {where}（层级）"
+        words = {api.SCOPE_KEYFRAME: "改这个形状（它覆盖的每一帧都跟着变）",
+                 api.SCOPE_SPLIT: "从这帧起新版本",
+                 api.SCOPE_FRAME_OVERRIDE: "只改这一帧"}
+        return words.get(scope, scope)
+
+    def _raw_missing_reason(self) -> str:
+        """Why this frame's pixels cannot be read (task U2a's two answers).
+
+        Called only for a frame with no image:
+
+        1. ``session.images.why_unreadable(key)`` -- the image cache's per-frame
+           answer: the raw drive's own sentence plus the recorded path, or the
+           file that could not be opened; ``None`` for a step that simply has
+           no image in this view;
+        2. the window's ``raw_root`` (:class:`tda.ui.app_rawdata.RawDataMixin`):
+           configured and not connected means the drive is not there, and its
+           ``message`` says which drive to plug in.
+        """
+        if compat.is_open(self.session):
             try:
-                found = why(self.session.current())
+                found = self.session.images.why_unreadable(self.session.current())
             except Exception:  # noqa: BLE001 - a hint is never worth a failure
                 found = None
             if found:
                 return str(found)
         raw = getattr(self, "raw_root", None)
-        if (raw is not None and getattr(raw, "configured", False)
-                and not getattr(raw, "connected", True)):
-            return str(getattr(raw, "message", "") or "原始数据盘没有接上 / raw drive missing")
-        for owner in (self.session, self):
-            for name in ("image_unavailable_reason", "raw_missing_reason"):
-                found = getattr(owner, name, None)
-                try:
-                    value = found() if callable(found) else found
-                except Exception:  # noqa: BLE001 - a hint is never worth a failure
-                    value = None
-                if value:
-                    return str(value)
+        if raw is not None and raw.configured and not raw.connected:
+            return str(raw.message or "原始数据盘没有接上 / raw drive missing")
         return ""
 
     def _cheat_for(self, mode: str) -> str:
@@ -376,8 +438,13 @@ class GuideMixin:
         if instance:
             _inst, label, raw = self._edit_label
             head = f"正在画：{label}" + (f"（日志：{raw}）" if raw else " ")
+            split = facts.editing_kind == api.KIND_SPLIT_KEYFRAME
+            if facts.layer_dirty:
+                # The key a ✂ row is committed with; Enter would rewrite the
+                # neighbour's version too (U2b round 2, I1).
+                return f"{head}— {BANNER_SPLIT if split else BANNER_PIXELS}"
             if facts.layer_pixels:
-                return f"{head}— {BANNER_PIXELS}"
+                return f"{head}— {BANNER_LOADED_SPLIT if split else BANNER_LOADED}"
             return f"{head}— {BANNER_EMPTY if self.sam_available else BANNER_EMPTY_NO_SAM}"
         if self.bench_instance:
             label, raw = self._label_of(self.bench_instance)
@@ -437,22 +504,21 @@ class GuideMixin:
 
     # ------------------------------------------ starting a new shape (U2b-4)
     def note_draw_tool(self, name: str) -> None:
-        """Remember the tool the annotator last drew with."""
-        if name in _DRAW_TOOLS:
-            self._last_draw_tool = name
+        """Remember the SAM tool the annotator last chose (S or X)."""
+        if name in _SAM_TOOLS:
+            self._last_sam_tool = name
 
     def pick_tool_for_new_shape(self) -> Optional[str]:
         """The tool an edit of an *empty* layer starts with, or ``None`` to stay.
 
-        The last drawing tool when it was a SAM tool, otherwise SAM point when
-        SAM is ready, otherwise whatever is armed: a new shape is started with
-        a click or a box, and the brush that ended the last one is the wrong
-        tool to meet an empty layer with.
+        The SAM tool the annotator last chose -- ``S`` until they have chosen
+        one -- when SAM is ready, otherwise whatever is armed (U2b round 2).
+        A brush picked up to tidy the last part's edge says nothing about how
+        they like to *start* a shape; which SAM prompt they prefer does.
         """
         if not self.sam_available:
             return None
-        last = self._last_draw_tool
-        return last if last in _SAM_TOOLS else "sam_point"
+        return self._last_sam_tool
 
     def switch_tool_for_empty_layer(self) -> None:
         """Arm :meth:`pick_tool_for_new_shape`'s answer when the layer is empty."""

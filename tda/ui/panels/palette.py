@@ -39,6 +39,7 @@ from PySide6.QtCore import QEvent, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -193,6 +194,18 @@ class PaletteButton(QAbstractButton):
     PAD = 5
     GAP = 4
 
+    #: A press on the button while it is greyed out: say why (round 2).
+    sigRefusedClick = Signal()
+
+    def event(self, event) -> bool:  # noqa: D102 - Qt override
+        # A disabled widget still receives its mouse events here (Qt only
+        # ignores them afterwards); a greyed button answers a click with its
+        # reason instead of with nothing.
+        if not self.isEnabled() and event.type() == QEvent.Type.MouseButtonRelease:
+            self.sigRefusedClick.emit()
+            return True
+        return super().event(event)
+
     def __init__(self, action: A.Action, checkable: bool = False,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -341,13 +354,18 @@ class PaletteButton(QAbstractButton):
 # --------------------------------------------------------------------------- #
 # the strip
 # --------------------------------------------------------------------------- #
-class ToolPalette(QScrollArea):
-    """Tools, the brush size, and the commit/confirm/undo keys, top to bottom.
+class ToolPalette(QWidget):
+    """Tools, the brush size, the commit/confirm/undo keys -- and the minimap.
 
     Per mode (:meth:`set_mode`): Annotate shows everything but the Review
     queue's keys; Review hides the tools and the brush size -- its canvas is
     read-only -- and keeps the difference map and the queue's four keys; Steps
     hides the whole strip (the window does that).
+
+    The buttons scroll (:attr:`scroll`) on a short screen; the minimap sits
+    below them, outside the scroll area, so it is always in view (U2b round 2:
+    it used to float over the canvas, where a left drag that started on it
+    moved the view instead of doing what the armed tool does).
     """
 
     #: ``(action name, pressed)``: a click (``pressed`` is ``True``), or the
@@ -358,15 +376,26 @@ class ToolPalette(QScrollArea):
     #: Typing in the brush-size box ended (``Enter`` or ``Esc``): the window
     #: takes the keyboard back to the canvas.  The payload is the radius shown.
     sigRadiusTyped = Signal(int)
+    #: A greyed button was clicked: ``(action name, why it cannot run)``.
+    sigRefused = Signal(str, str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("tool_palette")
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setWidgetResizable(True)
         self.setFixedWidth(PALETTE_WIDTH)
+        self.scroll = QScrollArea(self)
+        self.scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setWidgetResizable(True)
+        self._minimap_host = QVBoxLayout()
+        self._minimap_host.setContentsMargins(4, 2, 4, 4)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self.scroll, 1)
+        outer.addLayout(self._minimap_host)
         inner = QWidget()
         inner.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         layout = QVBoxLayout(inner)
@@ -406,6 +435,10 @@ class ToolPalette(QScrollArea):
         self.radius_spin.setToolTip(self.radius_label.toolTip())
         self.radius_spin.setAccelerated(True)
         self.radius_spin.installEventFilter(self)
+        # The wheel over either of them scrolls the strip unless the widget has
+        # the keyboard (round 2): on a 1280x720 screen the strip scrolls, and
+        # a wheel meant for it must not quietly resize the brush.
+        self.radius_slider.installEventFilter(self)
         self.radius_spin.editingFinished.connect(self._on_spin_finished)
         layout.addSpacing(4)
         for widget in (self.radius_label, self.radius_slider, self.radius_spin):
@@ -422,9 +455,23 @@ class ToolPalette(QScrollArea):
         for name in dict.fromkeys(review_first + A.PALETTE_ACTIONS + A.PALETTE_REVIEW):
             layout.addWidget(self._add(name, checkable=(name == "toggle_heat")))
         layout.addStretch(1)
-        self.setWidget(inner)
+        self.scroll.setWidget(inner)
         self.set_radius(8)
         self.set_mode(A.MODE_ANNOTATE)
+
+    def set_minimap(self, minimap: QWidget) -> None:
+        """Put the minimap at the foot of the strip, below the scrolling part.
+
+        Taking it into this layout reparents it: the canvas has no widget over
+        its picture any more, so a left drag on the canvas is always the armed
+        tool's (U2b round 2).
+        """
+        label = self._header("小地图")
+        label.setToolTip(minimap.toolTip())
+        self._minimap_host.addWidget(label)
+        if hasattr(minimap, "set_max_side"):
+            minimap.set_max_side(PALETTE_WIDTH - 12)
+        self._minimap_host.addWidget(minimap, 0, Qt.AlignmentFlag.AlignHCenter)
 
     @staticmethod
     def _header(text: str) -> QLabel:
@@ -438,6 +485,7 @@ class ToolPalette(QScrollArea):
     def _add(self, name: str, checkable: bool) -> PaletteButton:
         action = A.action_named(name)
         button = PaletteButton(action, checkable=checkable)
+        button.sigRefusedClick.connect(lambda n=name, b=button: self.sigRefused.emit(n, b.reason()))
         if action.hold:
             button.pressed.connect(lambda n=name: self.sigAction.emit(n, True))
             button.released.connect(lambda n=name: self.sigAction.emit(n, False))
@@ -510,6 +558,12 @@ class ToolPalette(QScrollArea):
 
     # -- typing a radius ------------------------------------------------------
     def eventFilter(self, obj, event) -> bool:  # noqa: D102 - the spin box's Esc
+        if (event.type() == QEvent.Type.Wheel
+                and obj in (self.radius_slider, self.radius_spin) and not obj.hasFocus()):
+            # Not focused: the wheel belongs to the strip, as in any list of
+            # controls (the standard "ignore the wheel when not focused" rule).
+            QApplication.sendEvent(self.scroll.verticalScrollBar(), event)
+            return True
         if (obj is self.radius_spin and event.type() == QEvent.Type.KeyPress
                 and event.key() == Qt.Key.Key_Escape):
             # Put back what is in force, typed digits and all, and hand the

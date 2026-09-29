@@ -50,7 +50,7 @@ from tda.ui import app_actions as A
 from tda.ui import guide as G
 from tda.ui import session_api as api
 from tda.ui.app import MainWindow
-from tda.ui.app_guide import BANNER_EMPTY, BANNER_PIXELS, HINT_DWELL_MS
+from tda.ui.app_guide import BANNER_EMPTY, BANNER_LOADED, BANNER_PIXELS, HINT_DWELL_MS
 from tda.ui.app_view import TOOL_LABELS
 from tda.ui.panels.palette import (
     RADIUS_MAX,
@@ -544,15 +544,17 @@ def test_review_and_steps_modes_have_their_own_line(window):
     assert "Apply" in window.guide.text()
 
 
-def test_a_frame_with_no_image_and_a_missing_drive(qapp, tmp_path):
+def test_a_frame_with_no_image_is_not_a_missing_drive(qapp, tmp_path):
+    """A step this view never photographed: no image, and nothing to plug in.
+
+    The drive-missing phase itself is tested with U2a's real resolver in
+    tests/test_app_guide_r2.py (``test_the_raw_drive_sentence_says_f5_once``).
+    """
     win = open_window(tmp_path, missing=(LAST_STEP,))
     try:
         win.session.goto(LAST_STEP)
         assert phase(win) == G.PHASE_NO_IMAGE
-        win.session.image_unavailable_reason = lambda: "F: 盘找不到"
-        win.refresh_guidance()
-        assert phase(win) == G.PHASE_RAW_MISSING
-        assert "F: 盘找不到" in win.guide.text()
+        assert win.session.images.why_unreadable(win.session.current()) is None
     finally:
         close_window(win)
 
@@ -594,7 +596,7 @@ def test_the_cheat_sheet_lists_only_this_modes_keys(window):
 # a task card that explains itself (ruling U2b-3)
 # --------------------------------------------------------------------------- #
 def test_the_header_says_what_the_frame_is():
-    assert card_header(42, None) == ("第 42 帧（起点，已经拆完的样子）："
+    assert card_header(42, None, last=42) == ("第 42 帧（起点，已经拆完的样子）："
                                      "把这一帧里还看得到的零件都画出来，每个都画完整形状"
                                      "（被别的零件挡住的部分也算它的，层级程序会处理）")
     assert card_header(40, 41) == ("第 40 帧：比第 41 帧多了下面这些零件"
@@ -606,7 +608,15 @@ def test_the_card_header_follows_the_frame(window):
     assert str(LAST_STEP) in window.task_card.header_text()
     answer_roi(window)
     window.act_step(-1)
-    assert f"比第 {LAST_STEP} 帧多了" in window.task_card.header_text()
+    # Round 2 (I3): the header is built from the rows it sits over.
+    kinds = [row["kind"] for row in window.task_card.rows()]
+    steps = window.session.steps()
+    header = window.task_card.header_text()
+    assert f"第 {LAST_STEP - 1} 帧" in header
+    assert header == card_header(LAST_STEP - 1, LAST_STEP, kinds,
+                                 first=min(steps), last=max(steps))
+    if api.KIND_ADD_SHAPE not in kinds:
+        assert "多了" not in header
     assert "✚" in window.task_card.header.toolTip()
 
 
@@ -823,7 +833,9 @@ def test_the_last_sam_tool_is_the_one_a_new_shape_starts_with(window):
     window.act_clear_edit()
     window.act_tool("brush")
     window.on_request_edit("cover.02")
-    assert window._tool_name == "sam_point", "the last drawing tool was the brush"
+    # Round 2: "remember the last SAM tool, default S" -- a brush used for
+    # tidying up in between does not make the next shape start with S.
+    assert window._tool_name == "sam_box", "the last SAM tool was X"
 
 
 def test_without_sam_the_tool_stays(qapp, tmp_path):
@@ -844,7 +856,9 @@ def test_a_shape_that_already_has_pixels_keeps_the_tool(window):
     window.act_tool("eraser")
     window.on_request_edit("cover.01")
     assert window._tool_name == "eraser"
-    assert window.canvas.banner_text().endswith(BANNER_PIXELS)
+    # Loaded and untouched: Enter would be refused, so the banner does not
+    # offer it first (round 2, item 2).
+    assert window.canvas.banner_text().endswith(BANNER_LOADED)
 
 
 def test_a_stroke_that_adopts_the_card_item_keeps_the_brush(window):

@@ -18,13 +18,25 @@ import html
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from tda.ui import guide as G
 
-__all__ = ["WhatNowPanel"]
+__all__ = ["MIN_HEIGHT", "WhatNowPanel"]
 
 _MARKERS = ("①", "②", "③", "④", "⑤", "⑥", "⑦")
+
+#: The panel's floor, in pixels: the title and a two-line "现在" line.  The
+#: rest scrolls, so a short screen never hides the line that says what to do.
+MIN_HEIGHT = 120
 
 
 def _steps_html(steps) -> str:
@@ -73,12 +85,29 @@ class WhatNowPanel(QWidget):
         self.cheat = self._label()
         self.cheat.setTextFormat(Qt.TextFormat.RichText)
         self.cheat.setVisible(False)
-        layout = QVBoxLayout(self)
+        # Everything scrolls (U2b round 2): at 1280x720 the dock is shorter than
+        # the "现在" line and five wrapped steps, and a label squeezed below its
+        # height-for-width loses its last lines without a trace.  Scrolled,
+        # every line is on screen or one wheel notch away.
+        content = QWidget()
+        content.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
         for widget in (self.title, self.now, self.steps, self.cheat_button, self.cheat):
             layout.addWidget(widget)
         layout.addStretch(1)
+        self.scroll = QScrollArea(self)
+        self.scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setWidget(content)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self.scroll)
+        # Never shorter than the title and the "现在" line.
+        self.setMinimumHeight(MIN_HEIGHT)
         self._fold(False)
 
     @staticmethod

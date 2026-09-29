@@ -100,6 +100,39 @@ def _has_shape(db: Db, tax: Taxonomy, desktop: int, view: str, instance: str, st
     return geom_type is None or chosen.geom_type == geom_type
 
 
+def _keyframe_at(db: Db, tax: Taxonomy, key: FrameKey, instance: str,
+                 cache: Optional[InputCache] = None):
+    """The keyframe in force for ``instance`` at ``key``, or ``None``."""
+    seg = pose_segment_of(db, key, cache)
+    placement = placement_of(db, tax, key, instance, cache)
+    return select_keyframe(chain_for(db, key, instance, seg, placement), key.step)
+
+
+def _has_split(db: Db, tax: Taxonomy, desktop: int, view: str, instance: str,
+               step: int, neighbour: int, cache: Optional[InputCache] = None) -> bool:
+    """Is there a shape boundary between ``step`` and ``neighbour`` (U2b round 2)?
+
+    A ✂ row asks for a *new version* of a shape from this frame on.  The old
+    version reaching this frame is exactly what the row is about, so "a shape
+    applies here" -- which is what ``done`` used to test -- was true before
+    anybody did anything, and the guide said "都做完了，按 Space" over a split
+    that did not exist.  Done means the version in force here is not the one in
+    force next door (a keyframe anchored here, in the reverse walk), or a
+    frame override is written for this frame.
+    """
+    here_key = FrameKey(desktop, step, view)
+    try:
+        if instance in (db.frame_overrides(here_key) or {}):
+            return True
+    except Exception:  # noqa: BLE001 - a missing table is "no override"
+        pass
+    here = _keyframe_at(db, tax, here_key, instance, cache)
+    if here is None:
+        return False
+    there = _keyframe_at(db, tax, FrameKey(desktop, neighbour, view), instance, cache)
+    return there is None or there.id != here.id
+
+
 def _has_bench_chain(db: Db, desktop: int, view: str, instance: str) -> bool:
     """Has anybody drawn a staging-area box for this instance in this view?"""
     return any(kf.placement == ON_BENCH for kf in db.keyframes(desktop, view, instance))
@@ -311,9 +344,13 @@ def task_card_for(db: Db, tax: Taxonomy, desktop: int, view: str, step: int,
         wants_box = needs_here.get(instance) in BENCH_KINDS
         if wants_box and kind == api.KIND_ADD_SHAPE:
             kind = api.KIND_ADD_BENCH_BOX
-        done = (True if kind == api.KIND_STATE_ONLY
-                else _has_shape(db, tax, desktop, view, instance, step, cache,
-                                GEOM_BOX if wants_box else None))
+        if kind == api.KIND_STATE_ONLY:
+            done = True
+        elif kind == api.KIND_SPLIT_KEYFRAME:
+            done = _has_split(db, tax, desktop, view, instance, step, neighbour, cache)
+        else:
+            done = _has_shape(db, tax, desktop, view, instance, step, cache,
+                              GEOM_BOX if wants_box else None)
         items.append(_item(instance, kind, changes, done, rec_i, span))
         if (bench and changes.get("placement") == (ON_BENCH, IN_CHASSIS)
                 and _has_bench_chain(db, desktop, view, instance)):

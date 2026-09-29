@@ -226,6 +226,7 @@ class MiniMap(QWidget):
         self.image_hw: tuple[int, int] = (0, 0)
         self.view_rect: Rect = (0, 0, 0, 0)
         self._thumb = QPixmap()
+        self._max_side = self.MAX_SIDE
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("小地图：点一下移动视野（不是 ROI）/ minimap: click to move "
                         "the view (this is not the ROI)")
@@ -254,15 +255,35 @@ class MiniMap(QWidget):
         y = float(point.y()) * h / max(1, self._thumb.height())
         self.sigCentreOn.emit(min(max(x, 0.0), float(w)), min(max(y, 0.0), float(h)))
 
-    def set_image(self, pixmap: QPixmap, hw: tuple[int, int]) -> None:
-        self.image_hw = (int(hw[0]), int(hw[1]))
-        self._thumb = pixmap.scaled(
-            self.MAX_SIDE,
-            self.MAX_SIDE,
+    def set_max_side(self, side: int) -> None:
+        """Draw the thumbnail at most ``side`` pixels on its long edge.
+
+        The window keeps the minimap at the foot of the tool palette, which is
+        narrower than the canvas corner it used to sit in.
+        """
+        self._max_side = max(16, int(side))
+        if not self._thumb.isNull():
+            self._thumb = self._scaled(self._thumb)
+            self.setFixedSize(self._thumb.size())
+            self.update()
+
+    def _scaled(self, pixmap: QPixmap) -> QPixmap:
+        return pixmap.scaled(
+            self._max_side,
+            self._max_side,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        self.resize(self._thumb.size())
+
+    def sizeHint(self):  # noqa: D102 - Qt override: a layout sizes it by this
+        return self._thumb.size() if not self._thumb.isNull() else super().sizeHint()
+
+    def set_image(self, pixmap: QPixmap, hw: tuple[int, int]) -> None:
+        self.image_hw = (int(hw[0]), int(hw[1]))
+        self._thumb = self._scaled(pixmap)
+        if not self._thumb.isNull():
+            # Fixed, so a layout (the palette's foot) gives it exactly this.
+            self.setFixedSize(self._thumb.size())
         self.setVisible(not self._thumb.isNull())
         self.update()
 
@@ -396,9 +417,6 @@ class ImageCanvas(QGraphicsView):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        #: The minimap is kept off screen while this is set (the ROI rectangle
-        #: is being edited): see :meth:`set_minimap_suppressed`.
-        self._minimap_suppressed = False
         self._minimap.raise_()
         self._minimap.sigCentreOn.connect(lambda x, y: self.center_on((x, y)))
         for bar in (self.horizontalScrollBar(), self.verticalScrollBar()):
@@ -421,8 +439,6 @@ class ImageCanvas(QGraphicsView):
         self._overlay_item.set_image(None)
         self.setSceneRect(QRectF(0, 0, w, h))
         self._minimap.set_image(pixmap, (h, w))
-        if self._minimap_suppressed:
-            self._minimap.hide()
         self._place_minimap()  # the thumbnail's size just changed
         self.fit_image()
 
@@ -448,19 +464,6 @@ class ImageCanvas(QGraphicsView):
 
     def minimap(self) -> MiniMap:
         return self._minimap
-
-    def set_minimap_suppressed(self, suppressed: bool) -> None:
-        """Hide the minimap (``True``) or give it back (``False``).
-
-        The minimap is a widget *on top of* the viewport, and a left press on it
-        re-centres the view. While the ROI rectangle is up the whole viewport
-        belongs to the rectangle -- on a frame zoomed to its ROI the minimap
-        sits inside it on screen -- so a drag there moved the view instead of
-        the rectangle (task U2a, trial #2).
-        """
-        self._minimap_suppressed = bool(suppressed)
-        has_picture = not self._minimap.thumbnail().isNull()
-        self._minimap.setVisible(has_picture and not self._minimap_suppressed)
 
     def refresh(self, rect: Optional[Rect] = None) -> None:
         """Recomposite the overlay, invalidating only what actually changed.
@@ -974,6 +977,14 @@ class ImageCanvas(QGraphicsView):
             self.sigZoomChanged.emit(zoom)
 
     def _place_minimap(self, margin: int = 8) -> None:
+        """Keep a minimap that is still the canvas' own in the bottom corner.
+
+        The annotator's window takes it off the canvas (it lives at the foot
+        of the tool palette, U2b round 2); a canvas used on its own keeps it
+        here, as before.
+        """
+        if self._minimap.parentWidget() is not self:
+            return
         self._minimap.move(
             max(0, self.viewport().width() - self._minimap.width() - margin),
             max(0, self.viewport().height() - self._minimap.height() - margin),
