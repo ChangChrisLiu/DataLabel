@@ -38,8 +38,8 @@ from typing import Iterable, Optional
 
 __all__ = [
     "AMBIGUOUS", "BackupUnavailable", "DEFAULT_MARKER", "FOUND", "MISSING", "MOVED",
-    "RAW_CHILDREN", "ROOT_KEYS", "RawRoot", "UNCONFIGURED", "backup_target",
-    "configure", "current", "locate", "reset", "resolve_raw",
+    "RAW_CHILDREN", "ROOT_KEYS", "RawRoot", "UNCONFIGURED", "backup_root", "backup_target",
+    "checked", "configure", "current", "locate", "reset", "resolve_raw",
 ]
 
 log = logging.getLogger(__name__)
@@ -60,9 +60,19 @@ AMBIGUOUS = "ambiguous"        # several drives hold it and nothing says which
 UNCONFIGURED = "unconfigured"  # the configuration names no raw root at all
 
 
+#: ``\\?\`` (and ``\\.\``), the Win32 long-path prefixes, once slashes are forward.
+_DEVICE_PREFIX = re.compile(r"^//[?.]/(?=[A-Za-z]:)")
+
+
 def _norm(path) -> str:
-    """Forward slashes, no trailing slash (a bare drive keeps its ``X:/``)."""
-    text = str(path).replace("\\", "/")
+    """One spelling of a path: forward slashes, no doubled separator, no trailing one.
+
+    ``F://x``, ``F:\\\\x`` and ``\\\\?\\F:\\x`` are all ``F:/x``; a UNC share keeps
+    its leading ``//``, and a bare drive keeps its ``X:/``.
+    """
+    text = _DEVICE_PREFIX.sub("", str(path).replace("\\", "/"))
+    lead = "//" if text.startswith("//") else ""
+    text = lead + re.sub(r"/{2,}", "/", text[len(lead):])
     while len(text) > 1 and text.endswith("/") and not re.fullmatch(r"[A-Za-z]:/", text):
         text = text[:-1]
     return text
@@ -93,13 +103,18 @@ def _under(path: str, root: str) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 # the platform: which drives exist, and what they are called
 # --------------------------------------------------------------------------- #
-def _drive_roots() -> list[str]:
-    """``["C:/", "D:/", ...]`` for the drive letters that exist right now.
+#: ``GetDriveTypeW`` answers (winbase.h).
+DRIVE_UNKNOWN, DRIVE_NO_ROOT_DIR, DRIVE_REMOVABLE, DRIVE_FIXED = 0, 1, 2, 3
+DRIVE_REMOTE, DRIVE_CDROM, DRIVE_RAMDISK = 4, 5, 6
+#: The only kinds of drive the scan looks at: an external USB disk is reported
+#: as one or the other. A network letter is never probed -- ``isdir`` on a
+#: dead share can block for the length of an SMB timeout -- nor is an optical
+#: drive, which spins up to answer.
+PROBED_TYPES = frozenset({DRIVE_REMOVABLE, DRIVE_FIXED})
 
-    One ``GetLogicalDrives`` call -- a bitmask, no I/O on any drive -- rather
-    than probing 26 letters, so an empty card reader or a disconnected network
-    letter costs nothing. Anywhere but Windows there are no letters to scan.
-    """
+
+def _logical_drives() -> list[str]:
+    """``["C:/", "D:/", ...]``: one ``GetLogicalDrives`` call, a bitmask, no I/O."""
     if sys.platform != "win32":
         return []
     try:
@@ -107,12 +122,37 @@ def _drive_roots() -> list[str]:
 
         mask = int(ctypes.windll.kernel32.GetLogicalDrives())
     except Exception:  # noqa: BLE001 - no enumeration is "nothing to scan"
-        return [f"{c}:/" for c in string.ascii_uppercase if os.path.isdir(f"{c}:/")]
+        return []
     return [f"{c}:/" for i, c in enumerate(string.ascii_uppercase) if mask & (1 << i)]
 
 
+def _drive_type(root: str) -> int:
+    """``GetDriveTypeW`` of one drive root; it reads the mount table, not the disk."""
+    try:
+        import ctypes
+
+        return int(ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(
+            str(root).replace("/", "\\"))))
+    except Exception:  # noqa: BLE001 - an unknown kind is not probed
+        return DRIVE_UNKNOWN
+
+
+def _drive_roots() -> list[str]:
+    """The drive roots the scan may probe: local fixed and removable disks only.
+
+    The letters come from one ``GetLogicalDrives`` bitmask and their kind from
+    ``GetDriveTypeW``, neither of which touches a disk. Only then does
+    :func:`locate` call ``isdir`` -- and only on the drives of
+    :data:`PROBED_TYPES`, so a disconnected network letter or an empty optical
+    drive cannot stall the start-up. The *recorded* root is checked directly
+    whatever its kind: it is where the data was. Anywhere but Windows there
+    are no letters to scan.
+    """
+    return [root for root in _logical_drives() if _drive_type(root) in PROBED_TYPES]
+
+
 def _volume_label(root: str) -> Optional[str]:
-    """The volume label of the drive holding ``root`` (``"Elements"``), or ``None``."""
+    """The volume label of the drive holding ``root`` -- any path on it -- or ``None``."""
     if sys.platform != "win32":
         return None
     drive = os.path.splitdrive(str(root))[0]
@@ -154,6 +194,8 @@ class RawRoot:
     #: Every drive root that held the dataset, for the ambiguous case.
     candidates: tuple[str, ...] = ()
     label: Optional[str] = None
+    #: Why this root rather than another, when that was a choice (the label).
+    note: str = ""
     _marker_re: re.Pattern = field(default=None, repr=False, compare=False)  # type: ignore
 
     def __post_init__(self) -> None:
@@ -205,6 +247,41 @@ class RawRoot:
             return str(path)
         return _norm(self.resolved) + below
 
+    def _resolved_is_recorded(self) -> bool:
+        resolved = (self.resolved or "").casefold()
+        return any(_norm(r).casefold() == resolved for r in self.recorded)
+
+    def to_recorded(self, path) -> str:
+        """A path found on today's drive, spelled the way the dataset was recorded.
+
+        The inverse of :meth:`resolve`, for whatever *writes* a path it found:
+        ``build-index`` scans ``G:/...`` today, and what it stores has to stay
+        ``F:/...`` -- the stored value is the provenance record, and a re-index
+        followed by ``load-index`` rewrote all 168 D13 frame paths to ``G:``.
+        Anything not under the resolved root comes back unchanged.
+        """
+        if not self.connected or not self.recorded or self._resolved_is_recorded():
+            return str(path)
+        below = _under(_norm(path), self.resolved or "")
+        if below is None:
+            return str(path)
+        return _norm(self.recorded[0]) + below
+
+    def respell(self, text: str) -> str:
+        """:meth:`to_recorded` for free text: every mention of today's root.
+
+        An index issue names a folder the way ``os.path.join`` built it --
+        today's root, then whatever separators followed -- so the root is
+        matched with either separator and the rest of the text is left alone.
+        """
+        if not self.connected or not self.recorded or self._resolved_is_recorded():
+            return str(text)
+        parts = [re.escape(p) for p in _norm(self.resolved or "").split("/") if p]
+        pattern = re.compile(r"[\\/]+".join(parts) + r"(?=[\\/]|$|[\s'\",;:)\]])",
+                             re.IGNORECASE)
+        recorded = _norm(self.recorded[0])
+        return pattern.sub(lambda _m: recorded, str(text))
+
     @property
     def log_line(self) -> str:
         """The one line a log gets: ``raw root: recorded F:/... resolved G:/...``.
@@ -217,7 +294,8 @@ class RawRoot:
             return ""
         recorded = self.recorded[0] if self.recorded else "?"
         if self.connected:
-            return f"raw root: recorded {recorded} resolved {self.resolved}"
+            note = f" ({self.note})" if self.note else ""
+            return f"raw root: recorded {recorded} resolved {self.resolved}{note}"
         where = f" ({', '.join(self.candidates)})" if self.candidates else ""
         return f"raw root: recorded {recorded} {self.status}{where}"
 
@@ -281,24 +359,38 @@ def locate(paths: dict, drives: Optional[Iterable[str]] = None) -> RawRoot:
     recorded = _recorded_roots(paths, marker)
     if not recorded:
         return RawRoot(marker=marker, status=UNCONFIGURED, label=label)
-    for root in recorded:
-        if _holds_dataset(root):
-            return RawRoot(marker=marker, recorded=recorded, resolved=_norm(root),
-                           status=FOUND, candidates=(_norm(root),), label=label)
+    wanted = str(label).casefold() if label else ""
+
+    def labelled(root: str) -> bool:
+        return bool(wanted) and (_volume_label(root) or "").casefold() == wanted
+
+    here = next((_norm(r) for r in recorded if _holds_dataset(r)), None)
+    if here is not None and (not wanted or labelled(here)):
+        return RawRoot(marker=marker, recorded=recorded, resolved=here,
+                       status=FOUND, candidates=(here,), label=label)
     found: list[str] = []
-    drive_of: dict[str, str] = {}
     for drive in (_drive_roots() if drives is None else drives):
         candidate = _norm(os.path.join(str(drive), marker))
         if _holds_dataset(candidate) and candidate.casefold() not in {
                 c.casefold() for c in found}:
             found.append(candidate)
-            drive_of[candidate] = str(drive)
-    if len(found) > 1 and label:
-        wanted = str(label).casefold()
-        labelled = [c for c in found
-                    if (_volume_label(drive_of[c]) or "").casefold() == wanted]
-        if len(labelled) == 1:
-            found = labelled
+    if here is not None:
+        # The recorded root holds a full copy, but not on the volume the
+        # configuration names: a labelled volume elsewhere is the dataset, the
+        # copy is not. With no such volume the copy is what there is.
+        others = [c for c in found if c.casefold() != here.casefold() and labelled(c)]
+        if len(others) == 1:
+            note = (f"the volume labelled {label} was chosen over the copy at {here} "
+                    f"on volume {_volume_label(here) or '(no label)'}")
+            return RawRoot(marker=marker, recorded=recorded, resolved=others[0],
+                           status=MOVED, candidates=(others[0], here), label=label,
+                           note=note)
+        return RawRoot(marker=marker, recorded=recorded, resolved=here,
+                       status=FOUND, candidates=(here,), label=label)
+    if len(found) > 1 and wanted:
+        chosen = [c for c in found if labelled(c)]
+        if len(chosen) == 1:
+            found = chosen
     if len(found) == 1:
         return RawRoot(marker=marker, recorded=recorded, resolved=found[0],
                        status=MOVED, candidates=tuple(found), label=label)
@@ -352,18 +444,35 @@ class BackupUnavailable(OSError):
     """There is nowhere a backup may go right now; the message says why."""
 
 
+def checked(paths: dict, raw: Optional[RawRoot] = None) -> RawRoot:
+    """An answer that is still true *now*: re-located unless its root still holds the data.
+
+    The process-wide answer is from start-up (or the last ``F5``). A drive
+    unplugged since then, and another volume that took its letter, would
+    otherwise receive the next backup -- so anything that is about to *write*
+    asks again. Only ``isdir`` checks; the process-wide answer is not changed.
+    """
+    raw = raw or current() or locate(paths)
+    if not raw.configured:
+        return raw
+    if raw.connected and _holds_dataset(raw.resolved or ""):
+        return raw
+    return locate(paths)
+
+
 def backup_root(paths: dict, raw: Optional[RawRoot] = None) -> str:
-    """Where ``backup_dir`` is *now*, without touching the disk.
+    """Where ``backup_dir`` is, given an answer about the raw drive.
 
     A ``backup_dir`` under a recorded raw root follows the raw drive to its
     current letter; any other one is taken as configured. Raises
     :class:`BackupUnavailable` when it is on the raw drive and that drive is
     not connected, and ``ValueError`` when there is no ``backup_dir`` at all.
+    Without ``raw`` the answer is :func:`checked` first.
     """
     configured = paths.get("backup_dir")
     if not configured:
         raise ValueError("paths.yaml defines no backup_dir")
-    raw = raw or current() or locate(paths)
+    raw = raw or checked(paths)
     below = raw.tail(configured)
     if below is None:
         return os.path.abspath(str(configured))
@@ -381,8 +490,11 @@ def backup_target(paths: dict, raw: Optional[RawRoot] = None) -> str:
     **Never creates a folder on a volume that is not the raw-data one.** On the
     raw drive only the leaf (``TDA_backups``) may be created, and only inside
     the resolved raw root; a ``backup_dir`` anywhere else has to exist already.
+    The answer about the raw drive -- the one handed in, or the process's -- is
+    re-checked first (:func:`checked`): a cached ``G:`` is not trusted to still
+    be the dataset.
     """
-    raw = raw or current() or locate(paths)
+    raw = checked(paths, raw)
     target = backup_root(paths, raw)
     if os.path.isdir(target):
         return target

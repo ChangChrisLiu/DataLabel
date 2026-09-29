@@ -145,7 +145,8 @@ def _within(target: Path, root: Path) -> bool:
     return target_text == root_text or target_text.startswith(root_text + os.sep)
 
 
-def backup_dest(paths: dict, dest: Optional[str] = None) -> str:
+def backup_dest(paths: dict, dest: Optional[str] = None,
+                raw: Optional["rawroot.RawRoot"] = None) -> str:
     """Where a backup may go: ``backup_dir`` itself or a folder inside it.
 
     ``backup_dir`` is the one place on the read-only raw drive this tool
@@ -156,14 +157,17 @@ def backup_dest(paths: dict, dest: Optional[str] = None) -> str:
 
     A ``backup_dir`` on the raw drive follows that drive to the letter it has
     *today* (:func:`tda.core.rawroot.backup_root`), and so does a ``--dest``
-    spelled with the recorded letter. Nothing here touches the disk; see
+    spelled with the recorded letter. Beyond re-checking that the raw root still
+    holds the dataset nothing here touches the disk; see
     :func:`ready_backup_dest` for the answer a copy can actually be written to.
+    ``raw`` is an answer already re-checked by the caller.
     """
     require(paths, "backup_dir")
-    root = Path(rawroot.backup_root(paths)).resolve()
+    raw = raw or rawroot.checked(paths)
+    root = Path(rawroot.backup_root(paths, raw)).resolve()
     if dest is None:
         return str(root)
-    target = Path(rawroot.resolve_raw(dest) or dest).resolve()
+    target = Path(raw.resolve(dest) or dest).resolve()
     if not _within(target, root):
         raise ValueError(f"--dest must be inside the configured backup_dir ({root})")
     return str(target)
@@ -180,8 +184,12 @@ def ready_backup_dest(paths: dict, dest: Optional[str] = None) -> str:
     ``OSError``, so every caller already reports it as "backup failed: ..."
     with the reason in both languages.
     """
-    out = backup_dest(paths, dest)      # refuses a bad --dest before touching a disk
-    rawroot.backup_target(paths)
+    # One answer for both halves, re-checked now: the drive the process found
+    # at start-up may have been unplugged, and its letter given to another
+    # volume, since.
+    raw = rawroot.checked(paths)
+    out = backup_dest(paths, dest, raw)  # refuses a bad --dest before any write
+    rawroot.backup_target(paths, raw)
     return out
 
 

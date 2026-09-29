@@ -241,24 +241,85 @@ def test_build_index_refuses_to_scan_an_unplugged_drive(tmp_path, monkeypatch, c
     assert not out.exists()
 
 
+def _oak_step(g: Path, step: int, stamp: str) -> None:
+    """One OAK camera-1 capture of D13 on the fake drive ``g``."""
+    folder = g / MARKER / OAK / "Desktop 13" / "Disassemble" / "Camera_1" / f"{step:03d}"
+    write_jpg(folder / f"{stamp}_camera_1_rgb_12mp.jpg")
+    write_jpg(folder / f"{stamp}_camera_1_rgb_aligned.png")
+
+
+def _build(paths: str, out: Path, tmp_path: Path) -> int:
+    from tda.cli import main
+
+    return main(["--paths", paths, "build-index", "--desktops", "13",
+                 "--out", str(out), "--report", str(tmp_path / "r.md")])
+
+
+def _recorded_spelling(tmp_path: Path, value) -> bool:
+    """Is every path in ``value`` spelled under the recorded ``F_`` root?"""
+    values = value if isinstance(value, list) else [value]
+    base = (tmp_path / "F_" / MARKER).as_posix()
+    return all(str(v).replace("\\", "/").startswith(base + "/") for v in values)
+
+
 def test_build_index_scans_where_the_drive_is_today(tmp_path, monkeypatch, capsys):
-    from tda.cli import EXIT_OK, main
+    """It reads G:, and it *records* F: -- the stored value is provenance."""
+    from tda.cli import EXIT_OK
     from tda.core.index import load_index
 
     g = tmp_path / "G_"
     make_drive(g)
     (tmp_path / "F_").mkdir()
     fake_drives(monkeypatch, tmp_path / "F_", g)
-    step = g / MARKER / OAK / "Desktop 13" / "Disassemble" / "Camera_1" / "001"
-    write_jpg(step / "20250603_135553_600_camera_1_rgb_12mp.jpg")
+    _oak_step(g, 1, "20250603_135553_600")
     paths = _cli_env(tmp_path)
     out = tmp_path / "cache" / "index.json"
-    assert main(["--paths", paths, "build-index", "--desktops", "13",
-                 "--out", str(out), "--report", str(tmp_path / "r.md")]) == EXIT_OK
+    assert _build(paths, out, tmp_path) == EXIT_OK
     assert "raw root: recorded" in capsys.readouterr().out
-    frames = load_index(str(out))[13].frames
-    oak = [f.path for k, f in frames.items() if k.view == "oak1"]
-    assert oak and all(Path(p).is_relative_to(g) for p in oak)   # what it found
+    loaded = load_index(str(out))[13]
+    oak = [f for k, f in loaded.frames.items() if k.view == "oak1"]
+    assert oak, "the scan of the moved drive found the capture"
+    for frame in oak:
+        assert _recorded_spelling(tmp_path, frame.path), frame.path
+        assert all(_recorded_spelling(tmp_path, v) for v in frame.aux.values()), frame.aux
+        assert Path(RR.resolve_raw(frame.path)).is_file()    # ... and it is there today
+    assert not any((g / MARKER).as_posix() in text.replace("\\", "/")
+                   for text in loaded.issues), loaded.issues
+    assert (g / MARKER).as_posix() not in out.read_text(encoding="utf-8")
+
+
+def test_rebuilding_and_reloading_keeps_every_stored_path_recorded(tmp_path, monkeypatch):
+    """The reviewer's run: build-index + load-index rewrote 168/168 D13 paths to G:."""
+    from tda.cli import EXIT_OK, main
+
+    g = tmp_path / "G_"
+    make_drive(g)
+    (tmp_path / "F_").mkdir()
+    fake_drives(monkeypatch, tmp_path / "F_", g)
+    _oak_step(g, 1, "20250603_135553_600")
+    paths = _cli_env(tmp_path)
+    out = tmp_path / "cache" / "index.json"
+    assert _build(paths, out, tmp_path) == EXIT_OK
+    assert main(["--paths", paths, "load-index", "--index", str(out)]) == EXIT_OK
+
+    _oak_step(g, 2, "20250603_135633_273")           # a genuinely new capture
+    assert _build(paths, out, tmp_path) == EXIT_OK
+    assert main(["--paths", paths, "load-index", "--index", str(out)]) == EXIT_OK
+
+    db = Db(str(tmp_path / "annotations" / "tda.sqlite"))
+    try:
+        rows = db.frames_for(13, "oak1")
+        stored = {int(r["step"]): r for r in rows if r.get("path")}
+        assert set(stored) == {1, 2}
+        for step, row in stored.items():
+            assert _recorded_spelling(tmp_path, row["path"]), (step, row["path"])
+            for value in (row.get("aux") or {}).values():
+                assert _recorded_spelling(tmp_path, value), (step, value)
+        meta = db.get_desktop(13) or {}
+        assert not any((g / MARKER).as_posix() in str(t).replace("\\", "/")
+                       for t in meta.get("index_issues") or [])
+    finally:
+        db.close()
 
 
 def test_the_backup_command_follows_the_drive(tmp_path, monkeypatch, capsys):
@@ -382,8 +443,14 @@ def test_a_connected_moved_drive_shows_no_bar_and_logs_one_line(qapp, tmp_path, 
 
 def test_the_exit_backup_is_skipped_without_the_drive_and_closing_still_works(
         qapp, tmp_path, monkeypatch):
+    from tda.ui import app_support as S
+
     win, _g = _raw_window(tmp_path, monkeypatch, plugged=False)
     win.close()
     assert win.closed is True
     assert "exit backup skipped" in win.status_message()
     assert _entries(tmp_path / "F_") == []        # no TDA_backups on the wrong drive
+    # ... and the log says so: it used to be written after shutdown() had
+    # already closed the log file, so it went nowhere
+    log = Path(S.log_path(win.paths)).read_text(encoding="utf-8")
+    assert "exit backup skipped" in log and "window closed" in log

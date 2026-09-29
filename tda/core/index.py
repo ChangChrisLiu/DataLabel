@@ -18,7 +18,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from tda.core.index_fixes import (
     cam2_fix_step,
@@ -51,7 +51,7 @@ RS_TIME_TOLERANCE_S = 30.0
 
 __all__ = [
     "DesktopIndex", "FrameFile", "build_index", "load_fixes", "load_index",
-    "load_roots", "save_index", "scan_desktop", "write_report",
+    "load_roots", "respell_paths", "save_index", "scan_desktop", "write_report",
 ]
 
 
@@ -454,6 +454,36 @@ def build_index(
     return out
 
 
+def _respelled(value: Any, spell: Callable[[str], str]) -> Any:
+    """``spell`` applied to a path, or to every path of a list (a burst)."""
+    if isinstance(value, str):
+        return spell(value) if value else value
+    if isinstance(value, list):
+        return [spell(v) if isinstance(v, str) and v else v for v in value]
+    return value
+
+
+def respell_paths(
+    idx: dict[int, DesktopIndex],
+    spell_path: Callable[[str], str],
+    spell_text: Optional[Callable[[str], str]] = None,
+) -> None:
+    """Rewrite, in place, every path the scan found with ``spell_path``.
+
+    ``build-index`` scans the raw drive where it is *today* and must record the
+    paths in the spelling the dataset was recorded with
+    (:meth:`tda.core.rawroot.RawRoot.to_recorded`): the frame's own path, every
+    ``aux`` path (``burst`` lists included), and -- through ``spell_text`` --
+    the folders the issues name.
+    """
+    for di in idx.values():
+        for ff in di.frames.values():
+            ff.path = _respelled(ff.path, spell_path)
+            ff.aux = {k: _respelled(v, spell_path) for k, v in (ff.aux or {}).items()}
+        if spell_text is not None:
+            di.issues = [spell_text(text) for text in di.issues]
+
+
 def _frame_to_json(ff: FrameFile) -> dict:
     return {
         "desktop": ff.key.desktop,
@@ -534,7 +564,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     cfg = _load_yaml(args.paths)
     raw = rawroot.configure(cfg)
-    # scanned where the raw drive is today; the index records what it finds
+    # scanned where the raw drive is today; what it finds is recorded in the
+    # spelling the dataset was recorded with (respell_paths below)
     roots = {k: rawroot.resolve_raw(cfg[k]) for k in ("oak_root", "scanner_root", "rs_root")}
     if any(v is None for v in roots.values()):
         print(f"[index] {raw.message}; nothing was scanned")
@@ -547,6 +578,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     started = datetime.now()
     idx = build_index(range(args.first, args.last + 1), roots, args.fixes, progress=True)
+    respell_paths(idx, raw.to_recorded, raw.respell)   # stored: the recorded spelling
     save_index(idx, out)
     write_report(idx, report)
     print(

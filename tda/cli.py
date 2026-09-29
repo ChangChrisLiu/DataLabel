@@ -65,7 +65,7 @@ from tda.cli_pose import _add_pose_breaks
 from tda.cli_relations import _add_infer_relations
 from tda.core import rawroot
 from tda.core.db import Db
-from tda.core.index import build_index, load_index, save_index
+from tda.core.index import build_index, load_index, respell_paths, save_index
 from tda.core.index_report import write_report
 from tda.core.model import VIEWS
 from tda.core.taxonomy import load_taxonomy
@@ -80,9 +80,13 @@ def cmd_build_index(args: argparse.Namespace) -> int:
     """Scan the source trees and write ``cache/index.json`` + its report.
 
     The trees are scanned where the raw drive is **today**
-    (:func:`tda.core.rawroot.resolve_raw`), and the index records what it
-    finds there. With the drive unplugged nothing is scanned and nothing is
-    written: an index of zero frames would be loaded as "every frame missing".
+    (:func:`tda.core.rawroot.resolve_raw`), and what is found there is written
+    in the spelling the dataset was **recorded** with
+    (:meth:`tda.core.rawroot.RawRoot.to_recorded`): a stored path is the
+    provenance record, and a re-index plus ``load-index`` must not rewrite
+    every ``F:/...`` into today's ``G:/...``. With the drive unplugged nothing
+    is scanned and nothing is written: an index of zero frames would be loaded
+    as "every frame missing".
     """
     paths = load_paths(args.paths)
     wanted = _desktops(args) or set(P.ALL_DESKTOPS)
@@ -99,6 +103,8 @@ def cmd_build_index(args: argparse.Namespace) -> int:
     report = args.report or P.cache_file(paths, P.INDEX_REPORT_NAME)
 
     index = build_index(sorted(wanted), roots, args.fixes, progress=True)
+    if raw is not None:
+        respell_paths(index, raw.to_recorded, raw.respell)
     save_index(index, out)
     write_report(index, report)
     print(f"[build-index] {len(index)} desktops, "

@@ -36,13 +36,24 @@ def make_drive(root: Path, *, dataset: bool = True, backups_only: bool = False) 
 
 
 def fake_drives(monkeypatch, drives: dict, labels: dict | None = None) -> None:
-    """Make ``_drive_roots`` answer ``drives`` (letter -> folder) and nothing else."""
+    """Make ``_drive_roots`` answer ``drives`` (letter -> folder) and nothing else.
+
+    ``_volume_label`` answers for any path *on* one of the fake volumes, the way
+    the real one does for any path on a drive.
+    """
     monkeypatch.setattr(RR, "_drive_roots", lambda: [str(p) for p in drives.values()])
     labels = labels or {}
     by_root = {os.path.normcase(str(p)): labels.get(letter)
                for letter, p in drives.items()}
-    monkeypatch.setattr(RR, "_volume_label",
-                        lambda root: by_root.get(os.path.normcase(str(root))))
+
+    def label_of(path) -> str | None:
+        text = os.path.normcase(str(Path(path)))
+        for root, label in by_root.items():
+            if text == root or text.startswith(root + os.sep):
+                return label
+        return None
+
+    monkeypatch.setattr(RR, "_volume_label", label_of)
 
 
 def paths_for(recorded: Path, **extra) -> dict:
@@ -261,3 +272,141 @@ def test_db_backup_creates_at_most_the_leaf(tmp_path):
         assert Path(db.backup(str(tmp_path / "backups"))).is_file()
     finally:
         db.close()
+
+
+# =========================================================================== #
+# Round 1
+# =========================================================================== #
+# --------------------------------------------------------------------------- #
+# a path found on today's drive is recorded with the recorded spelling
+# --------------------------------------------------------------------------- #
+def test_a_path_found_today_is_written_back_in_the_recorded_spelling(tmp_path, monkeypatch):
+    f, g = tmp_path / "F_", tmp_path / "G_"
+    make_drive(g)
+    fake_drives(monkeypatch, {"G": g})
+    raw = RR.locate(paths_for(f))
+    found = f"{(g / MARKER).as_posix()}/UGA DATA/13/RGB11/P_0.png"
+    assert raw.to_recorded(found) == f"{(f / MARKER).as_posix()}/UGA DATA/13/RGB11/P_0.png"
+    assert raw.to_recorded(found.replace("/", "\\")) == raw.to_recorded(found)
+    local = str(tmp_path / "cache" / "x.png")
+    assert raw.to_recorded(local) == local                 # not on the raw drive
+    # free text (an index issue) names the folder the way os.path.join made it
+    text = f"oak: no Disassemble folder under {g / MARKER}\\OAKD Capture\\D 7"
+    assert raw.respell(text) == (f"oak: no Disassemble folder under "
+                                 f"{(f / MARKER).as_posix()}\\OAKD Capture\\D 7")
+
+
+def test_on_the_recorded_drive_nothing_is_respelled(tmp_path, monkeypatch):
+    f = tmp_path / "F_"
+    make_drive(f)
+    fake_drives(monkeypatch, {"F": f})
+    raw = RR.locate(paths_for(f))
+    stored = str(f / MARKER / "UGA DATA" / "P_0.png")
+    assert raw.status == RR.FOUND
+    assert raw.to_recorded(stored) == stored
+
+
+# --------------------------------------------------------------------------- #
+# the backup re-checks the drive it was told about
+# --------------------------------------------------------------------------- #
+def test_a_volume_that_took_the_letter_mid_session_gets_no_backup(tmp_path, monkeypatch):
+    import shutil
+
+    g = tmp_path / "G_"
+    make_drive(g)
+    fake_drives(monkeypatch, {"G": g})
+    paths = paths_for(tmp_path / "F_",
+                      backup_dir=f"{(tmp_path / 'F_' / MARKER).as_posix()}/TDA_backups")
+    RR.configure(paths)                       # G: holds the dataset at startup
+    shutil.rmtree(g / MARKER)                 # ... the drive is unplugged,
+    (g / MARKER).mkdir()                      # and another volume takes the letter
+    with pytest.raises(RR.BackupUnavailable):
+        RR.backup_target(paths)
+    assert [p.name for p in (g / MARKER).iterdir()] == []
+    assert not (g / MARKER / "TDA_backups").exists()
+
+
+def test_a_drive_that_moved_mid_session_is_found_again_for_the_backup(tmp_path, monkeypatch):
+    import shutil
+
+    g, h = tmp_path / "G_", tmp_path / "H_"
+    make_drive(g)
+    h.mkdir()
+    fake_drives(monkeypatch, {"G": g, "H": h})
+    paths = paths_for(tmp_path / "F_",
+                      backup_dir=f"{(tmp_path / 'F_' / MARKER).as_posix()}/TDA_backups")
+    RR.configure(paths)
+    shutil.rmtree(g)
+    g.mkdir()
+    make_drive(h)                             # replugged, and it came back as H:
+    assert Path(RR.backup_target(paths)) == h / MARKER / "TDA_backups"
+    assert list(g.iterdir()) == []
+
+
+# --------------------------------------------------------------------------- #
+# the scan probes local disks only; the label wins over a stray copy
+# --------------------------------------------------------------------------- #
+@pytest.mark.skipif(os.name != "nt", reason="drive letters are a Windows thing")
+def test_only_fixed_and_removable_drives_are_scanned(monkeypatch):
+    kinds = {"C:/": RR.DRIVE_FIXED, "D:/": RR.DRIVE_FIXED, "E:/": RR.DRIVE_CDROM,
+             "G:/": RR.DRIVE_REMOVABLE, "Z:/": RR.DRIVE_REMOTE}
+    monkeypatch.setattr(RR, "_logical_drives", lambda: list(kinds))
+    monkeypatch.setattr(RR, "_drive_type", lambda root: kinds[root])
+    assert RR._drive_roots() == ["C:/", "D:/", "G:/"]
+
+
+def test_the_recorded_root_is_probed_whatever_its_drive_type(tmp_path, monkeypatch):
+    """A recorded root on a network letter is still where the data *was*."""
+    f = tmp_path / "F_"
+    make_drive(f)
+    monkeypatch.setattr(RR, "_drive_roots", lambda: [])       # the scan finds nothing
+    monkeypatch.setattr(RR, "_volume_label", lambda path: None)
+    assert RR.locate(paths_for(f)).status == RR.FOUND
+
+
+def test_the_labelled_volume_wins_over_a_copy_at_the_recorded_root(tmp_path, monkeypatch):
+    f, g = tmp_path / "F_", tmp_path / "G_"
+    make_drive(f)                             # a full copy on T9 ...
+    make_drive(g)                             # ... and the real thing on Elements
+    fake_drives(monkeypatch, {"F": f, "G": g}, labels={"F": "T9", "G": "Elements"})
+    raw = RR.locate(paths_for(f, raw_volume_label="Elements"))
+    assert raw.status == RR.MOVED
+    assert Path(raw.resolved) == g / MARKER
+    assert "Elements" in raw.log_line and "T9" in raw.log_line
+
+
+def test_the_recorded_copy_stands_when_no_other_volume_has_the_label(tmp_path, monkeypatch):
+    f = tmp_path / "F_"
+    make_drive(f)
+    fake_drives(monkeypatch, {"F": f}, labels={"F": "T9"})
+    raw = RR.locate(paths_for(f, raw_volume_label="Elements"))
+    assert raw.status == RR.FOUND and Path(raw.resolved) == f / MARKER
+
+
+def test_the_recorded_root_with_the_right_label_is_not_second_guessed(tmp_path, monkeypatch):
+    f, g = tmp_path / "F_", tmp_path / "G_"
+    make_drive(f)
+    make_drive(g)
+    fake_drives(monkeypatch, {"F": f, "G": g}, labels={"F": "Elements", "G": "Elements"})
+    raw = RR.locate(paths_for(f, raw_volume_label="Elements"))
+    assert raw.status == RR.FOUND and Path(raw.resolved) == f / MARKER
+
+
+# --------------------------------------------------------------------------- #
+# odd spellings of the same path
+# --------------------------------------------------------------------------- #
+def test_doubled_separators_and_long_path_prefixes_still_match(tmp_path, monkeypatch):
+    g = tmp_path / "G_"
+    make_drive(g)
+    fake_drives(monkeypatch, {"G": g})
+    raw = RR.locate(paths_for(tmp_path / "F_"))
+    want = g / MARKER / "UGA DATA" / "x.png"
+    recorded = f"{(tmp_path / 'F_' / MARKER).as_posix()}/UGA DATA/x.png"
+    for stored in (
+        recorded.replace("/", "//"),
+        "\\\\?\\" + recorded.replace("/", "\\"),
+        f"F://{MARKER}//UGA DATA/x.png",
+        f"F:\\\\{MARKER}\\\\UGA DATA\\x.png".replace("/", "\\"),
+        f"\\\\?\\F:\\{MARKER}\\UGA DATA\\x.png".replace("/", "\\"),
+    ):
+        assert Path(raw.resolve(stored)) == want, stored
