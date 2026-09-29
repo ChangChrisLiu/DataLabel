@@ -83,11 +83,15 @@ class TruthCacheMixin:
         # frame this epoch already compiled is not compiled again when its
         # digest says the rows describe these inputs: a confirmed frame the
         # layer order moved under keeps its rows *behind* on purpose, and used
-        # to pay a 12 MP compilation on every arrival for nothing (U2e).
-        stats = self.truth.refresh(key, want_compiled=current is None)
+        # to pay a 12 MP compilation on every arrival for nothing (U2e).  The
+        # truth service hands the held one back only when it is still what the
+        # inputs just read compile to (`usable`); the epoch alone is this
+        # session's word for it, and another writer moves the inputs without
+        # moving the epoch (U2f).
+        stats = self.truth.refresh(key, want_compiled=True, held=current)
         self.review.problems[key.step] = list(stats["problems"])
         self.review.invalidate()
-        self._keep_compiled(key.step, self._epoch, stats["compiled"] or current)
+        self._keep_compiled(key.step, self._epoch, stats["compiled"])
         self._truth_settled()
 
     def _truth_settled(self) -> None:

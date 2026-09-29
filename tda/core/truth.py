@@ -57,7 +57,7 @@ from tda.core.states import needs_geom
 from tda.core.taxonomy import Taxonomy
 from tda.core.truth_fresh import FreshMixin, digest_of
 from tda.core.truth_resolve import ResolveMixin, StaleConflictError
-from tda.core.truth_verify import BLOCKING_PROBLEMS, VerifyMixin
+from tda.core.truth_verify import BLOCKING_PROBLEMS, VerifyMixin, usable
 from tda.core.truth_conflicts import (
     BOX_TOL_PX,
     GEOM_BOX,
@@ -153,7 +153,8 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
 
     def refresh(self, key: FrameKey, cache: Optional[InputCache] = None,
                 guard: Optional[str] = None, want_compiled: bool = False,
-                ignore_digest: bool = False) -> dict:
+                ignore_digest: bool = False,
+                held: Optional[CompiledFrame] = None) -> dict:
         """Bring one frame's truth rows up to date with the current inputs.
 
         Returns ``{"updated", "conflicts", "standing", "skipped", "problems",
@@ -178,6 +179,15 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
         ``None`` unless ``want_compiled`` asks for it, which is what the session
         does when it needs the arrays to draw.
 
+        ``held`` is a compilation the caller already has for this frame -- the
+        session keeps the one it compiled, or the one the sweeper prefetched.
+        On that path ``want_compiled`` hands it back instead of compiling, but
+        **only when it is still the compilation these inputs make**
+        (:func:`~tda.core.truth_verify.usable`, asked of the inputs just read,
+        as ``verify_frame`` asks it of its ``prepared``); otherwise the frame is
+        compiled. A session's edit epoch is a fact about that session, and
+        another writer moves the inputs without touching it (U2f).
+
         ``guard`` is an :meth:`inputs_digest` taken before the compilation, for
         a caller working off the GUI thread. The pixel work happens outside any
         transaction; every write then happens inside **one**, which begins by
@@ -196,7 +206,9 @@ class TruthService(FreshMixin, ResolveMixin, VerifyMixin):
                       "skipped": self.db.compiled_count(key),
                       "problems": [], "compiled": None, "stale": False}
             if want_compiled:
-                result["compiled"] = self._compile_inputs(key, inputs)
+                result["compiled"] = (
+                    held if usable(held, key, inputs, self.compiler_version)
+                    else self._compile_inputs(key, inputs))
             return result
         # the inputs are already in hand: gathering them a second time reads the
         # whole keyframe table again, which is most of a batch pass's time
