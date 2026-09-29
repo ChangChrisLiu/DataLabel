@@ -155,8 +155,18 @@ def hint_style(rgb: Sequence[int]) -> OutlineStyle:
 
 
 def draw_outline_rect(painter: QPainter, rect: QRectF, style: OutlineStyle,
-                      dpr: float = 1.0) -> None:
-    """Stroke ``rect`` (in the painter's coordinates) in ``style``: dark, then bright."""
+                      dpr: float = 1.0, outside: bool = False) -> None:
+    """Stroke ``rect`` (in the painter's coordinates) in ``style``: dark, then bright.
+
+    ``outside`` puts the whole stroke just outside the rectangle instead of
+    centred on its edge -- for the boxes that name a part (the prompt box,
+    the hover hints): a screw's box is 20-odd image pixels, and a five-pixel
+    stroke centred on its edge covered a fifth of the screw it was pointing at.
+    """
+    if outside:
+        scale = abs(painter.worldTransform().m11()) or 1.0
+        grow = style.under_width / 2.0 / scale
+        rect = rect.adjusted(-grow, -grow, grow, grow)
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.setPen(style.under_pen(dpr))
     painter.drawRect(rect)

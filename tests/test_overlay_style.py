@@ -207,6 +207,33 @@ def test_the_hints_are_two_tone_in_their_colours(qapp):
         canvas.close()
 
 
+def test_a_box_that_names_a_part_is_stroked_outside_it(qapp):
+    """A screw's box is ~20 px: a stroke centred on its edge covered the screw."""
+    canvas = _canvas()
+    try:
+        canvas.set_zoom(2.0)
+        canvas.center_on((100, 100))
+        QApplication.processEvents()
+        canvas.set_rubber_band((90, 90, 110, 110), kind="prompt", label="")
+        screen = _screen(canvas)
+        corner = canvas.mapFromScene(90.0, 90.0)
+        x, y = int(corner.x()), int(corner.y())
+        mid = int(canvas.mapFromScene(100.0, 100.0).y())
+        grey = screen[mid, x + 1:x + 6]           # just inside the left edge
+        assert np.all(np.abs(grey.astype(int) - 128) <= 12), grey
+        outer = OS.PROMPT_BOX.under_width
+        stroke = screen[mid, x - int(outer):x]    # just outside it
+        assert (_near(stroke, OS.PROMPT_RGB, tol=30) | _near(stroke, (0, 0, 0), 40)).all()
+        # the ROI keeps its line on the rectangle (its handles sit on the corners)
+        canvas.set_rubber_band(None, kind="prompt")
+        canvas.set_roi((90, 90, 110, 110), editing=False)
+        screen = _screen(canvas)
+        edge = screen[mid, x - 1:x + 2]
+        assert not np.all(np.abs(edge.astype(int) - 128) <= 12)
+    finally:
+        canvas.close()
+
+
 def test_every_hint_and_the_roi_carry_a_chip_that_is_drawn(qapp):
     canvas = _canvas()
     try:

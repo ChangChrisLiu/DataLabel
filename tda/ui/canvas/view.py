@@ -819,9 +819,10 @@ class ImageCanvas(QGraphicsView):
     def _draw_hints(self, painter: QPainter, dpr: float) -> None:
         """The hover outlines; their labels are chips (:meth:`chip_layout`)."""
         for (x0, y0, x1, y1), _label, rgb in self._hints:
+            # Outside the box: the part it points at stays uncovered.
             OS.draw_outline_rect(
                 painter, QRectF(x0, y0, max(1.0, x1 - x0), max(1.0, y1 - y0)),
-                OS.hint_style(rgb), dpr)
+                OS.hint_style(rgb), dpr, outside=True)
 
     # -- label chips (task U2g) ---------------------------------------------
     def _chip_specs(self) -> list[tuple[str, tuple, QRectF, float, float]]:
@@ -844,13 +845,14 @@ class ImageCanvas(QGraphicsView):
             band = self._prompt_band
             if not any(_same_box(box, band) for box, label, _rgb in self._hints if label):
                 x0, y0, x1, y1 = band
+                # drawn outside the box: the whole stroke is beyond its edge
                 specs.append((self._prompt_band_label, OS.PROMPT_BOX.rgb,
                               QRectF(x0, y0, x1 - x0, y1 - y0),
-                              OS.PROMPT_BOX.under_width / 2.0, 0.0))
+                              OS.PROMPT_BOX.under_width, 0.0))
         for (x0, y0, x1, y1), label, rgb in self._hints:
             if label:
                 specs.append((label, tuple(rgb), QRectF(x0, y0, x1 - x0, y1 - y0),
-                              (OS.HINT_PX + OS.UNDER_EXTRA_PX) / 2.0, 0.0))
+                              OS.HINT_PX + OS.UNDER_EXTRA_PX, 0.0))
         return specs
 
     def _chip_pixmap(self, text: str, rgb: tuple, dpr: float) -> QPixmap:
@@ -1189,7 +1191,7 @@ class ImageCanvas(QGraphicsView):
         if self._prompt_band_shown():
             x0, y0, x1, y1 = self._prompt_band
             OS.draw_outline_rect(painter, QRectF(x0, y0, x1 - x0, y1 - y0),
-                                 OS.PROMPT_BOX, dpr)
+                                 OS.PROMPT_BOX, dpr, outside=True)
         self._draw_hints(painter, dpr)
         if self._drag_band is not None:
             # Last of the boxes: what the hand is doing now is on top.
