@@ -304,6 +304,18 @@ def test_a_chip_stays_inside_the_viewport_when_its_corner_is_off_screen(qapp):
         canvas.close()
 
 
+def test_a_chip_that_would_collide_moves_to_another_corner_of_its_own_box():
+    """Five screws a few mm apart: each label has to stay next to its own screw."""
+    view = QRectF(0, 0, 800, 600)
+    first = OS.place_chip((200, 20), QRectF(300, 300, 20, 20), view)
+    assert first == QRectF(300, 300 - OS.CHIP_GAP - 20, 200, 20)     # above-left
+    second = OS.place_chip((200, 20), QRectF(200, 305, 20, 20), view, [first])
+    assert not second.intersects(first)
+    assert second == QRectF(200, 325 + OS.CHIP_GAP, 200, 20)         # under its own box
+    third = OS.place_chip((200, 20), QRectF(250, 302, 20, 20), view, [first, second])
+    assert not third.intersects(first) and not third.intersects(second)
+
+
 def test_the_roi_chip_goes_with_the_outline_toggle_but_not_while_editing(qapp):
     canvas = _canvas()
     try:

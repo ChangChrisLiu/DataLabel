@@ -275,9 +275,12 @@ def place_chip(size: tuple[float, float], box: QRectF, viewport: QRectF,
     there is no room above.  The corner used is the box's *visible* top-left,
     and the chip is kept :data:`CHIP_MARGIN` inside the viewport, so a box
     whose corner is off-screen still has its label on screen.  A chip that
-    would cover one already ``taken`` moves right along the same line, then
-    down a line.  ``None`` when the box is not on screen at all -- a label
-    for an outline nobody can see is a label pointing at nothing.
+    would cover one already ``taken`` tries the box's other corners first --
+    under its bottom-left, above its top-right, under its bottom-right -- so
+    the label of one of five screws a few millimetres apart stays next to its
+    own screw; only when all four are taken does it move right along the
+    line, then down a line.  ``None`` when the box is not on screen at all --
+    a label for an outline nobody can see is a label pointing at nothing.
     """
     w, h = float(size[0]), float(size[1])
     box = QRectF(box.x(), box.y(), max(1.0, box.width()), max(1.0, box.height()))
@@ -285,16 +288,30 @@ def place_chip(size: tuple[float, float], box: QRectF, viewport: QRectF,
         return None
     left = max(box.left(), viewport.left())
     top = max(box.top(), viewport.top())
+    right = min(box.right(), viewport.right())
+    bottom = min(box.bottom(), viewport.bottom())
     lo_x = viewport.left() + CHIP_MARGIN
     hi_x = viewport.right() - CHIP_MARGIN - w
     lo_y = viewport.top() + CHIP_MARGIN
     hi_y = viewport.bottom() - CHIP_MARGIN - h
+
+    def clamped(x: float, y: float) -> QRectF:
+        return QRectF(min(max(x, lo_x), max(lo_x, hi_x)),
+                      min(max(y, lo_y), max(lo_y, hi_y)), w, h)
+
+    def free(rect: QRectF) -> bool:
+        return not any(r.adjusted(-1, -1, 1, 1).intersects(rect) for r in taken)
+
     y = top - gap - h
     if box.top() < viewport.top() or y < lo_y:
         y = top + gap                      # no room above: just inside the box
-    x = min(max(left, lo_x), max(lo_x, hi_x))
-    y = min(max(y, lo_y), max(lo_y, hi_y))
-    rect = QRectF(x, y, w, h)
+    rect = clamped(left, y)
+    if not free(rect):
+        for candidate in (clamped(left, bottom + gap),
+                          clamped(right - w, y),
+                          clamped(right - w, bottom + gap)):
+            if free(candidate):
+                return candidate
     for _ in range(24):
         hit = next((r for r in taken if r.adjusted(-1, -1, 1, 1).intersects(rect)), None)
         if hit is None:

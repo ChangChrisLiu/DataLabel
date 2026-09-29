@@ -873,7 +873,12 @@ class ImageCanvas(QGraphicsView):
         """``[(text, rect, pixmap)]``: every label chip, in viewport coordinates.
 
         Laid out in one pass so that chips never cover one another or the
-        banner; a chip whose box is off screen is not laid out at all.
+        banner, nor -- where there is room -- another small outlined box: on
+        a board with five screws a label lying across the next screw's box
+        hides the very outline it is next to.  Boxes a quarter of the view or
+        bigger (the ROI, a "whole chassis changed" difference box) are not
+        obstacles: every other chip is inside them.  A chip whose box is off
+        screen is not laid out at all.
         """
         specs = self._chip_specs()
         if not specs:
@@ -884,14 +889,21 @@ class ImageCanvas(QGraphicsView):
         banner = self._banner_target()
         if banner is not None:
             taken.append(QRectF(banner))
+        outers = []
+        for _text, _rgb, box, half, _extra in specs:
+            shown = QRectF(self.mapFromScene(box).boundingRect())
+            outers.append(shown.adjusted(-half, -half, half, half))
+        small = 0.25 * view.width() * view.height()
         out: list[tuple[str, QRectF, QPixmap]] = []
-        for text, rgb, box, half, extra in specs:
-            shown = self.mapFromScene(box).boundingRect()
-            outer = QRectF(shown).adjusted(-half, -half, half, half)
+        for index, (text, rgb, _box, _half, extra) in enumerate(specs):
+            outer = outers[index]
+            others = [o for i, o in enumerate(outers)
+                      if i != index and o.width() * o.height() < small]
             pixmap = self._chip_pixmap(text, rgb, dpr)
             ratio = pixmap.devicePixelRatio() or 1.0
             size = (pixmap.width() / ratio, pixmap.height() / ratio)
-            rect = OS.place_chip(size, outer, view, taken, gap=OS.CHIP_GAP + extra)
+            rect = OS.place_chip(size, outer, view, taken + others,
+                                 gap=OS.CHIP_GAP + extra)
             if rect is None:
                 continue
             taken.append(rect)
