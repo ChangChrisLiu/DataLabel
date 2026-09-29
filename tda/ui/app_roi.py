@@ -78,10 +78,6 @@ ROI_REMEASURING = ("正在重新测量机箱范围，量到就存 / re-measuring
 NO_CHASSIS_CLOSED = ("自动框没找到机箱：整幅图不作为 ROI，请按 Shift+R 自己画 / "
                      "the detector found no chassis; a whole-frame rectangle is "
                      "never stored -- draw one with Shift+R")
-#: Appended to the reminder bar when the offered rectangle is one that will
-#: not be stored, so that a button that is going to refuse says so before it
-#: is pressed rather than after (round 2, C1).
-ROI_BAR_UNUSABLE = NO_CHASSIS_CLOSED + "。"
 #: Refused: too small to be a chassis.  The floor is the ruled 64 px / 5 % of
 #: the frame's shorter side, capped at half of it so that a small frame (the
 #: 64x64 test scene, a thumbnail) still has usable rectangles at all.
@@ -493,8 +489,11 @@ class RoiMixin:
             buttons["accept"].setVisible(not unusable)
             buttons["redraw"].setVisible(True)
             buttons["none"].setVisible(True)
-            self.roi_bar.show_text(
-                ROI_BAR_PENDING + (ROI_BAR_UNUSABLE if unusable else ""))
+            # An offer that will be refused says so before the button is
+            # pressed (round 2, C1) -- and says *why*, in the words 确认建议框
+            # would answer with: a 20 px drag left behind by Esc is "too
+            # small", not "no chassis" (U2d).
+            self.roi_bar.show_text(ROI_BAR_PENDING + (f"{refusal}。" if unusable else ""))
             return
         self.roi_bar.hide()
 
