@@ -32,8 +32,11 @@ NO_CHASSIS_DRAG = ("自动没找到机箱：直接在画面上拖一个框框住
 NO_CHASSIS_FOUND = ("自动没找到机箱：直接在画面上拖一个框框住机箱（或拖白色小方块），"
                     "Enter 保存；Esc 先跳过 / no chassis found: drag a box around it, "
                     "Enter to save, Esc to skip")
+#: Said when a drag leaves a rectangle ``Enter`` would store: the refusal a
+#: previous drag earned is out of date the moment this one lands (U2d).
+ROI_BOX_READY = "框好了：Enter 保存 / Esc 放弃 / box ready: Enter to save"
 #: Shown when Enter arrives before the segment has been measured.
-ROI_STILL_MEASURING = ("还在找机箱，稍等或直接拖框 / still looking for the chassis "
+ROI_STILL_MEASURING =("还在找机箱，稍等或直接拖框 / still looking for the chassis "
                        "-- wait a moment, or drag a box yourself")
 
 #: What the ROI bar says while the rectangle is on screen: what it is, what it
@@ -562,9 +565,9 @@ class RoiMixin:
         self._remember_proposal(self.roi_draft)
         self._show_roi_rect()
         self.refresh_roi_bar()
-        refusal = self.roi_refusal(self.roi_draft)
-        if refusal:
-            self.report(refusal)
+        # Every drag answers in the status line: a good one replaces the
+        # "too small" / "no chassis" the last one left there (U2d).
+        self.report(self.roi_refusal(self.roi_draft) or ROI_BOX_READY)
 
     @S.guard
     def accept_roi(self) -> None:

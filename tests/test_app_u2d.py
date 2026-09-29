@@ -4,6 +4,7 @@
    that would be refused -- a 20 px drag left behind by Esc included.
 2. The open editor's bar said "Enter 保存；Esc 先跳过" twice and mentioned a
    Shift+R that only matters after Esc.
+3. A good drag after a refused one left the refusal in the status line.
 """
 from __future__ import annotations
 
@@ -21,8 +22,10 @@ from tda.ui.app import MainWindow
 from tda.ui.app_roi import (
     NO_CHASSIS_CLOSED,
     NO_CHASSIS_DRAG,
+    NO_CHASSIS_FOUND,
     ROI_BAR_KEYS,
     ROI_BAR_KEYS_STORED,
+    ROI_BOX_READY,
     ROI_TOO_SMALL,
     roi_min_side,
 )
@@ -131,5 +134,31 @@ def test_the_stored_editor_bar_says_esc_keeps_it(qapp, tmp_path):
         bar = roi_bar_text(win)
         assert "太小" in bar
         says_the_keys_once(bar, ROI_BAR_KEYS_STORED)
+    finally:
+        close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# item 3: a storable drag replaces the refusal the last one left
+# --------------------------------------------------------------------------- #
+def test_a_good_drag_after_refused_ones_says_it_is_ready(qapp, tmp_path, monkeypatch):
+    from tda.ui import app_roi_worker
+
+    monkeypatch.setattr(app_roi_worker, "suggest_roi_over",
+                        lambda images, view: (0, 0, 64, 64))
+    win = open_window(tmp_path, show=True)
+    try:
+        assert win.wait_for_roi_proposal() is True
+        assert NO_CHASSIS_FOUND in win.status_message()
+
+        win.on_roi_box((10.0, 10.0, 14.0, 14.0))
+        too_small = ROI_TOO_SMALL.format(floor=roi_min_side(win.overlay.hw))
+        assert win.status_message() == too_small
+
+        win.on_roi_box((8.0, 8.0, 56.0, 56.0))
+        assert win.status_message() == ROI_BOX_READY
+        assert win.roi_refusal(win.roi_draft) == ""
+        win.act_commit()                                  # ... and it is: Enter stores it
+        assert win.roi() == (8, 8, 56, 56)
     finally:
         close_window(win)
