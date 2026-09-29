@@ -43,6 +43,7 @@ from tda.ui.app import MainWindow
 from tda.ui.app_roi import NO_CHASSIS_CLOSED, NO_CHASSIS_FOUND
 from tda.ui.panels.instances import NOT_DRAWN
 from tda.ui.panels.taskcard import instance_of
+from tda.ui.panels.timeline import NO_IMAGE_TEXT, STEP_ROLE
 
 CHASSIS = "chassis"
 #: At LAST_STEP - 1 nothing about the PSU changes, so no card row names it.
@@ -316,5 +317,110 @@ def test_a_too_small_rectangle_is_named_as_that_not_as_no_chassis(qapp, tmp_path
         win.on_roi_box((10.0, 10.0, 14.0, 14.0))
         bar = roi_bar_text(win)
         assert "太小" in bar and "没找到机箱" not in bar
+    finally:
+        close_window(win)
+
+
+# --------------------------------------------------------------------------- #
+# item 4: a frame with no image is not work, so a finished view reads n/n
+# --------------------------------------------------------------------------- #
+FEW_STEPS = 5
+MISSING_STEP = 3
+
+
+def chooser_text(win: MainWindow) -> str:
+    return win.desktop_combo.itemText(win.desktop_combo.currentIndex())
+
+
+def seed_every_frame(session) -> None:
+    """One rectangle per chassis instance any image frame needs, and the order."""
+    wanted: list[str] = []
+    for step in session.available_steps():
+        for key in chassis_instances(session, step):
+            if key not in wanted:
+                wanted.append(key)
+    for index, key in enumerate(wanted):
+        session.db.add_keyframe(ShapeKeyframe(
+            id=None, instance=key, desktop=DESKTOP, view=VIEW, pose_segment=1,
+            anchor_step=LAST_STEP, placement="in_chassis", geom_type="mask",
+            parts=[ShapePart("main", masks.encode_rle(cell(index)))],
+        ))
+    session.db.set_zorder(ZOrderRec(DESKTOP, VIEW, 1, [(k, "main") for k in wanted]))
+    session.refresh_all()
+
+
+def test_a_view_with_a_missing_frame_reaches_n_of_n(qapp, tmp_path, capsys):
+    from tda.cli import main as cli_main
+
+    session = make_session(tmp_path, last_step=FEW_STEPS, missing=(MISSING_STEP,))
+    seed_every_frame(session)
+    win = open_window(tmp_path, session=session)
+    try:
+        answer_roi(win)
+        image_steps = session.available_steps()
+        assert MISSING_STEP not in image_steps and len(image_steps) == FEW_STEPS - 1
+        assert image_steps == annotatable_steps(win.db, DESKTOP, VIEW, session.steps())
+        n = len(image_steps)
+        assert f"[0/{n}]" in chooser_text(win), chooser_text(win)
+
+        session.goto(max(image_steps), force=True)
+        for _ in image_steps:            # Space steps back, skipping the gap
+            assert win.act_confirm() is True, win.task_card.problems()
+        QApplication.processEvents()
+
+        assert f"[{n}/{n}]" in chooser_text(win), chooser_text(win)
+        # the timeline says why the gap is not "not done"
+        timeline = win.timeline.list_widget()
+        texts = {int(timeline.item(i).data(STEP_ROLE)): timeline.item(i).text()
+                 for i in range(timeline.count())}
+        assert NO_IMAGE_TEXT in texts[MISSING_STEP]
+        assert all(NO_IMAGE_TEXT not in t for s, t in texts.items() if s != MISSING_STEP)
+
+        # ... and so does the command line, from the same database
+        capsys.readouterr()
+        assert cli_main(["--paths", write_paths_yaml(tmp_path), "status",
+                         "--desktop", str(DESKTOP)]) == 0
+        line = next(ln for ln in capsys.readouterr().out.splitlines()
+                    if ln.strip().startswith(VIEW))
+        assert f"{n}/{n}" in line.replace(" ", ""), line
+    finally:
+        close_window(win)
+
+
+def test_the_status_table_counts_what_the_navigation_walks(qapp, tmp_path):
+    """The SQL counters and ``annotatable_steps`` must never disagree."""
+    from tda.core.model import StepType
+
+    session = make_session(tmp_path, last_step=FEW_STEPS, missing=(MISSING_STEP,))
+    db = session.db
+    steps = db.steps(DESKTOP)
+    steps[0].step_type = StepType.IGNORE.value      # a skipped step has an image
+    db.replace_steps(DESKTOP, steps, db.actions(DESKTOP))
+    db.set_frame_flags(FrameKey(DESKTOP, 2, VIEW), review_status="verified")
+    db.set_frame_flags(FrameKey(DESKTOP, MISSING_STEP, VIEW), review_status="verified")
+
+    walked = annotatable_steps(db, DESKTOP, VIEW, [r["step"] for r in
+                                                   db.frames_for(DESKTOP, VIEW)])
+    assert walked == [2, 4, 5]
+    assert db.count_per_view("work")[(DESKTOP, VIEW)] == len(walked)
+    # a verified frame the view has no image for is not "done" either
+    assert db.count_per_view("done")[(DESKTOP, VIEW)] == 1
+    assert db.count_per_view("verified")[(DESKTOP, VIEW)] == 2   # stored as it was
+    db.close()
+
+
+def test_the_timeline_says_no_image_and_greys_the_row(qapp, tmp_path):
+    session = make_session(tmp_path, last_step=FEW_STEPS, missing=(MISSING_STEP,))
+    win = open_window(tmp_path, session=session)
+    try:
+        timeline = win.timeline.list_widget()
+        item = next(timeline.item(i) for i in range(timeline.count())
+                    if timeline.item(i).text().startswith(f"Step {MISSING_STEP} "))
+        assert NO_IMAGE_TEXT in item.text()
+        assert "不用做" in item.toolTip()
+        assert item.foreground().color().getRgb()[:3] == (150, 150, 156)
+        plain = next(timeline.item(i) for i in range(timeline.count())
+                     if timeline.item(i).text() == "Step 2")
+        assert plain.toolTip() == ""
     finally:
         close_window(win)

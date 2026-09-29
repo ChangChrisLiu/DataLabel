@@ -14,6 +14,8 @@ to find out -- nor disagreeing about whether a *frame* is a row.
 """
 from __future__ import annotations
 
+from tda.core.model import SKIP_STEP_TYPES, StepType
+
 __all__ = ["DESKTOP_COUNTERS", "VIEW_COUNTERS", "StatusMixin"]
 
 #: counter -> the table whose rows are counted per desktop.
@@ -24,6 +26,22 @@ DESKTOP_COUNTERS: dict[str, str] = {
     "events": "state_event",
     "keyframes": "shape_keyframe",
 }
+#: The frames that are work for their view, as a ``FROM`` source: a frame
+#: with an image (``missing`` unset) of a step the step table does not skip.
+#: The same two gates as :func:`tda.core.truth_inputs.annotatable_steps`, which
+#: is what the navigation walks: a frame with no image can never be confirmed
+#: (Space is refused there), so counting it put ``[22/23]`` on a view that was
+#: finished (task U2c).  A step with no row, or no type, counts as ``normal``.
+_SKIPPED = ", ".join(f"'{t}'" for t in sorted(SKIP_STEP_TYPES))
+_WORK = (
+    "FROM (SELECT f.desktop AS desktop, f.view AS view, "
+    "f.review_status AS review_status FROM frame f "
+    "LEFT JOIN step s ON s.desktop = f.desktop AND s.step = f.step "
+    "WHERE COALESCE(f.missing, 0) = 0 "
+    f"AND COALESCE(NULLIF(s.step_type, ''), '{StepType.NORMAL.value}') "
+    f"NOT IN ({_SKIPPED}))"
+)
+
 #: counter -> the ``FROM``/``WHERE`` clause counted per ``(desktop, view)``.
 VIEW_COUNTERS: dict[str, str] = {
     "frames": "FROM frame",
@@ -33,6 +51,10 @@ VIEW_COUNTERS: dict[str, str] = {
     # frozen frames whose inputs moved and that nobody has compared yet: until
     # this is zero the truth table of that view is not one to export (spec 3.4)
     "rechecks": "FROM recheck_queue",
+    # ``[done/work]``, the count the annotator watches: frames that are work
+    # for the view, and how many of them are confirmed
+    "work": _WORK,
+    "done": _WORK + " WHERE review_status='verified'",
 }
 
 

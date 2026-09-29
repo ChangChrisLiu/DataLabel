@@ -470,8 +470,10 @@ def status_rows(db: Db, desktops: Optional[set[int]] = None) -> list[dict]:
     """Per-desktop counters: steps, instances and the four views' frame counters.
 
     Each view carries ``frames`` (rows in the index, missing ones included),
-    ``missing``, ``keyframes`` (drawn or imported shapes) and ``verified``
-    (frames a human signed off).
+    ``missing``, ``keyframes`` (drawn or imported shapes), ``verified``
+    (frames a human signed off), and ``done`` / ``work``: the window's
+    ``[done/total]``, which leaves out the frames the view has no image for
+    (task U2c).
     """
     totals = {name: db.count_per_desktop(name) for name in STATUS_TOTALS}
     per_view = {name: db.count_per_view(name) for name in VIEW_COUNTERS}

@@ -148,12 +148,17 @@ class StatusMixin:
         return f"D{key.desktop} · {key.view} · step {key.step}/{total} · {status}"
 
     def _view_counts(self) -> tuple[dict, dict]:
-        """``(verified, frames)`` per ``(desktop, view)``; two whole-table scans.
+        """``(done, work)`` per ``(desktop, view)``; two whole-table scans.
 
         Read once and passed around: at 66 desktops, asking per row turned the
         combo box into 132 aggregate queries and 0.7 s of the start-up.
+
+        A frame with no image is not work for its view (task U2c): Space is
+        refused there, so counting it meant a view with one missing frame
+        could never read ``n/n``.  Both numbers leave out exactly the frames
+        the navigation skips (``db_status.VIEW_COUNTERS``).
         """
-        return self.db.count_per_view("verified"), self.db.count_per_view("frames")
+        return self.db.count_per_view("done"), self.db.count_per_view("work")
 
     def refresh_desktop_counts(self) -> None:
         """Re-read ``[done/total]`` for the machine that is open.
@@ -180,9 +185,9 @@ class StatusMixin:
         not tell two machines apart.
         """
         meta = self.db.get_desktop(desktop) or {}
-        verified, frames = counts if counts is not None else self._view_counts()
-        done = verified.get((desktop, self.session.view), 0)
-        total = frames.get((desktop, self.session.view), 0)
+        confirmed, work = counts if counts is not None else self._view_counts()
+        done = confirmed.get((desktop, self.session.view), 0)
+        total = work.get((desktop, self.session.view), 0)
         name = " ".join(str(meta.get(k) or "").strip()
                         for k in ("brand", "model_family") if meta.get(k))
         return " ".join(f"D{desktop} {name} [{done}/{total}]".split())
