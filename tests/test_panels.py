@@ -551,7 +551,10 @@ def test_taskcard_lists_items_with_icons_and_highlights_the_first_open_one(
     rows = texts(panel.list_widget())
     assert len(rows) == 3
     assert KIND_ICONS[api.KIND_ADD_SHAPE] in rows[0]
-    assert "cpu_cooler.01" in rows[0] and "Draw the cooler" in rows[0]
+    # Task U2b: the row says what to do in the annotator's words; the
+    # session's own sentence is kept in the tooltip.
+    assert "cpu_cooler.01" in rows[0] and "在这一帧画出它的完整形状" in rows[0]
+    assert "Draw the cooler" in panel.list_widget().item(0).toolTip()
     assert KIND_ICONS[api.KIND_STATE_ONLY] in rows[2]
     assert panel.current_index() == 1  # first not-done item
     assert panel.list_widget().currentRow() == 1

@@ -282,6 +282,7 @@ class AdoptMixin:
             return
         self.overlay.set_ghost(candidate.mask, candidate.box)
         self.canvas.refresh(candidate.box)
+        self.refresh_guidance()       # the ghost owns Enter/Esc now: say so
         seen = "（本视图已采纳过 / already adopted here）" \
             if candidate.key in self._draft_used else ""
         other_class = "" if candidate.same_class else f"【{candidate.cls}】"
@@ -387,6 +388,7 @@ class AdoptMixin:
             rect = self.overlay.ghost_rect
             self.overlay.clear_ghost()
             self.canvas.refresh(rect)
+        self.refresh_guidance()
         return True
 
     def forget_draft_ghost(self) -> None:

@@ -41,6 +41,7 @@ from tda.ui.app_adopt import AdoptMixin
 from tda.ui.app_assist import AssistMixin
 from tda.ui.app_commit import CommitMixin
 from tda.ui.app_edit import EditMixin
+from tda.ui.app_guide import GuideMixin
 from tda.ui.app_keys import FLASH_UNNAMED, KeysMixin
 from tda.ui.app_pose import PoseMixin
 from tda.ui.app_roi import RoiMixin
@@ -68,7 +69,7 @@ __all__ += ["CANDIDATES_DROPPED", "FLASH_UNNAMED", "GRID_OFF", "OPACITY_STEP"]
 
 
 class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, AssistMixin,
-                 KeysMixin,
+                 GuideMixin, KeysMixin,
                  ToolsMixin, StatusMixin, ShellMixin, QMainWindow):
     """One annotator, one desktop/view, three modes."""
 
@@ -109,6 +110,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         self._init_adopt()
         self._init_pose()
         self._init_assist(sam_queue)
+        self._init_guide()
         self._connect_session()
 
         self.setWindowTitle(f"Teardown Annotator — {self.annotator}")

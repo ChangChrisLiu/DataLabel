@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QDockWidget,
+    QHBoxLayout,
     QLabel,
     QMessageBox,
     QSplitter,
@@ -49,9 +50,11 @@ from tda.ui.app_status import (  # re-exported: this was their home
 from tda.ui.canvas.overlay import LabelOverlay
 from tda.ui.canvas.view import ImageCanvas
 from tda.ui.panels.instances import InstanceListPanel
+from tda.ui.panels.palette import ToolPalette
 from tda.ui.panels.review import ReviewPanel
 from tda.ui.panels.taskcard import TaskCardPanel
 from tda.ui.panels.timeline import TimelinePanel
+from tda.ui.panels.whatnow import WhatNowPanel
 
 __all__ = ["KNOWN_FAILURES", "MODE_TITLES", "ShellMixin", "StatusMixin",
            "explain_exception", "main", "take_lock"]
@@ -69,6 +72,8 @@ DEFAULT_WINDOW_SIZE = (1600, 1000)
 #: ``tests/test_app.py`` measures what actually comes out, not what is asked.
 TIMELINE_FRACTION = 0.11
 RIGHT_FRACTION = 0.20
+#: Share of the right column's height the "What now" guide is asked for.
+GUIDE_FRACTION = 0.30
 #: A restored layout that leaves the canvas less than this is not one anybody
 #: chose: it is a dock that grew once and was saved.
 MIN_CANVAS_FRACTION = 0.5
@@ -144,12 +149,21 @@ class ShellMixin:
         self.stack = QStackedWidget()
         self.stack.addWidget(self.canvas)
         self.stack.addWidget(self.placeholder_label)
+        # Every tool and commit key as a button, left of the canvas (task
+        # U2b); see tda/ui/panels/palette.py for why a strip there.
+        self.palette = ToolPalette()
 
         central = QWidget()
-        layout = QVBoxLayout(central)
+        outer = QHBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+        outer.addWidget(self.palette)
+        column = QWidget()
+        layout = QVBoxLayout(column)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
         layout.addWidget(self.stack, 1)
+        outer.addWidget(column, 1)
         self._central_layout = layout
         self.setCentralWidget(central)
 
@@ -215,12 +229,23 @@ class ShellMixin:
 
         self.timeline_dock = self._dock("Timeline", self.timeline,
                                         Qt.DockWidgetArea.LeftDockWidgetArea)
+        # The operation guide, on the main window and above the task card it
+        # talks about (task U2b).  A plain ASCII object name: it is the key the
+        # saved layout is stored under.
+        self.guide = WhatNowPanel()
+        self.guide_dock = QDockWidget("现在做什么 / What now", self)
+        self.guide_dock.setObjectName("dock_whatnow")
+        self.guide_dock.setWidget(self.guide)
+        self.guide_dock.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.guide_dock)
         right = QSplitter(Qt.Orientation.Vertical)
         right.addWidget(self.task_card)
         right.addWidget(self.instances)
-        # The card is a short checklist, the instance table is long: without
-        # this they open at half the dock each and the table shows four rows.
-        right.setStretchFactor(0, 1)
+        # The card used to be a short checklist next to a long instance
+        # table; since task U2b every row explains itself in three lines, and
+        # the card is what the guide above it keeps pointing at, so it gets
+        # the larger share.
+        right.setStretchFactor(0, 3)
         right.setStretchFactor(1, 2)
         self.right_dock = self._dock("Frame", right,
                                      Qt.DockWidgetArea.RightDockWidgetArea)
@@ -330,6 +355,13 @@ class ShellMixin:
              int(width * RIGHT_FRACTION)],
             Qt.Orientation.Horizontal,
         )
+        # The guide above the card: enough for the "现在" line and the five
+        # steps, the rest to the card and the instance table.
+        height = self.height() or DEFAULT_WINDOW_SIZE[1]
+        self.resizeDocks([self.guide_dock, self.right_dock],
+                         [int(height * GUIDE_FRACTION),
+                          int(height * (1.0 - GUIDE_FRACTION))],
+                         Qt.Orientation.Vertical)
 
     def last_frame_for(self, annotator: str) -> dict:
         """The desktop/view/step this annotator last had open, as far as it is known."""

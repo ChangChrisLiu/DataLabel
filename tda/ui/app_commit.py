@@ -252,6 +252,7 @@ class CommitMixin:
         if self.bench_instance is not None:
             self.disarm_bench()
             self.report("bench box cancelled")
+            self.refresh_guidance()
             return
         instance = getattr(self.session, "editing_instance", None)
         if instance is not None:

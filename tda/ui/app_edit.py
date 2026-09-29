@@ -369,6 +369,9 @@ class EditMixin:
             self.overlay.clear_editing()
         if repaint:
             self.canvas.refresh()
+        # The one place a layer is replaced from outside: the guide, the banner
+        # and the card's "正在画" follow it from here (task U2b).
+        self._note_edit_facts()
 
     # --------------------------------------------------- never lose an edit
     def has_uncommitted_edit(self) -> bool:
@@ -457,7 +460,11 @@ class EditMixin:
             return
         adopted = self._adoptable_instance()
         if adopted is not None:
-            self.on_request_edit(adopted)
+            # The press that is arriving belongs to the tool that is armed:
+            # the annotator reached for the brush and pressed.  Switching to
+            # SAM here (as a card click on an empty shape does) would turn
+            # their stroke into a prompt.
+            self.on_request_edit(adopted, switch_tool=False)
             return
         self._paint_blocked = True
         self._blocked_layer = (None if self.overlay is None
@@ -531,12 +538,20 @@ class EditMixin:
 
     # ----------------------------------------------------------------- edits
     @S.guard
-    def on_request_edit(self, instance: str) -> None:
+    def on_request_edit(self, instance: str, switch_tool: bool = True) -> None:
         """A panel asked for an instance to be edited (task card / instance list).
 
         The window owns ``begin_edit``: the panels only report the gesture, so
         that switching instance while pixels are uncommitted can be refused in
         one place instead of three.
+
+        Starting an edit has to *look* like something happened (task U2b): the
+        trial's double-click began one on an empty layer and nothing on screen
+        changed but a word in the status bar.  So the canvas banner names the
+        part, the card marks its row "✎ 正在画", and on an **empty** layer the
+        tool becomes the one a new shape starts with -- the last SAM tool, or
+        SAM point -- unless ``switch_tool`` is off (a press already on its way
+        to the armed tool).
         """
         if self.mode != "annotate":
             # Qt activates a list row on Enter, and the task card is still
@@ -562,13 +577,16 @@ class EditMixin:
             return
         self._sync_editing_layer()
         self.set_sam_instance(instance)
+        if switch_tool:
+            self.switch_tool_for_empty_layer()
         self._attach_tool()
         self.arm_prompt_box_for(instance)
         self._offer_restore(self.session.current(), instance)
-        # The panel was activated with a double-click, so it has the keyboard;
-        # give it straight back, or the next ``B`` is a list keystroke.
+        # The panel was activated with a click, so it has the keyboard; give
+        # it straight back, or the next ``B`` is a list keystroke.
         self.focus_canvas()
-        self.report(f"editing {instance}")
+        self.report(f"editing {instance} / 正在画 {self._edit_label[1] or instance}")
+        self.update_status()
 
     @S.guard
     def on_stroke(self, rect: object) -> None:
@@ -589,6 +607,7 @@ class EditMixin:
         self.note_layer_change("stroke", instance, before, after)
         compat.push_stroke(self.session, instance, before, after, erased=erased)
         self.queue_sidecar(self.session.current(), instance, after)
+        self._note_edit_facts(refresh=False)   # update_status refreshes the guide
         self.update_status()
 
     def erased_mask(self):
@@ -839,6 +858,7 @@ class EditMixin:
         if self.overlay is not None and instance is not None:
             self.overlay.set_editing(instance, mask)
             self.canvas.refresh()
+        self._note_edit_facts()
 
     @S.guard
     def act_fill_holes(self) -> None:

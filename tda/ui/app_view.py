@@ -25,19 +25,26 @@ GRID_OFF = 1e9
 CANDIDATES_DROPPED = ("切到画笔会丢弃其余候选 / switching tool discards the other "
                       "SAM candidates")
 
+def _badge_name(action_name: str) -> str:
+    """The name half of the palette button's caption (task U2b)."""
+    return A.short_parts(A.action_named(action_name))[0]
+
+
 #: Short bilingual name of each tool for the status bar.  Deliberately *not* the
 #: ``label_zh`` of :data:`tda.ui.app_actions.ACTIONS` -- those are sentences
-#: ("画笔（加像素）") and this is a badge that has to stay one glance wide.  The
-#: **key** still comes from ``ACTIONS`` (:func:`tda.ui.app_actions.tool_key`),
-#: so there is still one key map.
+#: ("画笔（加像素）") and this is a badge that has to stay one glance wide.  It
+#: *is* the name on the tool's palette button, read from the same ``short``
+#: caption: the badge and the checked button are two views of one state and
+#: must not call it two different things.  The **key** comes from ``ACTIONS``
+#: too (:func:`tda.ui.app_actions.tool_key`), so there is still one key map.
 TOOL_LABELS: dict[str, tuple[str, str]] = {
-    "brush": ("画笔", "Brush"),
-    "eraser": ("橡皮擦", "Eraser"),
-    "sam_point": ("SAM 点提示", "SAM point"),
-    "sam_box": ("SAM 框选", "SAM box"),
-    "occluder": ("遮挡层画笔", "Occluder"),
-    "bench_box": ("台面框", "Bench box"),
-    "roi": ("ROI 机箱范围框", "ROI box"),
+    "brush": (_badge_name("tool_brush"), "Brush"),
+    "eraser": (_badge_name("tool_eraser"), "Eraser"),
+    "sam_point": (_badge_name("tool_sam_point"), "SAM point"),
+    "sam_box": (_badge_name("tool_sam_box"), "SAM box"),
+    "occluder": (_badge_name("tool_occluder"), "Occluder"),
+    "bench_box": (_badge_name("tool_bench_box"), "Bench box"),
+    "roi": (_badge_name("edit_roi"), "ROI box"),
 }
 #: Shown in place of a tool in the two states where the canvas takes no edits.
 NO_TOOL_ZH = "只看不改"
@@ -105,6 +112,7 @@ class ToolsMixin:
         self.cancel_roi_edit()
         self.note_tool_switch(name, via="key")
         self._tool_name = name
+        self.note_draw_tool(name)
         self._attach_tool()
         self.update_status()
 
@@ -203,12 +211,13 @@ class ToolsMixin:
 
     @S.guard
     def act_radius(self, delta: int) -> None:
-        """``[`` / ``]``: every pixel tool shares one radius."""
-        radius = max(0, self.brush.radius + int(delta))
-        for tool in (self.brush, self.eraser, self.occluder):
-            tool.set_radius(radius)
-        self.sync_tool_cursor()   # the ring is the size of the stroke
-        self.update_status()
+        """``[`` / ``]``: every pixel tool shares one radius.
+
+        Through the same setter as the palette's slider (task U2b), so the key,
+        the slider, the spin box, the ring and the badge are one number,
+        clamped to the palette's 1..200 image pixels.
+        """
+        self.set_brush_radius(self.brush.radius + int(delta))
 
     # --------------------------------------------------------- display slots
     @S.guard

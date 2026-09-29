@@ -198,8 +198,29 @@ def _span_note(span: Optional[list[int]]) -> str:
 
 def _item(instance: str, kind: str, changes: dict, done: bool,
           rec: Optional[InstanceRec], span: Optional[list[int]] = None) -> dict:
-    return {"instance": instance, "kind": kind,
-            "text": item_text(kind, instance, changes, rec, span), "done": bool(done)}
+    """One card row.
+
+    Besides the four keys every reader relies on, a row carries what the card
+    needs to explain itself in the annotator's words (task U2b): the class and
+    its attributes (``cover`` of the CPU cooler is 导风罩), the names the step
+    sheet used for the part, the parent it came back in with, and the state
+    transition behind a split.  All of it is already in hand here, so saying
+    it costs the card nothing it did not already pay.
+    """
+    row = {"instance": instance, "kind": kind,
+           "text": item_text(kind, instance, changes, rec, span), "done": bool(done)}
+    if rec is not None:
+        row["cls"] = str(rec.cls)
+        row["attrs"] = dict(rec.attrs or {})
+        row["raw_names"] = [str(n) for n in (rec.raw_names or [])]
+        if rec.attached and rec.parent:
+            row["parent"] = str(rec.parent)
+    transition = changes.get("state")
+    if transition is not None:
+        row["transition"] = [str(transition[0]), str(transition[1])]
+    if span and len(span) > 1:
+        row["span"] = [int(s) for s in span]
+    return row
 
 
 def _ordered(items: list[dict], instances: dict[str, InstanceRec]) -> list[dict]:

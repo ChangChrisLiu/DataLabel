@@ -241,6 +241,18 @@ class RoiBoxTool(BoxDragTool):
 class Bar(QWidget):
     """A one-line non-modal bar under the canvas (scope suggestion, restore offer)."""
 
+    #: The bar was shown (``True``) or hidden.  Each of these bars owns
+    #: ``Enter``/``Esc`` while it is up, which is exactly what the guide panel
+    #: has to name next (task U2b); emitted on every show/hide, including the
+    #: ones a parent that is not on screen yet only records.
+    sigVisible = Signal(bool)
+
+    def setVisible(self, visible: bool) -> None:  # noqa: D102 - Qt override
+        was = self.isVisibleTo(self.parentWidget()) if self.parentWidget() else self.isVisible()
+        super().setVisible(visible)
+        if bool(visible) != bool(was):
+            self.sigVisible.emit(bool(visible))
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.label = QLabel("")

@@ -72,6 +72,15 @@ def window(qapp, tmp_path):
 
 
 def paint(win: MainWindow, dx: int = 8) -> None:
+    """A brush stroke across the middle of the canvas.
+
+    Starting an empty shape arms SAM now (task U2b); a drag with SAM armed is a
+    prompt, not a stroke, so the brush is picked first -- the annotator's ``B``.
+    Not while ``Tab`` is held: a real ``B`` ends the flash first (the key path
+    does), and these tests want the flash still up when they press.
+    """
+    if win._tool_name in ("sam_point", "sam_box") and not win.is_flashing():
+        win.act_tool("brush")
     viewport = win.canvas.viewport()
     centre = viewport.rect().center()
     QTest.mousePress(viewport, Qt.MouseButton.LeftButton,

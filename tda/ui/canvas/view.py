@@ -334,6 +334,18 @@ class ImageCanvas(QGraphicsView):
         #: than added to the scene, so there is nothing under the cursor that
         #: could swallow a press or shift the coordinate a tool is handed.
         self._prompt_point: Optional[tuple[int, int]] = None
+        #: One line across the top of the canvas saying what is being drawn
+        #: (task U2b): starting a new shape used to change nothing on screen
+        #: but one word in the status bar.  Painted in :meth:`drawForeground`
+        #: in *viewport* coordinates -- never a widget, so it cannot take a
+        #: click, and never the overlay image, so it costs no composite.
+        self._banner = ""
+        self._banner_cache: Optional[tuple[tuple, QPixmap]] = None
+        #: Where a task-card item probably is, while the pointer rests on it:
+        #: ``[((x0, y0, x1, y1), label, rgb), ...]`` in image coordinates.
+        #: Display only -- nothing reads it back.
+        self._hints: list[tuple[tuple[float, float, float, float], str,
+                                tuple[int, int, int]]] = []
         self._last_zoom: Optional[float] = None
         #: What the armed tool looks like under the mouse; ``None`` means the
         #: platform's own arrow.  The one thing on screen that says *what a
@@ -587,6 +599,149 @@ class ImageCanvas(QGraphicsView):
         """The marked pixel, or ``None``."""
         return self._prompt_point
 
+    # -- the banner and the hover hints (task U2b) --------------------------
+    #: Gap between the banner and the viewport's top edge, screen pixels.
+    BANNER_TOP = 8
+    BANNER_PAD = (12, 6)
+    BANNER_BG = QColor(24, 26, 30, 225)
+    BANNER_FG = QColor(255, 232, 64)
+
+    def set_banner(self, text: str) -> None:
+        """Show one line across the top of the canvas (``""`` clears it).
+
+        Setting the text it already shows repaints nothing, which is what
+        keeps the frame-change path free of it.
+        """
+        value = str(text or "")
+        if value == self._banner:
+            return
+        old = self._banner_target()
+        self._banner = value
+        new = self._banner_target()
+        for rect in (old, new):
+            if rect is not None:
+                self.viewport().update(rect)
+
+    def banner_text(self) -> str:
+        """The banner's text, ``""`` when none is shown."""
+        return self._banner
+
+    def _banner_pixmap(self) -> Optional[QPixmap]:
+        """The banner rendered once per text, width and pixel ratio."""
+        if not self._banner:
+            return None
+        width = max(80, self.viewport().width() - 2 * self.BANNER_TOP)
+        dpr = float(self.devicePixelRatioF() or 1.0)
+        key = (self._banner, width, round(dpr, 3))
+        if self._banner_cache is not None and self._banner_cache[0] == key:
+            return self._banner_cache[1]
+        font = self.font()
+        font.setBold(True)
+        font.setPointSizeF(max(9.0, font.pointSizeF() + 2.0))
+        from PySide6.QtGui import QFontMetrics
+
+        metrics = QFontMetrics(font)
+        padx, pady = self.BANNER_PAD
+        text = metrics.elidedText(self._banner, Qt.TextElideMode.ElideRight,
+                                  width - 2 * padx)
+        w = min(width, metrics.horizontalAdvance(text) + 2 * padx)
+        h = metrics.height() + 2 * pady
+        pixmap = QPixmap(int(round(w * dpr)), int(round(h * dpr)))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor(0, 0, 0, 200), 1))
+        painter.setBrush(self.BANNER_BG)
+        painter.drawRoundedRect(QRectF(0.5, 0.5, w - 1.0, h - 1.0), 6, 6)
+        painter.setFont(font)
+        painter.setPen(self.BANNER_FG)
+        painter.drawText(QRectF(padx, pady, w - 2 * padx, h - 2 * pady),
+                         int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                         text)
+        painter.end()
+        self._banner_cache = (key, pixmap)
+        return pixmap
+
+    def _banner_target(self):
+        """Where the banner sits in viewport coordinates, or ``None``."""
+        from PySide6.QtCore import QRect
+
+        pixmap = self._banner_pixmap()
+        if pixmap is None:
+            return None
+        dpr = pixmap.devicePixelRatio() or 1.0
+        w = int(round(pixmap.width() / dpr))
+        h = int(round(pixmap.height() / dpr))
+        x = max(0, (self.viewport().width() - w) // 2)
+        return QRect(x, self.BANNER_TOP, w, h)
+
+    def banner_rect(self):
+        """The banner's rectangle in viewport coordinates (for the tests)."""
+        return self._banner_target()
+
+    def _draw_banner(self, painter: QPainter, rect: QRectF) -> None:
+        target = self._banner_target()
+        if target is None:
+            return
+        exposed = self.mapFromScene(rect).boundingRect()
+        if not exposed.intersects(target):
+            return            # a brush dab elsewhere never pays for the banner
+        painter.save()
+        painter.resetTransform()
+        painter.drawPixmap(target.topLeft(), self._banner_pixmap())
+        painter.restore()
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:  # noqa: D102 - Qt override
+        super().scrollContentsBy(dx, dy)
+        # A pan blits the viewport's pixels -- the banner with them.  It is
+        # fixed to the viewport, so both where it was carried to and where it
+        # belongs are repainted (the rubber band gets the same treatment in
+        # Qt's own implementation).
+        target = self._banner_target()
+        if target is not None:
+            self.viewport().update(target)
+            self.viewport().update(target.translated(dx, dy))
+
+    def set_hint_boxes(self, hints) -> None:
+        """Outline where something probably is; ``[]`` takes them away.
+
+        ``hints`` is ``[((x0, y0, x1, y1), label, (r, g, b)), ...]`` in image
+        coordinates.  Nothing reads them back: they are shown while the
+        pointer rests on a task-card item and gone when it leaves.
+        """
+        value = [(tuple(float(v) for v in box), str(label),
+                  tuple(int(c) for c in rgb)) for box, label, rgb in (hints or [])]
+        if value == self._hints:
+            return
+        self._hints = value
+        self.viewport().update()
+
+    def hint_boxes(self) -> list:
+        """The outlines on screen (a copy)."""
+        return list(self._hints)
+
+    def _draw_hints(self, painter: QPainter) -> None:
+        if not self._hints:
+            return
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for (x0, y0, x1, y1), _label, rgb in self._hints:
+            pen = QPen(QColor(rgb[0], rgb[1], rgb[2], 190), 2, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.drawRect(QRectF(x0, y0, max(1.0, x1 - x0), max(1.0, y1 - y0)))
+        painter.save()
+        painter.resetTransform()
+        for (x0, y0, _x1, _y1), label, rgb in self._hints:
+            if not label:
+                continue
+            at = self.mapFromScene(QPointF(x0, y0))
+            painter.setPen(QColor(0, 0, 0, 200))
+            painter.drawText(at.x() + 4, at.y() - 3, label)
+            painter.setPen(QColor(rgb[0], rgb[1], rgb[2]))
+            painter.drawText(at.x() + 3, at.y() - 4, label)
+        painter.restore()
+
     # -- the armed tool, under the mouse ------------------------------------
     def set_tool_cursor(self, spec: Optional[ToolCursor]) -> None:
         """Say what the armed tool is; ``None`` restores the arrow.
@@ -834,6 +989,7 @@ class ImageCanvas(QGraphicsView):
     def drawForeground(self, painter: QPainter, rect: QRectF) -> None:  # noqa: D102
         super().drawForeground(painter, rect)
         self._draw_roi(painter)
+        self._draw_hints(painter)
         if self._rubber_band is not None:
             x0, y0, x1, y1 = self._rubber_band
             pen = QPen(QColor(255, 232, 64), 1, Qt.PenStyle.DashLine)
@@ -856,6 +1012,12 @@ class ImageCanvas(QGraphicsView):
                 QLineF(cx, cy - arm, cx, cy - gap),
                 QLineF(cx, cy + gap, cx, cy + arm),
             ])
+        self._draw_grid(painter, rect)
+        # Last, over everything else: it is the one thing on the canvas that
+        # is about the annotator rather than about the image.
+        self._draw_banner(painter, rect)
+
+    def _draw_grid(self, painter: QPainter, rect: QRectF) -> None:
         if self.zoom_factor() <= self.GRID_ZOOM:
             return
         h, w = self.image_hw()

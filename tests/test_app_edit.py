@@ -64,7 +64,15 @@ def window(qapp, tmp_path):
 
 
 def paint(win: MainWindow, dx: int = 8) -> None:
-    """One left-drag across the middle of the canvas viewport."""
+    """One left-drag across the middle of the canvas viewport.
+
+    A *stroke*: starting an empty shape arms SAM now (task U2b), and a drag
+    with SAM armed is a prompt -- so the brush is picked first when a SAM tool
+    is armed, which is what the annotator presses ``B`` for.  A test that
+    armed the eraser keeps it.
+    """
+    if win._tool_name in ("sam_point", "sam_box"):
+        win.act_tool("brush")
     viewport = win.canvas.viewport()
     centre = viewport.rect().center()
     QTest.mousePress(viewport, Qt.MouseButton.LeftButton,
