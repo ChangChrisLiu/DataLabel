@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
 from tda.ui import app_actions as A
 from tda.ui.canvas.overlay import EDIT_RGB as _EDIT_RGB
 from tda.ui.canvas.overlay import OCCLUDER_RGB as _OCCLUDER_RGB
+from tda.ui.canvas.overlay_style import ROI_RGB as _ROI_RGB
 
 __all__ = ["PALETTE_WIDTH", "RADIUS_MAX", "RADIUS_MIN", "PaletteButton",
            "ToolPalette", "radius_to_slider", "slider_to_radius", "tool_icon"]
@@ -166,9 +167,10 @@ def _icon_bench(p: QPainter, s: float) -> None:
 
 
 def _icon_roi(p: QPainter, s: float) -> None:
+    # The canvas' ROI in miniature: its colour over a dark under-stroke.
     p.setPen(QPen(QColor(0, 0, 0, 200), 3))
     p.drawRect(QRectF(3, 3, s - 6, s - 6))
-    p.setPen(QPen(QColor(*_EDIT_RGB), 1.6, Qt.PenStyle.DashLine))
+    p.setPen(QPen(QColor(*_ROI_RGB), 1.6, Qt.PenStyle.DashLine))
     p.drawRect(QRectF(3, 3, s - 6, s - 6))
     p.setPen(QPen(QColor(0, 0, 0), 0.8))
     p.setBrush(QColor(255, 255, 255))

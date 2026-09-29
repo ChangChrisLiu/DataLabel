@@ -638,3 +638,212 @@ def test_shift_c_is_in_the_actions_table_and_c_still_cycles_masks():
     assert alt.slot == "act_cycle_prompt_box"
     assert alt.modes == (A.MODE_ANNOTATE,)
     assert alt.label_zh in A.shortcut_markdown()
+
+
+# --------------------------------------------------------------------------- #
+# U2g addendum B: a first click outside the armed box means the box is wrong
+# --------------------------------------------------------------------------- #
+class _RightClick:
+    """What ``SamPointTool._is_negative`` reads off a right-button press."""
+
+    @staticmethod
+    def button():
+        from PySide6.QtCore import Qt
+
+        return Qt.MouseButton.RightButton
+
+
+def _armed_for_a_prompt(win):
+    """Rank 1 armed on a card item being edited with ``S``; returns (rank1 box, alts)."""
+    rank1, alts = _arm_with_alternates(win)
+    _start_edit(win)
+    win.act_tool("sam_point")
+    win.begin_add_shape(rank1)                   # the edit start re-armed it; again
+    box = tuple(float(v) for v in rank1.box)
+    assert win._prompt_box == box and win.sam_point.prompt_box == box
+    return box, alts
+
+
+def _far_outside(win) -> tuple[float, float]:
+    """A pixel on screen, far from rank 1's box (at the ROI's top-left).
+
+    On screen, because a SAM prompt is cropped from the viewport and a click
+    outside it is no prompt at all.
+    """
+    vx0, vy0, vx1, vy1 = win.canvas.viewport_image_rect()
+    x0, y0, x1, y1 = win.roi()
+    x = float(min(x1, vx1) - 1 + max(x0, vx0)) / 2.0 + 6.0
+    y = float(min(y1, vy1) - 1 + max(y0, vy0)) / 2.0 + 6.0
+    assert vx0 <= x < vx1 and vy0 <= y < vy1
+    from tda.ui.canvas.sam_tools import PROMPT_BOX_MARGIN_PX, box_holds
+
+    box = win._prompt_box
+    assert box is None or not box_holds(box, x, y, PROMPT_BOX_MARGIN_PX + 4)
+    return x, y
+
+
+def test_a_first_click_inside_the_box_is_sent_exactly_as_before(window):
+    from tda.ui.app_assist import BOX_REFUSED
+
+    box, _alts = _armed_for_a_prompt(window)
+    inside = ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+    window.sam_point.on_press(inside[0], inside[1], None)
+    sent = window.sam_queue.requests[-1]
+    assert sent.box is not None
+    assert window._prompt_box == box and window.sam_point.box_refused is False
+    assert BOX_REFUSED not in window.status_message()
+    # byte-identical to main's path: point + the armed box, straight to _submit
+    window.sam_point.reset_prompt()
+    window.begin_add_shape(_blob(tuple(int(v) for v in box)))
+    window.sam_point._submit([(inside[0], inside[1], 1)], box=window.sam_point.prompt_box)
+    main = window.sam_queue.requests[-1]
+    assert sent.box == main.box and sent.multimask == main.multimask
+    assert [tuple(p) for p in sent.points] == [tuple(p) for p in main.points]
+
+
+def test_a_first_click_outside_the_box_goes_point_only_and_drops_the_box(window):
+    from tda.ui.app_assist import BOX_REFUSED
+
+    box, _alts = _armed_for_a_prompt(window)
+    x, y = _far_outside(window)
+    window.sam_point.on_press(x, y, None)
+    sent = window.sam_queue.requests[-1]
+    assert sent.box is None, "the wrong box went to SAM with the click"
+    assert len(sent.points) == 1
+    # dropped everywhere, through the window's funnel -- not just in the tool
+    assert window._prompt_box is None
+    assert window.sam_point.prompt_box is None
+    assert window.sam_box.prompt_box is None
+    assert window.canvas.prompt_band() == (None, "")
+    assert window.status_message() == BOX_REFUSED
+    # a later click of the same prompt -- even inside the old box -- stays point-only
+    window.sam_point.on_press((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0, None)
+    again = window.sam_queue.requests[-1]
+    assert again.box is None and len(again.points) == 2
+    assert window._prompt_box is None
+
+
+def test_the_margin_is_eight_image_pixels_edges_included(window):
+    from tda.ui.canvas.sam_tools import PROMPT_BOX_MARGIN_PX, box_holds
+
+    assert PROMPT_BOX_MARGIN_PX == 8.0
+    probe = (10.0, 10.0, 20.0, 20.0)
+    assert box_holds(probe, 28.0, 15.0) and box_holds(probe, 2.0, 2.0)
+    assert not box_holds(probe, 28.5, 15.0) and not box_holds(probe, 15.0, 1.5)
+
+    box, _alts = _armed_for_a_prompt(window)
+    mid = (box[1] + box[3]) / 2.0
+    window.sam_point.on_press(box[2] + PROMPT_BOX_MARGIN_PX, mid, None)   # on the edge
+    assert window.sam_queue.requests[-1].box is not None
+    assert window._prompt_box == box
+
+    window.sam_point.reset_prompt()
+    window.begin_add_shape(_blob(tuple(int(v) for v in box)))
+    window.sam_point.on_press(box[2] + PROMPT_BOX_MARGIN_PX + 0.5, mid, None)  # past it
+    assert window.sam_queue.requests[-1].box is None
+    assert window._prompt_box is None
+
+
+def test_only_the_first_positive_click_decides(window):
+    """A right click outside is "not that", not "the box is wrong"."""
+    box, _alts = _armed_for_a_prompt(window)
+    x, y = _far_outside(window)
+    window.sam_point.on_press(x, y, _RightClick())
+    assert window.sam_queue.requests[-1].box is not None
+    assert window._prompt_box == box
+    window.sam_point.on_press(x - 1.0, y - 1.0, None)       # the first *positive* one
+    assert window.sam_queue.requests[-1].box is None
+    assert window._prompt_box is None
+
+
+def test_x_after_a_refused_box_drags_its_own_box_as_today(window):
+    _box, _alts = _armed_for_a_prompt(window)
+    x, y = _far_outside(window)
+    window.sam_point.on_press(x, y, None)
+    assert window.sam_box.prompt_box is None, "S and X disagree about the box"
+    window.act_tool("sam_box")
+    assert window.sam_box.prompt_box is None and window.sam_point.prompt_box is None
+    x0, y0, _x1, _y1 = window.roi()
+    window.sam_box.on_press(x0 + 20.0, y0 + 20.0, None)
+    window.sam_box.on_move(x0 + 30.0, y0 + 30.0, None)
+    assert window.canvas.rubber_band_kind() == "drag"
+    window.sam_box.on_release(x0 + 30.0, y0 + 30.0, None)
+    sent = window.sam_queue.requests[-1]
+    assert sent.box is not None and not sent.points
+    assert window._prompt_box is None
+
+
+def test_shift_c_still_offers_the_alternates_after_a_refused_box(window):
+    _box, alts = _armed_for_a_prompt(window)
+    x, y = _far_outside(window)
+    window.sam_point.on_press(x, y, None)
+    assert window._prompt_box is None
+
+    window.act_cycle_prompt_box()
+
+    alt = tuple(float(v) for v in alts[0].box)
+    assert window.prompt_rank() == 2 and window._prompt_box == alt
+    assert window.sam_point.prompt_box == alt and window.sam_box.prompt_box == alt
+    assert window.sam_point.box_refused is False, "Shift+C is a new prompt"
+    window.sam_point.on_press(float(alts[0].point[0]), float(alts[0].point[1]), None)
+    assert window.sam_queue.requests[-1].box is not None
+
+
+def test_a_late_comparison_does_not_put_a_refused_box_back(window):
+    box, _alts = _armed_for_a_prompt(window)
+    x, y = _far_outside(window)
+    window.sam_point.on_press(x, y, None)
+    window.begin_add_shape(_blob(tuple(int(v) for v in box)))   # a comparison lands
+    assert window._prompt_box is None and window.sam_point.prompt_box is None
+    window.sam_point.on_press(x - 1.0, y - 1.0, None)
+    assert window.sam_queue.requests[-1].box is None
+    # ... until the prompt ends: Esc / a commit / another part start a new one
+    window.reset_sam_prompt()
+    window.begin_add_shape(_blob(tuple(int(v) for v in box)))
+    assert window._prompt_box == box
+
+
+# --------------------------------------------------------------------------- #
+# U2g addenda A and C: the armed box says what it is, the status line what to do
+# --------------------------------------------------------------------------- #
+def test_the_armed_box_has_its_chip_and_the_arrival_line_has_no_coordinates(window):
+    from tda.ui.app_assist import PROMPT_ARMED, PROMPT_CHIP
+
+    rank1, alts = _arm_with_alternates(window)
+    box = tuple(float(v) for v in rank1.box)
+    assert window.canvas.prompt_band() == (box, PROMPT_CHIP)
+    assert window.canvas.rubber_band_kind() == "prompt"
+    message = window.status_message()
+    assert message == PROMPT_ARMED and message.startswith("虚线小框是程序猜的位置")
+    assert str(tuple(int(v) for v in rank1.box)) not in message and " px" not in message
+    total = len(alts) + 1
+    window.act_cycle_prompt_box()
+    assert window.canvas.prompt_band()[1] == f"SAM 提示框 2/{total}"
+    assert str(tuple(int(v) for v in alts[0].box)) not in window.status_message()
+    for _ in range(total - 1):
+        window.act_cycle_prompt_box()
+    assert window.canvas.prompt_band()[1] == f"SAM 提示框 1/{total}"
+
+
+def test_the_armed_box_stays_on_screen_across_a_tool_switch(window):
+    """Detaching a SAM tool used to wipe it while the tools kept sending it."""
+    rank1, _alts = _arm_with_alternates(window)
+    box = tuple(float(v) for v in rank1.box)
+    window.act_tool("brush")
+    assert window.canvas.prompt_band()[0] == box
+    window.act_tool("sam_point")
+    assert window.canvas.prompt_band()[0] == box
+    assert window.sam_point.prompt_box == box
+
+
+def test_no_box_this_time_is_said_in_plain_words(window):
+    from tda.ui.app_assist import PROMPT_TOO_BIG
+
+    _stand_on_a_card_item(window)
+    x0, y0, x1, y1 = window.roi()
+    window.act_tool("sam_point")
+    window.begin_add_shape(_blob((x0, y0, x1, y1), area=(x1 - x0) * (y1 - y0)))
+    message = window.status_message()
+    assert message == PROMPT_TOO_BIG
+    assert "没有提示框" in message and "点 S" in message and " px" not in message
+    assert window.canvas.prompt_band() == (None, "")

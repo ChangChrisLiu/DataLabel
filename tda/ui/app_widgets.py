@@ -29,6 +29,10 @@ class BoxDragTool(Tool):
     """
 
     sigBox = Signal(object)
+    #: Whether the drag is drawn as the canvas' rubber band.  The ROI tool's
+    #: is not: it previews the rectangle *as the ROI* (``sigPreview``), and a
+    #: second, differently coloured outline on the same edges is noise.
+    SHOWS_BAND = True
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -42,7 +46,7 @@ class BoxDragTool(Tool):
         if self._start is None:
             return
         self.box = self._norm(x, y)
-        if self.canvas is not None:
+        if self.canvas is not None and self.SHOWS_BAND:
             self.canvas.set_rubber_band(self.box)
 
     def on_release(self, x: float, y: float, ev: Any) -> None:
@@ -78,6 +82,7 @@ class RoiBoxTool(BoxDragTool):
 
     #: How close to a handle (screen px) still counts as grabbing it.
     GRAB_PX = 9
+    SHOWS_BAND = False
     #: Smallest rectangle a resize may leave, in image pixels.
     MIN_SIDE = 4.0
     _CURSORS = {

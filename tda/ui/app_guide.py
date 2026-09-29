@@ -36,6 +36,7 @@ from tda.ui import app_support as S
 from tda.ui import guide as G
 from tda.ui import session_api as api
 from tda.ui.app_roi import BENCH_NEEDS_ITEM, ON_BENCH
+from tda.ui.canvas import overlay_style as _OS
 from tda.ui.class_names import instance_label
 from tda.ui.panels.palette import RADIUS_MAX, RADIUS_MIN
 
@@ -68,9 +69,23 @@ HINT_MAX_DRAFTS = 5
 #: The hover's step window: unbounded, i.e. the pose segment ``drafts_for``
 #: clamps it to.  ``Shift+A`` keeps its own ±2 (``ls_adopt.NEAR_STEPS``).
 HINT_DRAFT_STEPS = 100_000
-HINT_DRAFT_RGB = (96, 208, 255)
-HINT_SHAPE_RGB = (80, 220, 120)
-HINT_DIFF_RGB = (255, 150, 40)
+#: The hover outlines' colours are the canvas overlay kinds' own
+#: (:mod:`tda.ui.canvas.overlay_style`), which no instance mask can have.
+HINT_DRAFT_RGB = _OS.DRAFT_RGB
+HINT_SHAPE_RGB = _OS.SHAPE_RGB
+HINT_DIFF_RGB = _OS.PROMPT_RGB
+#: The chips' words (ruling U2g-3): what each outline *is*, Chinese first.
+HINT_DIFF_LABEL = "差异最大处（SAM 提示框）"
+#: The box SAM is armed with is a ``Shift+C`` alternate, not the strongest.
+HINT_DIFF_ALT_LABEL = "差异图第 {rank} 处（SAM 提示框）"
+#: The strongest change, when SAM is not armed with it (no ROI yet, or the
+#: change covers most of the ROI and would be no prompt at all).
+HINT_DIFF_UNARMED_LABEL = "差异最大处"
+#: With the step: one draft traced on two steps is two outlines, and two
+#: chips saying the same thing would read as a mistake.
+HINT_DRAFT_LABEL = "旧草稿 {key}（第 {step} 帧）"
+HINT_SHAPE_LABEL = "第 {step} 帧画的形状"
+HINT_SHAPE_HERE_LABEL = "这一帧画的形状"
 
 #: Two outlines this similar are one place, said once with both names.
 HINT_SAME_PLACE_IOU = 0.5
@@ -736,8 +751,8 @@ class GuideMixin:
                 best = (distance, union, int(kf.anchor_step))
         if best is None:
             return []
-        label = ("它现在的形状" if best[2] == int(key.step)
-                 else f"第 {best[2]} 帧的形状")
+        label = (HINT_SHAPE_HERE_LABEL if best[2] == int(key.step)
+                 else HINT_SHAPE_LABEL.format(step=best[2]))
         return [(best[1], label, HINT_SHAPE_RGB)]
 
     def _draft_hints(self, key, row: dict, instance: str,
@@ -769,7 +784,8 @@ class GuideMixin:
             box = tuple(float(v) for v in candidate.box)
             if any(_iou(box, kept) >= HINT_SAME_PLACE_IOU for kept, _l, _c in out):
                 continue
-            out.append((box, "旧草稿", HINT_DRAFT_RGB))
+            out.append((box, HINT_DRAFT_LABEL.format(key=candidate.key, step=candidate.step),
+                        HINT_DRAFT_RGB))
             if len(out) >= HINT_MAX_DRAFTS:
                 break
         return out
@@ -785,5 +801,10 @@ class GuideMixin:
         box = self._frame_diff_box(key)
         if box is None:
             return []
-        label = "差异图的提示框" if self._prompt_box is not None else "差异最大处"
+        if self._prompt_box is None:
+            label = HINT_DIFF_UNARMED_LABEL
+        elif int(getattr(self, "_prompt_rank", 0) or 0) > 0:
+            label = HINT_DIFF_ALT_LABEL.format(rank=int(self._prompt_rank) + 1)
+        else:
+            label = HINT_DIFF_LABEL
         return [(box, label, HINT_DIFF_RGB)]

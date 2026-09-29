@@ -789,6 +789,49 @@ def test_the_difference_map_box_is_outlined_for_a_part_that_came_back(window):
     assert window._diff_hint(key, {"kind": api.KIND_ADD_SHAPE})[0][0] == (5.0, 6.0, 10.0, 12.0)
 
 
+def test_every_outline_says_what_it_is_in_its_chip(window):
+    """U2g ruling 3: each hover outline's label is the chip's text, Chinese first."""
+    from tda.core.diffmap import DiffBlob
+    from tda.ui.app_guide import (
+        HINT_DIFF_LABEL,
+        HINT_DIFF_UNARMED_LABEL,
+        HINT_DRAFT_RGB,
+        HINT_SHAPE_RGB,
+    )
+    from tda.ui.canvas import overlay_style as OS
+
+    assert HINT_DIFF_LABEL == "差异最大处（SAM 提示框）"
+    assert (HINT_DRAFT_RGB, HINT_SHAPE_RGB) == (OS.DRAFT_RGB, OS.SHAPE_RGB)
+    answer_roi(window)
+    window.act_step(-1)
+    key = window.session.current()
+    blob = DiffBlob(box=(3, 4, 20, 22), area=80, score=1.0)
+    window.assist_result = {"key": key, "blobs": [blob], "unexplained": [blob],
+                            "explained": []}
+    window._prompt_box = None
+    row = {"kind": api.KIND_ADD_SHAPE}
+    # not what SAM is armed with: only "the biggest change"
+    assert window._diff_hint(key, row)[0][1] == HINT_DIFF_UNARMED_LABEL
+    window._prompt_box, window._prompt_rank = (3.0, 4.0, 20.0, 22.0), 0
+    (_box, label, rgb), = window._diff_hint(key, row)
+    assert label == HINT_DIFF_LABEL and rgb == OS.PROMPT_RGB
+    window._prompt_rank = 2                              # a Shift+C alternate
+    assert window._diff_hint(key, row)[0][1] == "差异图第 3 处（SAM 提示框）"
+
+    instance = "cover.01"
+    window.session.db.add_keyframe(ShapeKeyframe(
+        id=None, instance=instance, desktop=DESKTOP, view=VIEW, pose_segment=1,
+        anchor_step=LAST_STEP - 2, placement="in_chassis", geom_type="mask",
+        parts=[ShapePart("main", masks.encode_rle(cell(9)))],
+    ))
+    shape = window._shape_hint(window.session.current(), instance)
+    assert shape and shape[0][1] == f"第 {LAST_STEP - 2} 帧画的形状"
+    _screw_draft(window, 3, 3, (30, 30, 33, 33))
+    drafts = window._draft_hints(window.session.current(), {"cls": "screw"},
+                                 "screw.motherboard.01")
+    assert drafts and drafts[0][1] == f"旧草稿 ls:{SCREW_LABEL}#3（第 3 帧）"
+
+
 def test_outlines_of_one_place_are_one_outline_with_both_names():
     """The difference map's box and a draft on the same screw overlapped labels."""
     from tda.ui.app_guide import _merge_hints
