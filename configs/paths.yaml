@@ -1,10 +1,24 @@
-# Filesystem roots used by tda. F: is read-only raw data; D: holds everything we produce.
+# Filesystem roots used by tda. The raw data drive is read-only; D: holds
+# everything we produce.
+#
+# The raw dataset is on an external drive whose letter changes from one plug-in
+# to the next. The four roots below are where it was *recorded* -- every stored
+# frame path starts with them -- not where it is today: at startup
+# tda.core.rawroot checks f_root, and when it does not hold the dataset's three
+# folders (OAKD Capture, UGA DATA, Realsense Capture) it looks for
+# <X>:/<raw_marker> on every drive letter. One match is used, none means "raw
+# data drive not connected", several are told apart by raw_volume_label.
 f_root: "F:/PHD Data Backup/Desktop Dataset"
 scanner_root: "F:/PHD Data Backup/Desktop Dataset/UGA DATA"
 oak_root: "F:/PHD Data Backup/Desktop Dataset/OAKD Capture/Desktop_Datacollection/DesktopData"
 rs_root: "F:/PHD Data Backup/Desktop Dataset/Realsense Capture/Dataset Information/Exp"
+raw_marker: "PHD Data Backup/Desktop Dataset"
+raw_volume_label: "Elements"
 cache_dir: "D:/DataSet/cache"
 db_path: "D:/DataSet/annotations/tda.sqlite"
+# On the raw drive, so it follows that drive to whatever letter it has today;
+# with the drive unplugged there is no backup (and no folder is ever created
+# anywhere else). A backup_dir off the raw drive must already exist.
 backup_dir: "F:/PHD Data Backup/Desktop Dataset/TDA_backups"
 # How many copies backup_dir keeps. Every destructive command and every app exit
 # adds an ~18 MB one, so without a limit the drive fills up. The newest copy of

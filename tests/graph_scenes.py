@@ -90,9 +90,10 @@ EXPECTED = {
     ("covered_by", "cpu.01", "cpu_cooler.fan.01"),
 }
 
-#: Bench classes that nothing can remove: a latch, a lever and the chassis
-#: itself are not in ``remove.applies_to`` (spec 6.3).
-NOT_REMOVABLE = frozenset({"chassis", "cpu_socket_lever", "psu_latch", "ram_latch"})
+#: Bench classes that nothing can remove: the board-moulded latch and lever and
+#: the chassis itself are not in ``remove.applies_to`` (spec 6.3). A PSU latch
+#: is -- it can be taken out by hand (task U2a).
+NOT_REMOVABLE = frozenset({"chassis", "cpu_socket_lever", "ram_latch"})
 
 #: Every class the bench desktop is built from, as a guard on class sweeps.
 BENCH_CLASSES = frozenset({

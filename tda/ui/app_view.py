@@ -98,6 +98,14 @@ class ToolsMixin:
         if name in ("sam_point", "sam_box") and not self.sam_available:
             self.report(f"SAM is unavailable: {self.sam_reason}")
             return
+        if (name == "bench_box" and not getattr(self, "bench_instance", None)
+                and not self._selected_bench_instance()):
+            # With nothing on the bench to box, the tool would only eat the
+            # next drag -- and the trial pressed R meaning "the ROI".
+            from tda.ui.app_roi import BENCH_NEEDS_ITEM
+
+            self.report(BENCH_NEEDS_ITEM)
+            return
         if name != "bench_box":
             self.disarm_bench()   # the arm belongs to the box tool, not to the brush
         losing = self._candidate_tool()

@@ -40,6 +40,22 @@ ROI_BAR_EDITING = (
     "inside it and the view zooms to it。拖动边或角可以调整，框里按住可以整体"
     "移动，空白处拖动重画 → Enter 保存；Esc 先跳过，之后按 Shift+R 再画。"
 )
+#: The same bar over a rectangle that is already stored: ``Esc`` keeps it.
+ROI_BAR_EDITING_STORED = (
+    "编辑已存的机箱范围（ROI：差异图和 SAM 提示框只在框里算）/ editing the stored "
+    "chassis range (the difference map and SAM's prompt boxes stay inside it) — "
+    "拖动边或角调整，框里按住整体移动 / drag an edge or a corner, or drag inside "
+    "to move it → Enter 保存 / Enter saves；Esc 保持原来的不变 / Esc keeps it as it was。"
+)
+#: Bare ``R`` with no part on the bench armed: it is not the ROI (trial #2).
+BENCH_NEEDS_ITEM = (
+    "R 是台面框（放在台面上的零件）；改机箱范围用 Shift+R 或工具栏的 ROI / R is "
+    "the bench box for a part lying on the bench; to change the chassis range "
+    "(ROI) press Shift+R or use the toolbar's ROI button"
+)
+#: ``编辑 ROI`` on a frame with no picture to draw it on.
+ROI_NO_IMAGE = ("这一帧没有图像，不能编辑 ROI / this frame has no image to draw "
+                "the ROI on")
 #: The compact reminder that replaces it once the annotator starts working.
 ROI_BAR_PENDING = (
     "ROI 未确认 / chassis range not answered — 现在差异图和 SAM 提示框会在整张"
@@ -113,13 +129,28 @@ class RoiMixin:
 
     @S.guard
     def act_edit_roi(self) -> None:
-        """``Shift+R``: draw the chassis rectangle again -- through the gate.
+        """``编辑 ROI`` (``Shift+R``, the status bar's ROI label, the toolbar).
+
+        Opens the rectangle **on the stored ROI** when the segment has one --
+        eight handles, drag inside to move, ``Enter`` saves, ``Esc`` keeps it
+        exactly as it was -- and proposes one when it has none. The annotator's
+        second trial ended with a stored rectangle nothing could reach: it was
+        a thin outline, and the one key that opened it was not written
+        anywhere they looked (trial #2).
 
         Arming the ROI tool takes ``Enter`` and ``Esc`` away from an uncommitted
         editing layer and gives them to a rectangle, so it is a way out of the
-        edit like every other one and is refused the same way.
+        edit like every other one and is refused the same way. From Steps or
+        Review mode it goes to Annotate first: the rectangle is drawn there.
         """
         if not self.can_leave_edit():
+            return
+        if self.mode != "annotate":
+            self.set_mode("annotate")
+            if self.mode != "annotate":
+                return
+        if self.session.image() is None:
+            self.report(ROI_NO_IMAGE)
             return
         self.start_roi_edit()
 
@@ -159,6 +190,10 @@ class RoiMixin:
         self._roi_dragged = False
         self._roi_awaiting = stored is None
         self._roi_wanted = self._roi_segment_key()
+        #: The segment this rectangle is *about*. Everything that ends it --
+        #: above all leaving the segment -- answers for that one, never for
+        #: the segment the frame happens to be on by then (trial #2).
+        self._roi_editing_key = self._roi_wanted
         if stored is not None:
             self.roi_draft = tuple(int(v) for v in stored)
         else:
@@ -394,7 +429,14 @@ class RoiMixin:
 
     # ------------------------------------------------------- the ROI on screen
     def _show_roi_rect(self) -> None:
-        """Put the rectangle (or the stored one) on the canvas and in the tool."""
+        """Put the rectangle (or the stored one) on the canvas and in the tool.
+
+        The minimap goes while the rectangle is up. On a frame zoomed to its
+        ROI it sits *inside* the rectangle on screen, and a left drag there
+        re-centred the view instead of moving the rectangle -- "在框里移动只是
+        修改视角", the second trial's report.
+        """
+        self.canvas.set_minimap_suppressed(bool(self.roi_editing))
         if self.roi_editing:
             self.canvas.set_roi(self.roi_draft, editing=True)
             self.roi_tool.set_rect(self.roi_draft)
@@ -431,8 +473,8 @@ class RoiMixin:
                 buttons[name].setVisible(True)
             for name in ("accept", "redraw", "none"):
                 buttons[name].setVisible(False)
-            self.roi_bar.show_text(
-                ROI_BAR_EDITING + (ROI_BAR_UNUSABLE if unusable else ""))
+            editing = ROI_BAR_EDITING_STORED if self.roi() is not None else ROI_BAR_EDITING
+            self.roi_bar.show_text(editing + (ROI_BAR_UNUSABLE if unusable else ""))
             return
         if self.roi_unanswered():
             buttons["save"].setVisible(False)
@@ -547,6 +589,7 @@ class RoiMixin:
         answered = self.roi_key()
         self.roi_draft = accepted
         self.roi_editing = False
+        self._roi_editing_key = None
         self._roi_accept_when_measured = None
         # The question is answered: the reminder never comes back for it.
         self._roi_pending.discard(answered)
@@ -683,15 +726,22 @@ class RoiMixin:
         self.roi_draft = self.roi()
         self._roi_awaiting = False
         self.roi_proposer.cancel()   # nobody is waiting for it any more
-        dismissed = self.roi_key()
+        # The segment the rectangle was opened for. Leaving a desktop or a
+        # segment with the rectangle up ends it *after* the frame has moved,
+        # and the trial's log then filed the dismissal under the segment
+        # arrived at -- "dismissed segment=(13, ...)" on the way out of D12.
+        dismissed = getattr(self, "_roi_editing_key", None) or self.roi_key()
+        self._roi_editing_key = None
         if dismissed is not None:
             self._roi_dismissed.add(dismissed)
         self.canvas.set_rubber_band(None)
         self._attach_tool()
         self._show_roi_rect()
         self.refresh_roi_bar()
+        # ... and leaving is not an answer: a segment still waiting for its
+        # ROI keeps waiting, reminder included.
         self.logger.info("roi rectangle dismissed segment=%s; unanswered=%s",
-                         dismissed, self.roi_unanswered())
+                         dismissed, dismissed in self._roi_pending)
         self.update_status()
 
     # ------------------------------------------------------------ bench box

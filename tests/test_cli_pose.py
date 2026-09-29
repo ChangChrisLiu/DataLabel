@@ -62,6 +62,7 @@ def env(tmp_path: Path) -> dict:
     db_path = tmp_path / "annotations" / "tda.sqlite"
     cfg = {"cache_dir": str(tmp_path / "cache"), "db_path": str(db_path),
            "backup_dir": str(tmp_path / "backups"), "backup_keep": 3}
+    (tmp_path / "backups").mkdir()   # off the raw drive it must already exist
     paths = tmp_path / "paths.yaml"
     paths.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
@@ -177,7 +178,7 @@ def test_the_import_command_backs_up_before_it_writes(env: dict, events: str):
 
 def test_a_dry_run_takes_no_backup(env: dict, events: str):
     assert run(env, "pose-breaks", "import", events, "--dry-run") == EXIT_OK
-    assert not (env["root"] / "backups").exists()
+    assert not list((env["root"] / "backups").glob("tda_*.sqlite"))
 
 
 def test_import_without_a_file_is_one_line_and_an_error(env: dict):
@@ -186,7 +187,7 @@ def test_import_without_a_file_is_one_line_and_an_error(env: dict):
 
 def test_a_missing_events_file_is_reported_not_a_traceback(env: dict):
     assert run(env, "pose-breaks", "import", str(env["root"] / "nope.csv")) == EXIT_ERROR
-    assert not (env["root"] / "backups").exists()   # refused before the backup
+    assert not list((env["root"] / "backups").glob("tda_*.sqlite"))   # refused before the backup
 
 
 def test_a_proposal_for_an_unknown_desktop_is_skipped_not_invented(env: dict, events: str):
@@ -295,7 +296,7 @@ def test_an_unknown_desktop_is_refused_before_the_backup(env: dict):
     assert run(env, "pose-breaks", "reject", "--desktop", "99", "--view", VIEW,
                "--step", "19") == EXIT_ERROR
 
-    assert not (env["root"] / "backups").exists()
+    assert not list((env["root"] / "backups").glob("tda_*.sqlite"))
     db = open_db(env)
     try:
         assert 99 not in db.desktop_ids()
@@ -307,7 +308,7 @@ def test_an_unknown_desktop_is_refused_before_the_backup(env: dict):
 def test_a_break_that_is_not_there_is_refused_before_the_backup(env: dict):
     assert run(env, "pose-breaks", "reject", "--desktop", str(DESKTOP), "--view", VIEW,
                "--step", "19") == EXIT_ERROR
-    assert not (env["root"] / "backups").exists()
+    assert not list((env["root"] / "backups").glob("tda_*.sqlite"))
 
 
 def test_a_break_for_a_view_with_no_frames_is_stored_and_cuts_nothing(env: dict):

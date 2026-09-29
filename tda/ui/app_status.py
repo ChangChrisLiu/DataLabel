@@ -19,6 +19,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QSizePolicy
 
 from tda.ui import app_compat as compat
+from tda.ui.app_widgets import ClickLabel
 
 __all__ = ["KNOWN_FAILURES", "StatusMixin", "explain_exception"]
 
@@ -61,8 +62,14 @@ class StatusMixin:
             "QLabel { font-weight: bold; padding: 1px 7px; border-radius: 3px;"
             " background: #2f3238; color: #ffe840; }"
         )
-        self.roi_label = QLabel("")
+        # Clickable: it is where the annotator looks for "is there an ROI?", so
+        # it is also where they can change it -- a stored rectangle used to be
+        # reachable only through a Shift+R nobody had been told about.
+        self.roi_label = ClickLabel("")
         self.roi_label.setStyleSheet("QLabel { padding: 1px 5px; }")
+        self.roi_label.setToolTip("点击编辑 ROI（机箱范围，Shift+R）/ click to edit "
+                                  "the ROI, the chassis range (Shift+R)")
+        self.roi_label.sigClicked.connect(self.act_edit_roi)
         self.sam_label = QLabel("")
         self.hint_label = QLabel("")
         # The Chinese hints start with a full-width glyph, which Qt draws hard

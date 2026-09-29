@@ -146,6 +146,8 @@ class ShellMixin:
             "no image for this step in this view\n本视图在该步骤没有图像"
         )
         self.placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # it may name a long path on the raw drive (tda.ui.app_rawdata)
+        self.placeholder_label.setWordWrap(True)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.canvas)
         self.stack.addWidget(self.placeholder_label)
@@ -367,13 +369,17 @@ class ShellMixin:
         """The desktop/view/step this annotator last had open, as far as it is known."""
         return _read_last_frame(self.settings, annotator)
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, close_log: bool = True) -> None:
         """Stop every thread and detach; the database is the caller's business.
 
         Order matters: the assist threads (the SAM queue, the SAM loader and the
         difference worker) are stopped **first**, because each of them can
         deliver into the window, and a result landing after the session has been
         closed is an exception out of a Qt slot with nothing left to catch it.
+
+        ``close_log=False`` leaves the log file open: :meth:`closeEvent` still
+        has the exit backup and the lock to report on, and "exit backup
+        skipped" written after the log was closed went nowhere.
         """
         if self.closed:
             return
@@ -412,9 +418,10 @@ class ShellMixin:
                 pass
         if self._cheat_sheet is not None:
             self._cheat_sheet.close()
-        self.logger.info("window closed (%s)", self.annotator)
         sys.excepthook = self._previous_hook
-        S.close_logger(self.logger)
+        if close_log:
+            self.logger.info("window closed (%s)", self.annotator)
+            S.close_logger(self.logger)
 
     def closeEvent(self, event) -> None:  # noqa: D102 - Qt override
         if not self._settle_uncommitted_edit():
@@ -422,7 +429,8 @@ class ShellMixin:
             return
         self.flush_sidecar()
         self.save_window_state()
-        self.shutdown()                       # threads first, then the database
+        # threads first, then the database; the log stays open for the backup
+        self.shutdown(close_log=False)
         try:
             self.session.save()
             compat.close_session(self.session)  # joins the session's sweeper
@@ -433,6 +441,8 @@ class ShellMixin:
             self.db.release_lock()
         except Exception as exc:  # noqa: BLE001
             self.report_error(f"releasing the lock failed: {exc}")
+        self.logger.info("window closed (%s)", self.annotator)
+        S.close_logger(self.logger)
         event.accept()
 
     def _settle_uncommitted_edit(self) -> bool:
@@ -469,10 +479,28 @@ class ShellMixin:
         return True
 
     def _backup_on_exit(self) -> None:
-        """Back the database up and *verify* it; a failure warns, never blocks."""
-        dest = self.paths.get("backup_dir")
-        if not dest:
+        """Back the database up and *verify* it; a failure warns, never blocks.
+
+        Where it goes is :func:`tda.pipeline.ready_backup_dest`'s answer: the
+        raw drive's ``TDA_backups`` at the letter that drive has *today*. With
+        the drive unplugged there is no such place, and the backup is skipped
+        with a line that says so -- it used to build ``F:/PHD Data Backup/...``
+        on whatever other drive was ``F:`` that day.
+        """
+        from tda import pipeline as P
+        from tda.core.rawroot import BackupUnavailable
+
+        if not self.paths.get("backup_dir"):
             self.report_error("no backup_dir in paths.yaml: no exit backup was made")
+            return
+        try:
+            dest = P.ready_backup_dest(self.paths)
+        except BackupUnavailable as exc:
+            self.logger.warning("exit backup skipped: %s", exc)
+            self.report(f"退出备份已跳过 / exit backup skipped: {exc}")
+            return
+        except Exception as exc:  # noqa: BLE001 - the annotator still gets to leave
+            self.report_error(f"exit backup failed: {exc}")
             return
         try:
             keep = self._backup_keep()
@@ -622,7 +650,12 @@ def main(paths: str = "configs/paths.yaml", desktop: Optional[int] = None,
     from tda.ui import app as app_module
     from tda.ui.session import AnnotationSession
 
+    from tda.core import rawroot
+
     config = P.load_paths(paths)
+    # Before the session: opening it already reads the first frame, and a
+    # stored ``F:/...`` means wherever the raw drive is today.
+    rawroot.configure(config)
     who = annotator or "annotator"
     db_path = db or P.require(config, "db_path")
     app = QApplication.instance() or QApplication(sys.argv[:1])

@@ -273,6 +273,11 @@ class EditMixin:
         # covers the frames that repaint; this covers the ones that do not,
         # including a view with no image at this step.
         self.forget_draft_ghost()
+        if self.roi_editing and getattr(self, "_roi_editing_key", None) != self.roi_key():
+            # The rectangle belongs to the segment (or desktop, or view) just
+            # left: it ends there, dismissed under *that* segment, which stays
+            # unanswered -- leaving is not an answer (trial #2).
+            self.cancel_roi_edit()
         if self.session.image() is not None:
             if self.roi() is not None:
                 if self.roi_editing:

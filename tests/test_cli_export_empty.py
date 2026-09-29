@@ -62,6 +62,7 @@ def bare(tmp_path: Path) -> Path:
         "raw_logs_dir": str(tmp_path / "raw_logs"),
     }
     Path(cfg["db_path"]).parent.mkdir(parents=True, exist_ok=True)
+    Path(cfg["backup_dir"]).mkdir(exist_ok=True)   # off the raw drive it must exist
     (tmp_path / "paths.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
     db = Db(cfg["db_path"])
     try:

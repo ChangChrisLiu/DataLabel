@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 from tda.ui.canvas.tools import Tool
 
-__all__ = ["MIN_BOX_PX", "Bar", "BoxDragTool", "RoiBoxTool"]
+__all__ = ["MIN_BOX_PX", "Bar", "BoxDragTool", "ClickLabel", "RoiBoxTool"]
 
 #: A drag shorter than this on either side is a click, not a box.
 MIN_BOX_PX = 2.0
@@ -236,6 +236,23 @@ class RoiBoxTool(BoxDragTool):
             y0 = min(max(0.0, y0), max(0.0, float(h) - height))
             return (x0, y0, min(float(w), x0 + width), min(float(h), y0 + height))
         return (max(0.0, x0), max(0.0, y0), min(float(w), x1), min(float(h), y1))
+
+
+class ClickLabel(QLabel):
+    """A status-bar label that is also a button (``ROI ✓`` opens the ROI editor)."""
+
+    sigClicked = Signal()
+
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None) -> None:
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:  # noqa: D102 - Qt override
+        if event.button() == Qt.MouseButton.LeftButton:
+            event.accept()
+            self.sigClicked.emit()
+            return
+        super().mousePressEvent(event)
 
 
 class Bar(QWidget):

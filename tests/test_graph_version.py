@@ -99,6 +99,7 @@ def test_constraints_stamps_exactly_what_the_accessor_answers(tmp_path):
 
     db_path = tmp_path / "annotations" / "tda.sqlite"
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "backups").mkdir()   # off the raw drive it must already exist
     (tmp_path / "paths.yaml").write_text(yaml.safe_dump({
         "cache_dir": str(tmp_path / "cache"),
         "db_path": str(db_path),
