@@ -53,6 +53,35 @@ HINT_DRAFT_RGB = (96, 208, 255)
 HINT_SHAPE_RGB = (80, 220, 120)
 HINT_DIFF_RGB = (255, 150, 40)
 
+#: Two outlines this similar are one place, said once with both names.
+HINT_SAME_PLACE_IOU = 0.5
+
+
+def _iou(a, b) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter)
+    return inter / union if union > 0 else 0.0
+
+
+def _merge_hints(hints: list) -> list:
+    """One outline per place: a draft on the difference map's box is one hint.
+
+    Two labels drawn on top of each other are two labels nobody can read.
+    """
+    out: list = []
+    for box, label, rgb in hints:
+        for index, (kept, kept_label, kept_rgb) in enumerate(out):
+            if _iou(box, kept) >= HINT_SAME_PLACE_IOU:
+                if label not in kept_label.split(" + "):
+                    out[index] = (kept, f"{kept_label} + {label}", kept_rgb)
+                break
+        else:
+            out.append((box, label, rgb))
+    return out
+
+
 _SAM_TOOLS = ("sam_point", "sam_box")
 _DRAW_TOOLS = ("brush", "eraser", "sam_point", "sam_box")
 _NO_EDIT = (None, False, False)
@@ -426,7 +455,7 @@ class GuideMixin:
             if len(self._hint_cache) > 64:
                 self._hint_cache.clear()
             self._hint_cache[(key, instance)] = cached
-        return self._diff_hint(key, row) + list(cached)
+        return _merge_hints(self._diff_hint(key, row) + list(cached))
 
     def _shape_hint(self, key, instance: str) -> list:
         seg = (self.db.pose_segment_for(key) or {}).get("seg")
@@ -487,6 +516,11 @@ class GuideMixin:
         payload = self.assist_result
         if not payload or payload.get("key") != key:
             return []
+        # The box SAM is armed with, when there is one -- it may be a
+        # ``Shift+C`` alternate -- and otherwise the difference map's own.
+        if self._prompt_box is not None:
+            return [(tuple(float(v) for v in self._prompt_box), "差异图的提示框",
+                     HINT_DIFF_RGB)]
         blob = best_unexplained(payload)
         if blob is None:
             return []

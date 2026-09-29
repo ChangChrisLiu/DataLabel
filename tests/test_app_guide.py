@@ -223,6 +223,55 @@ def test_a_palette_click_is_refused_outside_the_actions_mode(window):
     assert not window.palette.isHidden()
 
 
+def test_the_palette_goes_through_every_gate_its_key_does(window, monkeypatch):
+    """A button is a key: the gates live in the slots, so they hold for clicks."""
+    from tda.ui.app_adopt import ADOPT_FIRST
+    from tda.ui.app_edit import BLOCK_HINT
+
+    answer_roi(window)
+    _row, instance = first_row(window)
+    window.on_request_edit(instance)
+    brush_stroke(window)
+    step = window.session.current().step
+    # the dirty-layer gate: confirming steps the frame back, so it is refused
+    window.run_palette_action("confirm")
+    assert window.session.current().step == step
+    assert window.status_message() == BLOCK_HINT
+    # the ghost owns every commit key but Enter
+    monkeypatch.setattr(window, "showing_draft_ghost", lambda: True)
+    committed: list = []
+    monkeypatch.setattr(window.session, "commit_edit",
+                        lambda *a, **k: committed.append(a) or {})
+    window.run_palette_action("commit_split")
+    assert committed == [] and window.status_message() == ADOPT_FIRST
+    monkeypatch.undo()
+    # Review is read-only: a tool button does nothing there
+    window.act_clear_edit()
+    window.set_mode(A.MODE_REVIEW)
+    window.run_palette_action("tool_eraser")
+    assert window._tool_name != "eraser"
+    window.set_mode(A.MODE_ANNOTATE)
+
+
+def test_the_roi_rectangle_owns_the_palettes_esc(window):
+    """While the rectangle is up, 放弃编辑 answers the rectangle, not a layer."""
+    assert window.roi_editing
+    window.run_palette_action("clear_edit")
+    assert not window.roi_editing
+    assert window.roi_unanswered()
+
+
+def test_a_palette_click_ends_a_stuck_flash_first(window):
+    answer_roi(window)
+    window.act_step(-1)
+    window.act_flash_compare(True)
+    if not window.is_flashing():
+        pytest.skip("no neighbour image to flash")
+    window.run_palette_action("tool_eraser")
+    assert not window.is_flashing()
+    assert window._tool_name == "eraser"
+
+
 def test_the_armed_tool_is_the_checked_button(window):
     buttons = window.palette.buttons()
     assert buttons["edit_roi"].isChecked(), "the ROI rectangle is up on a fresh segment"
@@ -631,9 +680,26 @@ def test_the_difference_map_box_is_outlined_for_a_part_that_came_back(window):
     blob = DiffBlob(box=(3, 4, 20, 22), area=80, score=1.0)
     window.assist_result = {"key": key, "blobs": [blob], "unexplained": [blob],
                             "explained": []}
+    window._prompt_box = None
     hints = window._diff_hint(key, {"kind": api.KIND_ADD_SHAPE})
     assert hints and hints[0][0] == (3.0, 4.0, 20.0, 22.0)
     assert window._diff_hint(key, {"kind": api.KIND_STATE_ONLY}) == []
+    # the box SAM is actually armed with wins -- it may be a Shift+C alternate
+    window._prompt_box = (5.0, 6.0, 10.0, 12.0)
+    assert window._diff_hint(key, {"kind": api.KIND_ADD_SHAPE})[0][0] == (5.0, 6.0, 10.0, 12.0)
+
+
+def test_outlines_of_one_place_are_one_outline_with_both_names():
+    """The difference map's box and a draft on the same screw overlapped labels."""
+    from tda.ui.app_guide import _merge_hints
+
+    diff = ((898.0, 799.0, 922.0, 822.0), "差异图的提示框", (255, 150, 40))
+    same = ((896.0, 800.0, 920.0, 821.0), "旧草稿", (96, 208, 255))
+    again = ((897.0, 800.0, 921.0, 821.0), "旧草稿", (96, 208, 255))
+    other = ((918.0, 354.0, 937.0, 372.0), "旧草稿", (96, 208, 255))
+    merged = _merge_hints([diff, same, again, other])
+    assert [label for _b, label, _c in merged] == ["差异图的提示框 + 旧草稿", "旧草稿"]
+    assert merged[0][0] == diff[0]
 
 
 # --------------------------------------------------------------------------- #
