@@ -37,6 +37,9 @@ PHASE_CLOSED = "closed"
 PHASE_RAW_MISSING = "raw_missing"
 PHASE_NO_IMAGE = "no_image"
 PHASE_FLASH = "flash"
+#: A ``P`` polygon or a ``Y`` circle half drawn (task U5a): ``Enter`` and
+#: ``Esc`` are the shape's until it is filled or dropped.
+PHASE_SHAPE = "shape"
 PHASE_GHOST = "ghost"
 PHASE_WARNING = "warning"
 PHASE_SCOPE = "scope"
@@ -54,7 +57,8 @@ PHASE_CONFIRM = "confirm"
 PHASE_CONFIRMED = "confirmed"
 PHASES: tuple[str, ...] = (
     PHASE_STEPS, PHASE_REVIEW, PHASE_CLOSED, PHASE_RAW_MISSING, PHASE_NO_IMAGE,
-    PHASE_FLASH, PHASE_GHOST, PHASE_WARNING, PHASE_SCOPE, PHASE_ROI, PHASE_BENCH,
+    PHASE_FLASH, PHASE_SHAPE, PHASE_GHOST, PHASE_WARNING, PHASE_SCOPE, PHASE_ROI,
+    PHASE_BENCH,
     PHASE_DRAW_EMPTY, PHASE_DRAW_PIXELS, PHASE_LOADED, PHASE_PICK, PHASE_BLOCKED,
     PHASE_CONFIRM, PHASE_CONFIRMED,
 )
@@ -129,6 +133,10 @@ class GuideFacts:
     #: When no blocking line in the pane can be clicked, the first one's own
     #: instruction ("输入刚变了：再按一次 Space"); ``""`` when one can (U2e).
     blocker_hint: str = ""
+    #: The filled shape half drawn (task U5a): ``"polygon"``, ``"circle"`` or
+    #: ``""``, and how many vertices the polygon has so far.
+    shape: str = ""
+    shape_vertices: int = 0
 
 
 @dataclass(frozen=True)
@@ -158,7 +166,14 @@ ROI_NONE = "机箱范围（ROI）：这一段不用 ✓"
 ROI_WARN = ("机箱范围（ROI）还没确认：画布下方点「确认建议框」，或 Shift+R 重画"
             "（不挡你继续）")
 PICK = "在右边任务卡上单击一个零件"
-DRAW = "画：S 在零件上点一下 / X 拖框；B 画笔补、E 橡皮修边"
+DRAW = ("画：S 在零件上点一下 / X 拖框；B 画笔补、E 橡皮修边；P 连点填一块；"
+        "Y 圆形：拖一下画一颗螺丝")
+#: The filled shapes half drawn (task U5a): the "now" line and step ③.
+POLYGON_NOW = ("现在：多边形已点 {n} 个点 — 沿边接着点；Enter / 双击 / 点回第一个点 填上，"
+               "Backspace 删一个点，Esc 取消")
+POLYGON_DRAW = "多边形 {n} 个点：Enter / 双击 / 点回起点 填上"
+CIRCLE_NOW = "现在：拖到零件边缘松手，圆就填进去；Esc 取消"
+CIRCLE_DRAW = "圆形：拖到边缘松手"
 DRAW_BENCH = "在台面上拖一个框框住它（台面框 R），松手就存好"
 COMMIT = "Enter 提交（形状从这帧起变了用 Ctrl+K；只这一帧特殊用 Alt+Enter）"
 COMMIT_SPLIT = "Ctrl+K 提交（从这帧起新版本）— 这一条不要按 Enter"
@@ -273,6 +288,17 @@ def plan_for(facts: GuideFacts) -> GuidePlan:
 def _annotate_plan(facts: GuideFacts) -> GuidePlan:
     title = _title(facts)
     editing = facts.editing
+    if facts.shape and editing:
+        # First, as it is first in the Enter / Esc chains: the gesture in the
+        # annotator's hand owns both keys until it is filled or dropped (U5a).
+        picked = f"已选中：{editing}"
+        if facts.shape == "polygon":
+            n = int(facts.shape_vertices)
+            return GuidePlan(PHASE_SHAPE, title, POLYGON_NOW.format(n=n),
+                             _steps(facts, 2, pick_text=picked,
+                                    draw_text=POLYGON_DRAW.format(n=n)), "")
+        return GuidePlan(PHASE_SHAPE, title, CIRCLE_NOW,
+                         _steps(facts, 2, pick_text=picked, draw_text=CIRCLE_DRAW), "")
     if facts.ghost:
         return GuidePlan(PHASE_GHOST, title,
                          "现在：淡蓝色是旧草稿的预览 — Enter 采纳进编辑层再修，"
@@ -323,7 +349,7 @@ def _annotate_plan(facts: GuideFacts) -> GuidePlan:
         if facts.layer_dirty:
             return GuidePlan(PHASE_DRAW_PIXELS, title,
                              f"现在：「{editing}」的形状对了就按 Enter 提交；边缘不对用 "
-                             f"B 补 / E 擦，不想要就 Esc",
+                             f"B 补 / E 擦，漏掉的大块用 P 连点补，不想要就 Esc",
                              _steps(facts, 3, pick_text=picked), "commit")
         if facts.layer_pixels:
             # A stored shape, loaded and untouched: Enter has nothing to write

@@ -535,6 +535,32 @@ class LabelOverlay:
             self._editing_rect = _union(self._editing_rect, rect)
         return rect
 
+    def add_editing(self, patch: np.ndarray, box: Rect) -> Optional[Rect]:
+        """OR ``patch`` into the editing layer at ``box``; return the dirty rect.
+
+        The filled shapes (``P`` polygon, ``Y`` circle, task U5a) arrive as a
+        patch the size of their own bounding box, so adding one costs the size
+        of the shape, not of the frame.  ``box`` is ``(x0, y0, x1, y1)`` with
+        ``patch`` of shape ``(y1 - y0, x1 - x0)``; whatever hangs over the image
+        edge is dropped.  ``None`` when no set pixel of the patch lands on the
+        image -- the brush's rule for a stamp that falls outside it.
+        """
+        arr = np.asarray(patch, dtype=bool)
+        x0, y0, x1, y1 = (int(v) for v in box)
+        if arr.shape != (max(0, y1 - y0), max(0, x1 - x0)):
+            raise ValueError(f"patch {arr.shape!r} does not fit box {box!r}")
+        clipped = self._clip((x0, y0, x1, y1))
+        if clipped is None:
+            return None
+        cx0, cy0, cx1, cy1 = clipped
+        part = arr[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0]
+        if not part.any():
+            return None
+        self.editing[cy0:cy1, cx0:cx1] |= part
+        self._editing_rect = _union(self._editing_rect, clipped)
+        self._mark(clipped)
+        return clipped
+
     def paint_occluder(
         self,
         xy: tuple[int, int],

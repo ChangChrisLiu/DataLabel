@@ -40,6 +40,8 @@ def _badge_name(action_name: str) -> str:
 TOOL_LABELS: dict[str, tuple[str, str]] = {
     "brush": (_badge_name("tool_brush"), "Brush"),
     "eraser": (_badge_name("tool_eraser"), "Eraser"),
+    "polygon": (_badge_name("tool_polygon"), "Polygon"),
+    "circle": (_badge_name("tool_circle"), "Circle"),
     "sam_point": (_badge_name("tool_sam_point"), "SAM point"),
     "sam_box": (_badge_name("tool_sam_box"), "SAM box"),
     "occluder": (_badge_name("tool_occluder"), "Occluder"),
@@ -90,7 +92,8 @@ class ToolsMixin:
     # ----------------------------------------------------------- tool slots
     def _all_tools(self) -> tuple:
         return (self.brush, self.eraser, self.occluder, self.sam_point,
-                self.sam_box, self.roi_tool, self.bench_tool)
+                self.sam_box, self.roi_tool, self.bench_tool, self.polygon,
+                self.circle)
 
     @S.guard
     def act_tool(self, name: str) -> None:
@@ -157,6 +160,7 @@ class ToolsMixin:
             "brush": self.brush, "eraser": self.eraser, "occluder": self.occluder,
             "sam_point": self.sam_point, "sam_box": self.sam_box,
             "bench_box": self.bench_tool, "roi": self.roi_tool,
+            "polygon": self.polygon, "circle": self.circle,
         }.get(name, self.brush)
 
     def armed_tool_name(self) -> Optional[str]:
@@ -189,6 +193,17 @@ class ToolsMixin:
                               dashed=True)
         if name == "occluder":
             return ToolCursor("circle", OCCLUDER_RGB, self.occluder.radius)
+        if name == "polygon":
+            return ToolCursor("polygon", EDIT_RGB)
+        if name == "circle":
+            if self.circle.busy:
+                # Mid-drag the pointer is on the rim, and the canvas draws the
+                # disk being dragged: a ring there would be a second circle.
+                return ToolCursor("cross")
+            # The ring is the disk a plain click fills; the crosshair through
+            # it is what tells it from the brush (task U5a).
+            return ToolCursor("circle", EDIT_RGB, self.circle.click_radius,
+                              glyph="cross")
         return ToolCursor("cross")
 
     def sync_tool_cursor(self) -> None:
@@ -206,6 +221,12 @@ class ToolsMixin:
         for tool in self._all_tools():
             if tool is not wanted:
                 tool.detach()
+        # A shape half drawn with a tool that is no longer the armed one -- or
+        # outside Annotate mode, where no canvas key reaches it -- is dropped,
+        # never filled (task U5a).  Here rather than in the tools' ``detach``:
+        # holding Tab detaches every tool for a moment, and the polygon must
+        # survive a look at the other frame.
+        self.cancel_shapes(keep=wanted if self.mode == A.MODE_ANNOTATE else None)
         if self.tools_enabled and wanted is not None:
             wanted.attach()
             if wanted in (self.sam_point, self.sam_box):

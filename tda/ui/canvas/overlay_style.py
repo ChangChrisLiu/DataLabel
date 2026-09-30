@@ -43,11 +43,13 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap
 
 __all__ = [
     "CHIP_BG", "CHIP_GAP", "CHIP_MARGIN", "CHIP_MAX_W", "CURSOR_RING_PX", "DASH_PX",
-    "DRAFT_RGB", "DRAG_BAND", "DRAG_RGB", "GAP_PX", "HANDLE_EDGE", "HINT_PX",
+    "DRAFT_RGB", "DRAG_BAND", "DRAG_RGB", "FIRST_VERTEX_HOT_PX", "FIRST_VERTEX_PX",
+    "GAP_PX", "HANDLE_EDGE", "HINT_PX",
     "OCCLUDER_RGB", "OutlineStyle", "PROMPT_BOX", "PROMPT_POINT", "PROMPT_RGB",
     "RESERVED_HUE_HALF_WIDTH",
     "RESERVED_HUE_HALF_WIDTHS", "RESERVED_RGBS", "ROI_CHIP", "ROI_EDITING",
-    "ROI_HUE_HALF_WIDTH", "ROI_RGB", "ROI_STORED", "SHAPE_RGB",
+    "ROI_HUE_HALF_WIDTH", "ROI_RGB", "ROI_STORED", "SHAPE_CLOSING", "SHAPE_EDGE",
+    "SHAPE_RGB", "VERTEX_PX",
     "UNDER_ALPHA", "UNDER_EXTRA_PX", "chip_pixmap", "draw_outline_rect",
     "hint_style", "hue_degrees", "hue_distance", "place_chip", "reserved_half_width",
     "reserved_hue_bands",
@@ -170,6 +172,19 @@ PROMPT_BOX = OutlineStyle("prompt", PROMPT_RGB, 2.5)
 PROMPT_POINT = OutlineStyle("prompt_point", PROMPT_RGB, 2.0, dashed=False)
 #: A drag in progress (the rubber band).
 DRAG_BAND = OutlineStyle("drag", DRAG_RGB, 2.0)
+#: A filled shape being drawn (task U5a): the ``P`` polygon's placed edges,
+#: solid, and the edge that closes it back to the first vertex, dashed; the
+#: ``Y`` circle's rim is the drag band's own look.  White, like the drag band:
+#: it is what the hand is doing right now, and the editing layer's yellow is
+#: exactly what the edges run over (a SAM result with gaps in it).
+SHAPE_EDGE = OutlineStyle("shape_edge", DRAG_RGB, 2.0, dashed=False)
+SHAPE_CLOSING = OutlineStyle("shape_closing", DRAG_RGB, 2.0)
+#: A polygon vertex's dot, radius in logical (screen) pixels whatever the zoom;
+#: the first vertex is larger -- a click on it closes the polygon -- and larger
+#: again while the pointer is close enough for that click to count.
+VERTEX_PX = 3.5
+FIRST_VERTEX_PX = 5.0
+FIRST_VERTEX_HOT_PX = 7.5
 #: The ROI handles' edge, solid black: logical, like everything else.
 HANDLE_EDGE = OutlineStyle("handle_edge", (0, 0, 0), 1.0, dashed=False)
 #: The brush/eraser ring (drawn into a cursor pixmap, logical px there too):

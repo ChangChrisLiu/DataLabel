@@ -35,12 +35,14 @@ from tda.ui import app_compat as compat
 from tda.ui import app_support as S
 from tda.ui import guide as G
 from tda.ui import session_api as api
+from tda.ui.app_edit import SHAPE_BUSY
 from tda.ui.app_roi import BENCH_NEEDS_ITEM, ON_BENCH
 from tda.ui.canvas import overlay_style as _OS
 from tda.ui.class_names import instance_label
 from tda.ui.panels.palette import RADIUS_MAX, RADIUS_MIN
 
-__all__ = ["BANNER_EMPTY", "BANNER_PIXELS", "GuideMixin", "HINT_DWELL_MS", "VIS_NOTE_MS"]
+__all__ = ["BANNER_CIRCLE", "BANNER_EMPTY", "BANNER_PIXELS", "BANNER_POLYGON",
+           "GuideMixin", "HINT_DWELL_MS", "VIS_NOTE_MS"]
 
 #: The banner's two endings (ruling U2b-4).
 BANNER_EMPTY = "用 S 在零件上点一下，或 X 拖框"
@@ -51,6 +53,10 @@ BANNER_SPLIT = "Ctrl+K 从这帧起新版本 / Esc 放弃"
 #: A stored shape, loaded and untouched: Enter has nothing to write (item 2).
 BANNER_LOADED = "这是已存的形状：要改就画，改完 Enter；不改按 Esc"
 BANNER_LOADED_SPLIT = "这是前一版的形状：画出这一帧的样子，Ctrl+K 提交；不改按 Esc"
+#: A ``P`` polygon or a ``Y`` circle half drawn (task U5a): Enter and Esc are
+#: the shape's until it is filled or dropped.
+BANNER_POLYGON = "多边形 {n} 个点：Enter / 双击 / 点回起点 填上，Backspace 删点，Esc 取消"
+BANNER_CIRCLE = "圆形：拖到零件边缘松手填上，Esc 取消"
 #: How long the pointer rests on a card row before its outline is looked up.
 #: Passing over rows on the way to another one should not cost a query each.
 HINT_DWELL_MS = 120
@@ -251,7 +257,8 @@ class GuideMixin:
         """One radius for brush, eraser and occluder; the slider, ``[``/``]`` and
         the badge all end here."""
         value = min(max(int(radius), RADIUS_MIN), RADIUS_MAX)
-        for tool in (self.brush, self.eraser, self.occluder):
+        # ... and the circle tool's plain click, which fills a disk of it (U5a).
+        for tool in (self.brush, self.eraser, self.occluder, self.circle):
             tool.set_radius(value)
         self.sync_tool_cursor()      # the ring is the size of the stroke
         self.update_status()         # the badge's r=, and the palette's numbers
@@ -289,23 +296,30 @@ class GuideMixin:
             states[name] = (enabled, armed == tool, why)
 
         dirty = facts.layer_dirty
-        owner = facts.ghost or facts.roi_editing or bool(facts.scope) or facts.warning
+        # A half-drawn shape owns Enter too (task U5a): it closes the polygon.
+        owner = (facts.ghost or facts.roi_editing or bool(facts.scope) or facts.warning
+                 or bool(facts.shape))
         nothing = "没有可提交的修改：先在任务卡上单击一个零件，画好再提交"
         states["commit"] = (bool(not closed and (owner or dirty)), False, closed or nothing)
-        if facts.ghost:
+        if facts.shape:
+            why_scope = SHAPE_BUSY
+        elif facts.ghost:
             why_scope = "先处理草稿预览：Enter 采纳 / Esc 取消"
         elif facts.roi_editing:
             why_scope = "ROI 框开着：先 Enter 保存或 Esc 跳过"
         else:
             why_scope = nothing
-        scoped = bool(not closed and dirty and not facts.ghost and not facts.roi_editing)
+        scoped = bool(not closed and dirty and not facts.ghost and not facts.roi_editing
+                      and not facts.shape)
         # 只改这一帧 is an exception *on* a shape: with no keyframe under it
         # the part stays missing, so the button says so rather than write (U2d).
         no_shape = self.override_refusal() if scoped else ""
         states["commit_override"] = (scoped and not no_shape, False,
                                      closed or no_shape or why_scope)
         states["commit_split"] = (scoped, False, closed or why_scope)
-        if dirty:
+        if facts.shape:
+            why_confirm = SHAPE_BUSY
+        elif dirty:
             why_confirm = "有未提交的修改：先 Enter 提交或 Esc 放弃"
         elif facts.ghost:
             why_confirm = "先处理草稿预览：Enter 采纳 / Esc 取消"
@@ -450,6 +464,9 @@ class GuideMixin:
             # What the card's pane holds that makes Space refuse (U2d).
             blockers=self.task_card.problem_count() if opened else 0,
             blocker_hint=self.task_card.blocker_hint() if opened else "",
+            # The polygon or circle in the annotator's hand (U5a).
+            shape=self.shape_name(),
+            shape_vertices=len(self.polygon.vertices),
         )
 
     def _card_kind(self, instance: Optional[str]) -> str:
@@ -569,6 +586,11 @@ class GuideMixin:
         if instance:
             _inst, label, raw = self._edit_label
             head = f"正在画：{label}" + (f"（日志：{raw}）" if raw else " ")
+            if facts.shape == "polygon":
+                # Enter and Esc are the polygon's now, not the layer's (U5a).
+                return f"{head}— {BANNER_POLYGON.format(n=facts.shape_vertices)}"
+            if facts.shape == "circle":
+                return f"{head}— {BANNER_CIRCLE}"
             split = facts.editing_kind == api.KIND_SPLIT_KEYFRAME
             if facts.layer_dirty:
                 # The key a ✂ row is committed with; Enter would rewrite the

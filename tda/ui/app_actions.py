@@ -169,6 +169,15 @@ ACTIONS: tuple[Action, ...] = (
     # -- tools --------------------------------------------------------------
     _tool("brush", "B", "Brush", "画笔（加像素）", "画笔"),
     _tool("eraser", "E", "Eraser", "橡皮擦（减像素）", "橡皮擦"),
+    # Task U5a: two ways to add a whole region at once.  ``Y`` for the circle:
+    # 圆 is *yuán*, and C (candidates), O (occluder) and R (bench box) were
+    # taken; plain ``Y`` is free (``Ctrl+Y`` is redo, a different key).
+    _tool("polygon", "P", "Polygon fill",
+          "多边形（连点围一块：Enter / 双击 / 点回起点填上）", "多边形"),
+    _tool("circle", "Y", "Circle fill",
+          "圆形（圆心按下拖到边缘，松手填上；单击 = 笔刷大小的圆）", "圆形"),
+    Action("polygon_backspace", ("Backspace",), "act_polygon_backspace",
+           "Polygon: remove the last vertex", "多边形：删掉最后一个点", "tool", (), _ANN),
     _tool("sam_point", "S", "SAM point prompt", "SAM 点选（在零件上点一下）", "SAM 点选"),
     _tool("sam_box", "X", "SAM box prompt", "SAM 框选（拖一个框）", "SAM 框选"),
     _tool("occluder", "O", "Occluder brush", "遮挡层画笔（手/工具）", "遮挡（手/工具）"),
@@ -193,15 +202,16 @@ ACTIONS: tuple[Action, ...] = (
     Action("despeckle", ("Shift+D",), "act_despeckle", "Remove specks",
            "删除小碎块（默认 <16 像素）", "tool", (), _ANN),
     # -- editing ------------------------------------------------------------
+    # Enter and Esc answer a half-drawn P / Y shape first (task U5a).
     Action("commit", ("Return", "Enter"), "act_commit", "Commit edit",
-           "提交编辑（按建议范围）", "edit", (), _ANN, short="提交"),
+           "提交编辑（按建议范围；多边形没画完时先填上它）", "edit", (), _ANN, short="提交"),
     Action("commit_override", ("Alt+Return", "Alt+Enter"), "act_commit_override",
            "Commit for this frame only", "只对当前帧生效（帧覆盖）", "edit", (), _ANN,
            short="只改这一帧"),
     Action("commit_split", ("Ctrl+K",), "act_commit_split", "Split keyframe here",
            "从这一帧起拆分关键帧", "edit", (), _ANN, short="从这帧起新版本"),
     Action("clear_edit", ("Esc",), "act_clear_edit", "Discard the edit",
-           "放弃当前编辑", "edit", (), _ANN, short="放弃编辑"),
+           "放弃当前编辑（多边形 / 圆形没画完时只取消它）", "edit", (), _ANN, short="放弃编辑"),
     Action("confirm", ("Space",), "act_confirm", "Confirm the frame",
            "确认当前帧并后退一帧", "edit", (), _ANN, short="确认整帧"),
     # Review mode: the canvas is read-only, so its two keys are the queue's.
@@ -331,8 +341,8 @@ def _candidates(key, modifiers) -> list[int]:
 #: The palette's two columns of buttons (task U2b), top to bottom.  Names, not
 #: copies: every caption, key and tooltip is read off :data:`ACTIONS`.
 PALETTE_TOOLS: tuple[str, ...] = (
-    "tool_brush", "tool_eraser", "tool_sam_point", "tool_sam_box",
-    "tool_occluder", "tool_bench_box", "edit_roi",
+    "tool_brush", "tool_eraser", "tool_polygon", "tool_circle",
+    "tool_sam_point", "tool_sam_box", "tool_occluder", "tool_bench_box", "edit_roi",
 )
 PALETTE_ACTIONS: tuple[str, ...] = (
     "commit", "commit_override", "commit_split", "confirm", "undo", "redo",
