@@ -65,6 +65,7 @@ from tda.cli_pose import _add_pose_breaks
 from tda.cli_relations import _add_infer_relations
 from tda.core import rawroot
 from tda.core.db import Db
+from tda.core.extra import extra_keys
 from tda.core.index import build_index, load_index, respell_paths, save_index
 from tda.core.index_report import write_report
 from tda.core.model import VIEWS
@@ -187,7 +188,7 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
         "",
         f"- desktops imported: {len(imported)}",
         f"- desktops skipped (already had steps): {len(run.skipped)}",
-        f"- desktops refused (verified frames, no --force-verified): {len(run.refused)}",
+        f"- desktops refused (see their sections below): {len(run.refused)}",
         f"- desktops that failed to import: {len(run.failed)}",
         f"- steps: {sum(r.steps for r in imported)}",
         f"- actions: {sum(r.actions for r in imported)}",
@@ -197,6 +198,10 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
         f"- {L.INFERRED_HEADING}: {sum(len(r.fills) for r in imported)}",
         f"- instances dropped (the sheet no longer names them): "
         f"{sum(len(r.dropped) for r in imported)}",
+        f"- instances added in S1 and kept (not in the sheet): "
+        f"{sum(len(r.extras_kept) for r in imported)}",
+        f"- instances added in S1 and adopted by the sheet (--adopt-extras): "
+        f"{sum(len(r.adopted) for r in imported)}",
         f"- issues: {sum(len(r.issues) for r in imported)}",
         "",
         "| desktop | brand | steps | n_logged_steps | match | actions | instances "
@@ -225,9 +230,13 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
         lines.append("")
         # the drops first: they are the only thing here that removed a row
         lines.extend(f"- {text}" for text in r.dropped)
+        lines.extend(f"- {text}" for text in r.adopted)
+        if r.extras_kept:
+            lines.append(f"- kept {len(r.extras_kept)} instance(s) added in S1 (not in "
+                         f"the sheet): {', '.join(r.extras_kept)}")
         if r.issues:
             lines.extend(f"- {text}" for text in r.issues)
-        elif not r.dropped:
+        elif not (r.dropped or r.adopted or r.extras_kept):
             lines.append("- no issues")
         lines.append("")
         lines.extend(L.inferred_section(r))
@@ -245,6 +254,11 @@ REFUSAL_ADVICE = {
         "would shrink past believing -- far fewer steps than before, or too many "
         "instances deleted at once. Nothing was written. Check the sheets are "
         "complete exports; re-run with --force-drop if they really are right."
+    ),
+    L.REFUSED_EXTRAS: (
+        "would take over instances an annotator added in S1 (the sheet now names "
+        "their keys; the report lists them). Nothing was written. Re-run with "
+        "--adopt-extras to hand them to the sheet, or delete them in S1 first."
     ),
 }
 
@@ -272,7 +286,7 @@ def cmd_import_logs(args: argparse.Namespace) -> int:
         run = L.import_logs_into_db(
             db, directory, load_taxonomy(), index, _desktops(args), args.force,
             log=print, force_verified=args.force_verified,
-            force_drop=args.force_drop,
+            force_drop=args.force_drop, adopt_extras=args.adopt_extras,
         )
         imported = run.imported
         print(f"[import-logs] {len(imported)} desktops imported, {len(run.skipped)} skipped, "
@@ -342,6 +356,12 @@ def _add_import_logs(sub) -> None:
                         "desktop's instances about to be deleted. Without it such a "
                         "desktop is refused untouched, because an export truncated "
                         "to its header parses perfectly and means nothing")
+    p.add_argument("--adopt-extras", action="store_true",
+                   help="let the sheet take over instances an annotator added in S1 "
+                        "(Steps > Add parts) whose keys it now produces: their "
+                        "provenance and hand-set initial state are dropped, their "
+                        "shapes stay on the key, and one op_log row records how to undo "
+                        "it. Without it such a desktop is refused untouched")
     p.set_defaults(func=cmd_import_logs)
 
 
@@ -496,8 +516,14 @@ def format_desktop(db: Db, row: dict) -> str:
         f"Desktop {row['desktop']}  {row['brand']}",
         f"  steps {row['steps']} ({types or 'none'}), actions {row['actions']}, "
         f"instances {row['instances']}, state events {row['events']}",
-        f"  {'view':<6}{'frames':>8}{'missing':>9}{'keyframes':>11}{'done/work':>12}",
     ]
+    added = extra_keys(db.instances(row["desktop"]))
+    if added:
+        # counted among the instances above; said apart because no sheet
+        # names them, so nothing but this line says they exist (task U5b)
+        lines.append(f"  added in S1 (not in the log): {len(added)} - {', '.join(added)}")
+    lines.append(
+        f"  {'view':<6}{'frames':>8}{'missing':>9}{'keyframes':>11}{'done/work':>12}")
     for view in VIEWS:
         counts = row["views"][view]
         # done/work as the window's [done/total]: no-image frames are not work

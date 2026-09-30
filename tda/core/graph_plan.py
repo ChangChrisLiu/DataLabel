@@ -24,7 +24,7 @@ the editor, the panel, the derivation and the CLI.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Iterable, Mapping, Optional
 
 from tda.core.graph_rules import (
     CABLE_PREFIX,
@@ -417,9 +417,15 @@ def _binding(edges: Iterable[Edge], necessity: str = "required") -> list[Edge]:
 
 
 def _simulated(edges: list[Edge], instances: dict[str, InstanceRec], tax: Taxonomy,
-               state: Optional[FrameState]) -> dict[str, str]:
-    """Every node's state to reason from: the frame state, then class defaults."""
-    state = state if state is not None else initial_state(instances, tax)
+               state: Optional[FrameState],
+               initial: Optional[Mapping[str, str]] = None) -> dict[str, str]:
+    """Every node's state to reason from: the frame state, then class defaults.
+
+    With no frame state it is the state before step 1 -- the class defaults,
+    except where ``initial`` (:func:`tda.core.states.initial_overrides`) says
+    an instance added in S1 starts otherwise.
+    """
+    state = state if state is not None else initial_state(instances, tax, initial)
     sim = {key: inst.state for key, inst in state.items()}
     for key, current in cable_nodes(edges, state).items():
         sim.setdefault(key, current)
@@ -479,6 +485,7 @@ def _analyse(
     tax: Taxonomy,
     state: Optional[FrameState],
     necessity: str,
+    initial: Optional[Mapping[str, str]] = None,
 ) -> tuple[dict[VerbTarget, list[tuple[Edge, list[VerbTarget]]]], set[VerbTarget],
            dict[str, str]]:
     """The reachable action graph and which of its actions can be done at all.
@@ -494,7 +501,7 @@ def _analyse(
        edges, OR over the alternatives).
     """
     binding = _binding(edges, necessity)
-    sim = _simulated(binding, instances, tax, state)
+    sim = _simulated(binding, instances, tax, state, initial)
     by_target: dict[str, list[Edge]] = {}
     for edge in binding:
         by_target.setdefault(edge.target, []).append(edge)
@@ -559,6 +566,7 @@ def find_dead_ends(
     instances: dict[str, InstanceRec],
     tax: Taxonomy,
     state: Optional[FrameState] = None,
+    initial: Optional[Mapping[str, str]] = None,
 ) -> list[DeadEnd]:
     """Every instance whose removal is impossible for want of an action.
 
@@ -566,9 +574,10 @@ def find_dead_ends(
     to give way and that nothing can make give way. An instance stuck only
     inside a loop is **not** listed here -- :func:`find_deadlocks` names that,
     and the two together explain every ``remaining_plan`` that answers ``None``
-    apart from classes that cannot be removed at all (spec 6.3).
+    apart from classes that cannot be removed at all (spec 6.3). ``initial``:
+    see :func:`_simulated`.
     """
-    waits, doable, sim = _analyse(edges, instances, tax, state, "required")
+    waits, doable, sim = _analyse(edges, instances, tax, state, "required", initial)
     out: list[DeadEnd] = []
     for key in sorted(instances):
         if is_provisional(key):
@@ -621,6 +630,7 @@ def find_deadlocks(
     tax: Taxonomy,
     state: Optional[FrameState] = None,
     necessity: str = "required",
+    initial: Optional[Mapping[str, str]] = None,
 ) -> list[Deadlock]:
     """Every deadlock of actions the graph holds (spec 7.4), in a stable order.
 
@@ -648,9 +658,9 @@ def find_deadlocks(
     ``necessity`` is the weakest level that binds (see :func:`_binding`):
     ``required`` by default, because a recommended edge is a preference the
     planner drops. ``state`` defaults to the initial state, which is the state
-    the graph is written about.
+    the graph is written about -- with ``initial`` (see :func:`_simulated`).
     """
-    waits, doable, _sim = _analyse(edges, instances, tax, state, necessity)
+    waits, doable, _sim = _analyse(edges, instances, tax, state, necessity, initial)
 
     # 3. among the stuck ones, the arrows that are loops rather than dead ends
     graph: dict[VerbTarget, list[VerbTarget]] = {}

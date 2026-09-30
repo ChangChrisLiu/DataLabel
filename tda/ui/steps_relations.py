@@ -149,13 +149,19 @@ class RelationsData:
         return [*self.instance_keys(), *sorted(cables)]
 
     def violations(self) -> list[Violation]:
-        """The spec 7.4 replay of the staged session (same as ``--validate``)."""
+        """The spec 7.4 replay of the staged session (same as ``--validate``).
+
+        Replayed from the initial states the session holds -- a part added in
+        S1 that the picture shows ``open`` starts open, staged or stored.
+        """
         return violations_of(settled_instances(self.data.instances), self.view().edges,
-                             self.data.actions, self.data.tax)
+                             self.data.actions, self.data.tax,
+                             initial=self.data.initial_states())
 
     def cycles(self) -> list:
         """The spec 7.4 deadlock check over the staged **active** graph."""
-        return find_deadlocks(self.view().edges, self.data.instances, self.data.tax)
+        return find_deadlocks(self.view().edges, self.data.instances, self.data.tax,
+                              initial=self.data.initial_states())
 
     def dead_ends(self) -> list:
         """Instances that cannot be planned out, and the edge nothing can clear.
@@ -165,7 +171,8 @@ class RelationsData:
         edge. It must not be *silent* either -- one ``Add edge`` click can write
         one (round 4, I-1).
         """
-        return find_dead_ends(self.view().edges, self.data.instances, self.data.tax)
+        return find_dead_ends(self.view().edges, self.data.instances, self.data.tax,
+                              initial=self.data.initial_states())
 
     def soft_conflicts(self) -> list:
         """Recommended edges that contradict each other -- a note, not a refusal.
@@ -177,7 +184,8 @@ class RelationsData:
         """
         strict = {d.actions for d in self.cycles()}
         return [d for d in find_deadlocks(self.view().edges, self.data.instances,
-                                          self.data.tax, necessity="recommended")
+                                          self.data.tax, necessity="recommended",
+                                          initial=self.data.initial_states())
                 if d.actions not in strict]
 
     def names(self, key: str) -> list[Edge]:
@@ -300,7 +308,8 @@ class RelationsData:
         the staged edits stay staged, because the annotator is one small change
         away from a graph that works.
         """
-        found = find_deadlocks(derivation.edges, self.data.instances, self.data.tax)
+        found = find_deadlocks(derivation.edges, self.data.instances, self.data.tax,
+                               initial=self.data.initial_states())
         if not found:
             return
         named = "; ".join(d.label() for d in found)

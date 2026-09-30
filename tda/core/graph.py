@@ -25,7 +25,7 @@ Everything is pure except :func:`edges_to_db` / :func:`edges_from_db`.
 from __future__ import annotations
 
 import hashlib
-from typing import Optional, Union
+from typing import Mapping, Optional, Union
 
 from tda.core.graph_plan import (
     DeadEnd,
@@ -242,6 +242,7 @@ def validate_sequence(
     edges: list[Edge],
     actions: list[ActionRec],
     tax: Taxonomy,
+    initial: Optional[Mapping[str, str]] = None,
 ) -> list[str]:
     """Replay the observed actions and report every spec 7.4 breach.
 
@@ -258,14 +259,19 @@ def validate_sequence(
     :func:`tda.core.states.events_from_actions`, so two actions in one compound
     step see each other's effect. Recommended edges are ignored: they are a
     preference, not a physical law, and a log that skips one is not wrong.
+
+    ``initial`` is :func:`tda.core.states.initial_overrides` of the desktop's
+    hand-written events -- the state a part added in S1 starts in. Without it
+    an added clip the picture shows ``open``, linked to its module by ``of``,
+    would be replayed ``closed`` and the module's removal reported as a breach.
     """
     active = active_edges(edges)
     ordered = sorted(actions, key=lambda a: (a.step, a.idx))
     problems: list[str] = []
 
     for i, action in enumerate(ordered):
-        events = events_from_actions(instances, ordered[:i], tax)
-        state = state_at(instances, events, _ALL_STEPS, tax)
+        events = events_from_actions(instances, ordered[:i], tax, initial=initial)
+        state = state_at(instances, events, _ALL_STEPS, tax, initial=initial)
         gating = applicable_preconditions(active, action)
         bad = unmet(gating, state, "required")
         head = f"step {action.step}: {action.verb} {action.target}"

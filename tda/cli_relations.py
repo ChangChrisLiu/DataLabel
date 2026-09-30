@@ -55,7 +55,7 @@ from tda.core.graph_infer import (
 from tda.core.implied import OP_KIND as IMPLIED_OP_KIND
 from tda.core.implied import implied_instances
 from tda.core.model import InstanceRec
-from tda.core.states import events_from_actions
+from tda.core.states import events_from_actions, initial_overrides
 from tda.core.taxonomy import Taxonomy, load_taxonomy
 
 __all__ = [
@@ -259,8 +259,10 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
                 {"instance": key, "fields": new}, {"instance": key, "fields": old},
                 ANNOTATOR,
             )
+        initial = initial_overrides(e for e in db.events(desktop) if not e.auto)
         db.replace_events(
-            desktop, events_from_actions(instances, actions, tax), auto_only=True
+            desktop, events_from_actions(instances, actions, tax, initial=initial),
+            auto_only=True,
         )
     return out
 

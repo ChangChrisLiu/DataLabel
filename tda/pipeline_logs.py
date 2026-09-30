@@ -33,8 +33,10 @@ from tda.core.implied import implied_instances, is_implied
 from tda.core.index import DesktopIndex
 from tda.core.log_report import _expected_steps
 from tda.core.logs import LogImport, import_log, iter_desktop_csvs, read_desktop_csv
-from tda.core.model import VIEWS, StepRec, StepType
-from tda.core.states import events_from_actions
+from tda.core import extra as X
+from tda.core.extra import extra_keys
+from tda.core.model import VIEWS, StepRec, StepType, is_extra
+from tda.core.states import INITIAL_STEP, events_from_actions, initial_overrides
 from tda.core.taxonomy import Taxonomy
 from tda.pipeline import Log, merge_desktop_meta, split_pose_segments, wanted
 
@@ -60,11 +62,14 @@ IMPLIED_ANNOTATOR = "cli:import-logs"
 #: has to tell them apart rather than assume the older of the two.
 REFUSED_VERIFIED = "verified_frames"
 REFUSED_IMPLAUSIBLE = "implausible_shrink"
+#: The sheet (or the implied-instance rule) now produces a key an annotator
+#: added in S1 for a part the log did not name -- ``--adopt-extras`` answers it.
+REFUSED_EXTRAS = "extra_keys"
 
 __all__ = [
     "DesktopRun", "INFERRED_HEADING", "LogsRun", "add_implied_instances", "brand_model",
-    "chassis_type", "desktop_fields", "expected_steps", "import_logs_into_db",
-    "inferred_section",
+    "chassis_type", "desktop_fields", "expected_steps", "extra_clash", "import_logs_into_db",
+    "inferred_section", "REFUSED_EXTRAS",
 ]
 
 
@@ -156,8 +161,9 @@ class DesktopRun:
     #: Notes the re-imported sheet had no matching row for (it was renumbered).
     ls_notes_dropped: int = 0
     brand: str = ""
-    #: For a ``refused`` run, which refusal it was: :data:`REFUSED_VERIFIED` or
-    #: :data:`REFUSED_IMPLAUSIBLE`. Empty for every other status.
+    #: For a ``refused`` run, which refusal it was: :data:`REFUSED_VERIFIED`,
+    #: :data:`REFUSED_IMPLAUSIBLE` or :data:`REFUSED_EXTRAS`. Empty for every
+    #: other status.
     reason: str = ""
     issues: list[str] = field(default_factory=list)
     #: ``"<key>.<field> = <value>"`` per relational field the heuristic filled.
@@ -174,6 +180,11 @@ class DesktopRun:
     #: Of those, the ones held by work of their own; the rest are held only
     #: because a kept one names them, and need no decision of their own.
     kept_carrying_work: int = 0
+    #: Keys of the instances an annotator added in S1 (:mod:`tda.core.extra`)
+    #: that the import left alone -- the sheet does not name them.
+    extras_kept: list[str] = field(default_factory=list)
+    #: One line per added instance ``--adopt-extras`` handed to the sheet.
+    adopted: list[str] = field(default_factory=list)
 
 
 def inferred_section(run: DesktopRun) -> list[str]:
@@ -476,6 +487,15 @@ def _hold_reasons(db: Db, desktop: int, vanished: set[str]) -> tuple[dict[str, s
         if counts
     }
     carrying_work = len(holding)
+    # an instance S1 added is never dropped (see `_plan_drops`), so whatever it
+    # rides on stays too -- its parent is what takes it out of the chassis
+    for key, rec in sorted(stored.items()):
+        if not is_extra(rec):
+            continue
+        for field_name in REFERRING_FIELDS:
+            ref = getattr(rec, field_name, None)
+            if ref in vanished and ref not in holding:
+                holding[ref] = f"named by {key}.{field_name}, which is kept"
     growing = True
     while growing:
         growing = False
@@ -516,10 +536,13 @@ def _plan_drops(db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec],
     * **only what nothing holds** -- see :func:`_hold_reasons`.
 
     Provisional ``ls:*`` keys are never in scope: they belong to ``import-ls``.
+    Nor are the instances an annotator added in S1 (:mod:`tda.core.extra`):
+    the sheet never named them, so its not naming them now says nothing.
     """
     stored = db.instances(li.desktop)
-    vanished = {key for key in stored
-                if key not in _would_exist(db, li, tax) and not is_provisional(key)}
+    produced = _would_exist(db, li, tax)
+    vanished = {key for key, rec in stored.items()
+                if key not in produced and not is_provisional(key) and not is_extra(rec)}
     if not vanished:
         return DropPlan()
     holding, carrying = _hold_reasons(db, li.desktop, vanished)
@@ -552,7 +575,7 @@ def _implausible(li: LogImport, previous: list[StepRec], stored: dict,
     there are any.
     """
     real = [key for key, rec in stored.items()
-            if not is_provisional(key) and not is_implied(rec)]
+            if not is_provisional(key) and not is_implied(rec) and not is_extra(rec)]
     if not previous and not real:  # a genuine first import: nothing to lose
         return ""
     drafts = sum(1 for key in stored if is_provisional(key))
@@ -632,13 +655,86 @@ def _drop_reason(rec) -> str:
     return "no longer in the sheet"
 
 
+# --------------------------------------------------------------------------- #
+# keys an annotator added in S1
+# --------------------------------------------------------------------------- #
+def extra_clash(db: Db, li: LogImport, tax: Taxonomy) -> dict[str, str]:
+    """``key -> "log" | "implied"`` for every added instance this import would take.
+
+    An instance added in S1 (:mod:`tda.core.extra`) holds a key of its class's
+    ordinal run -- ``ram_latch.05`` after the log's ``.04``. A sheet re-exported
+    with rows "RAM clip 5-8" produces exactly those keys, and so can the
+    implied-instance rule (``motherboard.01`` after ``--reset-declined``). The
+    writer upserts every produced row, so without this the log would take the
+    added rows over in silence: provenance gone, the hand-set initial state now
+    applying to the log's part, the shape drawn for one clip now standing for
+    another.
+    """
+    extras = {key for key, rec in db.instances(li.desktop).items() if is_extra(rec)}
+    if not extras:
+        return {}
+    implied = {rec.key for rec in implied_instances(
+        li.instances, li.actions, tax, db.declined_implied(li.desktop))}
+    out: dict[str, str] = {}
+    for key in sorted(extras):
+        if key in li.instances:
+            out[key] = "log"
+        elif key in implied:
+            out[key] = "implied"
+    return out
+
+
+def _extras_refusal(desktop: int, clash: dict[str, str]) -> str:
+    """The sentence a desktop refused for :data:`REFUSED_EXTRAS` is reported with."""
+    named = ", ".join(f"{key} ({'the sheet' if who == 'log' else 'the implied rule'})"
+                      for key, who in sorted(clash.items()))
+    return (
+        f"D{desktop:02d}: this import would take over {len(clash)} instance(s) an "
+        f"annotator added in S1 for parts the log did not name: {named}. Nothing was "
+        f"written. Re-run with --adopt-extras to hand them to the sheet (their "
+        f"provenance and hand-set initial state go, their shapes stay on the key), or "
+        f"delete them in S1 first if the sheet means different parts."
+    )
+
+
+def _adopt_extras(db: Db, desktop: int, taken_by: dict[str, str]) -> list[str]:
+    """Hand added instances to the sheet. **Inside the caller's transaction.**
+
+    The row itself is overwritten by the upsert that follows (the log's record:
+    no provenance, the log's raw names); what has to go here is the step-0
+    initial state the annotator set, which would otherwise apply to the log's
+    part. The shapes stay on the key. One ``op_log`` row records the added
+    records and events as they were, as the inverse
+    :func:`tda.core.extra.undo_op` applies.
+    """
+    if not taken_by:
+        return []
+    stored = db.instances(desktop)
+    records = [stored[key] for key in sorted(taken_by)]
+    events = [e for e in db.events(desktop)
+              if e.target in taken_by and not e.auto and e.step <= INITIAL_STEP]
+    for key in taken_by:
+        db.delete_manual_events(desktop, key, up_to_step=INITIAL_STEP)
+    payload, inverse = X.adopt_patch(records, events, taken_by)
+    db.log_op(desktop, OP_VIEW, X.OP_ADOPT, payload, inverse, IMPLIED_ANNOTATOR)
+    return [
+        f"adopted {key}: added in S1, now produced by the "
+        f"{'sheet' if taken_by[key] == 'log' else 'implied-instance rule'} "
+        f"(provenance and hand-set initial state dropped, shapes kept)"
+        for key in sorted(taken_by)
+    ]
+
+
 def _write_import(
-    db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec], plan: DropPlan
-) -> tuple[int, int, int, list[str], list[str], list[str], list[str], list[str]]:
+    db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec], plan: DropPlan,
+    adopt: Optional[dict[str, str]] = None,
+) -> tuple[int, int, int, list[str], list[str], list[str], list[str], list[str], list[str]]:
     """Write one desktop's import atomically.
 
     Returns ``(events, steps with LS notes, notes dropped, fills, unresolved,
-    implied, dropped instances, drop issues)``.
+    implied, dropped instances, drop issues, adopted)``. ``adopt`` is
+    :func:`extra_clash` when ``--adopt-extras`` was given (see
+    :func:`_adopt_extras`).
 
     The relational heuristic of spec 7.3 runs here, *before* the instances are
     written and inside the same transaction: ``logs.py`` leaves ``fastens``,
@@ -650,13 +746,22 @@ def _write_import(
     tie on a desktop that lists two coolers. Filling them
     first also means ``events_from_actions`` below already emits the cascade,
     so the stored automatic log and the one
-    :func:`tda.core.truth_inputs.events_of` re-derives on every read agree.
+    :func:`tda.core.truth_inputs.events_of` re-derives on every read agree --
+    which is why the instances S1 added (:mod:`tda.core.extra`) are folded in
+    too: the sheet does not know them, but the cascade that takes an added RAM
+    clip out with its board is part of the same log.
     """
     declined = db.declined_implied(li.desktop)  # read before the transaction writes
+    adopt = dict(adopt or {})
+    extras = {key: rec for key, rec in db.instances(li.desktop).items()
+              if is_extra(rec) and key not in li.instances and key not in adopt}
+    initial = {key: state for key, state in initial_overrides(
+        e for e in db.events(li.desktop) if not e.auto).items() if key not in adopt}
     with db.transaction():
         kept, dropped = carry_ls_notes(li.steps, previous)
         merge_desktop_meta(db, li.desktop, desktop_fields(li.meta))
         db.replace_steps(li.desktop, li.steps, li.actions)
+        adopted = _adopt_extras(db, li.desktop, adopt)
         implied = add_implied_instances(db, li, tax)
         fills = infer_relational_fields(li.instances, tax, li.actions)
         for inst in li.instances.values():
@@ -665,12 +770,13 @@ def _write_import(
         # in here is what makes a desktop that raises keep both its old
         # instances and its old steps
         gone, drop_issues = _apply_drops(db, li, plan)
-        events = events_from_actions(li.instances, li.actions, tax)
+        events = events_from_actions({**extras, **li.instances}, li.actions, tax,
+                                     initial=initial)
         db.replace_events(li.desktop, events, auto_only=True)
         split_pose_segments(db, li.desktop)
     return (len(events), kept, dropped, fills,
             unresolved_relations(li.instances, tax, li.actions, declined), implied,
-            gone, drop_issues)
+            gone, drop_issues, adopted)
 
 
 def dropped_notes_line(desktop: int, dropped: int) -> str:
@@ -739,6 +845,7 @@ def import_logs_into_db(
     log: Optional[Log] = None,
     force_verified: bool = False,
     force_drop: bool = False,
+    adopt_extras: bool = False,
 ) -> LogsRun:
     """Import the exported Drive sheets into steps, actions, instances and events.
 
@@ -750,6 +857,10 @@ def import_logs_into_db(
     frames were compiled from the step table this would replace. A sheet that
     cannot be read is recorded as ``failed`` and the run carries on to the next
     desktop.
+
+    A desktop whose sheet now produces a key an annotator **added in S1**
+    (:func:`extra_clash`) is ``refused`` too -- the rows would be taken over
+    in silence -- unless ``adopt_extras`` hands them to the sheet.
     """
     index = index or {}
     run = LogsRun(directory=str(directory))
@@ -774,7 +885,8 @@ def import_logs_into_db(
             log(_force_warning(db, desktop, previous))
         try:
             run.runs.append(_import_one(db, desktop, path, tax, index, previous, log,
-                                        force=force, force_drop=force_drop))
+                                        force=force, force_drop=force_drop,
+                                        adopt_extras=adopt_extras))
         except Exception as exc:  # one unreadable sheet must not end the run
             run.runs.append(DesktopRun(
                 desktop, str(path), "failed",
@@ -788,11 +900,18 @@ def import_logs_into_db(
 def _import_one(
     db: Db, desktop: int, path, tax: Taxonomy,
     index: dict[int, DesktopIndex], previous: list[StepRec], log: Optional[Log],
-    force: bool = False, force_drop: bool = False,
+    force: bool = False, force_drop: bool = False, adopt_extras: bool = False,
 ) -> DesktopRun:
     """Read and write one desktop; raises if the sheet cannot be parsed."""
     rows, meta = read_desktop_csv(path)
     li = import_log(desktop, rows, meta, tax)
+    clash = extra_clash(db, li, tax)
+    if clash and not adopt_extras:
+        refusal = _extras_refusal(desktop, clash)
+        if log:
+            log(f"[import-logs] refused: {refusal}")
+        return DesktopRun(desktop, str(path), "refused", reason=REFUSED_EXTRAS,
+                          issues=[refusal])
     plan = _plan_drops(db, li, tax, previous, force, force_drop)
     if plan.refusal:
         if log:
@@ -807,11 +926,17 @@ def _import_one(
             f"kept the file's number"
         )
     (events, kept, dropped, fills, unresolved, implied,
-     gone, drop_issues) = _write_import(db, li, tax, previous, plan)
+     gone, drop_issues, adopted) = _write_import(db, li, tax, previous, plan, clash)
+    extras_kept = extra_keys(db.instances(desktop))
     if dropped:
         issues.append(dropped_notes_line(desktop, dropped))
     issues.extend(drop_issues)
     if log:
+        for text in adopted:
+            log(f"[import-logs]   {text}")
+        if extras_kept:
+            log(f"[import-logs]   kept {len(extras_kept)} instance(s) added in S1 "
+                f"(not in the sheet): {', '.join(extras_kept)}")
         extra = f", {len(implied)} implied instance(s)" if implied else ""
         log(f"[import-logs] D{desktop:02d}: {len(li.steps)} steps, {len(li.actions)} "
             f"actions, {len(li.instances)} instances, {events} events, "
@@ -832,7 +957,7 @@ def _import_one(
         brand=str(li.meta.get("brand_model_raw") or ""),
         issues=list(li.issues) + issues, fills=fills, unresolved=unresolved,
         implied=implied, dropped=gone, kept_for_review=len(plan.holding),
-        kept_carrying_work=plan.carrying_work,
+        kept_carrying_work=plan.carrying_work, extras_kept=extras_kept, adopted=adopted,
     )
 
 

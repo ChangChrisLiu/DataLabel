@@ -85,7 +85,7 @@ from tda.core.model import (
     StepType,
 )
 from tda.core.model import is_provisional
-from tda.core.states import FrameState, InstState, gone_with_parent
+from tda.core.states import FrameState, InstState, gone_with_parent, initial_overrides
 from tda.core.taxonomy import Taxonomy
 
 __all__ = [
@@ -840,7 +840,8 @@ def exclusion_reason(ctx: DesktopCtx, edges: list[Edge],
         return "no_graph_version"
     if not active_edges(edges):
         return "no_constraint_edges"
-    if find_deadlocks(edges, ctx.instances, ctx.tax, necessity="required"):
+    if find_deadlocks(edges, ctx.instances, ctx.tax, necessity="required",
+                      initial=initial_overrides(ctx.events)):
         return "deadlock"
     return None
 

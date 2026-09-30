@@ -20,7 +20,10 @@ Two halves:
   A Label Studio **draft** key (:func:`tda.core.model.is_provisional`) has one
   more exception: the ``source="labelstudio"`` keyframes the importer gave it
   are part of the draft, not work done on it, so they do not block the delete --
-  they go with it. Anything a human drew onto that key still does.
+  they go with it. Anything a human drew onto that key still does. A part
+  **added in S1** (:mod:`tda.core.extra`) likewise takes its own initial-state
+  event with it; a shape of it still blocks, which is the rule "deletable only
+  while it has no shapes".
 * :func:`delete_instance` -- do it in one transaction: drop the draft keyframes
   if it is a draft, drop the derived events and the cached rows, drop the
   identity row, and rewrite every neighbour that pointed at the key. A neighbour's pointer is *cleared*, except
@@ -30,20 +33,24 @@ Two halves:
   so an unsaved edit elsewhere in one of those rows is not flushed along with
   the repair. Deleting an implied instance also **records the refusal** for the
   desktop (:meth:`~tda.core.db.Db.decline_implied`), in the same transaction, so
-  the next import does not create it again. Nothing in memory changes until the
-  transaction has committed.
+  the next import does not create it again. Deleting an added part logs
+  :data:`tda.core.extra.OP_DELETE` with the whole stored record and its initial
+  events as the inverse (:func:`tda.core.extra.undo_op` puts it back). Nothing
+  in memory changes until the transaction has committed.
 """
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
+from tda.core import extra as X
 from tda.core.db import Db
 from tda.core.graph_derive import RULE
 from tda.core.graph_rules import HARD_TYPES, active_edges
 from tda.core.implied import is_implied
 from tda.core.logs import CHASSIS_KEY
 from tda.core.ls_import import SOURCE as LS_SOURCE
-from tda.core.model import VIEWS, InstanceRec, is_provisional
+from tda.core.model import VIEWS, InstanceRec, is_extra, is_provisional
+from tda.core.states import INITIAL_STEP
 from tda.ui.steps_values import RELATION_FIELDS, EditError
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, fine for typing
@@ -107,6 +114,13 @@ def check_deletable(data: "StepTableData", db: Db, key: str) -> None:
             f"{edge.type} constraint edge; apply or revert the Relations tab first"
         )
     counts = db.instance_reference_counts(data.desktop, key)
+    if is_extra(data.instances[key]) and counts.get("state_event"):
+        # an added part's initial state is part of the addition, not work done
+        # on it: it goes with the delete (and is in the op log's inverse)
+        left = counts["state_event"] - len(X.initial_events(db, data.desktop, key))
+        counts = {t: n for t, n in counts.items() if t != "state_event"}
+        if left > 0:
+            counts["state_event"] = left
     if counts:
         named = ", ".join(f"{n} row(s) in {table}" for table, n in sorted(counts.items()))
         raise EditError(f"{key!r} is still referenced by {named}")
@@ -167,13 +181,19 @@ OP_KIND = "instance_delete"
 OP_VIEW = "-"
 
 
-def _restamp(db: Db, data: "StepTableData", key: str, dropped: int) -> None:
+def _restamp(db: Db, data: "StepTableData", key: str, dropped: int,
+             extra_patch: Optional[tuple[dict, dict]] = None) -> None:
     """Re-stamp the desktop's graph meta after a delete. **In the transaction.**
 
     The delete takes the instance's rule edges with it, so the stored
     ``graph_version`` is about a graph that no longer exists -- and an export
     quoting it would be quoting something else. The version is read back through
     the accessor, exactly as the derivation and the ``constraints`` command do.
+
+    ``extra_patch`` is the ``(payload, inverse)`` of a part added in S1
+    (:func:`tda.core.extra.delete_patch`): its deletion is logged as
+    :data:`tda.core.extra.OP_DELETE`, with the whole record as the inverse, so
+    :func:`tda.core.extra.undo_op` can put it back.
     """
     from tda.core.graph import edges_from_db, graph_version   # local: import cycle
     from tda.core.graph_derive import settled_instances
@@ -185,8 +205,15 @@ def _restamp(db: Db, data: "StepTableData", key: str, dropped: int) -> None:
     merge_desktop_meta(db, data.desktop, {
         "graph_version": graph_version(db, data.desktop),
         "graph_edges": len(active_edges(edges)),
-        "graph_cycles": len(find_deadlocks(edges, settled_instances(left), data.tax)),
+        "graph_cycles": len(find_deadlocks(edges, settled_instances(left), data.tax,
+                                           initial=data.initial_states())),
     })
+    if extra_patch is not None:
+        payload, inverse = extra_patch
+        db.log_op(data.desktop, X.OP_VIEW, X.OP_DELETE,
+                  {**payload, "relations": dropped}, inverse,
+                  getattr(data, "annotator", "") or ANNOTATOR)
+        return
     db.log_op(data.desktop, OP_VIEW, OP_KIND,
               {"instance": key, "relations": dropped},
               {"instance": key}, ANNOTATOR)
@@ -219,6 +246,13 @@ def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
     implied_cls = data.instances[key].cls if is_implied(data.instances[key]) else None
     neighbours = stored_neighbours(db, data.desktop, key, revert_to=implied_cls)
     derived = derived_relations(db, data.desktop, key)
+    patch = None
+    if is_extra(data.instances[key]):
+        # the stored record, not the in-memory one: the inverse has to bring
+        # back what the database held, not an edit nobody applied
+        stored = db.instances(data.desktop).get(key, data.instances[key])
+        patch = X.delete_patch(stored, X.initial_events(db, data.desktop, key),
+                               X.relation_rows(db, data.desktop, key, RULE))
     try:
         with db.transaction():
             for triple in derived:
@@ -227,13 +261,15 @@ def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
                 # the draft and the shapes it was made of are one thing: a key
                 # nobody adopted leaves nothing behind but orphaned pixels
                 db.delete_keyframes_by_source(LS_SOURCE, [data.desktop], key)
+            if patch is not None:
+                db.delete_manual_events(data.desktop, key, up_to_step=INITIAL_STEP)
             db.delete_auto_events(data.desktop, key)
             db.delete_instance(data.desktop, key)
             for rec in neighbours:
                 db.upsert_instance(rec)
             if implied_cls:
                 db.decline_implied(data.desktop, implied_cls)
-            _restamp(db, data, key, len(derived))
+            _restamp(db, data, key, len(derived), patch)
     except Exception as error:  # the database rolled back; so must memory
         raise EditError(f"could not delete {key!r}: {error}") from error
 

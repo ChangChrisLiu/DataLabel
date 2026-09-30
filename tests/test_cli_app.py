@@ -215,9 +215,9 @@ def test_check_export_and_vlm_all_drain_the_pending_rechecks(env, monkeypatch):
     calls: list[tuple] = []
     real = cli_app._prepare_truth
 
-    def spy(db, tax, desktops, view, refresh=True):
-        calls.append((tuple(desktops), view, refresh))
-        return real(db, tax, desktops, view, refresh)
+    def spy(db, tax, desktops, view, refresh=True, **kwargs):
+        calls.append((tuple(desktops), view, refresh, kwargs.get("ignore_digest", False)))
+        return real(db, tax, desktops, view, refresh, **kwargs)
 
     monkeypatch.setattr(cli_app, "_prepare_truth", spy)
     out = Path(env["tmp"]) / "coco_prep.json"
@@ -227,6 +227,8 @@ def test_check_export_and_vlm_all_drain_the_pending_rechecks(env, monkeypatch):
     run(env, "export-vlm", "--desktops", str(DESKTOP), "--view", VIEW,
         "--out", str(Path(env["tmp"]) / "vlm_prep.jsonl"))
     assert [c[0] for c in calls] == [(DESKTOP,), (DESKTOP,), (DESKTOP,)]
+    # only `check` compiles past the digests (U5b round 2); the exports keep them
+    assert [c[3] for c in calls] == [True, False, False]
 
 
 def test_an_export_refuses_while_re_checks_are_pending(env, monkeypatch, capsys):

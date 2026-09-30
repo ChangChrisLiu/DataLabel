@@ -84,8 +84,8 @@ def test_check_exits_one_for_an_open_conflict_even_with_no_problems(env, capsys,
 
     real = cli_app._prepare_truth
 
-    def clean(db, tax, desktops, view, refresh=True):
-        stats = real(db, tax, desktops, view, refresh)
+    def clean(db, tax, desktops, view, refresh=True, **kwargs):
+        stats = real(db, tax, desktops, view, refresh, **kwargs)
         stats["problems"] = []
         return stats
 

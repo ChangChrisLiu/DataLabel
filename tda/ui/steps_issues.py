@@ -31,7 +31,7 @@ from typing import Callable, Iterable, Iterator, Optional
 from tda.core.graph_infer import is_provisional, real_instances
 from tda.core.implied import is_implied
 from tda.core.logs import CHASSIS_KEY, NO_ACTION_TYPES, UNRESOLVED
-from tda.core.model import ActionRec, InstanceRec, StepType
+from tda.core.model import ActionRec, InstanceRec, StepType, is_extra
 from tda.core.taxonomy import Taxonomy
 from tda.ui.steps_values import DIFFICULTY_MAX, DIFFICULTY_MIN, RELATION_FIELDS
 
@@ -84,12 +84,14 @@ def orphan_issues(
     So is an *implied* instance (:mod:`tda.core.implied`): "no action names it"
     is its definition, not a defect, and :func:`unresolved_issues` already asks
     the one question that matters about it. So is a Label Studio draft, for the
-    same reason and more strongly -- see :func:`draft_issues`.
+    same reason and more strongly -- see :func:`draft_issues`. And so is a part
+    an annotator added in S1 (:mod:`tda.core.extra`): it was added *because*
+    the log never operates it.
     """
     targeted = {action.target for action in actions}
     for key in sorted(instances):
         if (key == CHASSIS_KEY or key in targeted or is_provisional(key)
-                or is_implied(instances[key])):
+                or is_implied(instances[key]) or is_extra(instances[key])):
             continue
         yield f"no action references {key} - delete it or retarget a step at it"
 

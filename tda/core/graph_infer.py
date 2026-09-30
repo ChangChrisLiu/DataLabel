@@ -34,7 +34,7 @@ from typing import Iterable, Optional
 # class X" -- neither as the candidate nor as a competitor -- and nothing is
 # ever written onto them (spec 3.2: S1 turns a draft into a real instance, and
 # only then does it carry relations).
-from tda.core.model import LS_PREFIX, ActionRec, InstanceRec, is_provisional
+from tda.core.model import LS_PREFIX, ActionRec, InstanceRec, is_extra, is_provisional
 from tda.core.taxonomy import Taxonomy
 
 __all__ = [
@@ -268,6 +268,12 @@ def infer_relational_fields(
     :func:`unresolved_relations` rather than guessed at. Returns one
     ``"<key>.<field> = <value>"`` line per field it filled; every one of them is
     a guess with source ``"heuristic"``, to be confirmed in the S1 UI.
+
+    An instance an annotator added in S1 (:func:`tda.core.model.is_extra`) gets
+    its *host* and nothing else: no ``fastens`` for a screw, no ``of`` for a
+    RAM latch. The log never operated it, so the clock these guesses rest on
+    says nothing about it, and every edge a guess would imply is one the
+    recorded teardown would then "violate".
     """
     filled: list[str] = []
     clock = None if actions is None else _Clock(actions)
@@ -280,7 +286,8 @@ def infer_relational_fields(
         if is_provisional(key):
             continue
         if rec.cls == "screw":
-            _infer_screw(instances, rec, clock, put, filled)
+            if not is_extra(rec):  # an added screw fastens what S1 says, or nothing
+                _infer_screw(instances, rec, clock, put, filled)
         elif rec.cls == "connector":
             host = resolve_ref(instances, rec.socket_host)
             if host and host != rec.socket_host:
@@ -357,10 +364,15 @@ def _infer_ram_latches(instances: dict[str, InstanceRec], filled: list[str]) -> 
     *columns*: clearing that cell in the S1 table leaves an empty string, and a
     hand-edited sheet can leave a stray space. Both mean "not answered yet", and
     a latch pointing at ``" "`` is a latch rule 7.1 can never fire on.
+
+    A latch added in S1 (:func:`tda.core.model.is_extra`) is not paired: the
+    ones the log never names are, on D13, the clips of the two *empty* slots,
+    and pairing them would lock a module the operator never had to unclip.
     """
     latches = [
         rec for key, rec in sorted(instances.items())
         if rec.cls == "ram_latch" and blank(rec.attrs.get("of")) and not is_provisional(key)
+        and not is_extra(rec)
     ]
     modules = real_instances(instances, "ram_module")
     if not latches or not modules:
@@ -450,8 +462,8 @@ def unresolved_relations(
         if (host and host not in refused and blank(rec.parent)
                 and unique_of_class(instances, host) is None):
             out.append(_host_line(instances, key, rec.cls, host))
-        if rec.cls != "screw":
-            continue
+        if rec.cls != "screw" or is_extra(rec):
+            continue  # an added screw's `fastens` is S1's to fill, not a question
         kind = AMBIGUOUS
         if blank(rec.fastens):
             target, why = screw_target(instances, rec, clock)
