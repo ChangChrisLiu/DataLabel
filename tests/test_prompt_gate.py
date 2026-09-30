@@ -220,6 +220,33 @@ def test_a_k_below_one_or_not_a_number_is_off_with_a_warning(tmp_path, gate_log,
     assert len(said) == 1 and "k = " in said[0], said
 
 
+@pytest.mark.parametrize("lo, hi", [(10, 0), (0, 20), (-5, 20), (30, 20), (0, 0),
+                                    (".nan", 20), (10, ".inf"), ("-.inf", 20)],
+                         ids=["hi-zero", "lo-zero", "lo-negative", "reversed", "both-zero",
+                              "lo-nan", "hi-inf", "lo-minus-inf"])
+def test_an_impossible_band_is_off_with_a_warning(tmp_path, gate_log, lo, hi):
+    """U3 minor (a): ``hi_px: 0`` divided by zero on the status line."""
+    body = (f"views:\n  oak1:\n    classes:\n      screw:\n"
+            f"        lo_px: {lo}\n        hi_px: {hi}\n")
+    (tmp_path / "bands.yaml").write_text(body, encoding="utf-8")
+    policy = tmp_path / "gate.yaml"
+    policy.write_text("views: [oak1]\nbands: bands.yaml\n", encoding="utf-8")
+    g = PG.load_prompt_gate(str(policy))
+    assert g.views == frozenset() and g.judge("oak1", ["screw"], 10 ** 9) is None
+    said = warnings_in(gate_log)
+    assert len(said) == 1 and "impossible band for screw on oak1" in said[0], said
+    assert "0 < lo_px <= hi_px" in said[0]
+
+
+def test_a_band_of_one_area_is_possible(tmp_path, gate_log):
+    """``lo_px == hi_px``: U2h's expansion_card on scan was exactly that."""
+    g = PG.load_prompt_gate(write_gate(
+        tmp_path, "views: [oak1]\nbands: bands.yaml\n",
+        {"views": {"oak1": {"classes": {"screw": {"lo_px": 20, "hi_px": 20}}}}}))
+    assert g.band("oak1", "screw") == (20.0, 20.0) and warnings_in(gate_log) == []
+    assert g.judge("oak1", ["screw"], 61) is not None     # 61/20 > 3: no ZeroDivisionError
+
+
 def test_k_of_one_is_a_band_with_no_slack(tmp_path, gate_log):
     g = PG.load_prompt_gate(write_gate(
         tmp_path, "views: [oak1]\nk: 1\nbands: bands.yaml\n", BANDS))

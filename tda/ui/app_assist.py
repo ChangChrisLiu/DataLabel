@@ -21,8 +21,10 @@ from tda.ui import app_support as S
 from tda.ui import prompt_gate as PG
 from tda.ui import session_api as api
 from tda.ui.app_diff import (
+    ALT_DEDUP_IOU,
     AssistController,
     Box,
+    _box_iou,
     alternate_parts,
     best_unexplained,
     blob_boxes,
@@ -30,12 +32,14 @@ from tda.ui.app_diff import (
     expected_payload,
     heat_rgba,
 )
+from tda.ui.app_detect import DetCandidate, DetectMixin
 from tda.ui.app_roi_worker import RoiProposer
 from tda.ui.class_names import class_zh
 
-__all__ = ["ASSIST_CONFIRM_WAIT", "BOX_REFUSED", "EDITING_NO_BOX", "NO_ALTERNATE",
-           "PROMPT_ARMED", "PROMPT_CHIP", "PROMPT_CHIP_RANK", "PROMPT_TOO_BIG",
-           "PROMPT_WITHHELD", "AssistMixin"]
+__all__ = ["ASSIST_CONFIRM_WAIT", "BOX_REFUSED", "DET_CHIP", "DET_CHIP_RANK",
+           "EDITING_NO_BOX", "NO_ALTERNATE", "PROMPT_ARMED", "PROMPT_ARMED_DET",
+           "PROMPT_CHIP", "PROMPT_CHIP_RANK", "PROMPT_TOO_BIG", "PROMPT_WITHHELD",
+           "AssistMixin", "DiffOffer"]
 
 class _SamLoader(QObject):
     """Carries the outcome of the background SAM load onto the GUI thread."""
@@ -94,14 +98,42 @@ PROMPT_WITHHELD = ("这一步要补的是「{name}」，程序找到的变化大
                    "直接在零件上点 S，或用 B 涂 / no guess this time: click the part")
 WITHHELD_JOIN = "」或「"
 #: Appended to "正在画 X" when an edit starts on a frame whose box was
-#: withheld, which would otherwise overwrite the one line saying so (U2i).
-EDITING_NO_BOX = " — 这一帧没有提示框：直接在零件上点 S"
+#: withheld, which would otherwise overwrite the one line saying so (U2i);
+#: in both languages, like every other status line (U3).
+EDITING_NO_BOX = (" — 这一帧没有提示框：直接在零件上点 S / no prompt box on this "
+                  "frame: click the part")
+#: The chip of a box the small-part detector armed (task U3): what it is and
+#: who found it.  ``{name}`` is the class's Chinese name (螺丝).
+DET_CHIP = "SAM 提示框（检测器：{name}）"
+#: ... and after ``Shift+C``: which of how many.
+DET_CHIP_RANK = "SAM 提示框 {rank}/{total}（检测器：{name}）"
+#: The arrival line when the detector armed the box.  Its confidence and dE
+#: go to the log, not here.
+PROMPT_ARMED_DET = ("虚线框是检测器找到的{name}（这一帧和下一帧差别最大的那个）：对就直接在零件上"
+                    "点 S；不对就直接点零件，框会自动不用，或按 Shift+C 换一个 / the dashed box "
+                    "is a {cls} the detector found (the one that changes most in the next "
+                    "frame): click the part; a click outside it drops the box, Shift+C "
+                    "offers another")
 #: The first click of a prompt landed outside the armed box (addendum B).
 BOX_REFUSED = ("你点在提示框外：这次只用你的点，提示框不用了 / clicked outside the "
                "prompt box: point only")
 #: ... held against SAM's "+N px" line, which lands a fraction of a second
 #: later and would otherwise wipe the one sentence saying why the box went.
 BOX_REFUSED_HOLD_MS = 4000
+
+
+class DiffOffer:
+    """The difference map's own box, offered under ``Shift+C`` behind a detector box.
+
+    What rank 1 would have been without the detector (task U3): the strongest
+    unexplained blob, when the 60 %-of-the-ROI rule and the U2h gate would
+    have armed it.  No "click here" cross, like rank 1 itself.
+    """
+
+    def __init__(self, box: tuple, area: int) -> None:
+        self.box = tuple(float(v) for v in box)
+        self.area = int(area)
+        self.point = None
 
 
 def _covers_most(box, roi, limit: float = MAX_PROMPT_BOX_FRAC) -> bool:
@@ -111,7 +143,7 @@ def _covers_most(box, roi, limit: float = MAX_PROMPT_BOX_FRAC) -> bool:
     return (bw * bh) > limit * (rw * rh)
 
 
-class AssistMixin:
+class AssistMixin(DetectMixin):
     """The window half of the assist: SAM tools, prompt boxes, the heat map."""
 
     # ------------------------------------------------------------------ setup
@@ -170,6 +202,15 @@ class AssistMixin:
         #: :meth:`prompt_alternates`.  It is *only* ever non-zero because the
         #: annotator pressed ``Shift+C``.
         self._prompt_rank = 0
+        #: Who armed rank 1 (task U3): ``"diff"``, or ``"det:<class>"`` when the
+        #: small-part detector did -- and the chip every reset puts back with it.
+        self._rank_one_source = "diff"
+        self._rank_one_chip = PROMPT_CHIP
+        #: The detector's other candidates behind a detector rank 1, in dE order.
+        self._det_behind: list = []
+        #: Who armed the box on screen now: ``"diff"``, ``"det:<class>"`` or
+        #: ``None`` (the hover names it).
+        self._prompt_source: Optional[str] = None
         #: "No box when unsure" (task U2h): which views, ``k`` and the bands.
         self.prompt_gate = PG.load_prompt_gate()
         #: The rank-1 box the gate withheld on this frame, or ``None``.  Never
@@ -190,6 +231,9 @@ class AssistMixin:
         self._sam_loader = _SamLoader(self)
         self._sam_loader.sigLoaded.connect(self._on_sam_loaded,
                                            Qt.ConnectionType.QueuedConnection)
+        # Last: the detector's worker starts loading its model now, off the
+        # GUI thread, and the first frame's plan waits for it (task U3).
+        self._init_detect()
 
     def _sam_tool(self):
         return self.sam_box if self._tool_name == "sam_box" else self.sam_point
@@ -243,6 +287,9 @@ class AssistMixin:
         """
         for tool in (self.sam_point, self.sam_box):
             tool.reset_prompt()
+        # Somebody wrote the layer: a detector answer landing late must not
+        # move the box under what they are doing now (task U3).
+        self.note_prompt_touched()
         self.reset_prompt_rank()
         self.hand_prompt_box_to_tools()
 
@@ -275,6 +322,10 @@ class AssistMixin:
         self._rank_one = None
         self._withheld_box = None
         self._prompt_rank = 0
+        self._rank_one_source = "diff"
+        self._rank_one_chip = PROMPT_CHIP
+        self._det_behind = []
+        self._prompt_source = None
         self.canvas.set_prompt_point(None)
         self.canvas.set_rubber_band(None, kind="prompt")
         self.hand_prompt_box_to_tools()
@@ -317,7 +368,9 @@ class AssistMixin:
         refused = self._box_refused_here()
         self._prompt_rank = 0
         self._drop_prompt_for_new_box()
-        self._arm_prompt_box(None if refused else self._rank_one)
+        # With rank 1's own chip: the detector's (task U3), or today's.
+        self._arm_prompt_box(None if refused else self._rank_one,
+                             label=self._rank_one_chip, source=self._rank_one_source)
 
     def _box_refused_here(self) -> bool:
         """Has a click outside the armed box turned it down on this frame?
@@ -364,15 +417,17 @@ class AssistMixin:
 
     def _arm_prompt_box(self, box: Optional[tuple],
                         point: Optional[tuple] = None,
-                        label: str = PROMPT_CHIP) -> None:
+                        label: str = PROMPT_CHIP, source: str = "diff") -> None:
         """Put one box -- and optionally the pixel to click inside it -- on both tools.
 
         Both, always: ``S`` and ``X`` share the armed box, and arming only the
         tool that happens to be active is how switching to the other one
         silently downgraded the prompt to point-only.  ``None`` takes it off
-        both, and off the canvas -- the one funnel for that too.
+        both, and off the canvas -- the one funnel for that too.  ``source``
+        says who proposed it (``"diff"`` or ``"det:<class>"``) for the hover.
         """
         self._prompt_box = box
+        self._prompt_source = None if box is None else str(source)
         for tool in (self.sam_point, self.sam_box):
             tool.set_prompt_box(box)
         # The difference map's box, not a drag: its own band, colour and chip
@@ -399,6 +454,7 @@ class AssistMixin:
         # Off until the next frame visit, whatever resets the prompt meanwhile.
         self._refused_on = (self.session.current() if compat.is_open(self.session)
                             else None)
+        self.note_prompt_touched()
         # And the walk starts again (task U2i): a refused *alternate* left the
         # rank at 2 with nothing armed, and the next Shift+C skipped to 3.
         self._prompt_rank = 0
@@ -449,6 +505,9 @@ class AssistMixin:
         # Both bands: the armed box and any drag were about the frame just left.
         self.canvas.set_rubber_band(None)
         self.canvas.set_rubber_band(None, kind="prompt")
+        # The detector's pass (task U3): a dictionary lookup when this frame's
+        # answer is on hand, a priority request when it is not -- never a wait.
+        self.on_frame_changed_detect(key)
         if self._assist_subject() == self._assist_asked:
             # The same two frames, inside the same ROI: the difference between
             # them cannot have changed, so the comparison on hand (or the one
@@ -648,13 +707,17 @@ class AssistMixin:
         return (self.assist_result or {}).get("key") == key
 
     def _arm_from_card(self) -> None:
-        """Offer the strongest unexplained blob when the card wants a shape drawn."""
+        """Offer the strongest unexplained blob when the card wants a shape drawn.
+
+        Or the small-part detector's best candidate, when it has one for this
+        frame (task U3) -- even if the difference map found nothing.
+        """
         rows = self.session.task_card()
         index = self.task_card.current_index()
         if not (0 <= index < len(rows)) or rows[index].get("kind") != api.KIND_ADD_SHAPE:
             return
         blob = best_unexplained(self.assist_result)
-        if blob is not None:
+        if blob is not None or self._detector_offers(rows):
             self.begin_add_shape(blob, rows=rows)
 
     def arm_prompt_box_for(self, instance: str) -> None:
@@ -673,10 +736,31 @@ class AssistMixin:
         if row is None or row.get("kind") != api.KIND_ADD_SHAPE:
             return
         blob = best_unexplained(payload)
-        if blob is not None:
+        if blob is not None or self._detector_offers(card):
             self.begin_add_shape(blob, rows=card)
 
-    def begin_add_shape(self, blob: DiffBlob, rows: Optional[list] = None) -> None:
+    def _detector_offers(self, rows: Optional[list]) -> bool:
+        """Might the small-part detector have a rank 1 here (task U3)?  Cheap, a superset.
+
+        Only whether the frame's answer holds a candidate of a class the card
+        asks for; :meth:`_arm_from_detector` ranks and skips, and falls through
+        to the difference map when nothing survives.
+        """
+        config = self.det_config
+        if self.det_worker is None or config is None or not self._det_frames:
+            return False
+        if not compat.is_open(self.session):
+            return False
+        key = self.session.current()
+        frame = self._det_frames.get(int(key.step))
+        if frame is None or not config.applies(key.view) or not frame.change:
+            return False
+        asked = {str(r.get("cls") or str(r["instance"]).split(".", 1)[0])
+                 for r in (rows or []) if r.get("kind") == api.KIND_ADD_SHAPE
+                 and not r.get("done") and r.get("instance")}
+        return any(frame.dets[i].cls in asked for i in frame.change)
+
+    def begin_add_shape(self, blob: Optional[DiffBlob], rows: Optional[list] = None) -> None:
         """Feed a changed region's box to SAM as the box half of point+box.
 
         Only once the segment has a stored ROI.  Without one the difference map
@@ -688,6 +772,12 @@ class AssistMixin:
         the size of any part the card asks to add back (task U2h): no box
         rather than a likely-wrong one.  ``rows`` is the task card the caller
         already read; ``None`` reads it, and only on a gated view.
+
+        **The small-part detector goes first** (task U3): when the card's open
+        ✚ rows ask for a class it is configured for, on one of its views, and a
+        candidate survives the "already drawn" skip, rank 1 is its best
+        candidate -- the gate does not judge it, and ``blob`` may be ``None``.
+        Otherwise everything below runs exactly as it did before it existed.
         """
         roi = self.roi()
         if roi is None:
@@ -697,6 +787,10 @@ class AssistMixin:
             # frame; a comparison landing late, an ``Esc`` or the next part of
             # the card must not put one back under the annotator's next click
             # (U2g addendum B; until the next frame visit, U2h).
+            return
+        if self._arm_from_detector(rows):
+            return
+        if blob is None:
             return
         box = tuple(float(v) for v in blob.box)
         if _covers_most(box, roi):
@@ -717,16 +811,64 @@ class AssistMixin:
         self._rank_one = box
         self._withheld_box = None
         self._prompt_rank = 0
+        self._rank_one_source = "diff"
+        self._rank_one_chip = PROMPT_CHIP
+        self._det_behind = []
         self._arm_prompt_box(box)
         self.logger.info("prompt box from the difference map: %s (%d px)",
                          tuple(int(v) for v in blob.box), int(blob.area))
         self.report(PROMPT_ARMED)
+
+    def _arm_from_detector(self, rows: Optional[list]) -> bool:
+        """Arm the detector's best candidate as rank 1 (task U3); ``True`` if it did.
+
+        No gate, no 60 %-of-the-ROI rule: those are about the difference map's
+        blob, and this is a box the size of the part.  One log line per arming
+        with every candidate's box, confidence and dE -- to validate a dE
+        threshold later, never to apply one now.
+        """
+        ranking = self.detector_ranking(rows)
+        if ranking is None or not ranking.chosen:
+            return False
+        top = ranking.chosen[0]
+        name = class_zh(top.cls)
+        self._rank_one = top.box
+        self._withheld_box = None
+        self._prompt_rank = 0
+        self._rank_one_source = f"det:{top.cls}"
+        self._rank_one_chip = DET_CHIP.format(name=name)
+        self._det_behind = list(ranking.chosen[1:])
+        self._arm_prompt_box(top.box, label=self._rank_one_chip,
+                             source=self._rank_one_source)
+        key = ranking.key
+        self.logger.info(
+            "prompt box from the detector%s: D%s/%s step %s (dE against step %s) chose "
+            "%s conf %.3f dE %.2f; candidates (box, conf, dE) %s; skipped as drawn %s",
+            " (late answer)" if getattr(self, "_det_arming_late", False) else "",
+            key.desktop, key.view, key.step, ranking.neighbour, top.int_box, top.conf,
+            top.change, [c.describe() for c in ranking.chosen],
+            [c.describe() for c in ranking.skipped])
+        self.report(PROMPT_ARMED_DET.format(name=name, cls=top.cls))
+        return True
 
     def no_box_note(self) -> str:
         """:data:`EDITING_NO_BOX` while the gate's withholding is what is on the frame."""
         if self._withheld_box is not None and self._prompt_box is None:
             return EDITING_NO_BOX
         return ""
+
+    def _gate_verdict(self, blob: DiffBlob, rows: Optional[list]) -> tuple:
+        """``(verdict, the open ✚ rows, view)``; the verdict is ``None`` to keep the box."""
+        gate = self.prompt_gate
+        view = getattr(self.session.current(), "view", None)
+        if not gate.applies(view):
+            return None, [], view
+        card = self.session.task_card() if rows is None else rows
+        wanted = [r for r in card if r.get("kind") == api.KIND_ADD_SHAPE
+                  and not r.get("done") and r.get("instance")]
+        classes = [str(r.get("cls") or str(r["instance"]).split(".", 1)[0])
+                   for r in wanted]
+        return gate.judge(view, classes, int(blob.area)), wanted, view
 
     def _withhold(self, blob: DiffBlob, box: tuple, rows: Optional[list]) -> bool:
         """Withhold the box when the gate says so (task U2h); ``True`` if it did.
@@ -738,15 +880,7 @@ class AssistMixin:
         hover.  The heat map and ``Shift+C`` stay.
         """
         gate = self.prompt_gate
-        view = getattr(self.session.current(), "view", None)
-        if not gate.applies(view):
-            return False
-        card = self.session.task_card() if rows is None else rows
-        wanted = [r for r in card if r.get("kind") == api.KIND_ADD_SHAPE
-                  and not r.get("done") and r.get("instance")]
-        classes = [str(r.get("cls") or str(r["instance"]).split(".", 1)[0])
-                   for r in wanted]
-        verdict = gate.judge(view, classes, int(blob.area))
+        verdict, wanted, view = self._gate_verdict(blob, rows)
         if verdict is None:
             return False
         self.clear_prompt_box()
@@ -776,6 +910,8 @@ class AssistMixin:
         than to the proposal: "everything changed" is not an alternative to
         anything.
         """
+        if self._rank_one_source.startswith("det"):
+            return self._alternates_behind_detector()
         payload = self.assist_result
         if not compat.is_open(self.session) or not payload:
             return []
@@ -790,6 +926,47 @@ class AssistMixin:
         # been behind it: the withheld box spelled twice is not an alternative.
         armed = self._rank_one if self._rank_one is not None else self._withheld_box
         return alternate_parts(inside, armed)
+
+    def _alternates_behind_detector(self) -> list:
+        """``Shift+C`` behind a detector rank 1 (task U3): its other candidates first.
+
+        In dE order, then what the difference map offers: its own box -- what
+        rank 1 would have been without the detector, when the 60 % rule and the
+        gate would have armed it (:class:`DiffOffer`) -- and its split
+        proposals behind that, exactly as they would stand behind it.  A diff
+        box that repeats one of the detector's (IoU above
+        :data:`~tda.ui.app_diff.ALT_DEDUP_IOU`) is not offered twice.
+        """
+        out: list = list(self._det_behind)
+        taken = [self._rank_one] + [c.box for c in out]
+        payload = self.assist_result
+        if (not compat.is_open(self.session) or not payload
+                or payload.get("key") != self.session.current()):
+            return out
+        roi = self.roi()
+        if roi is None:
+            return out
+        diff: list = []
+        own = withheld = None
+        blob = best_unexplained(payload)
+        if blob is not None:
+            box = tuple(float(v) for v in blob.box)
+            if not _covers_most(box, roi):
+                if self._gate_verdict(blob, None)[0] is None:
+                    own = box
+                    diff.append(DiffOffer(box, int(blob.area)))
+                else:
+                    withheld = box
+        inside = [part for part in (payload.get("proposals") or [])
+                  if not _covers_most(tuple(float(v) for v in part.box), roi)]
+        diff += alternate_parts(inside, own if own is not None else withheld)
+        for part in diff:
+            box = tuple(float(v) for v in part.box)
+            if any(t is not None and _box_iou(box, t) > ALT_DEDUP_IOU for t in taken):
+                continue
+            out.append(part)
+            taken.append(box)
+        return out
 
     def _alternate_refusal(self) -> str:
         """Why ``Shift+C`` can do nothing right now, or ``""``.
@@ -824,11 +1001,18 @@ class AssistMixin:
         bad loss on nine large parts it over-split, the CPU cooler landing on
         the fan hub (0.870 -> 0.131).  Behind a key the annotator presses when
         the default box is visibly wrong, that trade is all upside.
+
+        When the small-part detector armed rank 1 (task U3) the walk is its
+        other candidates in dE order first, then the difference map's own box
+        and its split proposals (:meth:`_alternates_behind_detector`).
         """
         refusal = self._alternate_refusal()
         if refusal:
             self.report(refusal)
             return
+        # The annotator asked for another box: a detector answer landing late
+        # must not replace whatever they are about to walk to (task U3).
+        self.note_prompt_touched()
         alternates = self.prompt_alternates()
         if not alternates:
             self.report(NO_ALTERNATE)
@@ -839,6 +1023,13 @@ class AssistMixin:
         total = len(alternates) + 1
         self._prompt_rank = (self._prompt_rank + 1) % total
         chip = PROMPT_CHIP_RANK.format(rank=self._prompt_rank + 1, total=total)
+        if self._prompt_rank == 0 and self._rank_one_source.startswith("det"):
+            name = class_zh(self._rank_one_source.split(":", 1)[1])
+            self._arm_prompt_box(self._rank_one, source=self._rank_one_source,
+                                 label=DET_CHIP_RANK.format(rank=1, total=total, name=name))
+            self.report(f"提示框 1/{total}：检测器找到的那个{name}（差别最大） / prompt box "
+                        f"1/{total}: the detector's own{note}")
+            return
         if self._prompt_rank == 0:
             self._arm_prompt_box(self._rank_one, label=chip)
             if self._rank_one is None:
@@ -852,10 +1043,26 @@ class AssistMixin:
             return
         part = alternates[self._prompt_rank - 1]
         box = tuple(float(v) for v in part.box)
+        rank = self._prompt_rank + 1
+        if isinstance(part, DetCandidate):
+            name = class_zh(part.cls)
+            self._arm_prompt_box(box, label=DET_CHIP_RANK.format(rank=rank, total=total,
+                                                                  name=name),
+                                 source=f"det:{part.cls}")
+            self.logger.info("prompt box %d/%d from the detector: %s conf %.3f dE %.2f",
+                             rank, total, part.int_box, part.conf, part.change)
+            self.report(f"提示框 {rank}/{total}：检测器找到的另一个{name}，对就在零件上点 S / "
+                        f"prompt box {rank}/{total}: another {part.cls} the detector "
+                        f"found: click the part{note}")
+            return
         self._arm_prompt_box(box, part.point, label=chip)
         self.logger.info("prompt box %d/%d box=%s point=%s area=%d",
                          self._prompt_rank + 1, total,
                          tuple(int(v) for v in part.box), part.point, part.area)
+        if isinstance(part, DiffOffer):
+            self.report(f"提示框 {rank}/{total}：差异图原本给的那块 / prompt box "
+                        f"{rank}/{total}: the difference map's own{note}")
+            return
         # Where and how big is in the log line above; the status line says
         # what to do (U2g addendum C).
         self.report(f"提示框 {self._prompt_rank + 1}/{total}：差异图拆出的另一块，"
@@ -1038,3 +1245,5 @@ class AssistMixin:
             loader.join(30.0)       # a half-built SamQueue must not outlive us
         self.assist.shutdown()
         self.roi_proposer.shutdown()
+        # The detector's thread writes its cache on the way out (task U3).
+        self.shutdown_detector()

@@ -1,0 +1,70 @@
+# The small-part detector behind the reverse walk's guess (task U3).
+#
+# On frame j the annotator adds back the part removed at step j+1, and the box
+# the difference map arms for it is right about 8 % of the time for parts under
+# 40 px.  L2 (experiments/l2_detector/REPORT.md) trained a YOLO26n on the old
+# Label Studio drafts that finds *motherboard screws*: held out, the removed
+# screw was the armed box on 86 % of the scan events and 62 % of the oak1 ones.
+# The guess it wires (tda/ui/app_detect.py):
+#
+#   1. the detections of `classes` in frame j, conf >= `conf`, inside the ROI;
+#   2. minus those already drawn: a same-class instance on frame j whose box
+#      is within 2 px of the candidate's centre, or overlaps it at IoU >= 0.3;
+#   3. ranked by the mean native-resolution dE between j and the neighbour
+#      frame inside each box; the top one is rank 1, the rest go first under
+#      Shift+C.
+#
+# Only on `views`, and only when the frame's open ✚ rows ask for one of
+# `classes`; everywhere else the difference map (and the U2h gate) is exactly
+# what it was.  The dE of a candidate is logged, never used as a gate: L2's
+# "dE < 3 is mostly wrong" was found after the fact and is not validated.
+#
+# Swapping the model -- L3's all-desktop one -- is this file alone: `model`,
+# and `tiling` if it was trained on other tiles.  The detections are cached per
+# model (by the file's SHA-1) under `cache_root`, so a new model starts cold and
+# an old cache is never read for it.  The weights are not in git.
+#
+# Anything wrong here -- a missing or malformed file, a missing model file,
+# ultralytics that does not import, no CUDA -- is a WARNING in the log and a
+# detector that is off: the window opens and the guess is the difference map's.
+# TDA_DETECTOR=off (or =<another file>) overrides this file for one process.
+
+enabled: true
+
+# hold13 never saw D13, which is the honest model for the D13 trial; its
+# manifest (source run, classes, recipe) is the .json next to it.
+model: D:/DataSet/models/weights/tda_det_yolo26n_l2_hold13.pt
+
+# The detector's classes that arm a box.  L2: screws only -- connectors hit
+# 0-29 %, cooler screws 0 % (they are captive and stay on the cooler).
+classes: [screw]
+
+# Where it is on.  oak2 and rs stay off (L2: screw hit 19 % and 6 %).
+views: [scan, oak1]
+
+# Minimum confidence of a candidate (L2's operating point).
+conf: 0.10
+
+# L2's tiles.py, for inference exactly as for training: crop the frame to the
+# stored ROI, bring it to the view's work scale, cut 640 x 640 tiles at a
+# stride of 512 (grey padding, never resized).
+tiling:
+  roi_crop: true
+  work_scale:
+    scan: 1.0
+    oak1: 1.0
+  tile: 640
+  stride: 512
+
+# The GPU SAM runs on, in fp16, one frame at a time; `yield_ms` of sleep after
+# each frame the background pass computes, so a SAM click is never queued
+# behind a whole view.
+device: 0
+half: true
+yield_ms: 20
+
+# Detections, one JSON per desktop and view, under <cache_root>/<sha1[:12]>/.
+cache_root: D:/DataSet/cache/det
+
+# ultralytics writes its settings file here instead of %APPDATA%.
+yolo_config_dir: D:/DataSet/.cache/ultralytics_cfg

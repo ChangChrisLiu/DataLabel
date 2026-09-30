@@ -177,11 +177,68 @@ def test_no_part_is_the_occluders_red():
 def test_the_drag_band_is_a_colour_the_palette_cannot_make():
     sat = colorsys.rgb_to_hsv(*(c / 255 for c in OS.DRAG_RGB))[1]
     assert sat < 0.1
-    assert min(colorsys.rgb_to_hsv(*(c / 255 for c in p))[1] for p in PALETTE_64) >= 0.6
+    # U3: the floor went from 0.60 to 0.45, and white is a reserved colour
+    assert min(colorsys.rgb_to_hsv(*(c / 255 for c in p))[1] for p in PALETTE_64) >= 0.45
+    from tda.ui.canvas.overlay import PALETTE_RESERVED
+
+    assert OS.DRAG_RGB in PALETTE_RESERVED
 
 
 def test_the_palette_is_still_64_distinct_colours():
     assert len(set(PALETTE_64)) == 64
+
+
+# --------------------------------------------------------------------------- #
+# U3 minor (c): the palette's colours as far apart as they can be
+# --------------------------------------------------------------------------- #
+def test_no_two_palette_colours_are_closer_than_de2000_10():
+    from tda.ui.canvas.palette_build import min_pairwise
+
+    closest, a, b = min_pairwise(PALETTE_64)
+    assert closest >= 10.0, (closest, a, b)
+    # the pair U2i left at 1.58, one colour to anybody
+    assert (43, 242, 29) not in PALETTE_64 and (81, 242, 29) not in PALETTE_64
+
+
+def test_de2000_is_the_standard_one():
+    """Sharma, Wu & Dalal (2005), table 1: pairs 1, 7, 17 and 25."""
+    from tda.ui.canvas.palette_build import delta_e_2000
+
+    pairs = [((50.0, 2.6772, -79.7751), (50.0, 0.0, -82.7485), 2.0425),
+             ((50.0, 0.0, 0.0), (50.0, -1.0, 2.0), 2.3669),
+             ((50.0, 2.5, 0.0), (73.0, 25.0, -18.0), 27.1492),
+             ((60.2574, -34.0099, 36.2677), (60.4626, -34.1751, 39.4387), 1.2644)]
+    for lab1, lab2, want in pairs:
+        assert float(delta_e_2000(lab1, lab2)) == pytest.approx(want, abs=1e-4)
+
+
+def test_every_palette_colour_is_de2000_10_from_the_editing_yellow_and_the_overlays():
+    import numpy as np
+
+    from tda.ui.canvas.overlay import PALETTE_RESERVED
+    from tda.ui.canvas.palette_build import delta_e_2000, srgb_to_lab
+
+    assert EDIT_RGB in PALETTE_RESERVED
+    assert set(OS.RESERVED_RGBS) <= set(PALETTE_RESERVED)
+    lab = srgb_to_lab(np.asarray(PALETTE_64, float))
+    res = srgb_to_lab(np.asarray(PALETTE_RESERVED, float))
+    d = delta_e_2000(lab[:, None, :], res[None, :, :])
+    assert float(d.min()) >= 10.0 - 1e-9
+    # the ROI, drawn round the whole chassis, twice as far (D13's chassis was
+    # hot pink (255, 25, 136) at 10: 17 from the ROI's magenta)
+    to_roi = delta_e_2000(lab, srgb_to_lab(np.asarray(OS.ROI_RGB, float)))
+    assert float(to_roi.min()) >= 20.0 - 1e-9
+    from tda.ui.canvas.overlay import palette_color
+
+    assert palette_color("chassis") != (255, 25, 136)
+
+
+@pytest.mark.slow
+def test_the_palette_table_is_what_the_search_chooses():
+    """Deterministic: regenerating it gives the shipped table, in order."""
+    from tda.ui.canvas.overlay import _build_palette
+
+    assert _build_palette() == PALETTE_64
 
 
 def test_every_overlay_kind_has_its_own_colour():
