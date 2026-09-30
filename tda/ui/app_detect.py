@@ -180,7 +180,8 @@ class DetectionWorker(QObject):
     an answer from an older one is dropped on delivery, like
     :class:`tda.ui.app_diff.AssistController`'s superseded comparisons.  When
     a pass ends the engine lets go of its decoded frames and of the model's
-    CUDA cache.
+    CUDA cache; a pass the cache served whole before the model was up ends
+    -- its idle report, that housekeeping -- the moment the model is (round 4).
 
     Signals:
         sigFrame: a :class:`~tda.models.detector.FrameDets` of the current
@@ -209,6 +210,10 @@ class DetectionWorker(QObject):
         self._loaded: Optional[bool] = None
         #: ``(generation, item)`` the cache could not answer before the model was up.
         self._deferred: list[tuple[int, PlanItem]] = []
+        #: Frames were served in this generation and the pass has not ended
+        #: yet: when the cache answered them all before the model was up, the
+        #: pass ends once it is (round 4).
+        self._unreported = False
         self._stats: dict = {}
         self._bridge = _Bridge(self)
         conn = Qt.ConnectionType.QueuedConnection
@@ -230,6 +235,7 @@ class DetectionWorker(QObject):
             self._view = (int(desktop), str(view))
             self._plan = deque(items)
             self._priority = None
+            self._unreported = False
             self._stats = {"view": self._view, "frames": 0, "detected": 0,
                            "measured": 0, "cached": 0, "started": time.perf_counter()}
             self._lock.notify_all()
@@ -252,7 +258,7 @@ class DetectionWorker(QObject):
         if self._stopped or self._loaded is False:
             return self._busy
         return (self._loaded is None or self._busy or self._priority is not None
-                or bool(self._plan) or bool(self._deferred))
+                or bool(self._plan) or bool(self._deferred) or self._unreported)
 
     def pending(self) -> bool:
         """Is anything still to do (or being done, or the model still loading)?"""
@@ -346,7 +352,9 @@ class DetectionWorker(QObject):
         """The next job ``(item, gen, view, stats, model_up)``, or ``None`` to stop.
 
         Called with the lock held.  Once the model is up, what waited for it
-        goes first -- of the current generation only.
+        goes first -- of the current generation only.  ``item`` is ``None``
+        for the end of a pass the cache served whole before the model was up:
+        nothing to compute, only the idle report and the housekeeping.
         """
         while True:
             if self._stopped or self._loaded is False:
@@ -360,6 +368,9 @@ class DetectionWorker(QObject):
                 self._plan.extendleft(reversed([item for item in fresh if not item.priority]))
             if self._priority is not None or self._plan:
                 break
+            if self._loaded is True and self._unreported:
+                self._busy = True
+                return None, self._gen, self._view, self._stats, True
             self._lock.wait()
         if self._priority is not None:
             item, self._priority = self._priority, None
@@ -369,6 +380,7 @@ class DetectionWorker(QObject):
         # first view may wait for the model to load
         self._stats.setdefault("first", time.perf_counter())
         self._busy = True
+        self._unreported = True
         return item, self._gen, self._view, self._stats, self._loaded is True
 
     def _run(self) -> None:
@@ -392,12 +404,15 @@ class DetectionWorker(QObject):
             if job is None:
                 break
             item, gen, view, stats, model_up = job
+            step = getattr(item, "step", None)
             computed = False
             try:
-                if view != opened and view is not None:
+                if item is not None and view != opened and view is not None:
                     self.engine.open_view(*view)
                     opened = view
-                if model_up:
+                if item is None:
+                    frame = None    # a pass the cache served whole: only its end is left
+                elif model_up:
                     frame = self.engine.process(item)
                 else:
                     frame = self.engine.answer_from_cache(item)
@@ -412,11 +427,13 @@ class DetectionWorker(QObject):
                     stats["cached"] += int(not frame.detected)
                     self._emit("sigFrame", (gen, frame))
             except Exception as exc:  # noqa: BLE001 - one frame is not worth the pass
-                log.warning("detector: step %s failed: %s: %s", item.step,
+                log.warning("detector: step %s failed: %s: %s", step,
                             type(exc).__name__, exc, exc_info=True)
             with self._lock:
                 idle = (self._priority is None and not self._plan
                         and self._loaded is True and not self._deferred)
+                if idle:
+                    self._unreported = False
             try:
                 since_flush += int(computed)
                 if since_flush and (idle or since_flush >= FLUSH_EVERY):
@@ -432,7 +449,7 @@ class DetectionWorker(QObject):
                     done.pop("started", None)
                     self._emit("sigIdle", (gen, done))
             except Exception as exc:  # noqa: BLE001 - housekeeping is not worth the pass
-                log.warning("detector: after step %s: %s: %s", item.step,
+                log.warning("detector: after step %s: %s: %s", step,
                             type(exc).__name__, exc, exc_info=True)
             finally:
                 # Not idle until the housekeeping is done: wait() means "all of it".
@@ -550,8 +567,18 @@ class DetectMixin:
                      self.det_worker.engine.cache_root if self.det_worker else "")
             return
         self.det_state = "off"
-        self._det_frames = {}
-        log.warning("small-part detector OFF, the guess is the difference map's: %s", text)
+        answered, self._det_frames = len(self._det_frames), {}
+        if not answered:
+            log.warning("small-part detector OFF, the guess is the difference map's: %s", text)
+            return
+        # Round 4: a warm start answers from the disk cache before the model
+        # has loaded, so a box may already be the detector's when it fails.
+        source = str(getattr(self, "_prompt_source", "") or "")
+        on_screen = ("the box on screen came from that cache and stays until the "
+                     "prompt is reset; " if source.startswith("det") else "")
+        log.warning("small-part detector OFF: %s -- its disk cache had already answered "
+                    "%d frame(s) of this view before the model failed to load; %sfrom "
+                    "now on the guess is the difference map's", text, answered, on_screen)
 
     @S.guard
     def _on_det_idle(self, stats: object) -> None:

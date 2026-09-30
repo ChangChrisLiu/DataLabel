@@ -554,36 +554,53 @@ def test_the_real_models_cache_key_is_its_files_sha1_without_building_it(tmp_pat
     assert eng.cache.dir == tmp_path / "det" / DM.file_sha1(weights)[:12]
 
 
-def _fake_ultralytics(monkeypatch, zero: Path):
-    """An ``ultralytics`` whose import and ``YOLO()`` patch the process like the real one."""
+#: The fake's code runs *as* the ``ultralytics`` package (its globals'
+#: ``__name__``), which is how keep_process_state tells its warning filters
+#: from everyone else's.
+_FAKE_ULTRALYTICS = '''
+import os, warnings
+import cv2, numpy as np, PIL.Image, torch
+
+
+def patch_everything():
+    cv2.setNumThreads(1)
+    cv2.imread = lambda *a, **k: (_ for _ in ()).throw(cv2.error("patched imread"))
+    cv2.imwrite = lambda *a, **k: True
+    PIL.Image.open = lambda *a, **k: None
+    torch.save = lambda *a, **k: None
+    os.environ["NUMEXPR_MAX_THREADS"] = "8"
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    np.set_printoptions(linewidth=320)
+    warnings.filterwarnings("ignore", message="u3 fake")
+    warnings.simplefilter("ignore", category=BytesWarning)
+    for other in DURING:
+        other()
+
+
+class YOLO:
+    names = {0: "screw", 1: "connector"}
+
+    def __init__(self, path):
+        patch_everything()
+
+    def predict(self, batch, **kw):
+        return []
+'''
+
+
+def _fake_ultralytics(monkeypatch, zero: Path, during=()):
+    """An ``ultralytics`` whose ``YOLO()`` patches the process like the real one.
+
+    ``during`` are called inside ``YOLO()``, i.e. inside the second snapshot's
+    span -- where SAM's loader thread really does set things of its own.
+    """
     import types
 
-    import PIL.Image
     torch = pytest.importorskip("torch")
-
-    def patch_everything():
-        cv2.setNumThreads(1)
-        cv2.imread = lambda *a, **k: (_ for _ in ()).throw(cv2.error("patched imread"))
-        cv2.imwrite = lambda *a, **k: True
-        PIL.Image.open = lambda *a, **k: None
-        torch.save = lambda *a, **k: None
-        os.environ["NUMEXPR_MAX_THREADS"] = "8"
-        os.environ["OMP_NUM_THREADS"] = "1"
-        np.set_printoptions(linewidth=320)
-        import warnings
-        warnings.filterwarnings("ignore", message="u3 fake")
-
-    class YOLO:
-        names = {0: "screw", 1: "connector"}
-
-        def __init__(self, path):
-            patch_everything()
-
-        def predict(self, batch, **kw):
-            return []
-
     fake = types.ModuleType("ultralytics")
-    fake.YOLO = YOLO
+    fake.DURING = list(during)
+    exec(compile(_FAKE_ULTRALYTICS, "<fake ultralytics>", "exec"), fake.__dict__)
     monkeypatch.setitem(sys.modules, "ultralytics", fake)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     return fake
@@ -623,7 +640,15 @@ def test_after_the_model_has_loaded_the_process_is_as_it_was(tmp_path, monkeypat
     weights.write_bytes(b"weights")
     monkeypatch.setenv("YOLO_CONFIG_DIR", str(tmp_path / "ycfg"))
     monkeypatch.setenv("YOLO_OFFLINE", "1")
-    _fake_ultralytics(monkeypatch, zero)
+    monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+    inside: list = []
+    filters_before = list(warnings.filters)
+
+    def look():
+        inside.append(([f for f in warnings.filters if f not in filters_before],
+                       os.environ.get("NUMEXPR_MAX_THREADS"), cv2.imread))
+
+    _fake_ultralytics(monkeypatch, zero, during=[look])
     before = {"env": dict(os.environ), "threads": cv2.getNumThreads(),
               "imread": cv2.imread, "imwrite": cv2.imwrite, "imshow": cv2.imshow,
               "pil": PIL.Image.open, "save": torch.save,
@@ -632,12 +657,89 @@ def test_after_the_model_has_loaded_the_process_is_as_it_was(tmp_path, monkeypat
                                  yolo_config_dir=tmp_path / "ycfg"), tmp_path / "det")
     eng.load()
     assert eng.model is not None and eng.model.names[0] == "screw"
+    # the fake really did patch the process (two filters of its own, the env, imread) ...
+    (added, numexpr, imread), = inside
+    assert len(added) == 2 and numexpr == "8" and imread is not before["imread"]
+    # ... and none of it is left
     assert cv2.imread(str(zero)) is None
     assert cv2.imread is before["imread"] and cv2.imwrite is before["imwrite"]
     assert cv2.imshow is before["imshow"] and cv2.getNumThreads() == before["threads"]
     assert PIL.Image.open is before["pil"] and torch.save is before["save"]
     assert dict(os.environ) == before["env"]
     assert np.get_printoptions() == before["np"] and warnings.filters == before["filters"]
+    assert warnings.filterwarnings.__name__ == "filterwarnings"     # unwrapped again
+    assert not hasattr(warnings.simplefilter, "__wrapped__")
+
+
+class _OtherThreadsWarning(DeprecationWarning):
+    """Stands for sympy's ``SymPyDeprecationWarning``, filtered on SAM's thread."""
+
+
+def test_what_another_thread_sets_while_the_model_loads_stays(tmp_path, monkeypatch,
+                                                              guard_process):
+    """Round 4: SAM's loader sets an env variable and sympy a filter meanwhile; both stay.
+
+    Only what ultralytics' own code changed is put back: its variables in
+    ``ULTRALYTICS_ENV`` and the filters its own calls added.
+    """
+    import threading
+    import warnings
+
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"weights")
+    monkeypatch.setenv("YOLO_CONFIG_DIR", str(tmp_path / "ycfg"))
+    monkeypatch.setenv("YOLO_OFFLINE", "1")
+    monkeypatch.setenv("TDA_U3_SHARED", "before")
+    monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
+    monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+    monkeypatch.setenv("OMP_NUM_THREADS", "6")
+    monkeypatch.setenv("NUMEXPR_MAX_THREADS", "3")
+    inductor = str(tmp_path / "inductor")
+    filters_before = list(warnings.filters)
+
+    def sam_loader():
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor     # torch/_inductor does this
+        os.environ["TDA_U3_SHARED"] = "after"
+        warnings.simplefilter("once", _OtherThreadsWarning)  # sympy does this
+
+    def meanwhile():
+        other = threading.Thread(target=sam_loader, name="tda-sam-load-u3")
+        other.start()
+        other.join()
+
+    _fake_ultralytics(monkeypatch, tmp_path / "empty.png", during=[meanwhile])
+    eng = DetectionEngine(config(tmp_path, model=weights,
+                                 yolo_config_dir=tmp_path / "ycfg"), tmp_path / "det")
+    eng.load()
+    # the other thread's changes stay ...
+    assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == inductor
+    assert os.environ["TDA_U3_SHARED"] == "after"
+    new = [f for f in warnings.filters if f not in filters_before]
+    assert new == [("once", None, _OtherThreadsWarning, None, 0)]
+    # ... ultralytics' do not: the variables it changed, the one it added, its two filters
+    assert os.environ["OMP_NUM_THREADS"] == "6"
+    assert os.environ["NUMEXPR_MAX_THREADS"] == "3"
+    assert "CUBLAS_WORKSPACE_CONFIG" not in os.environ
+    assert not any(f[0] == "ignore" and f[2] is BytesWarning for f in warnings.filters)
+    assert not any(f[1] is not None and f[1].pattern == "u3 fake" for f in warnings.filters)
+
+
+def test_a_filter_ultralytics_repeats_is_not_taken_away(guard_process):
+    """A filter that was there before the span stays, even if ultralytics adds it again."""
+    import types
+    import warnings
+
+    warnings.filterwarnings("ignore", message="u3 already there")
+    had = list(warnings.filters)
+    fake = types.ModuleType("ultralytics.u3_fake")
+    exec("import warnings\n"
+         "def again():\n"
+         "    warnings.filterwarnings('ignore', message='u3 already there')\n"
+         "    warnings.filterwarnings('ignore', message='u3 new')\n", fake.__dict__)
+    with DM.keep_process_state():
+        fake.again()
+        assert any(f[1] is not None and f[1].pattern == "u3 new" for f in warnings.filters)
+    assert sorted(map(repr, warnings.filters)) == sorted(map(repr, had))
 
 
 @pytest.mark.slow
@@ -652,27 +754,41 @@ def test_importing_the_real_ultralytics_inside_keep_process_state_changes_nothin
     zero = tmp_path / "empty.png"
     zero.write_bytes(b"")
     code = f"""
-import json, os, sys
+import json, os, sys, threading, warnings
 sys.path.insert(0, {str(REPO)!r})
 import cv2, numpy as np, torch, PIL.Image
 from tda.models.detector import keep_process_state
 zero = {str(zero)!r}
 before = dict(os.environ)
+filters = list(warnings.filters)
 fns = (cv2.imread, cv2.imwrite, cv2.imshow, PIL.Image.open, torch.save)
 threads = cv2.getNumThreads()
 printopts = np.get_printoptions()
+class Other(DeprecationWarning):
+    pass
+def sam_loader():
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = "u3-inductor"
+    warnings.simplefilter("once", Other)
 with keep_process_state(torch):
     import ultralytics
     from ultralytics import YOLO
+    other = threading.Thread(target=sam_loader)
+    other.start()
+    other.join()
     inside = [cv2.imread is not fns[0], PIL.Image.open is not fns[3],
               torch.save is not fns[4], os.environ.get("NUMEXPR_MAX_THREADS"),
-              cv2.getNumThreads()]
+              cv2.getNumThreads(),
+              sum(f not in filters for f in warnings.filters)]
+after = dict(os.environ)
+inductor = after.pop("TORCHINDUCTOR_CACHE_DIR", None)
 print(json.dumps({{
     "inside": inside,
     "imread_none": cv2.imread(zero) is None,
     "same_fns": [a is b for a, b in zip((cv2.imread, cv2.imwrite, cv2.imshow,
                                          PIL.Image.open, torch.save), fns)],
-    "env_same": dict(os.environ) == before,
+    "env_same": after == before,
+    "inductor": inductor,
+    "new_filters": [repr(f) for f in warnings.filters if f not in filters],
     "numexpr": os.environ.get("NUMEXPR_MAX_THREADS"),
     "threads_same": cv2.getNumThreads() == threads,
     "np_same": np.get_printoptions() == printopts,
@@ -687,9 +803,14 @@ print(json.dumps({{
     out = json.loads(done.stdout.strip().splitlines()[-1])
     # ultralytics really did patch the process ...
     assert out["inside"][:3] == [True, True, True] and out["inside"][3] is not None
+    # (its six filters and the other thread's one)
+    assert out["inside"][5] >= 7, out["inside"]
     # ... and none of it survived
     assert out["imread_none"] and all(out["same_fns"]) and out["env_same"]
     assert out["numexpr"] is None and out["threads_same"] and out["np_same"]
+    # while what another thread set meanwhile (round 4) did
+    assert out["inductor"] == "u3-inductor"
+    assert out["new_filters"] == ["('once', None, <class '__main__.Other'>, None, 0)"]
 
 
 def test_detcache_flush_writes_only_when_something_changed(tmp_path):

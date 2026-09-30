@@ -31,10 +31,13 @@ short of a second process:
   ``None``, and the window's image cache, the difference map's worker, the ROI
   worker and the truth inputs all rely on ``None``;
 * ``PIL.Image.open`` and ``torch.save`` replaced;
-* the environment: ``OMP_NUM_THREADS``, ``NUMEXPR_MAX_THREADS``,
-  ``TF_CPP_MIN_LOG_LEVEL``, ``TORCH_CPP_LOG_LEVEL``, ``KINETO_LOG_LEVEL`` --
-  every variable it adds or changes;
-* numpy's and torch's print options, and the warning filters it installs.
+* numpy's and torch's print options;
+* the environment variables in :data:`ULTRALYTICS_ENV` -- *only* those: SAM's
+  loader thread runs at the same time and sets its own (torch's inductor sets
+  ``TORCHINDUCTOR_CACHE_DIR``), and they stay (round 4);
+* the warning filters ultralytics' own code adds -- *only* those, told apart by
+  the module that calls ``warnings.filterwarnings`` / ``simplefilter``: sympy,
+  imported on SAM's thread meanwhile, adds one of its own, and it stays.
 
 It also writes a settings file under ``%APPDATA%`` unless ``YOLO_CONFIG_DIR``
 says where; :func:`prepare_environment` points it at D: and turns downloads
@@ -45,9 +48,12 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import importlib.util
+import inspect
 import logging
 import math
 import os
+import sys
+import threading
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -59,7 +65,8 @@ import numpy as np
 
 __all__ = [
     "CONTAIN", "DEFAULT_FILE", "DEFAULT_YOLO_CONFIG_DIR", "EDGE_PX", "ENV_VAR",
-    "MAX_DET", "NMS_IOU", "PAD_VALUE", "PREDICT_CONF", "STORE_CONF", "Det",
+    "MAX_DET", "NMS_IOU", "PAD_VALUE", "PREDICT_CONF", "STORE_CONF",
+    "ULTRALYTICS_ENV", "Det",
     "DetectorConfig", "DetectorConfigError", "DetectorUnavailable", "Tile",
     "YoloTileDetector", "box_change", "file_sha1", "keep_process_state",
     "load_detector_config",
@@ -326,47 +333,153 @@ class _TorchState:
             self.torch.set_printoptions(**self.print_opts)
 
 
+#: Every environment variable ultralytics (8.4.155) writes or removes, from its
+#: source (``os.environ[...] =`` / ``.pop``): on import ``OMP_NUM_THREADS``
+#: (``ultralytics/__init__``) and ``NUMEXPR_MAX_THREADS``,
+#: ``TF_CPP_MIN_LOG_LEVEL``, ``TORCH_CPP_LOG_LEVEL``, ``KINETO_LOG_LEVEL``
+#: (``utils/__init__``); ``CUBLAS_WORKSPACE_CONFIG`` and ``PYTHONHASHSEED``
+#: (``utils/torch_utils.init_seeds``, set or popped); and on paths the app never
+#: takes -- training, callbacks, exporters -- ``NO_ALBUMENTATIONS_UPDATE``,
+#: ``TORCH_NCCL_BLOCKING_WAIT``, ``KMP_DUPLICATE_LIB_OK``,
+#: ``COMET_START_ONLINE``, ``PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION``.  Not
+#: ``PATH``: only the Axelera exporter touches it, and puts it back itself.
+ULTRALYTICS_ENV = (
+    "OMP_NUM_THREADS", "NUMEXPR_MAX_THREADS", "TF_CPP_MIN_LOG_LEVEL",
+    "TORCH_CPP_LOG_LEVEL", "KINETO_LOG_LEVEL", "CUBLAS_WORKSPACE_CONFIG",
+    "PYTHONHASHSEED", "NO_ALBUMENTATIONS_UPDATE", "TORCH_NCCL_BLOCKING_WAIT",
+    "KMP_DUPLICATE_LIB_OK", "COMET_START_ONLINE",
+    "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION",
+)
+
+
+class _FilterWatch:
+    """Records the warning filters ultralytics' own code adds, and nobody else's.
+
+    While at least one :func:`keep_process_state` is open,
+    ``warnings.filterwarnings`` and ``warnings.simplefilter`` are wrapped: a
+    call made from a module of the ``ultralytics`` package has the entry it
+    added noted in every open span's list; any other caller -- another thread,
+    sympy, torch -- goes straight through, unrecorded.  The entry is the new
+    tuple in ``warnings.filters`` whose fields are the call's arguments, so a
+    filter another thread adds at the same moment is not mistaken for it; a
+    filter that was there before (``filterwarnings`` only moves it to the
+    front) is not new and is never taken away.
+    """
+
+    _lock = threading.Lock()
+    _spans: list = []
+    _originals: dict = {}
+
+    @classmethod
+    def open(cls) -> list:
+        added: list = []
+        with cls._lock:
+            if not cls._spans:
+                for name in ("filterwarnings", "simplefilter"):
+                    original = getattr(warnings, name)
+                    cls._originals[name] = original
+                    setattr(warnings, name, cls._wrap(original))
+            cls._spans.append(added)
+        return added
+
+    @classmethod
+    def close(cls, added: list) -> None:
+        with cls._lock:
+            cls._spans = [s for s in cls._spans if s is not added]
+            if not cls._spans:
+                for name, original in cls._originals.items():
+                    if getattr(getattr(warnings, name), "__wrapped__", None) is original:
+                        setattr(warnings, name, original)
+                cls._originals = {}
+
+    @classmethod
+    def _wrap(cls, original):
+        signature = inspect.signature(original)
+
+        def watched(*args, **kwargs):
+            caller = sys._getframe(1).f_globals.get("__name__") or ""
+            if caller.partition(".")[0] != "ultralytics":
+                return original(*args, **kwargs)
+            before = list(warnings.filters)
+            result = original(*args, **kwargs)
+            call = signature.bind(*args, **kwargs)
+            call.apply_defaults()
+            new = [f for f in warnings.filters
+                   if f not in before and _is_filter(f, call.arguments)]
+            with cls._lock:
+                for span in cls._spans:
+                    span.extend(new)
+            return result
+
+        watched.__wrapped__ = original
+        return watched
+
+
+def _is_filter(entry: tuple, arguments: dict) -> bool:
+    """Is this ``warnings.filters`` entry the one a call with these arguments adds?"""
+    action, message, category, module, lineno = entry
+    text = message.pattern if message is not None else ""
+    where = module.pattern if module is not None else ""
+    return (action == arguments["action"] and category is arguments["category"]
+            and lineno == arguments["lineno"] and text == arguments.get("message", "")
+            and where == arguments.get("module", ""))
+
+
 @contextlib.contextmanager
 def keep_process_state(torch: Any = None) -> Iterator[_TorchState]:
     """Put back everything importing (and running) ultralytics changes process-wide.
 
-    A snapshot on entry, restored on exit whatever happened in between: the
-    OpenCV thread count and its ``imread`` / ``imwrite`` / ``imshow``,
-    ``PIL.Image.open``, numpy's print options, the warning filters, and the
-    environment -- every variable added, changed or removed goes back to what
-    it was.  ``torch.save`` and torch's print options too, once torch is
-    known: pass it, or import it inside and call ``watch(torch)`` on what this
-    yields before ultralytics is imported.
+    A snapshot on entry, put back on exit whatever happened in between, of
+    what only ultralytics changes: the OpenCV thread count and its ``imread``
+    / ``imwrite`` / ``imshow``, ``PIL.Image.open``, numpy's print options, and
+    ``torch.save`` and torch's print options once torch is known (pass it, or
+    import it inside and call ``watch(torch)`` on what this yields before
+    ultralytics is imported).
 
-    The environment is put back whole, so a variable another thread sets
-    in between goes too; nothing in ``tda`` sets one but
-    :func:`prepare_environment`, which runs before the snapshot.
+    What other threads change too is handled one entry at a time (round 4):
+
+    * the environment -- only the variables in :data:`ULTRALYTICS_ENV`: one
+      that was absent and is now set is removed, one that changed (or went)
+      gets its old value back; every other variable is left as it is, so what
+      SAM's loader sets meanwhile stays;
+    * the warning filters -- only the entries ultralytics' own calls added in
+      between (:class:`_FilterWatch`) are removed; everyone else's stay.
     """
     import PIL.Image
 
-    env = dict(os.environ)
+    env = {key: os.environ.get(key) for key in ULTRALYTICS_ENV}
     threads = cv2.getNumThreads()
     cv2_fns = {name: getattr(cv2, name) for name in _CV2_PATCHED}
     pil_open = PIL.Image.open
     np_print = np.get_printoptions()
-    filters = list(warnings.filters)
     torch_state = _TorchState()
     if torch is not None:
         torch_state.watch(torch)
+    added = _FilterWatch.open()
     try:
         yield torch_state
     finally:
+        _FilterWatch.close(added)
         cv2.setNumThreads(threads)
         for name, fn in cv2_fns.items():
             setattr(cv2, name, fn)
         PIL.Image.open = pil_open
         np.set_printoptions(**np_print)
-        warnings.filters[:] = filters
         torch_state.restore()
-        for key in [k for k in os.environ if k not in env]:
-            os.environ.pop(key, None)
+        for entry in added:
+            # ``warnings`` keeps no two equal entries, so the equal one that
+            # ``remove`` takes (in one step, under the GIL) is this very entry
+            if any(current is entry for current in warnings.filters):
+                with contextlib.suppress(ValueError):
+                    warnings.filters.remove(entry)
+        if added and hasattr(warnings, "_filters_mutated"):
+            warnings._filters_mutated()
         for key, value in env.items():
-            if os.environ.get(key) != value:
+            if os.environ.get(key) == value:
+                continue
+            if value is None:
+                os.environ.pop(key, None)
+            else:
                 os.environ[key] = value
 
 

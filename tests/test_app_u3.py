@@ -864,17 +864,7 @@ def test_the_frame_the_window_opens_on_gets_a_late_answer_while_untouched(
 def test_a_warm_cache_arms_the_first_frame_before_the_model_has_loaded(
         qapp, tmp_path, monkeypatch):
     """Review item 3: the cache is keyed by the model file, not by a loaded model."""
-    first = _built_with_a_detector(
-        tmp_path / "a", monkeypatch,
-        lambda _c: StubModel({SCREW_STEP: [det(A_BOX), det(B_BOX)]}, identity="warm-u3"),
-        identity="warm-u3", cache_root=tmp_path / "det")
-    try:
-        pump(first)
-        assert first._prompt_box == fbox(A_BOX)
-        scene = first.session.cache_dir
-    finally:
-        close_window(first)
-
+    scene, _frames = _warm_cache(tmp_path, monkeypatch)
     gate = threading.Event()
     built = []
 
@@ -895,6 +885,94 @@ def test_a_warm_cache_arms_the_first_frame_before_the_model_has_loaded(
         assert SCREW_STEP in second._det_frames
         assert second._prompt_box == fbox(A_BOX)
         assert time.perf_counter() - started < 5.0
+    finally:
+        gate.set()
+        close_window(second)
+
+
+def _warm_cache(tmp_path, monkeypatch) -> tuple:
+    """Run one window's pass to the end: ``(scene cache dir, frames in the pass)``."""
+    first = _built_with_a_detector(
+        tmp_path / "a", monkeypatch,
+        lambda _c: StubModel({SCREW_STEP: [det(A_BOX), det(B_BOX)]}, identity="warm-u3"),
+        identity="warm-u3", cache_root=tmp_path / "det")
+    try:
+        pump(first)
+        assert first._prompt_box == fbox(A_BOX)
+        return first.session.cache_dir, first.det_last_pass["frames"]
+    finally:
+        close_window(first)
+
+
+def test_a_pass_the_cache_served_whole_ends_once_the_model_is_up(qapp, tmp_path,
+                                                                 monkeypatch, logged):
+    """Round 4, minor (a): every frame answered before the model loaded -- the pass ends."""
+    scene, frames = _warm_cache(tmp_path, monkeypatch)
+    gate = threading.Event()
+
+    def slow(_config):
+        gate.wait(30)
+        return StubModel({}, identity="warm-u3")
+
+    second = _built_with_a_detector(tmp_path / "b", monkeypatch, slow, identity="warm-u3",
+                                    cache_root=tmp_path / "det", cache_dir=scene)
+    try:
+        worker = second.det_worker
+        released: list = []
+        real_release = worker.engine.release
+        worker.engine.release = lambda: (released.append(True), real_release())[-1]
+        assert worker.served_before_load(10)
+        with worker._lock:
+            assert not worker._deferred, "the cache did not answer every frame"
+        QApplication.processEvents()
+        assert second.det_last_pass is None and worker.pending()
+        gate.set()
+        assert worker.wait(10)
+        for _ in range(5):
+            QApplication.processEvents()
+        assert second.det_state == "on"
+        assert second.det_last_pass is not None
+        assert second.det_last_pass["frames"] == frames
+        assert second.det_last_pass["detected"] == 0
+        assert second.det_last_pass["cached"] == frames
+        assert released == [True]
+        assert [m for _l, m in logged if m.startswith("detector pass D13/scan")]
+    finally:
+        gate.set()
+        close_window(second)
+
+
+def test_a_model_that_fails_after_the_cache_armed_the_frame_says_so(qapp, tmp_path,
+                                                                   monkeypatch, logged):
+    """Round 4, minor (b): OFF, but the cache had answered and its box is on screen."""
+    scene, _frames = _warm_cache(tmp_path, monkeypatch)
+    gate = threading.Event()
+
+    def failing(_config):
+        gate.wait(30)
+        raise RuntimeError("no CUDA today")
+
+    second = _built_with_a_detector(tmp_path / "b", monkeypatch, failing, identity="warm-u3",
+                                    cache_root=tmp_path / "det", cache_dir=scene)
+    try:
+        assert second.det_worker.served_before_load(10)
+        assert second.assist.wait(10)
+        for _ in range(5):
+            QApplication.processEvents()
+        assert second._prompt_box == fbox(A_BOX)
+        gate.set()
+        deadline = time.monotonic() + 10
+        while second.det_state != "off" and time.monotonic() < deadline:
+            QApplication.processEvents()
+            time.sleep(0.01)
+        assert second.det_state == "off"
+        lines = [m for _l, m in logged if m.startswith("small-part detector OFF")]
+        assert len(lines) == 1, lines
+        assert "no CUDA today" in lines[0]
+        assert "disk cache had already answered" in lines[0]
+        assert "the box on screen came from that cache" in lines[0]
+        assert "the guess is the difference map's: " not in lines[0]
+        assert second._prompt_box == fbox(A_BOX)
     finally:
         gate.set()
         close_window(second)
