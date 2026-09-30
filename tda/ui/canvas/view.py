@@ -1270,6 +1270,15 @@ class ImageCanvas(QGraphicsView):
         point = inverted.map(QPointF(pos)) if ok else QPointF(pos)
         return (float(point.x()), float(point.y()))
 
+    def shows_image_point(self, x: float, y: float) -> bool:
+        """Is image point ``(x, y)`` inside the viewport right now?
+
+        A release that ran off the canvas is still delivered to it, at a
+        position outside it; the circle tool cancels on one (task U5a).
+        """
+        point = self.mapFromScene(QPointF(float(x), float(y)))
+        return self.viewport().rect().contains(point)
+
     def viewport_image_rect(self) -> Rect:
         """Visible image region ``(x0, y0, x1, y1)``, clipped to the image.
 

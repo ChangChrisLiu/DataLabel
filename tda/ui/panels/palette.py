@@ -146,7 +146,7 @@ def _icon_occluder(p: QPainter, s: float) -> None:
 
 def _icon_polygon(p: QPainter, s: float) -> None:
     """A filled polygon with its vertex dots: what ``P`` leaves in the layer (U5a)."""
-    corners =[QPointF(s * 0.18, s * 0.30), QPointF(s * 0.62, s * 0.14),
+    corners = [QPointF(s * 0.18, s * 0.30), QPointF(s * 0.62, s * 0.14),
                QPointF(s * 0.86, s * 0.56), QPointF(s * 0.52, s * 0.86),
                QPointF(s * 0.16, s * 0.72)]
     p.setPen(QPen(QColor(0, 0, 0, 170), 3.0))

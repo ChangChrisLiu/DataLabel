@@ -289,6 +289,33 @@ def test_a_click_on_the_first_vertex_closes_the_polygon(window):
     assert ops(window) == 1
 
 
+def test_near_the_first_vertex_a_click_is_a_vertex_until_there_are_three(window):
+    """Round 2: the first vertex only closes a polygon that could close.
+
+    At the fit zoom of a 12 MP frame its 8 screen px are ~44 image px, so a
+    small part's second and third corners land "near the first vertex"; they
+    were swallowed, and the "too few" line asked for clicks that would be
+    swallowed again.  Zoomed out here so the whole part is within the 8 px.
+    """
+    start_edit(window)
+    window.act_tool("polygon")
+    window.canvas.set_zoom(0.5)                     # 8 screen px = 16 image px
+    window.canvas.center_on((32.0, 32.0))
+    part = [(30.5, 30.5), (36.5, 30.5), (33.5, 36.5)]
+    for x, y in part[:2]:
+        click(window, x, y)
+        window.polygon.on_move(*part[0], None)
+        assert window.canvas.shape_preview()[2] is False, "lit below three vertices"
+    assert window.polygon.vertices == part[:2], "a corner near the first was swallowed"
+    click(window, *part[2])
+    assert window.polygon.vertices == part and ops(window) == 0
+    window.polygon.on_move(*part[0], None)
+    assert window.canvas.shape_preview()[2] is True
+    click(window, part[0][0] + 2.0, part[0][1] + 1.0)   # now it closes
+    assert window.polygon.vertices == [] and ops(window) == 1
+    assert np.array_equal(window.overlay.editing, fill_of(part))
+
+
 def test_a_double_click_closes_the_polygon(window):
     """Through the window, the way a real mouse arrives: Qt turns the second
     press of a double-click into ``MouseButtonDblClick`` for a widget, so the
@@ -322,7 +349,8 @@ def test_fewer_than_three_vertices_fill_nothing_and_say_so(window):
     click(window, *SQUARE[1])
     key(window, "Return")
     assert not window.overlay.editing.any() and ops(window) == 0
-    assert "至少要 3 个点" in window.status_message()
+    said = window.status_message()
+    assert "至少要 3 个点" in said and said.endswith("或 Esc 取消"), said
     assert window.polygon.vertices == SQUARE[:2], "the two clicks were thrown away"
     window.polygon.on_double_click(*SQUARE[1], None)
     assert not window.overlay.editing.any() and ops(window) == 0
@@ -563,17 +591,67 @@ def test_a_plain_click_fills_a_disk_of_the_brush_radius(window):
     assert ops(window) == 1
 
 
-def test_a_release_under_a_pixel_fills_nothing(window):
+def test_a_release_under_a_pixel_is_a_click_of_the_brush_radius(window):
+    """Round 2: click or drag is decided in image pixels, whatever the zoom --
+    here 0.5 px is six screen pixels, and still a click."""
     start_edit(window)
     window.act_tool("circle")
-    window.canvas.set_zoom(12.0)                    # 0.5 px is six screen pixels
+    window.set_brush_radius(4)
+    window.canvas.set_zoom(12.0)
     window.canvas.center_on((30, 30))
     window.circle.on_press(30.5, 30.5, None)
     window.circle.on_move(31.0, 30.5, None)
+    shape = window.canvas.shape_preview()
+    assert shape[2] == 4.0, "the preview must show the disk a release fills"
+    assert "r=4" in window.tool_label.text(), window.tool_label.text()
     window.circle.on_release(31.0, 30.5, None)
     QApplication.processEvents()
-    assert not window.overlay.editing.any() and ops(window) == 0
-    assert "不到 1 个像素" in window.status_message()
+    assert np.array_equal(window.overlay.editing, disk_of(30.5, 30.5, 4.0))
+    assert ops(window) == 1
+
+
+def test_at_a_quarter_zoom_a_short_drag_fills_the_radius_it_showed(window):
+    """Round 2 (m1): at 25 % an 8 px drag is two screen pixels.  It was taken
+    for a click and filled the brush radius, while the preview and the badge
+    said r=8."""
+    start_edit(window)
+    window.act_tool("circle")
+    window.set_brush_radius(3)
+    window.canvas.set_zoom(0.25)
+    window.canvas.center_on((32.0, 32.0))
+    assert window.canvas.zoom_factor() == pytest.approx(0.25)
+    window.circle.on_press(30.5, 30.5, None)
+    window.circle.on_move(38.5, 30.5, None)
+    assert window.canvas.shape_preview()[2] == pytest.approx(8.0)
+    assert "r=8" in window.tool_label.text(), window.tool_label.text()
+    window.circle.on_release(38.5, 30.5, None)
+    QApplication.processEvents()
+    assert np.array_equal(window.overlay.editing, disk_of(30.5, 30.5, 8.0))
+    assert "圆形 r=8 已填进编辑层" in window.status_message()
+
+
+def test_a_release_off_the_canvas_cancels_the_circle(window):
+    """Round 2 (m2): a drag that ran off the canvas filled to the release
+    point -- 1.1 Mpx on the scanner.  It is cancelled, and said."""
+    start_edit(window)
+    layer = seed_block(window)
+    count = ops(window)
+    window.act_tool("circle")
+    window.canvas.set_zoom(12.0)
+    window.canvas.center_on((30.0, 30.0))
+    viewport = window.canvas.viewport()
+    QTest.mousePress(viewport, Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, at(window, 30.5, 30.5))
+    off = QPoint(viewport.width() + 40, viewport.height() // 2)
+    QTest.mouseMove(viewport, off)
+    assert window.circle.busy
+    QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton,
+                       Qt.KeyboardModifier.NoModifier, off)
+    QApplication.processEvents()
+    assert not window.circle.busy and window.canvas.shape_preview() is None
+    assert np.array_equal(window.overlay.editing, layer) and ops(window) == count
+    assert "画布外" in window.status_message() and "已取消" in window.status_message()
+    assert window.canvas.tool_cursor().glyph == "cross", "the ring came back"
 
 
 def test_esc_mid_drag_drops_the_circle(window):

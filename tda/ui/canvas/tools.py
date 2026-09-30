@@ -419,8 +419,9 @@ class ShapeFillTool(Tool):
 
     :attr:`sigShape` says what happened to the shape in progress -- ``"start"``,
     ``"vertex"``, ``"remove"``, ``"radius"``, ``"cancel"``, ``"fill"``, and the
-    two that fill nothing: ``"too_few"`` (a polygon of under three vertices) and
-    ``"empty"`` (a shape that misses the image or is under a pixel) -- for the
+    three that fill nothing: ``"too_few"`` (a polygon of under three vertices),
+    ``"outside"`` (a circle released off the viewport) and ``"empty"`` (a
+    shape that misses the image) -- for the
     status line, the badge and the guide.  :attr:`accepts` is asked on every
     press; the window answers ``False`` when it has turned the press down (no
     part is being edited), so no shape starts that could never be filled.
@@ -487,9 +488,10 @@ class PolygonTool(ShapeFillTool):
 
     Asked for after SAM segmented the motherboard with gaps all over it: the
     brush filled them one dab at a time.  A left click adds a vertex; ``Enter``
-    (the window's), a double-click, or a click within :attr:`CLOSE_PX` screen
-    pixels of the first vertex closes the polygon and fills its interior into
-    the editing layer.  Fewer than :attr:`MIN_VERTICES` vertices fill nothing.
+    (the window's), a double-click, or -- once there are :attr:`MIN_VERTICES`
+    -- a click within :attr:`CLOSE_PX` screen pixels of the first vertex closes
+    the polygon and fills its interior into the editing layer.  Fewer than
+    :attr:`MIN_VERTICES` vertices fill nothing.
     :meth:`remove_last` is ``Backspace`` and :meth:`cancel` is ``Esc``.
 
     The vertices are **image** coordinates, so zooming and panning in the
@@ -540,7 +542,11 @@ class PolygonTool(ShapeFillTool):
     def on_press(self, x: float, y: float, ev: Any) -> None:
         if self.overlay is None or not _left_button(ev) or not self._accepted():
             return
-        if self.vertices and self._near_first(x, y):
+        # Only a polygon that could close closes on its first vertex -- the
+        # same rule that lights it (``on_move``).  Below three vertices a click
+        # there is a vertex: at the fit zoom of a 12 MP frame the first
+        # vertex's 8 screen px are ~44 image px, the whole of a small part.
+        if len(self.vertices) >= self.MIN_VERTICES and self._near_first(x, y):
             self.close()
             return
         self.vertices.append((float(x), float(y)))
@@ -615,18 +621,21 @@ class PolygonTool(ShapeFillTool):
 class CircleTool(ShapeFillTool):
     """``Y``: press at the centre, drag to the rim, release -- the disk is filled (U5a).
 
-    Asked for next to the polygon, for the screws.  The radius is in image
-    pixels, so the wheel may zoom in the middle of a drag.  A release under one
-    image pixel from the centre fills nothing; a plain **click** -- press and
-    release within :attr:`CLICK_PX` screen pixels -- fills a disk of the brush
-    radius (:attr:`click_radius`, the one ``[``/``]`` and the slider set), so a
-    screw can be one click at a matching brush size.  ``Esc`` (the window's
-    :meth:`cancel`) drops a drag in progress.
+    Asked for next to the polygon, for the screws.  **What a release fills is
+    what the preview and the badge showed**, decided in image pixels -- so the
+    wheel may zoom in the middle of a drag, and the zoom never changes the
+    answer: the drag's radius when it is at least :attr:`MIN_RADIUS`, and
+    below that the brush radius (:attr:`click_radius`, the one ``[``/``]`` and
+    the slider set) -- a plain click fills a disk of the brush size, so a screw
+    can be one click at a matching brush.  (Deciding "click" by screen pixels
+    instead turned a 2-px drag at a 25 % zoom -- an 8 px circle on the preview
+    -- into a brush-sized disk.)  A release outside the viewport cancels the
+    circle: a drag that ran off the canvas is not a disk that size (on the
+    scanner it was 1.1 Mpx).  ``Esc`` (the window's :meth:`cancel`) drops a
+    drag in progress.
     """
 
-    #: A press and release this close together, in screen pixels, are a click.
-    CLICK_PX = 3.0
-    #: Radii below this, in image pixels, fill nothing.
+    #: Drags shorter than this, in image pixels, are a click: the brush radius.
     MIN_RADIUS = 1.0
 
     def __init__(
@@ -642,7 +651,6 @@ class CircleTool(ShapeFillTool):
         self.drag_radius = 0.0
         #: The radius of the last disk filled, image pixels (for the status line).
         self.last_radius = 0.0
-        self._dragged = False
 
     @property
     def busy(self) -> bool:
@@ -650,11 +658,17 @@ class CircleTool(ShapeFillTool):
 
     @property
     def radius(self) -> int:
-        """What the status badge's ``r=`` shows: the drag's radius while one is
-        under way, the click's otherwise (image pixels, like the brush's)."""
+        """What the status badge's ``r=`` shows: the disk a release would fill
+        while a drag is under way, the click's otherwise (image pixels, like the
+        brush's)."""
         if self.centre is not None:
-            return int(round(self.drag_radius))
+            return int(round(self.fill_radius()))
         return self.click_radius
+
+    def fill_radius(self, drag: Optional[float] = None) -> float:
+        """The radius a release at drag radius ``drag`` fills (default: the current one)."""
+        radius = self.drag_radius if drag is None else float(drag)
+        return radius if radius >= self.MIN_RADIUS else float(self.click_radius)
 
     def set_radius(self, radius: int) -> None:
         """The brush radius, which a plain click fills with (``[`` / ``]``)."""
@@ -672,7 +686,6 @@ class CircleTool(ShapeFillTool):
             return
         self.centre = (float(x), float(y))
         self.drag_radius = 0.0
-        self._dragged = False
         self._show()
         self.sigShape.emit("start")
 
@@ -689,13 +702,15 @@ class CircleTool(ShapeFillTool):
     def on_release(self, x: float, y: float, ev: Any) -> None:
         if self.centre is None or not _left_button(ev):
             return
-        radius = self._radius_to(x, y)
-        (cx, cy), self.centre = self.centre, None
+        cx, cy = self.centre
+        radius = self.fill_radius(self._radius_to(x, y))
+        self.centre = None
         self.drag_radius = 0.0
         self._preview(None)
-        if not self._dragged:
-            radius = float(self.click_radius)
-        if radius < self.MIN_RADIUS:
+        if not self._in_view(x, y):
+            self.sigShape.emit("outside")
+            return
+        if radius < self.MIN_RADIUS:           # a brush radius of 0
             self.sigShape.emit("empty")
             return
         self.last_radius = radius
@@ -715,15 +730,19 @@ class CircleTool(ShapeFillTool):
     # -- helpers ------------------------------------------------------------
     def _radius_to(self, x: float, y: float) -> float:
         cx, cy = self.centre  # type: ignore[misc]
-        radius = math.hypot(float(x) - cx, float(y) - cy)
-        if radius * self._zoom() > self.CLICK_PX:
-            self._dragged = True
-        return radius
+        return math.hypot(float(x) - cx, float(y) - cy)
+
+    def _in_view(self, x: float, y: float) -> bool:
+        """Is image point ``(x, y)`` on the canvas' viewport (``True`` for a stub)?"""
+        shows = getattr(self.canvas, "shows_image_point", None)
+        return True if shows is None else bool(shows(x, y))
 
     def _show(self) -> None:
         if self.centre is None:
             self._preview(None)
         else:
-            self._preview(("circle", self.centre, float(self.drag_radius)))
+            # The disk a release here would fill -- the brush's while the drag
+            # is under a pixel -- so the preview never shows another circle.
+            self._preview(("circle", self.centre, self.fill_radius()))
 
 

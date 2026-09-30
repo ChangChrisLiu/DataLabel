@@ -92,16 +92,17 @@ SHAPE_SAYS: dict[tuple[str, str], str] = {
     ("polygon", "vertex"): ("多边形：{n} 个点 — Enter / 双击 / 点回第一个点 填上；"
                             "Backspace 删点，Esc 取消"),
     ("polygon", "remove"): "多边形：删掉一个点，还剩 {n} 个 / vertex removed",
-    ("polygon", "too_few"): ("多边形至少要 3 个点（现在 {n} 个），没有填：再点几个 / "
-                             "a polygon needs 3 vertices"),
+    ("polygon", "too_few"): ("多边形至少要 3 个点（现在 {n} 个），没有填 / a polygon "
+                             "needs 3 vertices：再点几个，或 Esc 取消"),
     ("polygon", "cancel"): "多边形已取消，什么都没填 / polygon cancelled",
     ("polygon", "fill"): "多边形已填进编辑层（Ctrl+Z 撤销）/ polygon filled",
     ("polygon", "empty"): "多边形在图像外，什么都没填 / the polygon misses the image",
     ("circle", "start"): "圆形：拖到零件边缘松手；Esc 取消",
     ("circle", "cancel"): "圆形已取消，什么都没填 / circle cancelled",
     ("circle", "fill"): "圆形 r={r} 已填进编辑层（Ctrl+Z 撤销）/ disk filled",
-    ("circle", "empty"): ("半径不到 1 个像素（或在图像外），什么都没填 / "
-                          "under one pixel: nothing filled"),
+    ("circle", "empty"): "圆形在图像外，什么都没填 / the circle misses the image",
+    ("circle", "outside"): ("松手时在画布外：圆形已取消，什么都没填 / released off the "
+                            "canvas: circle cancelled"),
 }
 #: ``Enter`` while a circle is being dragged: the release is what fills it.
 CIRCLE_ENTER = "松开鼠标就填上圆形；不要了按 Esc / release the mouse to fill the circle"
@@ -780,7 +781,7 @@ class EditMixin:
             self.tool_label.setText(shown)
             self.tool_label.setToolTip(tip)
             return
-        if name == "circle" and what in ("start", "cancel", "fill", "empty"):
+        if name == "circle" and what in ("start", "cancel", "fill", "empty", "outside"):
             # A crosshair on the rim while dragging; the click-sized ring after.
             self.sync_tool_cursor()
         said = SHAPE_SAYS.get((name, what), "")
