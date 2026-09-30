@@ -205,7 +205,8 @@ def _restamp(db: Db, data: "StepTableData", key: str, dropped: int,
     merge_desktop_meta(db, data.desktop, {
         "graph_version": graph_version(db, data.desktop),
         "graph_edges": len(active_edges(edges)),
-        "graph_cycles": len(find_deadlocks(edges, settled_instances(left), data.tax)),
+        "graph_cycles": len(find_deadlocks(edges, settled_instances(left), data.tax,
+                                           initial=data.initial_states())),
     })
     if extra_patch is not None:
         payload, inverse = extra_patch
@@ -250,7 +251,8 @@ def delete_instance(data: "StepTableData", db: Db, key: str) -> None:
         # the stored record, not the in-memory one: the inverse has to bring
         # back what the database held, not an edit nobody applied
         stored = db.instances(data.desktop).get(key, data.instances[key])
-        patch = X.delete_patch(stored, X.initial_events(db, data.desktop, key))
+        patch = X.delete_patch(stored, X.initial_events(db, data.desktop, key),
+                               X.relation_rows(db, data.desktop, key, RULE))
     try:
         with db.transaction():
             for triple in derived:

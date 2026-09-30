@@ -444,6 +444,9 @@ class ShellMixin:
             S.close_logger(self.logger)
 
     def closeEvent(self, event) -> None:  # noqa: D102 - Qt override
+        if not self.settle_steps_edits():   # staged S1 edits ask first (U5b)
+            event.ignore()
+            return
         if not self._settle_uncommitted_edit():
             event.ignore()
             return

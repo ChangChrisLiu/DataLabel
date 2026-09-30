@@ -129,6 +129,9 @@ class StepTablePanel(QWidget):
     #: waits for ``Apply`` and is no ``dataChanged`` of either model, so the
     #: window's unsaved-edit gate listens here.
     sigEdited = Signal()
+    #: Emitted by :meth:`revert`: nothing is staged any more, and the window's
+    #: unsaved-edit flag has to hear it.
+    sigReverted = Signal()
 
     def __init__(
         self,
@@ -267,6 +270,7 @@ class StepTablePanel(QWidget):
         """Throw away every unsaved edit and reload from the database."""
         self.set_desktop(self.desktop)
         self.status.setText("Reverted to the stored step table.")
+        self.sigReverted.emit()
 
     def apply(self) -> None:
         """Write the session back, recompile the auto events and report.

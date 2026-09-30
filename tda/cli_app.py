@@ -212,7 +212,7 @@ def _call_export(export, *args, allow_conflicts: bool, **kw):
 
 
 def _prepare_truth(db, tax, desktops: Sequence[int], view: str,
-                   refresh: bool = True) -> dict:
+                   refresh: bool = True, ignore_digest: bool = False) -> dict:
     """Bring the compiled truth of ``desktops`` up to date before it is read.
 
     Three commands read the truth table and all three were reading it raw:
@@ -233,6 +233,12 @@ def _prepare_truth(db, tax, desktops: Sequence[int], view: str,
     ``truth``: the exports take it as a keyword argument and refresh lazily
     through the same object, so a frame is never compiled twice per run.
 
+    ``ignore_digest`` compiles every frame whatever its stored digest says.
+    ``check`` needs it: a frame whose digest is current is skipped without
+    compiling, and a skipped frame reports no problems -- so the second
+    ``check`` of an untouched view printed ``problems: 0`` and exited 0 over
+    hundreds of missing shapes. The exports keep the digest shortcut.
+
     Returns ``{"truth", "desktops", "view", "steps", "updated", "conflicts",
     "problems", "pending"}``; ``pending`` is what is *still* queued afterwards,
     which is what the exports refuse on.
@@ -249,7 +255,8 @@ def _prepare_truth(db, tax, desktops: Sequence[int], view: str,
         if refresh:
             steps = [int(row["step"]) for row in db.frames_for(int(desktop), str(view))
                      if not row.get("missing")]
-            stats = truth.refresh_range(int(desktop), str(view), steps)
+            stats = truth.refresh_range(int(desktop), str(view), steps,
+                                        ignore_digest=ignore_digest)
             total["steps"] += len(steps)
             total["updated"] += int(stats.get("updated", 0))
             total["conflicts"] += int(stats.get("conflicts", 0))
@@ -319,7 +326,9 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def _check_one(db, tax, args: argparse.Namespace, desktop: int, view: str) -> int:
     """Recompile one ``(desktop, view)`` and report it; the exit code is its own."""
-    stats = _prepare_truth(db, tax, [desktop], view, refresh=True)
+    # every frame compiled, as on a first run: a digest-skipped frame reports
+    # no problems, and a check has to see them all every time
+    stats = _prepare_truth(db, tax, [desktop], view, refresh=True, ignore_digest=True)
     problems = list(stats["problems"])
     standing = _open_conflicts(stats["truth"], db, [desktop], view)
     print(f"[check] D{desktop:02d} {view}: {stats['steps']} steps, "

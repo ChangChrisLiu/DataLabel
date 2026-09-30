@@ -341,6 +341,7 @@ def state_at(
     events: list[StateEvent],
     step: int,
     tax: Taxonomy,
+    initial: Optional[Mapping[str, str]] = None,
 ) -> FrameState:
     """The state of every instance at logical step ``step``.
 
@@ -358,8 +359,14 @@ def state_at(
     handed to the closure, which is how a child that came out on its own keeps
     its own identity instead of being counted as part of a parent that followed
     it later.
+
+    ``initial`` is :func:`initial_overrides` for a caller whose ``events`` are
+    the *derived* log alone (the spec 7.4 replay): the hand-written step-0
+    events that carry an added part's initial state are not in it, so the
+    snapshot has to start from them. A full log that contains them folds them
+    either way.
     """
-    frame = initial_state(instances, tax)
+    frame = initial_state(instances, tax, initial)
     removed_at: dict[str, int] = {}
     for event in sorted(events, key=lambda e: e.step):  # stable: keeps intra-step order
         if event.step > step:

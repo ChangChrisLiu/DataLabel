@@ -180,6 +180,10 @@ class StepTableData:
     #: so every table and question sees them; :meth:`save` writes their
     #: initial-state events and one ``op_log`` row per batch.
     extras: list[X.ExtraBatch] = field(default_factory=list)
+    #: The hand-written initial states the database holds
+    #: (:func:`tda.core.states.initial_overrides`), read at load and after
+    #: every save; :meth:`initial_states` adds the staged ones.
+    stored_initial: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.relations is None:
@@ -197,7 +201,8 @@ class StepTableData:
         rows = [StepRow(step=rec, actions=by_step.get(rec.step, [])) for rec in db.steps(desktop)]
         data = cls(desktop=desktop, tax=tax, rows=rows, instances=db.instances(desktop),
                    declined=set(db.declined_implied(desktop)),
-                   annotator=str(annotator or ANNOTATOR))
+                   annotator=str(annotator or ANNOTATOR),
+                   stored_initial=_stored_initial(db, desktop))
         data.relations.reload(db)
         data.refresh_issues()
         return data
@@ -431,6 +436,18 @@ class StepTableData:
         self.refresh_issues()
         return batch.keys
 
+    def initial_states(self) -> dict[str, str]:
+        """``key -> state`` before step 1 where it is not the class default.
+
+        The stored hand-written initial states plus the ones a staged
+        "＋ 添加零件" would write, for every instance still in the table: what
+        the spec 7.4 replay and the deadlock checks of the Relations tab start
+        from, so an added clip the picture shows ``open`` is open there too.
+        """
+        out = {k: v for k, v in self.stored_initial.items() if k in self.instances}
+        out.update(initial_overrides(e for batch in self.extras for e in batch.events))
+        return out
+
     def staged_extra(self, key: str) -> bool:
         """Is ``key`` an added part that has not been applied yet?"""
         return any(key in batch.keys for batch in self.extras)
@@ -593,6 +610,7 @@ class StepTableData:
                 self.recut = split_pose_segments(db, self.desktop)
             self.relations.write(db)
         self.extras = []
+        self.stored_initial = _stored_initial(db, self.desktop)
         self.relations.committed()
         self.messages = validate_events(self.instances, db.events(self.desktop), self.tax)
         self.refresh_issues()
@@ -748,6 +766,11 @@ class StepTableData:
     def _next_ordinal(self, cls: str, attrs: dict, staged: frozenset | set = frozenset()) -> int:
         """One past the highest ordinal among the instances of the same group."""
         return X.next_ordinal((*self.instances, *staged), cls, attrs)
+
+
+def _stored_initial(db: Db, desktop: int) -> dict[str, str]:
+    """The hand-written initial states ``desktop`` holds (step-0 manual events)."""
+    return initial_overrides(e for e in db.events(desktop) if not e.auto)
 
 
 def _queue_verified(db: Db, desktop: int) -> int:

@@ -68,6 +68,11 @@ __all__ = ["MainWindow", "main", "take_lock"]
 # already did; the definitions live with the code that uses them.
 __all__ += ["CANDIDATES_DROPPED", "FLASH_UNNAMED", "GRID_OFF", "OPACITY_STEP"]
 
+#: What :meth:`MainWindow.settle_steps_edits` asks: "Yes" drops the staged S1
+#: edits (a part added, a step retargeted, an edge staged), so it says so.
+STEPS_UNSAVED = ("Steps 里有没 Apply 的修改（例如刚加的零件）：选 Yes 会把它们全部丢掉。\n"
+                 "The step table has edits that were never applied; Yes drops them all.")
+
 
 class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, AssistMixin,
                  GuideMixin, KeysMixin, RawDataMixin,
@@ -143,6 +148,7 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
                                    annotator=self.annotator)
             panel.sigSaved.connect(self.on_steps_saved)
             panel.sigEdited.connect(self._mark_steps_dirty)  # a part added (U5b)
+            panel.sigReverted.connect(self._clear_steps_dirty)
             for model in (panel.steps_model, panel.instances_model):
                 model.dataChanged.connect(self._mark_steps_dirty)
             # A staged constraint edge is an unsaved step-table edit like any
@@ -300,11 +306,9 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         if not self.can_leave_edit():
             self._sync_mode_tab()
             return
-        if self.mode == A.MODE_STEPS and self._steps_dirty:
-            if not self.confirm_discard("The step table has unsaved edits."):
-                self._sync_mode_tab()
-                return
-            self._steps_dirty = False
+        if self.mode == A.MODE_STEPS and not self.settle_steps_edits():
+            self._sync_mode_tab()
+            return
         self.mode = mode
         self.disarm_bench()
         self.forget_draft_ghost()   # the canvas it was offered on is going away
@@ -342,8 +346,31 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         """Ask before throwing unsaved S1 edits away."""
         return confirm_discard_dialog(self, why)
 
+    def settle_steps_edits(self, why: str = STEPS_UNSAVED) -> bool:
+        """Ask before unsaved S1 edits are lost; ``True`` means go ahead.
+
+        The one gate for every way out of them -- leaving Steps mode, opening
+        another machine, closing the window. "Yes" **drops** them: the panel
+        reverts to the stored step table, so what the annotator sees afterwards
+        is what the database holds (the staged edits used to survive a "Yes",
+        invisibly, and could be applied later by a click that meant something
+        else). "No" keeps them and cancels whatever was about to lose them.
+        """
+        if not self._steps_dirty:
+            return True
+        if not self.confirm_discard(why):
+            return False
+        if self._steps_panel is not None:
+            self._steps_panel.revert()
+        self._steps_dirty = False
+        return True
+
     def _mark_steps_dirty(self, *_args) -> None:
         self._steps_dirty = True
+
+    def _clear_steps_dirty(self, *_args) -> None:
+        """``Revert`` in the panel: nothing is staged any more."""
+        self._steps_dirty = False
 
     @S.guard
     def on_steps_saved(self, desktop: int) -> None:
@@ -427,6 +454,9 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         """Open another machine in the current view."""
         if not self._has_frames(int(desktop), self.session.view):
             self.report(f"D{desktop}: 这个视图没有帧 / no frames in this view")
+            self._sync_desktop_combo()
+            return
+        if not self.settle_steps_edits():   # they are about this machine
             self._sync_desktop_combo()
             return
 

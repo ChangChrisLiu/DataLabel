@@ -188,7 +188,7 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
         "",
         f"- desktops imported: {len(imported)}",
         f"- desktops skipped (already had steps): {len(run.skipped)}",
-        f"- desktops refused (verified frames, no --force-verified): {len(run.refused)}",
+        f"- desktops refused (see their sections below): {len(run.refused)}",
         f"- desktops that failed to import: {len(run.failed)}",
         f"- steps: {sum(r.steps for r in imported)}",
         f"- actions: {sum(r.actions for r in imported)}",
@@ -198,6 +198,10 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
         f"- {L.INFERRED_HEADING}: {sum(len(r.fills) for r in imported)}",
         f"- instances dropped (the sheet no longer names them): "
         f"{sum(len(r.dropped) for r in imported)}",
+        f"- instances added in S1 and kept (not in the sheet): "
+        f"{sum(len(r.extras_kept) for r in imported)}",
+        f"- instances added in S1 and adopted by the sheet (--adopt-extras): "
+        f"{sum(len(r.adopted) for r in imported)}",
         f"- issues: {sum(len(r.issues) for r in imported)}",
         "",
         "| desktop | brand | steps | n_logged_steps | match | actions | instances "
@@ -226,9 +230,13 @@ def logs_report(run: L.LogsRun, expected: Optional[dict[int, int]] = None) -> st
         lines.append("")
         # the drops first: they are the only thing here that removed a row
         lines.extend(f"- {text}" for text in r.dropped)
+        lines.extend(f"- {text}" for text in r.adopted)
+        if r.extras_kept:
+            lines.append(f"- kept {len(r.extras_kept)} instance(s) added in S1 (not in "
+                         f"the sheet): {', '.join(r.extras_kept)}")
         if r.issues:
             lines.extend(f"- {text}" for text in r.issues)
-        elif not r.dropped:
+        elif not (r.dropped or r.adopted or r.extras_kept):
             lines.append("- no issues")
         lines.append("")
         lines.extend(L.inferred_section(r))
@@ -246,6 +254,11 @@ REFUSAL_ADVICE = {
         "would shrink past believing -- far fewer steps than before, or too many "
         "instances deleted at once. Nothing was written. Check the sheets are "
         "complete exports; re-run with --force-drop if they really are right."
+    ),
+    L.REFUSED_EXTRAS: (
+        "would take over instances an annotator added in S1 (the sheet now names "
+        "their keys; the report lists them). Nothing was written. Re-run with "
+        "--adopt-extras to hand them to the sheet, or delete them in S1 first."
     ),
 }
 
@@ -273,7 +286,7 @@ def cmd_import_logs(args: argparse.Namespace) -> int:
         run = L.import_logs_into_db(
             db, directory, load_taxonomy(), index, _desktops(args), args.force,
             log=print, force_verified=args.force_verified,
-            force_drop=args.force_drop,
+            force_drop=args.force_drop, adopt_extras=args.adopt_extras,
         )
         imported = run.imported
         print(f"[import-logs] {len(imported)} desktops imported, {len(run.skipped)} skipped, "
@@ -343,6 +356,12 @@ def _add_import_logs(sub) -> None:
                         "desktop's instances about to be deleted. Without it such a "
                         "desktop is refused untouched, because an export truncated "
                         "to its header parses perfectly and means nothing")
+    p.add_argument("--adopt-extras", action="store_true",
+                   help="let the sheet take over instances an annotator added in S1 "
+                        "(Steps > Add parts) whose keys it now produces: their "
+                        "provenance and hand-set initial state are dropped, their "
+                        "shapes stay on the key, and one op_log row records how to undo "
+                        "it. Without it such a desktop is refused untouched")
     p.set_defaults(func=cmd_import_logs)
 
 

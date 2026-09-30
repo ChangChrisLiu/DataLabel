@@ -60,6 +60,7 @@ from tda.core.graph import (
     validate_sequence,
 )
 from tda.core.graph_derive import Derivation, derive_edges, write_derivation
+from tda.core.states import initial_overrides
 from tda.core.taxonomy import Taxonomy, load_taxonomy
 
 __all__ = [
@@ -211,8 +212,13 @@ def _settled(db: Db, desktop: int) -> dict:
 
 
 def _summary(desktop: int, derivation: Derivation, instances: dict, tax: Taxonomy,
-             validate: bool) -> DesktopGraph:
-    """The run record of one derivation, before anything is written."""
+             validate: bool, initial: Optional[dict] = None) -> DesktopGraph:
+    """The run record of one derivation, before anything is written.
+
+    ``initial`` is the desktop's hand-written initial states (a part added in S1
+    that the picture shows ``open``), so the loops and dead ends are judged from
+    the state the machine really starts in.
+    """
     counts = derivation.counts()
     return DesktopGraph(
         desktop=desktop,
@@ -225,8 +231,10 @@ def _summary(desktop: int, derivation: Derivation, instances: dict, tax: Taxonom
         manual=counts["manual"],
         imported=counts["imported"],
         protected_other=counts["other"],
-        cycles=[d.label() for d in find_deadlocks(derivation.edges, instances, tax)],
-        dead_ends=[d.label() for d in find_dead_ends(derivation.edges, instances, tax)],
+        cycles=[d.label() for d in find_deadlocks(derivation.edges, instances, tax,
+                                                   initial=initial)],
+        dead_ends=[d.label() for d in find_dead_ends(derivation.edges, instances, tax,
+                                                     initial=initial)],
         version=edge_digest(derivation.edges),
         validated=validate,
     )
@@ -246,11 +254,12 @@ def _apply_one(db: Db, tax: Taxonomy, desktop: int, dry_run: bool,
     instances = _settled(db, desktop)
     stored = edges_from_db(db, desktop)
     derivation = derive_edges(instances, stored, tax)
-    out = _summary(desktop, derivation, instances, tax, validate)
+    initial = initial_overrides(e for e in db.events(desktop) if not e.auto)
+    out = _summary(desktop, derivation, instances, tax, validate, initial)
     out.unresolved = unresolved_fan_owners(instances)
     if validate:
         out.violations = validate_sequence(
-            instances, derivation.edges, db.actions(desktop), tax)
+            instances, derivation.edges, db.actions(desktop), tax, initial=initial)
     if dry_run:
         return out
     with db.transaction():

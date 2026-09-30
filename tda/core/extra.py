@@ -35,7 +35,11 @@ the operator never touched. The annotator can fill them in the Instances table.
 
 Everything here is Qt-free. :class:`ExtraBatch` is what one "＋ 添加零件" makes;
 :func:`write_batch` stores it with one ``op_log`` row whose inverse undoes it
-(:func:`undo_op`), and :func:`delete_patch` is the record a deletion logs.
+(:func:`undo_op`), :func:`delete_patch` is the record a deletion logs and
+:func:`adopt_patch` the one ``import-logs --adopt-extras`` logs when a sheet
+starts naming an added key (:func:`tda.pipeline_logs.extra_clash` refuses that
+import otherwise). Every undo recompiles the stored automatic events and
+re-stamps ``graph_version``, so the database is as it was before the op.
 """
 from __future__ import annotations
 
@@ -58,11 +62,12 @@ from tda.core.states import ATTR_STATE, INITIAL_STEP, REMOVED
 from tda.core.taxonomy import Taxonomy
 
 __all__ = [
-    "ADDED_AT", "ADDED_BY", "MAX_COUNT", "NOTE_ATTR", "OP_ADD", "OP_DELETE", "OP_UNDO",
-    "OP_VIEW", "REASON", "REASON_ATTR", "ExtraBatch", "ExtraError", "default_parent",
-    "delete_patch", "extra_keys", "host_instances", "initial_events",
-    "is_extra", "next_ordinal", "parent_choices", "plan_extras", "planned_keys",
-    "state_choices", "undo_op", "write_batch",
+    "ADDED_AT", "ADDED_BY", "MAX_COUNT", "NOTE_ATTR", "OP_ADD", "OP_ADOPT", "OP_DELETE",
+    "OP_UNDO", "OP_VIEW", "REASON", "REASON_ATTR", "ExtraBatch",
+    "ExtraError", "adopt_patch", "default_parent", "delete_patch", "extra_keys",
+    "host_instances", "initial_events", "is_extra", "next_ordinal", "parent_choices",
+    "plan_extras", "planned_keys", "recompile_events", "relation_rows",
+    "restamp_graph", "state_choices", "undo_op", "write_batch",
 ]
 
 #: ``attrs`` provenance keys of an extra instance.
@@ -78,6 +83,11 @@ REASON = "not in the log"
 OP_ADD = "add_extra_instances"
 OP_DELETE = "delete_extra_instance"
 OP_UNDO = "undo_extra_instances"
+#: ``op_log.kind`` of ``import-logs --adopt-extras`` handing added instances to
+#: a sheet that now names their keys (:mod:`tda.pipeline_logs`).
+OP_ADOPT = "adopt_extra_instances"
+#: Instance fields holding another instance's key (``steps_values.RELATION_FIELDS``).
+_POINTERS = ("parent", "mounted_on", "fastens", "socket_host")
 #: ``op_log`` is scoped per ``(desktop, view)``; an identity row belongs to none.
 OP_VIEW = "-"
 
@@ -300,14 +310,43 @@ def initial_events(db: Db, desktop: int, key: str) -> list[StateEvent]:
             if e.target == key and not e.auto and e.step <= INITIAL_STEP]
 
 
-def delete_patch(rec: InstanceRec, events: list[StateEvent]) -> tuple[dict, dict]:
+#: The ``relation`` columns an inverse carries, so an edge comes back as it was.
+_RELATION_COLUMNS = ("type", "target", "blocker", "necessity", "mode", "reason",
+                     "source", "evidence_step", "status")
+
+
+def relation_rows(db: Db, desktop: int, key: str, source: str = _RULE) -> list[dict]:
+    """The stored ``source`` edges naming ``key``, as restorable dicts."""
+    return [{c: row[c] for c in _RELATION_COLUMNS} for row in db.relations(desktop)
+            if key in (row["target"], row["blocker"]) and row["source"] == source]
+
+
+def delete_patch(rec: InstanceRec, events: list[StateEvent],
+                 relations: Iterable[dict] = ()) -> tuple[dict, dict]:
     """``(payload, inverse)`` of the ``op_log`` row deleting one extra.
 
-    The inverse is the whole record and its initial events, so
-    :func:`undo_op` can put the instance back exactly as it was.
+    The inverse is the whole record, its initial events and the rule edges the
+    delete took with it (:func:`relation_rows`), so :func:`undo_op` can put the
+    instance back exactly as it was.
     """
-    record = {"instances": [asdict(rec)], "events": [asdict(e) for e in events]}
+    record = {"instances": [asdict(rec)], "events": [asdict(e) for e in events],
+              "relations": [dict(r) for r in relations]}
     payload = {"instance": rec.key, **record}
+    return payload, dict(record)
+
+
+def adopt_patch(records: Iterable[InstanceRec], events: Iterable[StateEvent],
+                taken_by: dict[str, str]) -> tuple[dict, dict]:
+    """``(payload, inverse)`` of the ``op_log`` row an adoption writes.
+
+    ``taken_by`` says per key what now owns it (``"log"`` or ``"implied"``).
+    The inverse is the added records and their initial events as they were, so
+    :func:`undo_op` can hand the keys back; the shapes never moved.
+    """
+    records = list(records)
+    record = {"instances": [asdict(r) for r in records],
+              "events": [asdict(e) for e in events]}
+    payload = {"adopted": [r.key for r in records], "taken_by": dict(taken_by), **record}
     return payload, dict(record)
 
 
@@ -319,6 +358,10 @@ def _refusal(db: Db, desktop: int, key: str) -> str:
     steps = sorted({a.step for a in db.actions(desktop) if a.target == key})
     if steps:
         return f"{key} is the target of step(s) {', '.join(map(str, steps))}"
+    named = sorted(f"{other}.{name}" for other, rec in db.instances(desktop).items()
+                   for name in _POINTERS if other != key and getattr(rec, name) == key)
+    if named:
+        return f"{key} is named by {', '.join(named)}"
     counts = {table: n for table, n in db.instance_reference_counts(desktop, key).items()
               if table != "state_event"}
     later = [e for e in db.events(desktop)
@@ -340,19 +383,89 @@ def _event(data: dict) -> StateEvent:
         "desktop", "step", "target", "attr", "old", "new", "evidence_view", "auto")})
 
 
-def undo_op(db: Db, op: dict, annotator: str = "") -> int:
-    """Apply the inverse of one ``op_log`` row this module wrote.
+def recompile_events(db: Db, desktop: int, tax: Taxonomy) -> None:
+    """Rewrite the stored automatic event log of ``desktop`` from its actions.
 
-    ``op`` is a row as :meth:`tda.core.db.Db.ops` returns it. An
-    :data:`OP_ADD` is undone by deleting the instances it added -- refused, with
-    nothing written, while any of them carries a shape, an action or anything
-    else a human made -- and an :data:`OP_DELETE` by putting the record and its
-    initial events back. The undo is logged as :data:`OP_UNDO`, with the op it
-    undid as its own inverse. Returns that row's id.
+    What ``Apply`` stores, from the same inputs: the instance table, the actions
+    and the hand-written initial states. **In the caller's transaction.**
     """
+    from tda.core.states import events_from_actions, initial_overrides
+
+    manual = [e for e in db.events(desktop) if not e.auto]
+    db.replace_events(desktop, events_from_actions(
+        db.instances(desktop), db.actions(desktop), tax,
+        initial=initial_overrides(manual)), auto_only=True)
+
+
+def restamp_graph(db: Db, desktop: int, tax: Taxonomy) -> None:
+    """Re-stamp the desktop's graph meta from what is stored. **In the transaction.**
+
+    The same three fields :func:`tda.ui.steps_delete._restamp` writes after a
+    delete: an undo that takes a rule edge away (or brings one back) must not
+    leave ``graph_version`` describing a graph that no longer exists.
+    """
+    from tda.core.graph import edges_from_db, graph_version
+    from tda.core.graph_derive import settled_instances
+    from tda.core.graph_plan import find_deadlocks
+    from tda.core.graph_rules import HARD_TYPES, active_edges
+    from tda.core.states import initial_overrides
+    from tda.pipeline import merge_desktop_meta   # late: tda.pipeline is heavy
+
+    edges = [e for e in edges_from_db(db, desktop) if e.type in HARD_TYPES]
+    initial = initial_overrides(e for e in db.events(desktop) if not e.auto)
+    merge_desktop_meta(db, desktop, {
+        "graph_version": graph_version(db, desktop),
+        "graph_edges": len(active_edges(edges)),
+        "graph_cycles": len(find_deadlocks(edges, settled_instances(db.instances(desktop)),
+                                           tax, initial=initial)),
+    })
+
+
+def _restore(db: Db, desktop: int, inverse: dict) -> None:
+    """Put records, their initial events and their edges back. **In the transaction.**"""
+    for data in inverse.get("instances") or []:
+        db.upsert_instance(InstanceRec(**data))
+    keys = [str(data["key"]) for data in inverse.get("instances") or []]
+    for key in keys:
+        # an adopted key's initial state is the log's now: whatever hand-written
+        # one is stored for it is replaced by the one the inverse carries
+        db.delete_manual_events(desktop, key, up_to_step=INITIAL_STEP)
+    db.add_events(_event(data) for data in inverse.get("events") or [])
+    for row in inverse.get("relations") or []:
+        db.add_relation(desktop, row["type"], row["target"], row["blocker"],
+                        necessity=row.get("necessity") or "required", mode=row.get("mode"),
+                        reason=row.get("reason"), source=row.get("source") or _RULE,
+                        evidence_step=row.get("evidence_step"),
+                        status=row.get("status") or "active")
+
+
+def undo_op(db: Db, op: dict, annotator: str = "", tax: Optional[Taxonomy] = None) -> int:
+    """Apply the inverse of one ``op_log`` row this module (or the importer) wrote.
+
+    ``op`` is a row as :meth:`tda.core.db.Db.ops` returns it.
+
+    * :data:`OP_ADD` is undone by deleting the instances it added -- refused,
+      with nothing written, while any of them carries a shape, an action, a
+      pointer from another instance or anything else a human made;
+    * :data:`OP_DELETE` by putting the record, its initial events and the rule
+      edges the delete took back;
+    * :data:`OP_ADOPT` (``import-logs --adopt-extras``) by putting the added
+      records back over the rows the log took them over with.
+
+    Every branch then recompiles the stored automatic events -- the cascade
+    that takes an added clip out with its board is part of that log -- and
+    re-stamps ``graph_version``, so the database is as it was before the op.
+    The undo is logged as :data:`OP_UNDO`, with the op it undid as its own
+    inverse. Returns that row's id.
+    """
+    if tax is None:
+        from tda.core.taxonomy import load_taxonomy
+
+        tax = load_taxonomy()
     kind = str(op.get("kind") or "")
     inverse = op.get("inverse") or {}
     desktop = int(op["desktop"])
+    who = annotator or str(op.get("annotator") or "")
     if kind == OP_ADD:
         keys = [str(k) for k in inverse.get("delete_instances") or []]
         stored = db.instances(desktop)
@@ -374,19 +487,21 @@ def undo_op(db: Db, op: dict, annotator: str = "") -> int:
                 db.delete_manual_events(desktop, key, up_to_step=INITIAL_STEP)
                 db.delete_auto_events(desktop, key)
                 db.delete_instance(desktop, key)
+            recompile_events(db, desktop, tax)
+            restamp_graph(db, desktop, tax)
             return db.log_op(desktop, OP_VIEW, OP_UNDO, {"undid": int(op["id"]), **inverse},
-                             op.get("payload") or {}, annotator or str(op.get("annotator") or ""))
-    if kind == OP_DELETE:
+                             op.get("payload") or {}, who)
+    if kind in (OP_DELETE, OP_ADOPT):
         records = [InstanceRec(**data) for data in inverse.get("instances") or []]
-        events = [_event(data) for data in inverse.get("events") or []]
         stored = db.instances(desktop)
-        clash = [rec.key for rec in records if rec.key in stored]
-        if clash:
-            raise ExtraError(f"cannot undo the deletion: {', '.join(clash)} exists again")
+        if kind == OP_DELETE:
+            clash = [rec.key for rec in records if rec.key in stored]
+            if clash:
+                raise ExtraError(f"cannot undo the deletion: {', '.join(clash)} exists again")
         with db.transaction():
-            for rec in records:
-                db.upsert_instance(rec)
-            db.add_events(events)
+            _restore(db, desktop, inverse)
+            recompile_events(db, desktop, tax)
+            restamp_graph(db, desktop, tax)
             return db.log_op(desktop, OP_VIEW, OP_UNDO, {"undid": int(op["id"]), **inverse},
-                             op.get("payload") or {}, annotator or str(op.get("annotator") or ""))
+                             op.get("payload") or {}, who)
     raise ExtraError(f"op {op.get('id')} ({kind!r}) is not one this module can undo")

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from typing import Iterable, Optional
+from typing import Iterable, Mapping, Optional
 
 from tda.core.graph import (
     HARD_TYPES,
@@ -404,6 +404,7 @@ def violations_of(
     edges: list[Edge],
     actions: list[ActionRec],
     tax,
+    initial: Optional[Mapping[str, str]] = None,
 ) -> list[Violation]:
     """The spec 7.4 replay of ``actions`` against ``edges``, one record per line.
 
@@ -412,10 +413,12 @@ def violations_of(
     :func:`~tda.core.graph.constraint_edges` subset, so a violation the panel
     shows as gone is gone from the report too. The step is read back off the
     line rather than re-derived, because there is only one replay and only one
-    wording.
+    wording. ``initial`` is the hand-written initial states (an added part the
+    picture shows ``open``), as :func:`~tda.core.graph.validate_sequence` takes it.
     """
     out: list[Violation] = []
-    for text in validate_sequence(instances, constraint_edges(edges), list(actions), tax):
+    for text in validate_sequence(instances, constraint_edges(edges), list(actions), tax,
+                                  initial=initial):
         match = _STEP.match(text)
         out.append(Violation(
             step=int(match.group(1)) if match else 0,
@@ -438,6 +441,10 @@ def violations(db, desktop: int, tax=None) -> list[Violation]:
         from tda.core.taxonomy import load_taxonomy
 
         tax = load_taxonomy()
+    from tda.core.states import initial_overrides
+
     instances = {k: rec for k, rec in db.instances(desktop).items()
                  if not is_provisional(k)}
-    return violations_of(instances, edges_from_db(db, desktop), db.actions(desktop), tax)
+    initial = initial_overrides(e for e in db.events(desktop) if not e.auto)
+    return violations_of(instances, edges_from_db(db, desktop), db.actions(desktop), tax,
+                         initial=initial)
