@@ -37,9 +37,9 @@ from tda.models.detector import (
     Det,
     DetectorConfig,
     FrameDets,
-    YoloTileDetector,
     box_change,
     file_sha1,
+    make_detector,
     whole,
 )
 
@@ -178,10 +178,11 @@ class DetCache:
 class DetectionEngine:
     """Detections and candidate dE for one frame at a time; the worker's half.
 
-    ``factory`` builds the model from the configuration -- a
-    :class:`~tda.models.detector.YoloTileDetector` unless a test passes a
-    stub.  A model has ``identity`` (the cache key), ``names`` and
-    ``detect(img_rgb, crop, view, step)``; ``describe()`` is optional.
+    ``factory`` builds the model from the configuration -- the backend's
+    (:func:`~tda.models.detector.make_detector`: a ``YoloTileDetector`` or an
+    ``RFDetrTileDetector``) unless a test passes a stub.  A model has
+    ``identity`` (the cache key), ``names`` and ``detect(img_rgb, crop, view,
+    step)``; ``describe()`` is optional.
     """
 
     def __init__(self, config: DetectorConfig, cache_root: Optional[Path] = None,
@@ -190,7 +191,7 @@ class DetectionEngine:
         self.config = config
         self.cache_root = Path(cache_root) if cache_root else Path(config.cache_root)
         self._real_model = factory is None
-        self.factory = factory or YoloTileDetector
+        self.factory = factory or make_detector
         self.change_fn = change_fn
         #: The cache key; the model file's SHA-1 unless a stub names one.
         self.identity: Optional[str] = identity

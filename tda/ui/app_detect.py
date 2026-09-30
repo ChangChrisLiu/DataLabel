@@ -1,10 +1,12 @@
-"""The small-part detector in the window: a background pass and the rank-1 guess (task U3).
+"""The small-part detector in the window: a background pass and the rank-1 guess (tasks U3, U4).
 
 In the reverse walk the annotator adds back, on frame ``j``, the part removed
 at step ``j + 1``.  For small parts the difference map's box is right about
-8 % of the time; L2's detector finds the removed motherboard screw 86 % of the
-time on the scanner and 62 % on OAK camera 1.  This module wires it for the
-views and classes :mod:`configs/detector.yaml <tda.models.detector>` names:
+8 % of the time; L2's YOLO finds the removed motherboard screw 86 % of the
+time on the scanner and 62 % on OAK camera 1, and L3's RF-DETR small -- the
+backend :mod:`configs/detector.yaml <tda.models.detector>` names since U4 --
+finds more of them, on OAK camera 2 too.  This module wires either for the
+views and classes that file names, the same way:
 
 1. **A background pass.**  When a view opens, :class:`DetectionWorker` runs the
    model over every frame of the view that has an image, in walk order
@@ -168,8 +170,8 @@ class _Bridge(QObject):
 class DetectionWorker(QObject):
     """One thread, one frame at a time: the frame on screen first, then the walk.
 
-    The model is built on a second, short-lived thread (seconds: torch,
-    ultralytics, the weights, a warm-up).  Meanwhile this one serves what the
+    The model is built on a second, short-lived thread (seconds: torch, the
+    backend's library, the weights, a warm-up).  Meanwhile this one serves what the
     disk cache already holds -- its key is the model file's SHA-1, no torch
     needed -- and sets aside the frames that need the model; they go first
     once it is up (round 3: a warm start arms the first frame at once, not
@@ -291,8 +293,8 @@ class DetectionWorker(QObject):
     def shutdown(self, timeout: float = 10.0) -> None:
         """Refuse new work, let the frame in hand finish, write the cache, join.
 
-        The model's loader thread is not waited for: importing torch and
-        ultralytics cannot be interrupted, it ends on its own once the load
+        The model's loader thread is not waited for: importing torch and the
+        backend's library cannot be interrupted, it ends on its own once the load
         returns, and closing the window does not wait seconds for it.
         """
         with self._lock:

@@ -1,8 +1,11 @@
-"""U3: the small-part detector without a window -- its file, its tiles, its cache.
+"""U3/U4: the small-part detector without a window -- its file, its tiles, its cache.
 
-No GPU, no ultralytics: the model is a stub (:class:`StubModel`) and the one
-test of :class:`~tda.models.detector.YoloTileDetector` stops it before the
-import.  The window's half is ``tests/test_app_u3.py``.
+No GPU, no ultralytics, no weights: the model is a stub (:class:`StubModel`),
+the tests of :class:`~tda.models.detector.YoloTileDetector` stop it before the
+import or hand it a fake ``ultralytics``, and :class:`RFDetrTileDetector`
+(U4) runs on a fake ``rfdetr`` (``tests/fake_rfdetr.py``) that changes the
+process the way the real one was measured to.  Two slow tests import the real
+libraries in a subprocess.  The window's half is ``tests/test_app_u3.py``.
 """
 from __future__ import annotations
 
@@ -139,18 +142,42 @@ def good_yaml(tmp_path: Path, **over) -> Path:
     return path
 
 
-def test_the_shipped_file_is_scan_and_oak1_screws_with_l2s_tiles(monkeypatch):
-    data = yaml.safe_load(DM.DEFAULT_FILE.read_text(encoding="utf-8"))
-    parsed = DM._parse(data, DM.DEFAULT_FILE)
-    assert parsed.enabled is True
-    assert parsed.views == ("scan", "oak1") and parsed.classes == ("screw",)
-    assert parsed.conf == pytest.approx(0.10)
+def test_the_shipped_file_is_rfdetr_on_scan_oak1_and_oak2_screws_with_l2s_tiles(monkeypatch):
+    """U4: L3's RF-DETR small, with the 0.10 floor; U3's YOLO stays, commented, as the fallback."""
+    text = DM.DEFAULT_FILE.read_text(encoding="utf-8")
+    parsed = DM._parse(yaml.safe_load(text), DM.DEFAULT_FILE)
+    assert parsed.enabled is True and parsed.backend == "rfdetr"
+    assert parsed.model.name == "tda_det_rfdetr_small_all.pt"
+    assert parsed.views == ("scan", "oak1", "oak2") and parsed.classes == ("screw",)
+    assert parsed.conf == pytest.approx(0.10) and parsed.merge_floor == pytest.approx(0.10)
     assert parsed.roi_crop is True and parsed.tile == 640 and parsed.stride == 512
-    assert parsed.scale("scan") == parsed.scale("oak1") == 1.0
-    assert parsed.model.name == "tda_det_yolo26n_l2_hold13.pt"
+    assert parsed.scale("scan") == parsed.scale("oak1") == parsed.scale("oak2") == 1.0
     assert str(parsed.cache_root).replace("\\", "/") == "D:/DataSet/cache/det"
     assert str(parsed.yolo_config_dir).replace("\\", "/").startswith("D:/")
     assert parsed.half is True and parsed.device == 0
+    # the fallback, one swap away
+    assert "# backend: yolo" in text
+    assert "# model: D:/DataSet/models/weights/tda_det_yolo26n_l2_hold13.pt" in text
+    fallback = DM._parse(dict(yaml.safe_load(text), backend="yolo",
+                              model="D:/DataSet/models/weights/tda_det_yolo26n_l2_hold13.pt"),
+                         DM.DEFAULT_FILE)
+    assert fallback.backend == "yolo" and fallback.merge_floor == pytest.approx(0.10)
+
+
+def test_the_shipped_models_manifest_has_its_tiles_and_classes():
+    """The manifest L3 wrote beside the weights: the tiling the file asks for, screw first."""
+    parsed = DM._parse(yaml.safe_load(DM.DEFAULT_FILE.read_text(encoding="utf-8")),
+                       DM.DEFAULT_FILE)
+    manifest = DM.read_manifest(parsed.model)
+    if manifest is None:
+        pytest.skip(f"{parsed.model.with_suffix('.json')} is not on this machine")
+    assert manifest["model"] == "rfdetr_small"
+    assert DM._manifest_names(manifest)[0] == "screw"
+    inference = manifest["inference"]
+    assert (inference["tile"], inference["stride"]) == (parsed.tile, parsed.stride)
+    assert inference["pad_value"] == DM.PAD_VALUE
+    assert all(inference["work_scale"][v] == parsed.scale(v) for v in parsed.views)
+    assert inference["precision"] == ("fp16" if parsed.half else "fp32")
 
 
 def test_a_good_file_loads_quietly_the_on_line_comes_with_the_model(tmp_path, lines):
@@ -201,6 +228,14 @@ BROKEN = {
     "half a word": {"half": "yes"},
     "device a list": {"device": [0]},
     "no model": {"model": None},
+    # U4
+    "an unknown backend": {"backend": "detectron"},
+    "backend a list": {"backend": ["rfdetr"]},
+    "merge_floor above conf": {"merge_floor": 0.2},
+    "merge_floor negative": {"merge_floor": -0.1},
+    "merge_floor a word": {"merge_floor": "low"},
+    "merge_floor nan": {"merge_floor": float("nan")},
+    "merge_floor a bool": {"merge_floor": True},
 }
 
 
@@ -239,6 +274,48 @@ def test_no_ultralytics_is_a_warning_and_off(tmp_path, lines, monkeypatch):
                         lambda name, *a: None if name == "ultralytics" else real(name, *a))
     assert DM.load_detector_config(str(good_yaml(tmp_path))) is None
     assert "ultralytics is not installed" in lines[0].getMessage()
+    # ... which an rfdetr file does not need
+    lines.clear()
+    got = DM.load_detector_config(str(good_yaml(tmp_path, backend="rfdetr")))
+    if importlib.util.find_spec("rfdetr") is not None:
+        assert got is not None and got.backend == "rfdetr" and lines == []
+
+
+def test_no_rfdetr_is_a_warning_and_off(tmp_path, lines, monkeypatch):
+    """U4: the package the backend imports is looked for without importing it."""
+    import importlib.util
+
+    real = importlib.util.find_spec
+    asked = []
+
+    def find_spec(name, *a):
+        asked.append(name)
+        return None if name == "rfdetr" else real(name, *a)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    assert DM.load_detector_config(str(good_yaml(tmp_path, backend="rfdetr"))) is None
+    assert [r.levelname for r in lines] == ["WARNING"]
+    assert "rfdetr is not installed" in lines[0].getMessage()
+    assert "rfdetr" in asked and "ultralytics" not in asked, asked
+
+
+def test_the_backend_and_the_floor_are_read_with_their_defaults(tmp_path):
+    """No ``backend`` is U3's yolo; no ``merge_floor`` is 0.10, or ``conf`` when that is lower."""
+    got = DM.load_detector_config(str(good_yaml(tmp_path)))
+    assert got.backend == "yolo" and got.merge_floor == pytest.approx(0.10)
+    got = DM.load_detector_config(str(good_yaml(tmp_path, conf=0.05)))
+    assert got.merge_floor == pytest.approx(0.05)
+    got = DM.load_detector_config(str(good_yaml(tmp_path, merge_floor=0, backend=" yolo ")))
+    assert got.merge_floor == 0.0 and got.backend == "yolo"
+    got = DM.load_detector_config(str(good_yaml(tmp_path, merge_floor=0.1, conf=0.1,
+                                                backend="rfdetr")))
+    if got is not None:          # None only where rfdetr is not installed
+        assert got.backend == "rfdetr" and got.merge_floor == pytest.approx(0.1)
+    # both are in the recipe: a cache written without the floor is not read with it
+    base = config(tmp_path)
+    assert base.recipe()["merge_floor"] == pytest.approx(0.10)
+    assert base.recipe() != config(tmp_path, merge_floor=0.0).recipe()
+    assert base.recipe() != config(tmp_path, backend="rfdetr").recipe()
 
 
 def test_no_cuda_stops_the_model_before_ultralytics_is_imported(tmp_path, monkeypatch):
@@ -331,6 +408,61 @@ def test_tile_answers_come_back_in_native_pixels_merged():
     assert len(dets) == 1
     assert dets[0].box == (700.0, 350.0, 720.0, 370.0) and dets[0].cls == "screw"
     assert dets[0].conf == pytest.approx(0.8)
+
+
+class _MergeSpy:
+    """Stands in for :func:`merge` and remembers what reached it."""
+
+    def __init__(self, monkeypatch):
+        self.confs: list = []
+        real = DM.merge
+
+        def spy(boxes, confs, clss, edge):
+            self.confs.append([round(float(c), 3) for c in confs])
+            return real(boxes, confs, clss, edge)
+
+        monkeypatch.setattr(DM, "merge", spy)
+
+
+def test_a_box_under_the_merge_floor_never_reaches_the_merge(monkeypatch):
+    """U4 (L3 §5): 0.09 is dropped before the merge, 0.11 goes in; floor 0 is L2's protocol."""
+    spy = _MergeSpy(monkeypatch)
+    work = np.zeros((300, 300, 3), np.uint8)
+    tiles = DM.make_tiles(work, 640, 512)
+    results = [(np.array([[10, 10, 30, 30], [100, 100, 120, 120], [200, 200, 220, 220]], float),
+                np.array([0.09, 0.11, 0.10]), np.array([0, 0, 0]))]
+    dets = DM.tiles_to_dets(tiles, results, (0, 0, 300, 300), 1.0, work.shape[:2],
+                            {0: "screw"}, floor=0.10)
+    assert spy.confs == [[0.11, 0.10]], "a box under the floor reached the merge"
+    assert sorted(round(d.conf, 2) for d in dets) == [0.10, 0.11]
+    DM.tiles_to_dets(tiles, results, (0, 0, 300, 300), 1.0, work.shape[:2], {0: "screw"})
+    assert spy.confs[-1] == [0.09, 0.11, 0.10]
+
+
+def test_the_floor_comes_before_the_containment_rule_not_after_it(monkeypatch):
+    """A cut-off 0.5 box inside a whole 0.05 one: dropped by L2's merge, kept once 0.05 is floored.
+
+    This is the one way the floor can change what comes out above it -- and
+    why it has to be in the merge and not a filter on its result.
+    """
+    work = np.zeros((650, 800, 3), np.uint8)
+    tiles = DM.make_tiles(work, 640, 512)
+    assert [(t.ox, t.oy) for t in tiles][:2] == [(0, 0), (160, 0)]
+    results = []
+    for t in tiles:
+        if (t.ox, t.oy) == (0, 0):       # cut off by this tile's right edge (640)
+            results.append((np.array([[600, 300, 640, 320]], float), np.array([0.5]),
+                            np.array([0])))
+        elif (t.ox, t.oy) == (160, 0):   # the whole part, from the next tile, at 0.05
+            results.append((np.array([[440, 300, 490, 320]], float), np.array([0.05]),
+                            np.array([0])))
+        else:
+            results.append(None)
+    l2 = DM.tiles_to_dets(tiles, results, (0, 0, 800, 650), 1.0, work.shape[:2], {0: "screw"})
+    assert [round(d.conf, 2) for d in l2] == [0.05]
+    u4 = DM.tiles_to_dets(tiles, results, (0, 0, 800, 650), 1.0, work.shape[:2], {0: "screw"},
+                          floor=0.10)
+    assert [(d.box, round(d.conf, 2)) for d in u4] == [((600.0, 300.0, 640.0, 320.0), 0.5)]
 
 
 def test_box_change_is_l1s_and_large_only_where_the_part_left(frames):
@@ -811,6 +943,322 @@ print(json.dumps({{
     # while what another thread set meanwhile (round 4) did
     assert out["inductor"] == "u3-inductor"
     assert out["new_filters"] == ["('once', None, <class '__main__.Other'>, None, 0)"]
+
+
+# --------------------------------------------------------------------------- #
+# task U4: the RF-DETR backend (a fake rfdetr -- no weights, no GPU)
+# --------------------------------------------------------------------------- #
+import fake_rfdetr as FR  # noqa: E402  (tests/ is on the path, like app_scene)
+
+
+@pytest.fixture
+def guard_rfdetr(guard_process):
+    """U4's items too: whatever the backend fails to put back, the suite gets back."""
+    import PIL.Image
+    torch = pytest.importorskip("torch")
+    precision = torch.get_float32_matmul_precision()
+    pil_max = PIL.Image.MAX_IMAGE_PIXELS
+    had = vars(np).get("complex_", FR)
+    yield
+    if torch.get_float32_matmul_precision() != precision:
+        torch.set_float32_matmul_precision(precision)
+    PIL.Image.MAX_IMAGE_PIXELS = pil_max
+    if had is FR:
+        vars(np).pop("complex_", None)
+
+
+def _process_now() -> dict:
+    """Everything rfdetr (and ultralytics) was measured to change, as it is now."""
+    import warnings
+
+    import PIL.Image
+    torch = pytest.importorskip("torch")
+    return {"precision": torch.get_float32_matmul_precision(),
+            "tf32": torch.backends.cuda.matmul.allow_tf32,
+            "pil_max": PIL.Image.MAX_IMAGE_PIXELS, "complex_": "complex_" in vars(np),
+            "env": dict(os.environ), "filters": list(warnings.filters),
+            "threads": cv2.getNumThreads(), "imread": cv2.imread,
+            "pil_open": PIL.Image.open, "save": torch.save,
+            "np_print": np.get_printoptions()}
+
+
+def _rf_config(tmp_path: Path, **over) -> DetectorConfig:
+    weights = tmp_path / "rf.pt"
+    if not weights.exists():
+        weights.write_bytes(b"rf-detr weights, or so the fake says")
+    return config(tmp_path, backend="rfdetr", model=weights, **over)
+
+
+def _rf_ready(monkeypatch):
+    """CUDA 'available' (nothing touches it) and the variables the load writes put back."""
+    torch = pytest.importorskip("torch")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")          # set on purpose by the backend
+    for name in DM.RFDETR_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_the_backend_is_chosen_by_the_file(tmp_path, monkeypatch):
+    built = []
+
+    class Built(StubModel):
+        def __init__(self, cfg, kind):
+            super().__init__(identity=DM.file_sha1(cfg.model))
+            built.append((kind, cfg.backend))
+
+    monkeypatch.setattr(DM, "YoloTileDetector", lambda cfg: Built(cfg, "yolo"))
+    monkeypatch.setattr(DM, "RFDetrTileDetector", lambda cfg: Built(cfg, "rfdetr"))
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"w")
+    DM.make_detector(config(tmp_path, model=weights))
+    DM.make_detector(config(tmp_path, model=weights, backend="rfdetr"))
+    assert built == [("yolo", "yolo"), ("rfdetr", "rfdetr")]
+    # the engine builds through it when no stub is given
+    eng = DetectionEngine(config(tmp_path, model=weights, backend="rfdetr"), tmp_path / "det")
+    assert eng.factory is DM.make_detector
+    eng.load()
+    assert built[-1] == ("rfdetr", "rfdetr") and eng.identity == DM.file_sha1(weights)
+
+
+def test_rfdetr_loads_and_the_process_is_as_it_was(tmp_path, monkeypatch, guard_rfdetr):
+    """U4: what loading rfdetr changes process-wide is put back -- and it did change it."""
+    _rf_ready(monkeypatch)
+    seen: dict = {}
+    fake = FR.install(monkeypatch, after_import=[lambda: seen.update(import_=_process_now())])
+    before = _process_now()
+    import warnings
+    eng = DetectionEngine(_rf_config(tmp_path), tmp_path / "det")
+    text = eng.load()
+    assert isinstance(eng.model, DM.RFDetrTileDetector)
+    # the fake really did what rfdetr does ...
+    inside = seen["import_"]
+    assert inside["precision"] == "high" and inside["tf32"] is True
+    assert inside["pil_max"] == 2_000_000_000 and inside["complex_"] is True
+    assert inside["env"]["KMP_DUPLICATE_LIB_OK"] == "True"
+    assert inside["env"]["KMP_INIT_AT_FORK"] == "FALSE"
+    assert len([f for f in inside["filters"] if f not in before["filters"]]) == 4
+    # ... and none of it is left
+    after = _process_now()
+    for key in ("precision", "tf32", "pil_max", "complex_", "env", "filters", "threads",
+                "np_print"):
+        assert after[key] == before[key], key
+    for key in ("imread", "pil_open", "save"):
+        assert after[key] is before[key], key
+    assert not hasattr(warnings.filterwarnings, "__wrapped__")
+    assert not hasattr(np, "complex_")
+    # built as L3 ran it: fp16, a warm-up of two batches of four, at the floor
+    assert ("inference", False, "torch.float16") in fake.log
+    assert [e for e in fake.log if e[0] == "predict"] == [("predict", 4, 0.10, False)] * 2
+    assert fake.log[0] == ("from_checkpoint", str(tmp_path / "rf.pt"), {"device": "cuda:0"})
+    assert text.startswith("rfdetr model") and "merge floor 0.1" in text
+    assert "no manifest" in text and "at 640 px" in text
+
+
+class _OtherThreadsWarning(DeprecationWarning):
+    """Stands for sympy's filter, added on SAM's loader thread meanwhile."""
+
+
+def test_rfdetr_what_another_thread_sets_while_the_model_loads_stays(tmp_path, monkeypatch,
+                                                                     guard_rfdetr):
+    import threading
+    import warnings
+
+    _rf_ready(monkeypatch)
+    monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
+    monkeypatch.setenv("TDA_U4_SHARED", "before")
+    inductor = str(tmp_path / "inductor")
+    filters_before = list(warnings.filters)
+
+    def sam_loader():
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor
+        os.environ["TDA_U4_SHARED"] = "after"
+        warnings.simplefilter("once", _OtherThreadsWarning)
+
+    def meanwhile():
+        other = threading.Thread(target=sam_loader, name="tda-sam-load-u4")
+        other.start()
+        other.join()
+
+    FR.install(monkeypatch, during=[meanwhile])
+    DetectionEngine(_rf_config(tmp_path), tmp_path / "det").load()
+    assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == inductor
+    assert os.environ["TDA_U4_SHARED"] == "after"
+    new = [f for f in warnings.filters if f not in filters_before]
+    assert new == [("once", None, _OtherThreadsWarning, None, 0)]
+
+
+def test_an_rfdetr_that_patches_and_then_fails_to_import_is_off_and_put_back(
+        tmp_path, monkeypatch, guard_rfdetr):
+    _rf_ready(monkeypatch)
+    FR.install(monkeypatch, fail_import=True)
+    before = _process_now()
+    with pytest.raises(DetectorUnavailable, match="rfdetr does not import"):
+        DM.RFDetrTileDetector(_rf_config(tmp_path))
+    after = _process_now()
+    for key in ("precision", "tf32", "pil_max", "complex_", "env", "filters"):
+        assert after[key] == before[key], key
+
+
+def test_no_cuda_stops_rfdetr_before_it_is_imported(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setitem(sys.modules, "rfdetr", None)       # would raise if reached
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")              # put back after the test
+    with pytest.raises(DetectorUnavailable, match="CUDA is not available"):
+        DM.RFDetrTileDetector(_rf_config(tmp_path))
+    assert os.environ["HF_HUB_OFFLINE"] == "1", "downloads were not forbidden first"
+
+
+@pytest.mark.parametrize("what", ["unreadable", "another resolution", "no screw class"])
+def test_an_rfdetr_model_that_cannot_run_here_is_off(tmp_path, monkeypatch, guard_rfdetr, what):
+    _rf_ready(monkeypatch)
+    kwargs, message = {
+        "unreadable": ({"fail_load": RuntimeError("invalid load key")}, "rfdetr cannot load"),
+        "another resolution": ({"resolution": 560}, "runs at 560 px, the tiles are 640"),
+        "no screw class": ({"class_names": ("connector", "cpu")}, r"no class \['screw'\]"),
+    }[what]
+    FR.install(monkeypatch, **kwargs)
+    before = _process_now()
+    with pytest.raises(DetectorUnavailable, match=message):
+        DM.RFDetrTileDetector(_rf_config(tmp_path))
+    assert _process_now()["precision"] == before["precision"]
+    assert _process_now()["env"] == before["env"]
+
+
+def _manifest(tmp_path: Path, **over) -> Path:
+    weights = tmp_path / "rf.pt"
+    body = {"model": "rfdetr_small", "classes": list(FR.L3_CLASSES),
+            "bytes": weights.stat().st_size,
+            "sha256": DM.file_digests(weights, ["sha256"])["sha256"]}
+    for key, value in over.items():
+        if value is None:
+            body.pop(key, None)
+        else:
+            body[key] = value
+    path = tmp_path / "rf.json"
+    path.write_text(json.dumps(body), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("what", ["agrees", "yolo's mapping", "classes reordered",
+                                  "a class short", "bytes", "sha256", "sha1", "not json",
+                                  "no classes"])
+def test_the_manifest_must_agree_with_the_file_and_its_classes(tmp_path, monkeypatch,
+                                                               guard_rfdetr, what):
+    """U4: read beside the weights, checked against the model like the configured classes."""
+    _rf_ready(monkeypatch)
+    FR.install(monkeypatch)
+    cfg = _rf_config(tmp_path)
+    over = {
+        "agrees": {},
+        "yolo's mapping": {"classes": {str(i): c for i, c in enumerate(FR.L3_CLASSES)},
+                           "sha1": DM.file_sha1(cfg.model), "sha256": None},
+        "classes reordered": {"classes": list(reversed(FR.L3_CLASSES))},
+        "a class short": {"classes": list(FR.L3_CLASSES[:-1])},
+        "bytes": {"bytes": 1},
+        "sha256": {"sha256": "0" * 64},
+        "sha1": {"sha1": "0" * 40},
+        "not json": None,
+        "no classes": {"classes": None},
+    }[what]
+    if over is None:
+        (tmp_path / "rf.json").write_text("{not json", encoding="utf-8")
+    else:
+        _manifest(tmp_path, **over)
+    if what in ("agrees", "yolo's mapping"):
+        det = DM.RFDetrTileDetector(cfg)
+        assert "manifest rf.json agrees" in det.describe()
+        return
+    message = {"classes reordered": "lists the classes", "a class short": "lists the classes",
+               "bytes": "is for a file of 1 bytes", "sha256": "is for another file: its sha256",
+               "sha1": "is for another file: its sha1", "not json": "cannot be read",
+               "no classes": "has no list of classes"}[what]
+    with pytest.raises(DetectorUnavailable, match=message):
+        DM.RFDetrTileDetector(cfg)
+
+
+def test_rfdetr_detections_come_back_native_floored_and_without_the_extra_slot(
+        tmp_path, monkeypatch, guard_rfdetr):
+    """L3's forward: RGB tiles in, the (num_classes + 1)th slot and the sub-floor boxes out."""
+    _rf_ready(monkeypatch)
+    fake = FR.install(monkeypatch)
+    det = DM.RFDetrTileDetector(_rf_config(tmp_path))
+    spy = _MergeSpy(monkeypatch)
+    img = np.zeros((800, 1000, 3), np.uint8)
+    img[350:370, 700:720] = (230, 0, 0)            # red: found only if the tiles are RGB
+    dets = det.detect(img, (100, 50, 900, 700), "scan", step=7)
+    assert [(d.box, d.cls, round(d.conf, 2)) for d in dets] == [
+        ((700.0, 350.0, 720.0, 370.0), "screw", 0.9)]
+    # four tiles each saw the square whole; neither 0.09 nor the extra slot got in
+    assert spy.confs == [[0.9, 0.9, 0.9, 0.9]]
+    assert fake.log[-1] == ("predict", 4, 0.10, False)
+
+
+@pytest.mark.slow
+def test_importing_the_real_rfdetr_inside_keep_process_state_changes_nothing(tmp_path):
+    """The real import (no model, no GPU), in a fresh process: it patches, and it is undone."""
+    import importlib.util
+    import subprocess
+
+    if importlib.util.find_spec("rfdetr") is None:
+        pytest.skip("rfdetr is not installed")
+    code = f"""
+import json, os, sys, threading, warnings
+sys.path.insert(0, {str(REPO)!r})
+import cv2, numpy as np, torch, PIL.Image
+from tda.models.detector import RFDETR_PATCHES, keep_process_state
+before = dict(os.environ)
+filters = list(warnings.filters)
+precision = torch.get_float32_matmul_precision()
+pil_max = PIL.Image.MAX_IMAGE_PIXELS
+class Other(DeprecationWarning):
+    pass
+def sam_loader():
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = "u4-inductor"
+    warnings.simplefilter("once", Other)
+with keep_process_state(torch, RFDETR_PATCHES):
+    from rfdetr import RFDETR
+    other = threading.Thread(target=sam_loader)
+    other.start()
+    other.join()
+    inside = {{"precision": torch.get_float32_matmul_precision(),
+              "pil_max": PIL.Image.MAX_IMAGE_PIXELS, "complex_": "complex_" in vars(np),
+              "kmp": [os.environ.get(k) for k in ("KMP_DUPLICATE_LIB_OK", "KMP_INIT_AT_FORK")],
+              "new_filters": [repr(f) for f in warnings.filters if f not in filters]}}
+after = dict(os.environ)
+inductor = after.pop("TORCHINDUCTOR_CACHE_DIR", None)
+print(json.dumps({{
+    "inside": inside,
+    "precision": torch.get_float32_matmul_precision(),
+    "tf32": torch.backends.cuda.matmul.allow_tf32,
+    "pil_max_same": PIL.Image.MAX_IMAGE_PIXELS == pil_max,
+    "complex_": "complex_" in vars(np),
+    "env_same": after == before, "inductor": inductor,
+    "new_filters": [repr(f) for f in warnings.filters if f not in filters],
+}}))
+"""
+    env = dict(os.environ, TMP=str(tmp_path), TEMP=str(tmp_path), HF_HUB_OFFLINE="1")
+    for name in DM.RFDETR_ENV + ("TORCHINDUCTOR_CACHE_DIR",):
+        env.pop(name, None)
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          env=env, timeout=300)
+    assert done.returncode == 0, done.stderr[-2000:]
+    out = json.loads(done.stdout.strip().splitlines()[-1])
+    inside = out["inside"]
+    # rfdetr really did change the process ...
+    assert inside["precision"] == "high" and inside["pil_max"] == 2_000_000_000
+    assert inside["complex_"] and inside["kmp"] == ["True", "FALSE"]
+    theirs = [f for f in inside["new_filters"] if any(
+        p in f for p in ("scipy", "urllib3", "requests", "matrix subclass"))]
+    assert len(theirs) >= 5, inside["new_filters"]
+    # ... and none of that survived
+    assert out["precision"] == "highest" and out["tf32"] is False
+    assert out["pil_max_same"] and not out["complex_"] and out["env_same"]
+    assert not [f for f in out["new_filters"] if any(
+        p in f for p in ("scipy", "urllib3", "requests", "matrix subclass"))], out["new_filters"]
+    # while what another thread set meanwhile, and torch's own, did
+    assert out["inductor"] == "u4-inductor"
+    assert "('once', None, <class '__main__.Other'>, None, 0)" in out["new_filters"]
 
 
 def test_detcache_flush_writes_only_when_something_changed(tmp_path):
