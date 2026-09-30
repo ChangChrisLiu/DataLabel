@@ -117,19 +117,37 @@ def guess_tables(ms: list[str]) -> list[str]:
             row[m] = f1(pct(ev[m].loc[x.index].L2small_in1))
         rows.append(row)
     out += ["All sizes, top-1 %:", "", md_table(pd.DataFrame(rows)), ""]
+    # L2's gate: each model against today's guess, < 40 px, paired bootstrap
+    rows = []
+    for v in VIEWS + ["all"]:
+        x = base if v == "all" else base[base["view"] == v]
+        x = x[x.bucketB == "<40"]
+        row = {"view": v, "n": len(x)}
+        for m in ms:
+            y = ev[m].loc[x.index]
+            d, lo, hi = boot_ci(x.M0app_in1.to_numpy(), y.L2small_in1.to_numpy())
+            row[m] = f"{d:+.1f} ({lo:+.1f} .. {hi:+.1f})"
+        rows.append(row)
+    out += ["L2's gate -- top-1 minus M0app, < 40 px, points (95 % paired bootstrap CI; "
+            "gate: +20 on scan and oak1):", "", md_table(pd.DataFrame(rows)), ""]
     # paired differences vs the first model
     rows = []
-    for v in ("scan", "oak1", "oak2"):
-        x = base[(base["view"] == v) & (base.bucketB == "<40")]
+    subsets = [(v, base[(base["view"] == v) & (base.bucketB == "<40")], "< 40 px")
+               for v in VIEWS]
+    subsets.append(("all", base[base.bucketB == "<40"], "< 40 px"))
+    mb = base.target.astype(str).str.startswith("screw.motherboard")
+    subsets.append(("scan+oak1", base[base["view"].isin(["scan", "oak1"]) & mb],
+                    "motherboard screws"))
+    for v, x, what in subsets:
         for m in ms[1:]:
             y = ev[m].loc[x.index]
             d, lo, hi = boot_ci(x.L2small_in1.to_numpy(), y.L2small_in1.to_numpy())
             win = int(((y.L2small_in1 == 1) & (x.L2small_in1 == 0)).sum())
             loss = int(((y.L2small_in1 == 0) & (x.L2small_in1 == 1)).sum())
-            rows.append({"view": v, "model": m, "n": len(x),
+            rows.append({"view": v, "events": what, "model": m, "n": len(x),
                          f"top-1 minus {ms[0]}": f"{d:+.1f}",
                          "95 % CI": f"{lo:+.1f} .. {hi:+.1f}", "wins / losses": f"{win} / {loss}"})
-    out += [f"Paired change in top-1 (< 40 px) against {ms[0]}, bootstrap over events:", "",
+    out += [f"Paired change in top-1 against {ms[0]}, bootstrap over events:", "",
             md_table(pd.DataFrame(rows)), ""]
     # per held-out desktop
     rows = []
@@ -184,7 +202,7 @@ def guess_tables(ms: list[str]) -> list[str]:
 
 def timing_table(ms: list[str]) -> list[str]:
     rows = []
-    for m in ms:
+    for m in [t for mm in ms for t in (mm, f"{mm}_c10")]:
         p = env.OUT / m / "timing_l3.json"
         if not p.exists():
             continue
@@ -208,6 +226,9 @@ def timing_table(ms: list[str]) -> list[str]:
     if not rows:
         return []
     return ["## 5. Runtime (RTX 5090, fp16, median / p90 seconds per frame)", "",
+            "`<model>` = L2's protocol (every box >= 0.001 goes through L2's merge); "
+            "`<model>_c10` = boxes below the guess's own threshold 0.10 dropped before the "
+            "merge (what the app would run).", "",
             md_table(pd.DataFrame(rows)), ""]
 
 

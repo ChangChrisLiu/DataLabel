@@ -33,10 +33,14 @@ def main(argv=None) -> int:
         script, model = parts[0], parts[1]
         cmd = [PY, "-m", f"experiments.l3_detector.{script}", "--model", model]
         tag = f"{script}_{model}"
-        if len(parts) > 2:
-            cmd += ["--fold", parts[2]]
-            tag += f"_{parts[2]}"
-        cmd += parts[3:]
+        rest = parts[2:]
+        if rest and not rest[0].startswith("-"):
+            cmd += ["--fold", rest[0]]
+            tag += f"_{rest[0]}"
+            rest = rest[1:]
+        # extra flags, e.g. ``--conf=0.1`` (use ``=``: ``:`` separates the fields)
+        cmd += rest
+        tag += "".join(f"_{r.lstrip('-').replace('=', '')}" for r in rest)
         t0 = time.perf_counter()
         with (LOGS / f"{tag}.log").open("w", encoding="utf-8") as fh:
             rc = subprocess.call(cmd, stdout=fh, stderr=subprocess.STDOUT,

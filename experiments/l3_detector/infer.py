@@ -90,23 +90,33 @@ class RFDetector(Detector):
         return out
 
 
-def make_detector(model: str, fold: str, half: bool = True):
+def make_detector(model: str, fold: str, half: bool = True, conf: float = 0.001):
+    """``conf`` is the score floor applied *before* L2's merge (0.001 = L2's
+    evaluation protocol; 0.10 = the guess's own threshold, what an app would use)."""
     w = weights_of(model, fold)
     if not w.exists():
         raise SystemExit(f"missing weights {w}")
-    return Detector(w, half=half) if model in YOLO_MODELS else RFDetector(w, half=half)
+    if model in YOLO_MODELS:
+        return Detector(w, half=half, conf=conf)
+    return RFDetector(w, half=half, conf=conf)
+
+
+def tag_of(model: str, conf: float) -> str:
+    return model if conf == 0.001 else f"{model}_c{int(round(conf * 100)):02d}"
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True, choices=YOLO_MODELS + RF_MODELS)
     ap.add_argument("--fold", required=True)
+    ap.add_argument("--conf", type=float, default=0.001,
+                    help="score floor before the merge; != 0.001 writes to <model>_cNN/")
     args = ap.parse_args(argv)
-    out_dir = env.bind_l2(args.model)
+    out_dir = env.bind_l2(tag_of(args.model, args.conf))
     held = int(args.fold.replace("hold", ""))
     boxes = D.load_boxes()
     by = D.index(boxes)
-    det = make_detector(args.model, args.fold)
+    det = make_detector(args.model, args.fold, conf=args.conf)
     con = D.connect()
     out: dict[str, list] = {}
     tim = []

@@ -42,8 +42,12 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
     ap.add_argument("--views", default="scan,oak1,oak2,rs")
+    ap.add_argument("--conf", type=float, default=0.001,
+                    help="score floor before the merge (0.001 = L2's protocol)")
     args = ap.parse_args(argv)
-    out = env.bind_l2(args.model)
+    from experiments.l3_detector.infer import tag_of
+
+    out = env.bind_l2(tag_of(args.model, args.conf))
     from experiments.l2_detector import data as D
     from experiments.l2_detector.guess_eval import CONF, FOLD_OF, setup_l1, suppressed
     from experiments.l1_localise import base
@@ -54,7 +58,7 @@ def main(argv=None) -> int:
     events, shapes, by_frame, con = setup_l1()
     import torch
 
-    dets_by_fold = {f: make_detector(args.model, f) for f in FOLD_OF.values()}
+    dets_by_fold = {f: make_detector(args.model, f, conf=args.conf) for f in FOLD_OF.values()}
     torch.cuda.reset_peak_memory_stats()
     rng = np.random.default_rng(0)
     rows = []
@@ -129,7 +133,8 @@ def main(argv=None) -> int:
     con.close()
     gpu_mb = torch.cuda.max_memory_allocated() / 2 ** 20
 
-    summ = {"model": args.model, "views": {}, "full_oak1_median": float(np.median(full)),
+    summ = {"model": args.model, "conf_floor": args.conf, "views": {},
+            "full_oak1_median": float(np.median(full)),
             "full_oak1_p90": float(np.percentile(full, 90)), "bg_per_frame": bg,
             "gpu_peak_mb_3_folds_loaded": round(gpu_mb)}
     for view in D.VIEWS:
