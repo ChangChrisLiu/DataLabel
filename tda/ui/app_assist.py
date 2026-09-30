@@ -32,7 +32,7 @@ from tda.ui.app_diff import (
     expected_payload,
     heat_rgba,
 )
-from tda.ui.app_detect import DetCandidate, DetectMixin
+from tda.ui.app_detect import DetCandidate, DetectMixin, detector_asked
 from tda.ui.app_roi_worker import RoiProposer
 from tda.ui.class_names import class_zh
 
@@ -755,9 +755,7 @@ class AssistMixin(DetectMixin):
         frame = self._det_frames.get(int(key.step))
         if frame is None or not config.applies(key.view) or not frame.change:
             return False
-        asked = {str(r.get("cls") or str(r["instance"]).split(".", 1)[0])
-                 for r in (rows or []) if r.get("kind") == api.KIND_ADD_SHAPE
-                 and not r.get("done") and r.get("instance")}
+        asked = detector_asked(rows or [])
         return any(frame.dets[i].cls in asked for i in frame.change)
 
     def begin_add_shape(self, blob: Optional[DiffBlob], rows: Optional[list] = None) -> None:
@@ -774,9 +772,11 @@ class AssistMixin(DetectMixin):
         already read; ``None`` reads it, and only on a gated view.
 
         **The small-part detector goes first** (task U3): when the card's open
-        ✚ rows ask for a class it is configured for, on one of its views, and a
-        candidate survives the "already drawn" skip, rank 1 is its best
-        candidate -- the gate does not judge it, and ``blob`` may be ``None``.
+        ✚ rows ask for a class it is configured for -- rows that come back on
+        their own, not with a parent (round 2: captive cooler screws) -- on one
+        of its views, and a candidate survives the "already drawn" skip, rank 1
+        is its best candidate -- the gate does not judge it, and ``blob`` may
+        be ``None``.
         Otherwise everything below runs exactly as it did before it existed.
         """
         roi = self.roi()

@@ -5,7 +5,8 @@ on a 1600x1600 one, with a stored ROI and a stub detector whose pass over the
 view has finished -- the state every frame after the first is in.  Measured
 exactly like the window's own frame change (``act_step(-1)`` to a repainted
 canvas, best and median of five, :data:`BUDGET_WINDOW_FRAME_CHANGE`), on the
-frame whose card asks for the cooler's screws back, so the detector's rank 1 is
+frame whose card asks for four screws back -- with their ``parent`` taken off
+the card, so that they ask for the detector -- and the detector's rank 1 is
 what the comparison's arrival arms.
 
 The arming itself happens later, when the comparison lands on the GUI thread;
@@ -95,6 +96,13 @@ def test_arrival_with_a_warm_detector_cache_is_inside_the_frame_change_budget(
     session.db.set_pose_segment(DESKTOP, VIEW, 1, 1, 14, 14, None, None)
     session.db.set_pose_segment_roi(DESKTOP, VIEW, 1, roi, annotator="tester", hw=hw)
     session.goto(SCREW_STEP + 1)
+    # frame 12's cooler screws are captive (a parent) and never ask for the
+    # detector (round 2); measured here as screws that come back on their own,
+    # the way D13's motherboard screws do on frames 35-40
+    real_card = session.task_card
+    session.task_card = lambda: [
+        {k: v for k, v in row.items() if not (k == "parent" and row.get("cls") == "screw")}
+        for row in real_card()]
     window = _open_window(session, tmp_path)
     try:
         stub = _Stub(hw)

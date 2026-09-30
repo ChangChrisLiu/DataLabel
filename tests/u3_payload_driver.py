@@ -6,7 +6,10 @@ Run by ``tests/test_u3_cross_tree.py`` twice: once inside a copy of main
 ``95d3386`` (no detector exists there) and once in this tree with
 ``--detector`` -- a stub model that finds three screws on **every** frame, so
 the only thing keeping it off a frame is the rule under test (the card asks
-for no screw).  Per frame it records the box on the canvas, both SAM tools'
+for no screw that comes back on its own: frame 12's are captive, back in with
+the fan).  After the walk, ``live_check`` revisits frame 12 with the screws'
+``parent`` taken off the card, where the detector must arm -- the proof that
+the stub was live.  Per frame it records the box on the canvas, both SAM tools'
 boxes, the chip, the cross, the rank, the status line, the ``Shift+C``
 alternates, and the SAM request a click in the middle of the box sends
 (box, points, multimask, crop shape and pixel sum, mask input).  Imports only
@@ -126,6 +129,22 @@ def main(argv) -> int:
             win.act_clear_edit()
             app.processEvents()
         frames[str(step)] = record
+    if use_detector:
+        # The stub is live: frame 12's screws come back with the fan (a
+        # parent) and so ask for nothing; take the parent off and the same
+        # frame arms the detector's screw.
+        real = session.task_card
+
+        def loose():
+            return [{k: v for k, v in row.items()
+                     if not (k == "parent" and row.get("cls") == "screw")}
+                    for row in real()]
+
+        session.task_card = loose
+        session.goto(12)          # from frame 1, where the walk ended: a new visit
+        settle()
+        frames["live_check"] = {"step": 12, "held": held(),
+                                "chip": win.canvas.prompt_band()[1]}
     close_window(win)
     out.write_text(json.dumps(frames, ensure_ascii=False, indent=1, default=str),
                    encoding="utf-8")

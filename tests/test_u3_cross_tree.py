@@ -1,4 +1,4 @@
-"""U3: on frames that ask for no screw, this tree arms exactly what main 95d3386 did.
+"""U3: on frames that ask for no screw of their own, this tree arms exactly what main 95d3386 did.
 
 ``git archive`` puts main's ``tda/``, its configs and its test scene in a
 temporary directory; ``tests/u3_payload_driver.py`` walks the same synthetic
@@ -7,10 +7,13 @@ scene in both trees -- here with a stub detector that finds three screws on
 the box on the canvas and in both SAM tools, the chip, the cross, the rank,
 the status line, the ``Shift+C`` alternates and the SAM request a click sends.
 
-On every frame whose card asks for no screw the two are compared field by
-field and must be equal.  On the frame that does ask for screws they must
-**differ** -- the proof that the stub was live and it is the rule, not an idle
-detector, that kept it off the others.
+In this scene no screw comes back on its own: frame 12's four are captive,
+back in with the fan (round 2), and frame 14 has no neighbour.  So **every**
+frame must equal main field by field -- frame 12 included, its box the
+difference map's over the fan.  The driver's ``live_check`` then takes the
+screws' ``parent`` off frame 12's card and the detector's screw must arm: the
+proof that the stub was live and it is the rule, not an idle detector, that
+kept it off.
 """
 from __future__ import annotations
 
@@ -56,19 +59,19 @@ def _run(tree: Path, out: Path, work: Path, *extra: str) -> dict:
 
 
 @pytest.mark.slow
-def test_frames_without_a_screw_arm_byte_for_byte_what_main_did(tmp_path):
+def test_frames_without_a_screw_of_their_own_arm_byte_for_byte_what_main_did(tmp_path):
     main_tree = _main_tree(tmp_path / "main_src")
     before = _run(main_tree, tmp_path / "main.json", tmp_path / "w_main")
     after = _run(REPO, tmp_path / "u3.json", tmp_path / "w_u3", "--detector")
-    assert sorted(before) == sorted(after)
-    plain = [s for s in before if not after[s]["open_screw_rows"]]
-    screwed = [s for s in before if after[s]["open_screw_rows"]]
-    assert len(plain) >= 10 and screwed, (plain, screwed)
-    for step in plain:
+    live = after.pop("live_check")
+    assert sorted(before) == sorted(after) and len(before) == 14
+    for step in before:
         assert after[step] == before[step], f"frame {step} differs from main"
-    # the detector was live: where the card asks for screws, rank 1 is its box
-    armed = [s for s in screwed if after[s]["held"]["window"] is not None]
-    assert armed, "no frame with an open screw row armed a box"
-    for step in armed:
-        assert after[step]["chip"] == "SAM 提示框（检测器：螺丝）"
-        assert after[step] != before[step]
+    # frame 12 asks for four screws, all captive -- and still armed main's box
+    assert len(after["12"]["open_screw_rows"]) == 4
+    assert after["12"]["held"]["window"] is not None
+    assert after["12"]["chip"] == "SAM 提示框（程序猜的位置）"
+    # the stub was live: the same frame with screws of their own arms its screw
+    assert live["chip"] == "SAM 提示框（检测器：螺丝）"
+    assert live["held"]["window"] == [26.0, 20.0, 36.0, 32.0]
+    assert len(set(json.dumps(v) for v in live["held"].values())) == 1

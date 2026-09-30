@@ -2,7 +2,7 @@
 cache/
 annotations/*.sqlite*
 raw_logs/
-models/weights/
+/models/weights/
 *.pt
 *.pth
 *.ply
@@ -23,5 +23,6 @@ thumbs.db
 .cache/
 .claude/worktrees/
 .superpowers/
-models/
+# the repo root's models/ only: an unanchored `models/` also hid tda/models/
+/models/
 experiments_out/

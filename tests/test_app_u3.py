@@ -5,6 +5,13 @@ the CPU cooler and its four screws back (neighbour 13), on frames 10 and 9 for
 a drive cage and an SSD -- no screw.  The model is :class:`StubModel`, the dE
 a table (``change_fn``) unless a test is about the real one; no GPU.
 
+Frame 12's screws are *captive*: their rows come back with the fan (a
+``parent``), which never asks for the detector (round 2).  The tests about the
+detector itself therefore stand on a frame 12 whose screws come back on their
+own -- :func:`loose_screws` takes the ``parent`` off the screw rows, which is
+what D13's motherboard screws on frames 35-40 look like -- and the tests about
+the captive case use the scene as it is.
+
 * ranking, the "already drawn" skip, and the fallback to the difference map;
 * the rank-1 source switch (the U2h gate does not judge a detector box);
 * a late answer arms only while the prompt is untouched;
@@ -44,7 +51,7 @@ from tda.ui.app_assist import (
     PROMPT_CHIP_RANK,
     DiffOffer,
 )
-from tda.ui.app_detect import DetCandidate, already_drawn
+from tda.ui.app_detect import DetCandidate, already_drawn, detector_asked
 from tda.ui.app_guide import HINT_DET_ALT_LABEL, HINT_DET_LABEL, HINT_DIFF_RGB
 
 SCREW_STEP = 12
@@ -176,7 +183,23 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
-def _window(tmp_path):
+def loose_screws(win) -> None:
+    """Frame 12's screws without their ``parent``: screws that come back on their own.
+
+    The session's card, with the ``parent`` key taken off every screw row --
+    the shape of a motherboard screw's row, which is removed by itself.
+    """
+    real = win.session.task_card
+
+    def card():
+        return [{k: v for k, v in row.items()
+                 if not (k == "parent" and row.get("cls") == "screw")}
+                for row in real()]
+
+    win.session.task_card = card
+
+
+def _window(tmp_path, loose: bool = True):
     session = make_session(tmp_path)
     queue = StubSamQueue()
     win = MainWindow(session, make_paths(tmp_path), "tester", sam_queue=queue)
@@ -188,6 +211,8 @@ def _window(tmp_path):
     if win.roi_editing:
         win.wait_for_roi_proposal()
         win.act_commit()
+    if loose:
+        loose_screws(win)
     return win
 
 
@@ -203,6 +228,7 @@ def test_the_scene_is_what_these_tests_assume(window):
     go(window, SCREW_STEP)
     card = window.session.task_card()
     assert {r["cls"] for r in card if r.get("kind") == api.KIND_ADD_SHAPE} >= {"screw"}
+    assert detector_asked(card) == {"cpu_cooler", "screw"}, "loose_screws did not apply"
     assert window.session.task_neighbour() == SCREW_STEP + 1
     for step in PLAIN_STEPS:
         go(window, step)
@@ -359,6 +385,60 @@ def test_the_diff_path_is_byte_identical_with_the_detector_on(qapp, tmp_path, st
     assert seen["on"] == seen["off"]
 
 
+# --------------------------------------------------------------------------- #
+# round 2: screws that come back with a parent never ask for the detector
+# --------------------------------------------------------------------------- #
+def test_only_rows_that_come_back_on_their_own_ask_for_the_detector():
+    fan = {"instance": "cpu_cooler.fan.01", "kind": api.KIND_ADD_SHAPE, "done": False,
+           "cls": "cpu_cooler"}
+    captive = [{"instance": f"screw.cpu_cooler.0{i}", "kind": api.KIND_ADD_SHAPE,
+                "done": False, "cls": "screw", "parent": "cpu_cooler.fan.01",
+                "attrs": {"role": "cpu_cooler", "captive": True}} for i in (1, 2, 3, 4)]
+    assert detector_asked([fan, *captive]) == {"cpu_cooler"}
+    board = {"instance": "screw.motherboard.03", "kind": api.KIND_ADD_SHAPE,
+             "done": False, "cls": "screw"}
+    assert detector_asked([fan, *captive, board]) == {"cpu_cooler", "screw"}
+    assert detector_asked([dict(board, done=True)]) == set()
+    assert detector_asked([dict(board, kind=api.KIND_SPLIT_KEYFRAME)]) == set()
+
+
+def test_captive_screws_that_come_back_with_their_fan_keep_the_difference_maps_box(
+        qapp, tmp_path):
+    """Frame 12 as the scene has it: the fan plus four captive screws with a parent.
+
+    The detector answers screws there, and rank 1 is still the difference
+    map's box over the fan -- byte for byte what a window without a detector
+    arms, and what a click sends.
+    """
+    seen = {}
+    for name in ("off", "on"):
+        win = _window(tmp_path / name, loose=False)
+        try:
+            model = None
+            if name == "on":
+                model = enable(win, tmp_path / name,
+                               {s: [det(A_BOX), det(B_BOX), det(C_BOX)] for s in range(1, 15)})
+            go(win, SCREW_STEP)
+            card = win.session.task_card()
+            captive = [r for r in card if r.get("cls") == "screw"]
+            assert len(captive) == 4 and all(r.get("parent") == "cpu_cooler.fan.01"
+                                             for r in captive)
+            assert detector_asked(card) == {"cpu_cooler"}
+            if model is not None:
+                assert SCREW_STEP in win._det_frames, "the detector never answered frame 12"
+                assert win.detector_ranking() is None
+            state = _state(win)
+            _start_edit(win)
+            win.act_tool("sam_point")
+            state["request"] = request_inside(win, win._prompt_box)
+            state["edit_line"] = win.status_message()
+            seen[name] = state
+        finally:
+            close_window(win)
+    assert seen["on"] == seen["off"]
+    assert seen["on"]["band"][1] == PROMPT_CHIP and seen["on"]["line"] == PROMPT_ARMED
+
+
 def test_the_gate_does_not_judge_a_detector_box(window, tmp_path):
     enable(window, tmp_path, {SCREW_STEP: [det(A_BOX)]})
     window.prompt_gate = PG.PromptGate(["scan"], 3.0, {"scan": {
@@ -491,6 +571,7 @@ def test_storing_the_roi_plans_the_view_and_arms_the_frame_on_screen(qapp, tmp_p
         win.show()
         QApplication.processEvents()
         win.set_mode(A.MODE_ANNOTATE)
+        loose_screws(win)
         assert win.roi() is None
         model = enable(win, tmp_path, {SCREW_STEP: [det(A_BOX), det(B_BOX)]})
         pump(win)

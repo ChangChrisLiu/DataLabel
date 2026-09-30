@@ -14,8 +14,9 @@ views and classes :mod:`configs/detector.yaml <tda.models.detector>` names:
    it: when the frame on screen is not ready it is asked for first, with the
    pixels the window already decoded.
 2. **The guess** (:meth:`DetectMixin.detector_ranking`): the frame's
-   detections of the classes its open ✚ rows ask for, at the configured
-   confidence, inside the ROI; minus those already drawn -- a same-class
+   detections of the classes its open ✚ rows ask for -- rows that come back
+   on their own, not with a parent (:func:`detector_asked`) -- at the
+   configured confidence, inside the ROI; minus those already drawn -- a same-class
    instance whose shape applies at this frame, within 2 px of the candidate's
    centre or at IoU >= 0.3 with it; ranked by native dE between the frame and
    its neighbour inside each box.  :mod:`tda.ui.app_assist` arms the first as
@@ -55,7 +56,7 @@ from tda.ui import app_support as S
 from tda.ui import session_api as api
 
 __all__ = ["DRAWN_CENTRE_PX", "DRAWN_IOU", "DetCandidate", "DetRanking",
-           "DetectMixin", "DetectionWorker", "already_drawn"]
+           "DetectMixin", "DetectionWorker", "already_drawn", "detector_asked"]
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +82,21 @@ def _iou(a, b) -> float:
 def _holds(box, x: float, y: float, margin: float = DRAWN_CENTRE_PX) -> bool:
     return (box[0] - margin <= x < box[2] + margin
             and box[1] - margin <= y < box[3] + margin)
+
+
+def detector_asked(card) -> set:
+    """The classes the card's open ✚ rows ask to add back **on their own**.
+
+    A row with a ``parent`` is a part that comes back in *with* that parent
+    -- D13's four captive CPU-cooler screws on frame 12, "跟 cpu_cooler.fan.01
+    一起装回来的" -- so the part removed at ``j + 1`` was the parent, not
+    the screw, and the detector's premise does not hold: it armed a screw on
+    the fan where the difference map had boxed the whole fan (U3 round 2).
+    Such rows never ask for the detector.
+    """
+    return {str(r.get("cls") or str(r["instance"]).split(".", 1)[0])
+            for r in card if r.get("kind") == api.KIND_ADD_SHAPE
+            and not r.get("done") and r.get("instance") and not r.get("parent")}
 
 
 def already_drawn(box, drawn) -> bool:
@@ -615,8 +631,10 @@ class DetectMixin:
 
         ``None`` -- the difference map decides, exactly as before -- when the
         detector is off or not for this view, the frame has no ROI or no answer
-        yet, or none of the card's open ✚ rows is a class the detector is for.
-        ``rows`` is the task card the caller already read.
+        yet, or none of the card's open ✚ rows is a class the detector is for
+        and comes back on its own (:func:`detector_asked`: a row with a
+        ``parent`` does not count).  ``rows`` is the task card the caller
+        already read.
         """
         config = self.det_config
         if (self.det_worker is None or config is None or not self._det_frames
@@ -632,9 +650,7 @@ class DetectMixin:
         if not self._det_ready(int(key.step), crop):
             return None
         card = self.session.task_card() if rows is None else rows
-        asked = {str(r.get("cls") or str(r["instance"]).split(".", 1)[0])
-                 for r in card if r.get("kind") == api.KIND_ADD_SHAPE
-                 and not r.get("done") and r.get("instance")}
+        asked = detector_asked(card)
         wanted = [c for c in config.classes if c in asked]
         if not wanted:
             return None
