@@ -19,7 +19,8 @@ the captive case use the scene as it is.
 * the chip, the hover, the log line, refusal and canvas == tools.
 
 The engine, its cache and its file are ``tests/test_detector.py``; the diff
-path against main ``95d3386`` is ``tests/test_u3_cross_tree.py``.
+path against main (``72363fc`` since U4) is ``tests/test_u3_cross_tree.py``;
+the RF-DETR backend in the window, through its file, is ``tests/test_app_u4.py``.
 """
 from __future__ import annotations
 

@@ -1,11 +1,13 @@
-# The small-part detector behind the reverse walk's guess (task U3).
+# The small-part detector behind the reverse walk's guess (tasks U3, U4).
 #
 # On frame j the annotator adds back the part removed at step j+1, and the box
 # the difference map arms for it is right about 8 % of the time for parts under
 # 40 px.  L2 (experiments/l2_detector/REPORT.md) trained a YOLO26n on the old
-# Label Studio drafts that finds *motherboard screws*: held out, the removed
-# screw was the armed box on 86 % of the scan events and 62 % of the oak1 ones.
-# The guess it wires (tda/ui/app_detect.py):
+# Label Studio drafts that finds *motherboard screws*; L3
+# (experiments/l3_detector/REPORT.md) found RF-DETR small better on the same
+# tiles -- held out, screw hit scan 72.8 -> 87.7 %, oak1 62.8 -> 78.7 %,
+# oak2 18.6 -> 62.7 % -- and no slower with the merge floor below.  The guess
+# it wires (tda/ui/app_detect.py):
 #
 #   1. the detections of `classes` in frame j, conf >= `conf`, inside the ROI;
 #   2. minus those already drawn: a same-class instance on frame j whose box
@@ -14,39 +16,56 @@
 #      frame inside each box; the top one is rank 1, the rest go first under
 #      Shift+C.
 #
-# Only on `views`, and only when the frame's open ✚ rows ask for one of
-# `classes` on its own: a row that comes back *with* a parent -- D13's captive
-# CPU-cooler screws, back in with the fan -- does not count, because the part
-# removed at j+1 was the parent.  Everywhere else the difference map (and the
-# U2h gate) is exactly what it was.  The dE of a candidate is logged, never
-# used as a gate: L2's "dE < 3 is mostly wrong" was found after the fact and
-# is not validated.
+# Only on `views`, only once the view's ROI is stored, and only when the
+# frame's open ✚ rows ask for one of `classes` on its own: a row that comes
+# back *with* a parent -- D13's captive CPU-cooler screws, back in with the
+# fan -- does not count, because the part removed at j+1 was the parent.
+# Everywhere else the difference map (and the U2h gate) is exactly what it
+# was.  The dE of a candidate is logged, never used as a gate: L2's "dE < 3
+# is mostly wrong" was found after the fact and is not validated.
 #
-# Swapping the model -- L3's all-desktop one -- is this file alone: `model`,
-# and `tiling` if it was trained on other tiles.  The detections are cached
-# per model (by the file's SHA-1) under `cache_root`, so a new model starts
-# cold and an old cache is never read for it.  The weights are not in git.
+# Swapping the model is this file alone: `backend` and `model`, and `tiling`
+# if it was trained on other tiles.  The detections are cached per model (by
+# the file's SHA-1) and per recipe under `cache_root`, so a new model starts
+# cold and an old cache is never read for it.  The weights are not in git;
+# the manifest beside them (<model>.json) must agree with the file and its
+# classes when it is there.
 #
 # Anything wrong here -- a missing or malformed file, a missing model file,
-# ultralytics that does not import, no CUDA -- is a WARNING in the log and a
-# detector that is off: the window opens and the guess is the difference map's.
+# a library that is not installed or does not import, no CUDA, weights that
+# do not load -- is a WARNING in the log and a detector that is off: the
+# window opens and the guess is the difference map's.
 # TDA_DETECTOR=off (or =<another file>) overrides this file for one process.
 
 enabled: true
 
-# hold13 never saw D13, which is the honest model for the D13 trial; its
-# manifest (source run, classes, recipe) is the .json next to it.
-model: D:/DataSet/models/weights/tda_det_yolo26n_l2_hold13.pt
+# yolo (ultralytics) or rfdetr.  L3's production model: RF-DETR small trained
+# on all 4 873 tiles, its recipe and tiling in the manifest beside it.
+backend: rfdetr
+model: D:/DataSet/models/weights/tda_det_rfdetr_small_all.pt
 
-# The detector's classes that arm a box.  L2: screws only -- connectors hit
-# 0-29 %, cooler screws 0 % (they are captive and stay on the cooler).
+# The fallback, U3's YOLO26n (hold13 never saw D13) -- swap these two lines in:
+# backend: yolo
+# model: D:/DataSet/models/weights/tda_det_yolo26n_l2_hold13.pt
+# (with the YOLO, oak2 is best left out of `views`: L2's screw hit there was
+# 19 %.)
+
+# The detector's classes that arm a box.  L2 and L3: screws only --
+# connectors hit 15-29 % whatever the model, cooler screws 0 % (they are
+# captive and stay on the cooler).
 classes: [screw]
 
-# Where it is on.  oak2 and rs stay off (L2: screw hit 19 % and 6 %).
-views: [scan, oak1]
+# Where it is on.  rs stays off (L3: screw hit 35 % at 6-10 px, not ready).
+views: [scan, oak1, oak2]
 
-# Minimum confidence of a candidate (L2's operating point).
+# Minimum confidence of a candidate (L2's operating point, kept by L3).
 conf: 0.10
+
+# L3 §5: a box under this is dropped before the merge -- it changed 0 of 105
+# scan/oak1 events, and RF-DETR's detection on a scan frame went from 0.052 s
+# (all 300 queries a tile into the merge) to 0.025 s.  Never above `conf`;
+# left out it is 0.10 (or `conf`, if that is lower).
+merge_floor: 0.10
 
 # L2's tiles.py, for inference exactly as for training: crop the frame to the
 # stored ROI, bring it to the view's work scale, cut 640 x 640 tiles at a
@@ -56,6 +75,7 @@ tiling:
   work_scale:
     scan: 1.0
     oak1: 1.0
+    oak2: 1.0
   tile: 640
   stride: 512
 
@@ -69,5 +89,6 @@ yield_ms: 20
 # Detections, one JSON per desktop and view, under <cache_root>/<sha1[:12]>/.
 cache_root: D:/DataSet/cache/det
 
-# ultralytics writes its settings file here instead of %APPDATA%.
+# The yolo backend: ultralytics writes its settings file here instead of
+# %APPDATA%.  (rfdetr writes none.)
 yolo_config_dir: D:/DataSet/.cache/ultralytics_cfg
