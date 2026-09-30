@@ -45,6 +45,10 @@ _ENV = {
     "HUGGINGFACE_HUB_CACHE": str(CACHE / "hf" / "hub"),
     "TRANSFORMERS_CACHE": str(CACHE / "hf" / "transformers"),
     "XDG_CACHE_HOME": str(CACHE / "xdg"),
+    # its settings.json points weights_dir at WEIGHTS.  Note: ultralytics' AMP
+    # check fetches yolo26n.pt into weights_dir when it is absent, YOLO_OFFLINE
+    # or not -- it did so once on 2026-09-29 (a byte-identical copy of the
+    # yolo26n.pt already in models/ultralytics/weights); it is present now.
     "YOLO_CONFIG_DIR": str(CACHE / "ultralytics_cfg"),
     "RF_HOME": str(WEIGHTS),
     "ROBOFLOW_HOME": str(WEIGHTS),
