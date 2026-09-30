@@ -182,7 +182,23 @@ def _load(target: Path) -> tuple[PromptGate, Path]:
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise GateFileError(f"the bands file {bands_file} has a malformed band: "
                             f"{type(exc).__name__}: {exc}") from None
+    for view, classes in bands.items():
+        for cls, (lo, hi) in classes.items():
+            _check_band(bands_file, view, cls, lo, hi)
     return PromptGate(raw_views, k, bands), bands_file
+
+
+def _check_band(bands_file: Path, view: str, cls: str, lo: float, hi: float) -> None:
+    """A band is two finite areas with ``0 < lo_px <= hi_px`` (task U3 minor a).
+
+    ``hi_px: 0`` used to load and then divide by zero in :func:`outside_factor`
+    -- on the status line, at the first box above it; a negative or reversed
+    band would withhold or keep boxes by accident.  Either is a broken file.
+    """
+    if not (math.isfinite(lo) and math.isfinite(hi) and 0.0 < lo <= hi):
+        raise GateFileError(f"the bands file {bands_file} has an impossible band for "
+                            f"{cls} on {view}: lo_px = {lo!r}, hi_px = {hi!r} "
+                            f"(it must be 0 < lo_px <= hi_px, both finite)")
 
 
 def load_prompt_gate(path: Optional[str] = None) -> PromptGate:

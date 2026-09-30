@@ -18,7 +18,8 @@ code, and both are fixed here rather than at each call site:
   :data:`RESERVED_HUE_HALF_WIDTH` degrees around each of them empty
   (:data:`ROI_HUE_HALF_WIDTH` around the ROI's), so no instance mask can ever
   share an overlay's hue; the drag band is white, which the palette's
-  saturation floor (0.62) cannot produce either.
+  saturation floor (0.45) and its CIEDE2000 distance of at least 10 from
+  every reserved colour (task U3) keep it from producing either.
 
 The look itself is the one the ROI editor already had (ruling U-ROI-2): a
 dark, solid under-stroke two logical pixels wider than a fully opaque bright

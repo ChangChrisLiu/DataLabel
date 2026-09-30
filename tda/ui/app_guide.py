@@ -81,6 +81,10 @@ HINT_DIFF_ALT_LABEL = "差异图第 {rank} 处（SAM 提示框）"
 #: The strongest change, when SAM is not armed with it (no ROI yet, or the
 #: change covers most of the ROI and would be no prompt at all).
 HINT_DIFF_UNARMED_LABEL = "差异最大处"
+#: The box SAM is armed with came from the small-part detector (task U3):
+#: rank 1, and one of its other candidates under ``Shift+C``.
+HINT_DET_LABEL = "检测器：{name}（SAM 提示框）"
+HINT_DET_ALT_LABEL = "检测器：{name}，第 {rank} 个（SAM 提示框）"
 #: With the step: one draft traced on two steps is two outlines, and two
 #: chips saying the same thing would read as a mistake.
 HINT_DRAFT_LABEL = "旧草稿 {key}（第 {step} 帧）"
@@ -814,8 +818,16 @@ class GuideMixin:
         box = self._frame_diff_box(key)
         if box is None:
             return []
+        source = str(getattr(self, "_prompt_source", None) or "diff")
         if self._prompt_box is None:
             label = HINT_DIFF_UNARMED_LABEL
+        elif source.startswith("det:"):
+            from tda.ui.class_names import class_zh
+
+            name = class_zh(source.split(":", 1)[1])
+            rank = int(getattr(self, "_prompt_rank", 0) or 0)
+            label = (HINT_DET_LABEL.format(name=name) if rank == 0
+                     else HINT_DET_ALT_LABEL.format(name=name, rank=rank + 1))
         elif int(getattr(self, "_prompt_rank", 0) or 0) > 0:
             label = HINT_DIFF_ALT_LABEL.format(rank=int(self._prompt_rank) + 1)
         else:

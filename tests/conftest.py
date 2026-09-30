@@ -28,6 +28,12 @@ _masks.CHECK_ENCODE_WINDOW = True
 # tests that are about the gate load ``configs/prompt_gate.yaml`` themselves.
 os.environ["TDA_PROMPT_GATE"] = "off"
 
+# The small-part detector (task U3, ``tda.ui.app_detect``) is off for the suite
+# too: no window may import torch or ultralytics, touch the GPU or write a
+# detection cache under D:/DataSet/cache.  The tests that are about it hand a
+# window a stub model with ``MainWindow.enable_detector``.
+os.environ["TDA_DETECTOR"] = "off"
+
 
 @pytest.fixture
 def tmp_db_path(tmp_path: Path) -> str:

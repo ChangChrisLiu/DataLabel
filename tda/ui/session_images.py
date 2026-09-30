@@ -25,7 +25,8 @@ from tda.core.db import Db
 from tda.core.model import FrameKey
 from tda.core.rawroot import resolve_raw
 
-__all__ = ["IMAGE_BUDGET_BYTES", "IMAGE_CACHE_SIZE", "ImageCache", "thumb_path"]
+__all__ = ["IMAGE_BUDGET_BYTES", "IMAGE_CACHE_SIZE", "ImageCache", "frame_candidates",
+           "thumb_path"]
 
 #: How many decoded frames are kept at most.  The real bound is
 #: :data:`IMAGE_BUDGET_BYTES`; this only stops a view of small images from
@@ -44,6 +45,23 @@ def thumb_path(cache_dir: str, key: FrameKey) -> str:
     """
     root = str(cache_dir).replace("\\", "/").rstrip("/")
     return f"{root}/thumbs/{key.view}/D{key.desktop:02d}/s{key.step:03d}.jpg"
+
+
+def frame_candidates(cache_dir: str, key: FrameKey,
+                     row: Optional[dict]) -> list[Optional[str]]:
+    """Where one frame's pixels may be, best first, given its ``frame`` row.
+
+    The local cache, the row's recorded cache copy, the row's own path -- the
+    last two through :func:`tda.core.rawroot.resolve_raw`.  Shared by
+    :class:`ImageCache` and the detector's background pass, which must read
+    the very file the canvas shows (task U3).
+    """
+    row = row or {}
+    return [
+        cached_image_path(cache_dir, key),
+        resolve_raw((row.get("aux") or {}).get("cache_path")),
+        resolve_raw(row.get("path")),
+    ]
 
 
 def _first_readable(candidates: Iterable) -> Optional[str]:
@@ -89,12 +107,7 @@ class ImageCache:
 
     def _candidates(self, key: FrameKey) -> list[Optional[str]]:
         """Where this frame's pixels may be, as files to open *now*."""
-        row = self.db.get_frame(key) or {}
-        return [
-            cached_image_path(self.cache_dir, key),
-            resolve_raw((row.get("aux") or {}).get("cache_path")),
-            resolve_raw(row.get("path")),
-        ]
+        return frame_candidates(self.cache_dir, key, self.db.get_frame(key))
 
     def why_unreadable(self, key: FrameKey) -> Optional[str]:
         """Why a frame that *should* have pixels has none, or ``None``.

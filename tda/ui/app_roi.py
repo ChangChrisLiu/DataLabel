@@ -643,6 +643,12 @@ class RoiMixin:
         self.refresh_roi_bar()
         self.logger.info("roi accepted segment=%s roi=%s", answered, accepted)
         self.update_status()
+        # The detector crops to the ROI: the segment's frames are planned again
+        # and the one on screen is asked for first (task U3).  The comparison
+        # starts over below, so the prompt does too: the drag that made the
+        # rectangle is not a touch that keeps the detector's answer off it.
+        self._det_visit = None
+        self.on_frame_changed_detect(self.session.current())
         self.request_assist()
         if self.has_uncommitted_edit():
             # Storing loses nothing, but moving the view under a half-drawn

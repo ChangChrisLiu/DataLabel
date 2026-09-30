@@ -14,7 +14,6 @@ only the disk it touched instead of the whole frame.
 """
 from __future__ import annotations
 
-import colorsys
 import weakref
 import zlib
 from typing import Optional
@@ -76,48 +75,51 @@ def _free_arcs() -> list[tuple[float, float]]:
     return arcs
 
 
-def _free_hue(u: float, arcs: list[tuple[float, float]]) -> float:
-    """``u`` in [0, 1) laid onto the free arcs, end to end; a hue in [0, 1).
-
-    Monotonic and proportional, so the golden-ratio spacing below survives:
-    the instances only lose the reserved bands, not their separation.
-    """
-    total = sum(hi - lo for lo, hi in arcs)
-    left = (u % 1.0) * total
-    for lo, hi in arcs:
-        if left < hi - lo:
-            return ((lo + left) / 360.0) % 1.0
-        left -= hi - lo
-    return (arcs[-1][1] / 360.0) % 1.0
-
-
-def _build_palette() -> tuple[RGB, ...]:
-    """64 distinct, evenly separated colours, none of an overlay's hue.
-
-    Hues advance by the golden ratio so that neighbouring indices -- and any
-    two instances of one frame -- land far apart on the wheel; saturation and
-    value alternate on a 2x2 pattern to keep the colours apart when printed or
-    seen by a colour-deficient eye.  The wheel they advance on is the hue
-    circle with the overlays' bands cut out (:func:`_free_arcs`), so a mask can
-    never be the colour of the outline drawn over it.
-    """
-    arcs = _free_arcs()
-    colors: list[RGB] = []
-    for i in range(64):
-        hue = _free_hue((i * 0.6180339887498949) % 1.0, arcs)
-        sat = 0.62 + 0.26 * ((i >> 1) & 1)
-        val = 0.95 - 0.22 * (i & 1)
-        r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
-        colors.append((round(r * 255), round(g * 255), round(b * 255)))
-    return tuple(colors)
-
-
-#: Fixed instance palette; see :func:`palette_color`.
-PALETTE_64: tuple[RGB, ...] = _build_palette()
-
 #: Highlight colour of the instance currently being edited (spec 4.3): one
 #: fixed colour, never a palette entry, so "what am I painting" is unambiguous.
 EDIT_RGB: RGB = (255, 232, 64)
+#: What no instance colour may come near (CIEDE2000 >= 10, task U3): the
+#: editing highlight, every reserved overlay colour, and the white drag band.
+PALETTE_RESERVED: tuple[RGB, ...] = (EDIT_RGB, *_style.RESERVED_RGBS, _style.DRAG_RGB)
+
+
+def _build_palette() -> tuple[RGB, ...]:
+    """The 64 colours :data:`PALETTE_64` is: as far apart as can be found.
+
+    Farthest-point selection in CIEDE2000 over a grid of the free hue arcs
+    (:func:`_free_arcs`) in saturation and value, then swaps until no colour
+    can move further from its nearest neighbour
+    (:func:`tda.ui.canvas.palette_build.build_palette`).  A few seconds, so it
+    is not run at import: the table below is its output, and a test checks
+    they agree.
+    """
+    from tda.ui.canvas.palette_build import MIN_DE_TO_ROI, build_palette
+
+    return build_palette(_free_arcs(), PALETTE_RESERVED,
+                         stricter=((_style.ROI_RGB, MIN_DE_TO_ROI),))
+
+
+#: Fixed instance palette; see :func:`palette_color`.  Chosen by
+#: :func:`_build_palette` (task U3): the closest two colours are CIEDE2000
+#: 10.20 apart -- the golden-ratio palette it replaces had two at 1.58,
+#: (43, 242, 29) and (81, 242, 29) -- every colour is at least 10 from the
+#: editing yellow, the white drag band and each overlay colour and 20 from the
+#: ROI's magenta, with a hue outside every reserved band.  Display only: no
+#: colour is stored.
+PALETTE_64: tuple[RGB, ...] = (
+    (0, 13, 128), (42, 255, 0), (140, 190, 255), (242, 0, 77), (128, 100, 0), (0, 153, 112),
+    (255, 200, 0), (204, 112, 137), (13, 247, 255), (128, 13, 68), (113, 166, 0), (9, 82, 178),
+    (13, 255, 178), (104, 64, 128), (25, 125, 255), (166, 91, 127), (255, 140, 171),
+    (204, 217, 119), (42, 0, 255), (166, 130, 0), (65, 50, 166), (0, 128, 70), (13, 124, 128),
+    (191, 0, 51), (159, 140, 255), (102, 204, 158), (0, 204, 0), (0, 178, 98), (128, 115, 70),
+    (25, 94, 255), (232, 255, 25), (128, 19, 191), (178, 36, 90), (0, 53, 128), (84, 105, 153),
+    (128, 70, 85), (138, 191, 105), (191, 191, 0), (140, 91, 166), (84, 151, 153),
+    (152, 217, 0), (153, 153, 0), (140, 255, 224), (0, 153, 3), (87, 13, 128), (153, 143, 84),
+    (107, 153, 84), (186, 255, 140), (128, 0, 34), (121, 153, 242), (70, 128, 108),
+    (108, 82, 204), (128, 123, 6), (204, 184, 112), (112, 201, 204), (89, 128, 13),
+    (230, 34, 119), (135, 102, 255), (80, 178, 161), (70, 76, 128), (157, 38, 255),
+    (112, 123, 204), (204, 163, 0), (22, 217, 197),
+)
 #: Frame-level occluder layer colour (spec 3.1 ``OccluderMask``).  Its hue is
 #: one the palette keeps clear of (task U2i), so it is defined with the other
 #: reserved colours.
