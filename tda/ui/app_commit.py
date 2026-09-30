@@ -45,7 +45,14 @@ class CommitMixin:
         chain at the top: it can only be up when none of the others is (see
         :meth:`~tda.ui.app_adopt.AdoptMixin._adopt_refusal`), so the order
         between them never has to be guessed at.
+
+        Above even the ghost: a ``P`` polygon half drawn (task U5a).  It is the
+        gesture in the annotator's hand, so ``Enter`` closes it -- and with
+        fewer than three vertices does nothing but say so -- before it can mean
+        anything to the layer underneath.
         """
+        if self.finish_shape():
+            return
         if self.accept_draft_ghost():
             return
         if self.roi_editing:
@@ -85,7 +92,7 @@ class CommitMixin:
     @S.guard
     def act_commit_override(self) -> None:
         """``Alt+Enter``: this frame only."""
-        if self.refuse_under_ghost():
+        if self.refuse_under_shape() or self.refuse_under_ghost():
             return
         self._commit(api.SCOPE_FRAME_OVERRIDE)
 
@@ -100,7 +107,7 @@ class CommitMixin:
         annotator can neither see nor explain.  ``Alt+Enter`` is different on
         purpose: a frame override makes this instance visible here by itself.
         """
-        if self.refuse_under_ghost():
+        if self.refuse_under_shape() or self.refuse_under_ghost():
             return
         pending = self._pending_scope or ""
         if pending.startswith(A_ZORDER_ABOVE):
@@ -236,7 +243,13 @@ class CommitMixin:
         happens to be loaded behind it, and while a draft ghost is up it is the
         ghost -- which is why it dismisses *only* the ghost and the layer under
         it survives.
+
+        First of all, a ``P`` polygon or a ``Y`` circle half drawn (task U5a):
+        ``Esc`` drops that shape and nothing else -- the layer it would have
+        been filled into is the next ``Esc``'s.
         """
+        if self.cancel_shapes():
+            return
         if self.clear_draft_ghost():
             self.report("草稿已取消 / the draft was dismissed")
             return
@@ -282,6 +295,8 @@ class CommitMixin:
         analysed" rather than as "nothing unexplained", which would quietly
         claim the frame had been checked.
         """
+        if self.refuse_under_shape():
+            return False      # the half-drawn shape would go with the frame (U5a)
         if self.refuse_under_ghost():
             return False      # the preview owns every commit key while it is up
         if not self.can_leave_edit():

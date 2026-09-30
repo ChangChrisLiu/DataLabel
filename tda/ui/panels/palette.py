@@ -35,7 +35,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -62,7 +62,8 @@ __all__ = ["PALETTE_WIDTH", "RADIUS_MAX", "RADIUS_MIN", "PaletteButton",
 #: The strip's width in logical pixels (see the module docstring for why a
 #: strip at all).  Measured against ``tests/test_app.py``'s canvas share.
 PALETTE_WIDTH = 124
-#: The brush, the eraser and the occluder share one radius, in image pixels.
+#: The brush, the eraser and the occluder share one radius, in image pixels --
+#: and the circle tool's plain click fills a disk of it (task U5a).
 RADIUS_MIN = 1
 RADIUS_MAX = 200
 #: The slider runs 0..SLIDER_STEPS and maps to a radius *quadratically*: on a
@@ -98,6 +99,7 @@ def tool_icon(name: str, dpr: float = 1.0) -> Optional[QPixmap]:
     """
     painters = {
         "tool_brush": _icon_brush, "tool_eraser": _icon_eraser,
+        "tool_polygon": _icon_polygon, "tool_circle": _icon_circle,
         "tool_sam_point": _icon_point, "tool_sam_box": _icon_box,
         "tool_occluder": _icon_occluder, "tool_bench_box": _icon_bench,
         "edit_roi": _icon_roi,
@@ -140,6 +142,32 @@ def _icon_eraser(p: QPainter, s: float) -> None:
 
 def _icon_occluder(p: QPainter, s: float) -> None:
     _ring(p, s, _OCCLUDER_RGB, dashed=False, fill=True)
+
+
+def _icon_polygon(p: QPainter, s: float) -> None:
+    """A filled polygon with its vertex dots: what ``P`` leaves in the layer (U5a)."""
+    corners =[QPointF(s * 0.18, s * 0.30), QPointF(s * 0.62, s * 0.14),
+               QPointF(s * 0.86, s * 0.56), QPointF(s * 0.52, s * 0.86),
+               QPointF(s * 0.16, s * 0.72)]
+    p.setPen(QPen(QColor(0, 0, 0, 170), 3.0))
+    p.drawPolygon(corners)
+    p.setPen(QPen(QColor(*_EDIT_RGB), 1.6))
+    p.setBrush(QColor(_EDIT_RGB[0], _EDIT_RGB[1], _EDIT_RGB[2], 150))
+    p.drawPolygon(corners)
+    p.setPen(QPen(QColor(0, 0, 0), 0.8))
+    p.setBrush(QColor(255, 255, 255))
+    for corner in corners:
+        p.drawEllipse(corner, 1.6, 1.6)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+
+def _icon_circle(p: QPainter, s: float) -> None:
+    """The ``Y`` cursor in small: a filled ring with a crosshair through it (U5a)."""
+    _ring(p, s, _EDIT_RGB, dashed=False, fill=True)
+    c = s / 2.0
+    p.setPen(QPen(QColor(0, 0, 0, 200), 1.0))
+    p.drawLine(int(c), 3, int(c), int(s - 3))
+    p.drawLine(3, int(c), int(s - 3), int(c))
 
 
 def _icon_point(p: QPainter, s: float) -> None:
@@ -417,7 +445,7 @@ class ToolPalette(QWidget):
             self._tool_widgets.append(button)
 
         self.radius_label = self._header("笔刷大小 r")
-        self.radius_label.setToolTip("画笔、橡皮擦、遮挡共用一个大小，单位是图像像素；"
+        self.radius_label.setToolTip("画笔、橡皮擦、遮挡和圆形的单击共用一个大小，单位是图像像素；"
                                      "拖滑块、点数字框直接输入（Enter 确定，Esc 取消），"
                                      "或键盘 [ 变小、] 变大（可长按）")
         self.radius_slider = QSlider(Qt.Orientation.Horizontal)

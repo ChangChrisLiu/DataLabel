@@ -16,6 +16,22 @@ Three flows are worth reading as a whole:
 * **Leaving.**  An editing layer with uncommitted pixels blocks every way out of
   the frame, the instance and the mode, with one hint.  A stroke that lands with
   no instance to hold it adopts the task card's open item or is reverted.
+
+**Enter and Esc are layered**: each answers whatever owns the canvas right now,
+one layer per press (``act_commit`` / ``act_clear_edit`` in
+:mod:`tda.ui.app_commit`).  Top to bottom:
+
+1. a ``P`` polygon or ``Y`` circle half drawn (task U5a) -- ``Enter`` closes the
+   polygon (under three vertices it only says so), ``Esc`` drops the shape and
+   nothing else; ``Alt+Enter``, ``Ctrl+K`` and ``Space`` wait for it;
+2. the Label Studio draft ghost;
+3. the area warning (``Esc`` goes back to the mask, a second ``Enter`` writes);
+4. the ROI rectangle;
+5. the armed bench box (``Esc``) / the scope bar's suggestion (``Enter``);
+6. the editing layer -- ``Enter`` commits it, ``Esc`` discards it.
+
+A shape's fill is a stroke like any other (:meth:`EditMixin.on_stroke`): one
+undo step, the sidecar, the erased set lifted where it lands.
 """
 from __future__ import annotations
 
@@ -30,10 +46,17 @@ from tda.ui import app_priors
 from tda.ui import app_support as S
 from tda.ui import session_api as api
 from tda.ui.app_widgets import Bar, BoxDragTool, RoiBoxTool
-from tda.ui.canvas.tools import BrushTool, EraserTool, OccluderTool
+from tda.ui.canvas.tools import (
+    BrushTool,
+    CircleTool,
+    EraserTool,
+    OccluderTool,
+    PolygonTool,
+)
 
 __all__ = ["BLOCK_HINT", "BoxDragTool", "EditMixin", "DESPECKLE_MIN_PX",
-           "FLASH_HINT", "NO_INSTANCE_HINT", "REVIEW_READ_ONLY"]
+           "FLASH_HINT", "NO_INSTANCE_HINT", "REVIEW_READ_ONLY", "SHAPE_BUSY",
+           "SHAPE_SAYS"]
 
 #: Components smaller than this are specks (``Shift+D``); spec 9.1's floor.
 DESPECKLE_MIN_PX = 16
@@ -61,6 +84,33 @@ FLASH_HINT = ("松开 Tab 再操作：屏幕上是对照帧  "
 #: Shown, and kept on screen, when the crash sidecar cannot be written.
 SIDECAR_BROKEN = ("崩溃保护已失效：{why} —— 请尽快提交，崩溃会丢失当前图层 "
                   "(the crash sidecar cannot be written)")
+#: What the status line says about a ``P`` polygon or a ``Y`` circle (task
+#: U5a), keyed ``(tool, what happened)`` as the tool's ``sigShape`` says it.
+SHAPE_SAYS: dict[tuple[str, str], str] = {
+    ("polygon", "start"): ("多边形：第 1 个点 — 沿边接着点；Enter / 双击 / 点回第一个点 填上，"
+                           "Backspace 删点，Esc 取消"),
+    ("polygon", "vertex"): ("多边形：{n} 个点 — Enter / 双击 / 点回第一个点 填上；"
+                            "Backspace 删点，Esc 取消"),
+    ("polygon", "remove"): "多边形：删掉一个点，还剩 {n} 个 / vertex removed",
+    ("polygon", "too_few"): ("多边形至少要 3 个点（现在 {n} 个），没有填：再点几个 / "
+                             "a polygon needs 3 vertices"),
+    ("polygon", "cancel"): "多边形已取消，什么都没填 / polygon cancelled",
+    ("polygon", "fill"): "多边形已填进编辑层（Ctrl+Z 撤销）/ polygon filled",
+    ("polygon", "empty"): "多边形在图像外，什么都没填 / the polygon misses the image",
+    ("circle", "start"): "圆形：拖到零件边缘松手；Esc 取消",
+    ("circle", "cancel"): "圆形已取消，什么都没填 / circle cancelled",
+    ("circle", "fill"): "圆形 r={r} 已填进编辑层（Ctrl+Z 撤销）/ disk filled",
+    ("circle", "empty"): ("半径不到 1 个像素（或在图像外），什么都没填 / "
+                          "under one pixel: nothing filled"),
+}
+#: ``Enter`` while a circle is being dragged: the release is what fills it.
+CIRCLE_ENTER = "松开鼠标就填上圆形；不要了按 Esc / release the mouse to fill the circle"
+#: ``Backspace`` with no polygon in progress.
+NO_POLYGON = ("Backspace 删的是多边形的最后一个点：现在没有正在画的多边形 / "
+              "no polygon in progress")
+#: A commit or confirm key while a shape is half drawn; also the greyed
+#: buttons' reason.
+SHAPE_BUSY = "多边形 / 圆形还没画完：Enter 填上（圆形松开鼠标）或 Esc 取消"
 
 
 def _px(mask) -> int:
@@ -103,8 +153,19 @@ class EditMixin:
         self.occluder = OccluderTool(self.canvas, None)
         self.roi_tool = RoiBoxTool(self.canvas, None)
         self.bench_tool = BoxDragTool(self.canvas, None)
-        for tool in (self.brush, self.eraser, self.occluder):
+        # The filled shapes (task U5a): their fills are strokes to the window.
+        self.polygon = PolygonTool(self.canvas, None)
+        self.circle = CircleTool(self.canvas, None, radius=self.brush.radius)
+        #: ``(frame, instance)`` the half-drawn shape was started on; it is
+        #: dropped the moment either stops being true (see ``_drop_stale_shapes``).
+        self._shape_owner: Optional[tuple] = None
+        for tool in (self.brush, self.eraser, self.occluder, self.polygon, self.circle):
             tool.sigStroke.connect(self.on_stroke)
+        for tool in (self.polygon, self.circle):
+            tool.sigShape.connect(self._on_shape)
+            # A press the window turned down (no part to put it on) starts
+            # nothing: the brush paints and is reverted, a shape never begins.
+            tool.accepts = self._shape_press_accepted
         self.roi_tool.sigBox.connect(self.on_roi_box)
         self.roi_tool.sigPreview.connect(self.on_roi_preview)
         self.bench_tool.sigBox.connect(self.on_bench_box)
@@ -281,6 +342,8 @@ class EditMixin:
         # covers the frames that repaint; this covers the ones that do not,
         # including a view with no image at this step.
         self.forget_draft_ghost()
+        # ... and so is a half-drawn polygon or circle (task U5a).
+        self._drop_stale_shapes()
         if self.roi_editing and getattr(self, "_roi_editing_key", None) != self.roi_key():
             # The rectangle belongs to the segment (or desktop, or view) just
             # left: it ends there, dismissed under *that* segment, which stays
@@ -368,6 +431,11 @@ class EditMixin:
             self.overlay.clear_editing()
         if repaint:
             self.canvas.refresh()
+        # A shape half drawn for another part or on another frame -- a commit,
+        # Esc, another card item, a frame change all end here -- is dropped,
+        # never filled into the layer that replaced its own (task U5a).  An
+        # undo keeps the part and the frame, and so keeps the polygon.
+        self._drop_stale_shapes()
         # The one place a layer is replaced from outside: the guide, the banner
         # and the card's "正在画" follow it from here (task U2b).
         self._note_edit_facts()
@@ -453,7 +521,7 @@ class EditMixin:
         if self._is_right_button(ev):
             return          # the right button is a negative SAM point, not an edit
         if self.roi_editing or self._tool_name not in (
-                "brush", "eraser", "sam_point", "sam_box"):
+                "brush", "eraser", "sam_point", "sam_box", "polygon", "circle"):
             return
         if getattr(self.session, "editing_instance", None) is not None:
             return
@@ -610,6 +678,115 @@ class EditMixin:
         compat.push_stroke(self.session, instance, before, after, erased=erased)
         self.queue_sidecar(self.session.current(), instance, after)
         self._note_edit_facts(refresh=False)   # update_status refreshes the guide
+        self.update_status()
+
+    # ------------------------------------------------ filled shapes (task U5a)
+    def _shape_press_accepted(self) -> bool:
+        """May the press that just arrived start or extend a ``P`` / ``Y`` shape?
+
+        :meth:`_on_canvas_press` has already run for it (it is connected before
+        any tool), so a press it turned down -- nothing being edited and nothing
+        on the card to adopt -- is known here and starts nothing.
+        """
+        return not self._paint_blocked
+
+    def shape_in_progress(self):
+        """The ``P`` polygon or the ``Y`` circle half drawn, or ``None``."""
+        for tool in (self.polygon, self.circle):
+            if tool.busy:
+                return tool
+        return None
+
+    def shape_name(self) -> str:
+        """``"polygon"``, ``"circle"`` or ``""``: what :meth:`shape_in_progress` is."""
+        tool = self.shape_in_progress()
+        if tool is None:
+            return ""
+        return "polygon" if tool is self.polygon else "circle"
+
+    def cancel_shapes(self, keep=None) -> bool:
+        """Drop every half-drawn shape but ``keep``'s, filling nothing.
+
+        ``Esc`` (the top of its chain), a tool switch, and a frame, part or mode
+        that the shape no longer belongs to.  ``True`` when one was dropped.
+        """
+        dropped = False
+        for tool in (self.polygon, self.circle):
+            if tool is not keep and tool.cancel():
+                dropped = True
+        return dropped
+
+    def finish_shape(self) -> bool:
+        """``Enter``'s first owner: close the polygon.  ``True`` when it was the shape's.
+
+        With fewer than three vertices nothing is filled and the status line
+        says so; the polygon stays, so a third click can still make it one.  A
+        circle is filled by its own release, so ``Enter`` in the middle of the
+        drag only says that.
+        """
+        if self.polygon.busy:
+            self.polygon.close()
+            return True
+        if self.circle.busy:
+            self.report(CIRCLE_ENTER)
+            return True
+        return False
+
+    def refuse_under_shape(self) -> bool:
+        """``Alt+Enter``, ``Ctrl+K`` and ``Space`` wait for a half-drawn shape.
+
+        Each of them would end the edit the shape is being drawn for, and the
+        shape with it, unfilled -- the polygon's clicks gone with no word.  The
+        same answer as the greyed buttons (``palette_states``).
+        """
+        name = self.shape_name()
+        if not name:
+            return False
+        self.report(SHAPE_BUSY)
+        return True
+
+    def _shape_owner_now(self) -> Optional[tuple]:
+        if not compat.is_open(self.session):
+            return None
+        return (self.session.current(), getattr(self.session, "editing_instance", None))
+
+    def _drop_stale_shapes(self) -> None:
+        """Cancel a shape whose frame or part is no longer the one on screen.
+
+        Two attribute reads when nothing is half drawn, which is almost always:
+        this runs on every frame change and every layer replacement.
+        """
+        if self.shape_in_progress() is None:
+            return
+        if self._shape_owner != self._shape_owner_now():
+            self.cancel_shapes()
+
+    @S.guard
+    def act_polygon_backspace(self) -> None:
+        """``Backspace``: take the polygon's last vertex back."""
+        if not self.polygon.remove_last():
+            self.report(NO_POLYGON)
+
+    @S.guard
+    def _on_shape(self, what: str) -> None:
+        """A ``P`` / ``Y`` shape changed: the badge, the cursor, the line, the guide."""
+        tool = self.sender()
+        name = "circle" if tool is self.circle else "polygon"
+        if what == "start":
+            self._shape_owner = self._shape_owner_now()
+        if what == "radius":
+            # Every mouse move of a drag: the badge's r= and nothing else.
+            shown, tip = self._tool_text()
+            self.tool_label.setText(shown)
+            self.tool_label.setToolTip(tip)
+            return
+        if name == "circle" and what in ("start", "cancel", "fill", "empty"):
+            # A crosshair on the rim while dragging; the click-sized ring after.
+            self.sync_tool_cursor()
+        said = SHAPE_SAYS.get((name, what), "")
+        if said:
+            self.report(said.format(n=len(self.polygon.vertices),
+                                    r=int(round(self.circle.last_radius))))
         self.update_status()
 
     def erased_mask(self):

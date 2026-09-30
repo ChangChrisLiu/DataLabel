@@ -39,10 +39,10 @@ from PySide6.QtWidgets import (
 )
 
 from tda.ui.canvas import overlay_style as OS
-from tda.ui.canvas.overlay import LabelOverlay
+from tda.ui.canvas.overlay import EDIT_RGB, LabelOverlay
 
-__all__ = ["CURSOR_MAX_PX", "ImageCanvas", "MiniMap", "OverlayItem", "ToolCursor",
-           "circle_cursor"]
+__all__ = ["CURSOR_MAX_PX", "ImageCanvas", "MiniMap", "OverlayItem",
+           "POLYGON_CURSOR_PX", "ToolCursor", "circle_cursor", "polygon_cursor"]
 
 Rect = tuple[int, int, int, int]
 
@@ -73,19 +73,27 @@ class ToolCursor:
     ``circle`` (the canvas turns it into screen pixels with its own zoom, so the
     ring is the size of the stroke the annotator is about to make) and ignored
     otherwise.  ``dashed`` is how the eraser is told apart from the brush at a
-    glance, without relying on colour alone.
+    glance, without relying on colour alone.  ``glyph`` marks the centre of a
+    ring: ``""`` is the brush family's dot, ``"cross"`` a crosshair through
+    the ring -- the circle tool ``Y`` (task U5a), whose ring is the disk a
+    plain click fills.  ``polygon`` is the ``P`` tool's fixed-size crosshair
+    ring with a small polygon beside it.
     """
 
-    KINDS = ("circle", "cross", "arrow", "forbidden")
+    KINDS = ("circle", "cross", "arrow", "forbidden", "polygon")
+    GLYPHS = ("", "cross")
 
     def __init__(self, kind: str, rgb: tuple[int, int, int] = (255, 232, 64),
-                 radius: int = 0, dashed: bool = False) -> None:
+                 radius: int = 0, dashed: bool = False, glyph: str = "") -> None:
         if kind not in self.KINDS:
             raise ValueError(f"unknown cursor kind {kind!r}; expected {self.KINDS}")
+        if glyph not in self.GLYPHS:
+            raise ValueError(f"unknown cursor glyph {glyph!r}; expected {self.GLYPHS}")
         self.kind = kind
         self.rgb = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
         self.radius = max(0, int(radius))
         self.dashed = bool(dashed)
+        self.glyph = str(glyph)
 
     def key(self, diameter: int, dpr: float) -> tuple:
         """Cache key: two specs with this key produce the same cursor.
@@ -95,26 +103,29 @@ class ToolCursor:
         that lands on a size already drawn costs nothing.
         """
         return (self.kind, self.rgb, int(diameter), self.dashed,
-                round(float(dpr), 3))
+                round(float(dpr), 3), self.glyph)
 
     def __eq__(self, other: object) -> bool:  # noqa: D105
         return isinstance(other, ToolCursor) and (
-            (self.kind, self.rgb, self.radius, self.dashed)
-            == (other.kind, other.rgb, other.radius, other.dashed)
+            (self.kind, self.rgb, self.radius, self.dashed, self.glyph)
+            == (other.kind, other.rgb, other.radius, other.dashed, other.glyph)
         )
 
     def __repr__(self) -> str:  # noqa: D105 - for a failing assert
+        glyph = f", glyph={self.glyph!r}" if self.glyph else ""
         return (f"ToolCursor({self.kind!r}, rgb={self.rgb}, radius={self.radius}, "
-                f"dashed={self.dashed})")
+                f"dashed={self.dashed}{glyph})")
 
 
 def circle_cursor(diameter: int, rgb: tuple[int, int, int], dashed: bool,
-                  dpr: float = 1.0) -> QCursor:
+                  dpr: float = 1.0, glyph: str = "") -> QCursor:
     """A ring ``diameter`` screen pixels across, with a dark halo and a centre dot.
 
     The halo matters: the chassis is dark metal and the scan bed is white paper,
     and a one-colour ring disappears into one of them.  The dot is the pixel the
-    stamp is centred on, which a ring alone does not say at low zoom.
+    stamp is centred on, which a ring alone does not say at low zoom.  With
+    ``glyph="cross"`` the dot is a crosshair across the whole ring instead:
+    the circle tool's, so it is never mistaken for the brush (task U5a).
     """
     size = max(CURSOR_MIN_PX, int(diameter)) + 6
     dpr = max(1.0, float(dpr))
@@ -137,12 +148,57 @@ def circle_cursor(diameter: int, rgb: tuple[int, int, int], dashed: bool,
     painter.setPen(pen)
     painter.drawEllipse(box)
     centre = size / 2.0
+    if glyph == "cross":
+        arm = (size - 6) / 2.0
+        lines = [QLineF(centre - arm, centre, centre + arm, centre),
+                 QLineF(centre, centre - arm, centre, centre + arm)]
+        painter.setPen(QPen(QColor(0, 0, 0, OS.UNDER_ALPHA), 1.0 + OS.UNDER_EXTRA_PX))
+        painter.drawLines(lines)
+        painter.setPen(QPen(QColor(*rgb), 1.0))
+        painter.drawLines(lines)
+        painter.end()
+        return QCursor(pixmap, size // 2, size // 2)
     painter.setPen(QPen(QColor(0, 0, 0, OS.UNDER_ALPHA), 3.0))
     painter.drawPoint(QPointF(centre, centre))
     painter.setPen(QPen(QColor(*rgb), 1.0))
     painter.drawPoint(QPointF(centre, centre))
     painter.end()
     return QCursor(pixmap, size // 2, size // 2)
+
+
+#: The ``P`` cursor's size, logical pixels; its hotspot is the ring's centre.
+POLYGON_CURSOR_PX = 29
+
+
+def polygon_cursor(rgb: tuple[int, int, int], dpr: float = 1.0) -> QCursor:
+    """A small crosshair ring with a polygon beside it: the ``P`` tool (task U5a).
+
+    Fixed size, whatever the zoom -- a vertex is a point, not a stroke -- and
+    drawn in the canvas' outline style: a dark halo under the bright lines.
+    The hotspot is the centre of the ring, where the vertex will go.
+    """
+    size = POLYGON_CURSOR_PX
+    dpr = max(1.0, float(dpr))
+    pixmap = QPixmap(int(round(size * dpr)), int(round(size * dpr)))
+    pixmap.setDevicePixelRatio(dpr)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    c = 10.5
+    ring = QRectF(c - 4.5, c - 4.5, 9.0, 9.0)
+    arms = [QLineF(c - 9.5, c, c - 2.5, c), QLineF(c + 2.5, c, c + 9.5, c),
+            QLineF(c, c - 9.5, c, c - 2.5), QLineF(c, c + 2.5, c, c + 9.5)]
+    glyph = [QPointF(19.5, 16.5), QPointF(26.5, 19.0), QPointF(25.0, 26.5),
+             QPointF(17.5, 26.5), QPointF(16.0, 21.0)]
+    for pen in (QPen(QColor(0, 0, 0, OS.UNDER_ALPHA), OS.CURSOR_RING_PX + OS.UNDER_EXTRA_PX),
+                QPen(QColor(*rgb), OS.CURSOR_RING_PX)):
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(ring)
+        painter.drawLines(arms)
+        painter.drawPolygon(glyph)
+    painter.end()
+    return QCursor(pixmap, int(c), int(c))
 
 
 class OverlayItem(QGraphicsItem):
@@ -333,6 +389,10 @@ class ImageCanvas(QGraphicsView):
     sigMousePress = Signal(float, float, object)
     sigMouseMove = Signal(float, float, object)
     sigMouseRelease = Signal(float, float, object)
+    #: A double-click, after the press and release of its first click have
+    #: gone out as usual.  Only the polygon tool listens (``P`` closes on it,
+    #: task U5a); every other tool sees exactly the events it always saw.
+    sigMouseDoubleClick = Signal(float, float, object)
     #: The zoom factor changed, by whatever route -- the wheel, a fit, a
     #: programmatic set.  The status bar's percentage was rewritten only by the
     #: *actions* that zoom, so after a wheel notch it said the old number.
@@ -407,6 +467,10 @@ class ImageCanvas(QGraphicsView):
         #: the zoom has changed (U1 report 1, ruling R1).
         self._tool_cursor: Optional[ToolCursor] = None
         self._cursor_cache: dict[tuple, QCursor] = {}
+        #: The filled shape being drawn (task U5a), in image coordinates:
+        #: ``("polygon", ((x, y), ...), hot)`` or ``("circle", (cx, cy), r)``,
+        #: or ``None``.  Painted in :meth:`drawForeground` like the rubber band.
+        self._shape: Optional[tuple] = None
         # Parented to the view, not the viewport: QGraphicsView scrolls the
         # viewport's child widgets together with the scene, which would drag the
         # minimap off screen on the first pan.
@@ -685,6 +749,111 @@ class ImageCanvas(QGraphicsView):
     def prompt_point(self) -> Optional[tuple[int, int]]:
         """The marked pixel, or ``None``."""
         return self._prompt_point
+
+    # -- the filled shape being drawn (task U5a) ----------------------------
+    def set_shape_preview(self, shape: Optional[tuple]) -> None:
+        """Show the ``P`` polygon or the ``Y`` circle being drawn; ``None`` clears it.
+
+        ``("polygon", ((x, y), ...), hot)`` -- the placed edges solid, the edge
+        back to the first vertex dashed, a dot on every vertex and a bigger one
+        on the first (bigger still while ``hot``: a click there closes it) --
+        or ``("circle", (cx, cy), r)``, the rim and a small cross on the
+        centre.  Image coordinates, so a zoom or a pan in the middle of it
+        carries it along.  Only the region the shape covered and now covers is
+        repainted, and setting what is already shown repaints nothing.
+        """
+        value = None if shape is None else self._normal_shape(shape)
+        if value == self._shape:
+            return
+        old = self._shape_view_rect(self._shape)
+        self._shape = value
+        new = self._shape_view_rect(value)
+        for rect in (old, new):
+            if rect is not None:
+                self.viewport().update(rect)
+
+    def shape_preview(self) -> Optional[tuple]:
+        """The shape being drawn, as :meth:`set_shape_preview` was given it."""
+        return self._shape
+
+    @staticmethod
+    def _normal_shape(shape: tuple) -> tuple:
+        kind = shape[0]
+        if kind == "polygon":
+            return ("polygon", tuple((float(x), float(y)) for x, y in shape[1]),
+                    bool(shape[2]))
+        if kind == "circle":
+            (cx, cy), r = shape[1], shape[2]
+            return ("circle", (float(cx), float(cy)), max(0.0, float(r)))
+        raise ValueError(f"unknown shape {kind!r}")
+
+    #: What a shape's outline, dots and centre cross stick out beyond its
+    #: points, in screen pixels -- the margin of the repaint.
+    _SHAPE_PAD = 14
+
+    def _shape_view_rect(self, shape: Optional[tuple]):
+        """Where ``shape`` is drawn, in viewport coordinates, or ``None``."""
+        if shape is None:
+            return None
+        if shape[0] == "polygon":
+            points = shape[1]
+            if not points:
+                return None
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            box = QRectF(min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+        else:
+            (cx, cy), r = shape[1], shape[2]
+            box = QRectF(cx - r, cy - r, 2.0 * r, 2.0 * r)
+        pad = self._SHAPE_PAD
+        return self.mapFromScene(box).boundingRect().adjusted(-pad, -pad, pad, pad)
+
+    def _draw_shape(self, painter: QPainter, dpr: float) -> None:
+        """The polygon or circle being drawn, over the frame (U2g's two tones)."""
+        shape = self._shape
+        if shape is None:
+            return
+        zoom = max(self.zoom_factor(), 1e-6)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if shape[0] == "circle":
+            (cx, cy), r = shape[1], shape[2]
+            if r > 0.0:
+                rim = QRectF(cx - r, cy - r, 2.0 * r, 2.0 * r)
+                painter.setPen(OS.DRAG_BAND.under_pen(dpr))
+                painter.drawEllipse(rim)
+                painter.setPen(OS.DRAG_BAND.over_pen(dpr))
+                painter.drawEllipse(rim)
+            arm = 6.0 / zoom
+            cross = [QLineF(cx - arm, cy, cx + arm, cy), QLineF(cx, cy - arm, cx, cy + arm)]
+            painter.setPen(OS.SHAPE_EDGE.under_pen(dpr))
+            painter.drawLines(cross)
+            painter.setPen(OS.SHAPE_EDGE.over_pen(dpr))
+            painter.drawLines(cross)
+            return
+        points = [QPointF(x, y) for x, y in shape[1]]
+        hot = shape[2]
+        if len(points) >= 2:
+            painter.setPen(OS.SHAPE_EDGE.under_pen(dpr))
+            painter.drawPolyline(points)
+            painter.setPen(OS.SHAPE_EDGE.over_pen(dpr))
+            painter.drawPolyline(points)
+        if len(points) >= 3:
+            closing = QLineF(points[-1], points[0])
+            painter.setPen(OS.SHAPE_CLOSING.under_pen(dpr))
+            painter.drawLine(closing)
+            painter.setPen(OS.SHAPE_CLOSING.over_pen(dpr))
+            painter.drawLine(closing)
+        # The dots are sized in screen pixels, like the ROI's handles: findable
+        # at 20 %, and not covering the pixel they mark at 800 %.
+        painter.setPen(OS.HANDLE_EDGE.over_pen(dpr))
+        painter.setBrush(QColor(*OS.DRAG_RGB))
+        dot = OS.VERTEX_PX / zoom
+        for point in points[1:]:
+            painter.drawEllipse(point, dot, dot)
+        first = (OS.FIRST_VERTEX_HOT_PX if hot else OS.FIRST_VERTEX_PX) / zoom
+        painter.setBrush(QColor(*EDIT_RGB))
+        painter.drawEllipse(points[0], first, first)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
     # -- the banner and the hover hints (task U2b) --------------------------
     #: Gap between the banner and the viewport's top edge, screen pixels.
@@ -998,7 +1167,17 @@ class ImageCanvas(QGraphicsView):
             if cursor is None:
                 if len(self._cursor_cache) > 64:
                     self._cursor_cache.clear()   # a long wheel spin, not a leak
-                cursor = circle_cursor(diameter, spec.rgb, spec.dashed, dpr)
+                cursor = circle_cursor(diameter, spec.rgb, spec.dashed, dpr,
+                                       glyph=spec.glyph)
+                self._cursor_cache[key] = cursor
+            self.viewport().setCursor(cursor)
+            return
+        if spec.kind == "polygon":
+            dpr = float(self.devicePixelRatioF() or 1.0)
+            key = spec.key(POLYGON_CURSOR_PX, dpr)
+            cursor = self._cursor_cache.get(key)
+            if cursor is None:
+                cursor = polygon_cursor(spec.rgb, dpr)
                 self._cursor_cache[key] = cursor
             self.viewport().setCursor(cursor)
             return
@@ -1194,6 +1373,14 @@ class ImageCanvas(QGraphicsView):
         self.sigMouseRelease.emit(x, y, event)
         event.accept()
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: D102
+        # Said, then handed to the base class exactly as before (task U5a):
+        # the tools that never listened to a double-click see no difference.
+        if event.button() != Qt.MouseButton.MiddleButton and not self._panning:
+            x, y = self.image_pos(event.position())
+            self.sigMouseDoubleClick.emit(x, y, event)
+        super().mouseDoubleClickEvent(event)
+
     def drawForeground(self, painter: QPainter, rect: QRectF) -> None:  # noqa: D102
         super().drawForeground(painter, rect)
         # Every outline is in the one style of :mod:`overlay_style`, with its
@@ -1230,6 +1417,9 @@ class ImageCanvas(QGraphicsView):
             painter.setPen(OS.PROMPT_POINT.over_pen(dpr))
             painter.drawLines(lines)
         self._draw_grid(painter, rect)
+        # The polygon or circle being drawn (task U5a): the hand's gesture, so
+        # over the frame's own outlines and the grid.
+        self._draw_shape(painter, dpr)
         # Over every line, so a label is never crossed out by another outline.
         self._draw_chips(painter, rect, dpr)
         # Last, over everything else: it is the one thing on the canvas that
