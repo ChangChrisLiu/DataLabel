@@ -28,6 +28,8 @@ from PySide6.QtGui import QPixmap
 
 from PySide6.QtWidgets import QComboBox, QSpinBox, QStyledItemDelegate
 
+from tda.core import extra as X
+from tda.core.model import is_extra
 from tda.core.taxonomy import Taxonomy
 from tda.ui.steps_model import StepTableData
 from tda.ui.steps_values import (
@@ -442,6 +444,8 @@ class InstanceTableModel(_TableModel):
             return None
         inst = self.data_model.instances[self.keys[index.row()]]
         column = self.columns[index.column()]
+        if role == Qt.ToolTipRole:
+            return extra_tooltip(inst, self.data_model.staged_extra(inst.key))
         if role == Qt.CheckStateRole:
             if column.kind != "check" or not self._applies(index):
                 return None
@@ -473,5 +477,25 @@ class InstanceTableModel(_TableModel):
             return inst.attrs.get(column.field, BLANK if column.field == "head" else False)
         value = getattr(inst, column.field)
         if column.field == "raw_names":
+            if is_extra(inst):  # no sheet ever named it: say where it came from
+                return EXTRA_RAW_NAMES
             return " | ".join(value or [])
         return BLANK if value is None else value
+
+
+#: What the Raw names cell of a part added in S1 reads: it has no raw name.
+EXTRA_RAW_NAMES = "＋ 手动添加（日志里没有）/ added in S1"
+
+
+def extra_tooltip(inst, staged: bool = False) -> Optional[str]:
+    """Where an added part came from, for its row's tooltip; ``None`` otherwise."""
+    if not is_extra(inst):
+        return None
+    attrs = inst.attrs or {}
+    lines = [f"{inst.key}: added by {attrs.get(X.ADDED_BY)} at {attrs.get(X.ADDED_AT)} "
+             f"({attrs.get(X.REASON_ATTR)})"]
+    if attrs.get(X.NOTE_ATTR):
+        lines.append(f"note: {attrs[X.NOTE_ATTR]}")
+    lines.append("未写入：按 Apply 保存 / not applied yet" if staged
+                 else "没画形状时可以右键删除 / deletable while it has no shape")
+    return "\n".join(lines)

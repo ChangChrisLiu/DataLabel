@@ -37,18 +37,20 @@ carry geometry, because :func:`needs_geom` only answers for real instances.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Iterable, Mapping, Optional
 
 from tda.core.model import ActionRec, InstanceRec, Placement, StateEvent, is_provisional
 from tda.core.taxonomy import Taxonomy
 
 __all__ = [
     "ANY_VIEW",
+    "INITIAL_STEP",
     "InstState",
     "FrameState",
     "diff_states",
     "events_from_actions",
     "gone_with_parent",
+    "initial_overrides",
     "initial_state",
     "is_virtual_target",
     "needs_geom",
@@ -59,6 +61,10 @@ __all__ = [
 ATTR_STATE = "state"
 ATTR_PLACEMENT = "placement"
 REMOVED = "removed"
+#: The logical step a hand-written *initial* state event is recorded at: before
+#: step 1, so it is folded into every snapshot and is never "the change" of any
+#: frame (task U5b -- an instance added in S1 whose picture shows it ``open``).
+INITIAL_STEP = 0
 CABLE_PREFIX = "cable:"
 CABLE_CLASS = "cable"
 CONNECTOR_CLASS = "connector"
@@ -118,12 +124,41 @@ def _virtual_class(target: str) -> str | None:
 # --------------------------------------------------------------------------- #
 # 1. state
 # --------------------------------------------------------------------------- #
-def initial_state(instances: dict[str, InstanceRec], tax: Taxonomy) -> FrameState:
-    """The state before step 1: class defaults, everything still in the chassis."""
+def initial_state(
+    instances: dict[str, InstanceRec],
+    tax: Taxonomy,
+    initial: Optional[Mapping[str, str]] = None,
+) -> FrameState:
+    """The state before step 1: class defaults, everything still in the chassis.
+
+    ``initial`` overrides the default of the instances it names -- the states
+    :func:`initial_overrides` reads off the hand-written step-0 events.
+    """
+    over = initial or {}
     return {
-        key: InstState(state=tax.default_state(rec.cls), placement=IN_CHASSIS)
+        key: InstState(state=over.get(key) or tax.default_state(rec.cls),
+                       placement=IN_CHASSIS)
         for key, rec in instances.items()
     }
+
+
+def initial_overrides(events: Iterable[StateEvent]) -> dict[str, str]:
+    """``key -> state`` a hand-written event sets before step 1.
+
+    An instance an annotator added in S1 (:mod:`tda.core.extra`) has no action,
+    so the only way it can start anywhere but its class default -- a RAM clip
+    the picture shows open -- is a manual ``state`` event at
+    :data:`INITIAL_STEP`. :func:`state_at` folds that event like any other;
+    this is what :func:`events_from_actions` needs so the events it *derives*
+    later (the cascade when the host leaves) start from the same value, and
+    :func:`validate_events` does not report ``old`` as wrong.
+    """
+    out: dict[str, str] = {}
+    for event in sorted(events, key=lambda e: e.step):
+        if (not event.auto and event.step <= INITIAL_STEP
+                and event.attr == ATTR_STATE and event.new):
+            out[event.target] = str(event.new)
+    return out
 
 
 def _attached_children(instances: dict[str, InstanceRec]) -> dict[str, list[str]]:
@@ -151,14 +186,20 @@ def events_from_actions(
     instances: dict[str, InstanceRec],
     actions: list[ActionRec],
     tax: Taxonomy,
+    initial: Optional[Mapping[str, str]] = None,
 ) -> list[StateEvent]:
     """Compile the recorded actions into a chronological state-event log.
 
     Actions are processed in ``(step, idx)`` order, so ``old`` on every event is
     the value that actually held when the action was performed. All events are
     ``auto=True``: they are derived, not typed in by an annotator.
+
+    ``initial`` is :func:`initial_overrides` of the hand-written events: the
+    state an instance with no action starts in when it is not its class
+    default. Without it the cascade that takes an ``open`` added clip out with
+    its board would be recorded as ``closed -> removed``.
     """
-    frame = initial_state(instances, tax)
+    frame = initial_state(instances, tax, initial)
     cable_states: dict[str, str] = {}
     children = _attached_children(instances)
     events: list[StateEvent] = []

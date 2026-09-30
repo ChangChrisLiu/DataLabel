@@ -54,6 +54,7 @@ from tda.core.truth_refusals import (
     conflict_of,
     is_blocking,
 )
+from tda.core.model import EXTRA_ATTR
 from tda.ui import session_api as api
 from tda.ui.class_names import instance_label, state_zh, visibility_zh
 from tda.ui.panels import session_is_open
@@ -284,9 +285,19 @@ def row_view(row: dict, editing: Optional[str] = None, bench: bool = False,
         chip = CHIP_CONFIRM
     else:
         chip = CHIP_TODO
+    if raw:
+        raw = f"日志：{raw}"
+    elif (row.get("attrs") or {}).get(EXTRA_ATTR):
+        # a part added in S1 has no name in the log: say so rather than nothing
+        raw = ADDED_RAW
     return {"icon": KIND_ICONS.get(kind, "•"), "title": title,
-            "raw": f"日志：{raw}" if raw else "", "sentence": sentence, "chip": chip,
+            "raw": raw, "sentence": sentence, "chip": chip,
             "done": done, "editing": chip in (CHIP_EDITING, CHIP_BOXING)}
+
+
+#: What a row of a part added in S1 (:mod:`tda.core.extra`) shows where the
+#: others show their name in the log.
+ADDED_RAW = "S1 手动添加（日志里没有）"
 
 
 def row_tooltip(row: dict, view: dict, blockers: int = 0, confirmed: bool = False) -> str:

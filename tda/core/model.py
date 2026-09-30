@@ -69,6 +69,29 @@ def is_provisional(key: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# parts the picture shows but the log never names (task U5b, spec 3.2)
+# --------------------------------------------------------------------------- #
+#: ``attrs`` key naming the annotator who added an instance by hand in S1
+#: (:mod:`tda.core.extra`). Its presence is what makes a row an *extra*: the
+#: log never named it, so it has no actions and no raw names.
+EXTRA_ATTR = "added_by"
+
+
+def is_extra(rec: Optional["InstanceRec"]) -> bool:
+    """Did an annotator add this instance in S1 rather than the log name it?
+
+    Here rather than in :mod:`tda.core.extra` for the reason
+    :func:`is_provisional` is: the graph rules, the relational heuristic and the
+    log importer all have to ask it, and none of them may import the module
+    that writes extras. An extra is an ordinary part of the machine -- it needs
+    geometry, it is compiled, it is exported -- but nothing *about* it may be
+    guessed: no heuristic fills a relation on it, no template edge starts at it
+    and no re-import drops it, because the sheet never knew it existed.
+    """
+    return rec is not None and bool((rec.attrs or {}).get(EXTRA_ATTR))
+
+
+# --------------------------------------------------------------------------- #
 # what a step type means (spec 6.6)
 # --------------------------------------------------------------------------- #
 #: Step types that describe no annotatable moment of the teardown.

@@ -20,10 +20,10 @@ one import.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from tda.core import extra as X
 from tda.core.db import Db
 from tda.core.logs import CHASSIS_KEY, UNRESOLVED, instance_key
 from tda.core.model import ActionRec, InstanceRec, StepRec, StepType
@@ -31,6 +31,7 @@ from tda.core.states import (
     CABLE_CLASS,
     CABLE_PREFIX,
     events_from_actions,
+    initial_overrides,
     validate_events,
 )
 from tda.core.taxonomy import Taxonomy, load_taxonomy, parse_raw_name
@@ -80,13 +81,15 @@ __all__ = [
 
 #: The verb a brand-new action starts from until the annotator picks one.
 DEFAULT_VERB = "remove"
+#: ``op_log.annotator`` when the window did not say who is editing.
+ANNOTATOR = "ui:steps"
+#: :meth:`StepTableData.add_extras`'s "no parent given": use the class's host rule.
+DEFAULT_PARENT = object()
 
 _ACTION_FIELDS = ("verb", "tool", "direction", "result", "failure_reason", "difficulty")
 #: Relations only one class may carry (spec 7.1).
 _RELATION_CLASS = {"fastens": "screw", "socket_host": "connector"}
 _ATTR_FIELDS = ("head", "captive")
-
-_ORDINAL = re.compile(r"\.(\d+)$")
 
 
 # --------------------------------------------------------------------------- #
@@ -169,6 +172,14 @@ class StepTableData:
     #: written by :meth:`save` in the same transaction
     #: (:mod:`tda.ui.steps_relations`, stage S6).
     relations: "RelationsData" = None  # type: ignore[assignment]
+    #: Who is editing: the ``added_by`` of an added part and the ``op_log``
+    #: annotator of what :meth:`save` writes about it.
+    annotator: str = ANNOTATOR
+    #: "＋ 添加零件" batches staged since the last load or save
+    #: (:mod:`tda.core.extra`). Their records are already in :attr:`instances`,
+    #: so every table and question sees them; :meth:`save` writes their
+    #: initial-state events and one ``op_log`` row per batch.
+    extras: list[X.ExtraBatch] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.relations is None:
@@ -176,7 +187,8 @@ class StepTableData:
 
     # -- loading ---------------------------------------------------------- #
     @classmethod
-    def load(cls, db: Db, desktop: int, tax: Taxonomy | None = None) -> "StepTableData":
+    def load(cls, db: Db, desktop: int, tax: Taxonomy | None = None,
+             annotator: str = ANNOTATOR) -> "StepTableData":
         """Read one desktop's steps, actions, instances and constraint edges."""
         tax = tax or load_taxonomy()
         by_step: dict[int, list[ActionRec]] = {}
@@ -184,7 +196,8 @@ class StepTableData:
             by_step.setdefault(action.step, []).append(action)
         rows = [StepRow(step=rec, actions=by_step.get(rec.step, [])) for rec in db.steps(desktop)]
         data = cls(desktop=desktop, tax=tax, rows=rows, instances=db.instances(desktop),
-                   declined=set(db.declined_implied(desktop)))
+                   declined=set(db.declined_implied(desktop)),
+                   annotator=str(annotator or ANNOTATOR))
         data.relations.reload(db)
         data.refresh_issues()
         return data
@@ -358,6 +371,86 @@ class StepTableData:
         self.refresh_issues()
         return [rec.key for rec in staged]
 
+    # -- parts the log never names (task U5b) ------------------------------ #
+    def extra_defaults(self, cls: str) -> dict:
+        """What the "＋ 添加零件" dialog pre-fills for ``cls``.
+
+        ``parent`` is the class's host rule (:func:`tda.core.extra.default_parent`),
+        ``parents`` what may be picked instead, ``state`` the class default and
+        ``states`` the states a visible part can start in.
+        """
+        if cls not in self.tax.classes:
+            raise EditError(f"{cls!r} is not a taxonomy class")
+        return {
+            "parent": X.default_parent(self.instances, self.tax, cls),
+            "parents": X.parent_choices(self.instances, self.tax, cls),
+            "state": self.tax.default_state(cls),
+            "states": X.state_choices(self.tax, cls),
+        }
+
+    def preview_extras(self, cls: str, count: int, attrs: dict | None = None) -> list[str]:
+        """The keys :meth:`add_extras` would create, without creating them."""
+        if cls not in self.tax.classes or cls == CHASSIS_KEY:
+            return []
+        count = max(X.MIN_COUNT, min(X.MAX_COUNT, int(count)))
+        return X.planned_keys(self.instances, cls, dict(attrs or {}), count)
+
+    def add_extras(
+        self,
+        cls: str,
+        count: int = 1,
+        parent: Any = DEFAULT_PARENT,
+        state: str | None = None,
+        note: str = "",
+        attrs: dict | None = None,
+    ) -> list[str]:
+        """Stage ``count`` instances of ``cls`` the log never names.
+
+        They join :attr:`instances` at once -- the Instances tab, the open
+        questions and the Relations tab see them -- and :meth:`save` writes
+        them with their initial state and one ``op_log`` row for the batch;
+        ``Revert`` drops them with every other unsaved edit. ``parent`` left
+        out follows the class's host rule; ``None`` means none. Returns the new
+        keys.
+        """
+        attrs = {k: v for k, v in dict(attrs or {}).items() if v not in (None, "")}
+        if cls in self.tax.classes:
+            self._check_discriminator(cls, attrs)
+        if parent is DEFAULT_PARENT:
+            parent = X.default_parent(self.instances, self.tax, cls) if (
+                cls in self.tax.classes) else None
+        try:
+            batch = X.plan_extras(self.instances, self.tax, self.desktop, cls, count,
+                                  parent=parent or None, state=state, note=note,
+                                  annotator=self.annotator, attrs=attrs)
+        except X.ExtraError as error:
+            raise EditError(str(error)) from None
+        for rec in batch.records:
+            self.instances[rec.key] = rec
+        self.extras.append(batch)
+        self.refresh_issues()
+        return batch.keys
+
+    def staged_extra(self, key: str) -> bool:
+        """Is ``key`` an added part that has not been applied yet?"""
+        return any(key in batch.keys for batch in self.extras)
+
+    def _unstage_extra(self, key: str) -> None:
+        """Forget a staged addition: nothing about it was written."""
+        if any(a.target == key for a in self.actions):
+            raise EditError(f"{key!r} is the target of a step - retarget it first")
+        for batch in self.extras:
+            batch.drop(key)
+        self.extras = [batch for batch in self.extras if batch.records]
+        del self.instances[key]
+        for other in self.instances.values():
+            for name in RELATION_FIELDS:
+                if getattr(other, name) == key:
+                    setattr(other, name, None)
+                    if name == "parent":
+                        other.attached = False
+        self.refresh_issues()
+
     # -- instance edits ---------------------------------------------------- #
     def apply_instance_edit(self, key: str, field: str, value: Any) -> None:
         """Edit one relational attribute of an instance (spec 7.1)."""
@@ -439,8 +532,12 @@ class StepTableData:
 
         See :mod:`tda.ui.steps_delete` for what is refused, what goes with the
         identity row and why the neighbours are repaired from their stored
-        records rather than from memory.
+        records rather than from memory. A part added in this session and not
+        applied yet was never written, so deleting it only unstages it.
         """
+        if self.staged_extra(key):
+            self._unstage_extra(key)
+            return
         delete_instance(self, db, key)
 
     def save(self, db: Db) -> list[str]:
@@ -465,6 +562,13 @@ class StepTableData:
         The staged constraint edges (stage S6) go in the same transaction, last,
         so an edge can name an instance this very Apply created and a re-cut
         that fails rolls the edges back with everything else.
+
+        The parts staged with :meth:`add_extras` are written with their
+        initial-state events and one ``op_log`` row per batch
+        (:data:`tda.core.extra.OP_ADD`, whose inverse undoes it), and the
+        derived log starts from those initial states. A frozen frame now asks
+        for a part it was not confirmed with, so every verified frame of the
+        desktop is queued for a re-check, as ``infer-relations`` does.
         """
         from tda.pipeline import split_pose_segments    # late: tda.pipeline is heavy
 
@@ -475,11 +579,20 @@ class StepTableData:
             db.replace_steps(self.desktop, self.steps, actions)
             for inst in self.instances.values():
                 db.upsert_instance(inst)
-            events = events_from_actions(self.instances, actions, self.tax)
+            for batch in self.extras:
+                db.add_events(batch.events)
+                db.log_op(self.desktop, X.OP_VIEW, X.OP_ADD, batch.payload(),
+                          batch.inverse(), self.annotator)
+            manual = [event for event in db.events(self.desktop) if not event.auto]
+            events = events_from_actions(self.instances, actions, self.tax,
+                                         initial=initial_overrides(manual))
             db.replace_events(self.desktop, events, auto_only=True)
+            if self.extras:
+                _queue_verified(db, self.desktop)
             if moved:
                 self.recut = split_pose_segments(db, self.desktop)
             self.relations.write(db)
+        self.extras = []
         self.relations.committed()
         self.messages = validate_events(self.instances, db.events(self.desktop), self.tax)
         self.refresh_issues()
@@ -634,15 +747,17 @@ class StepTableData:
 
     def _next_ordinal(self, cls: str, attrs: dict, staged: frozenset | set = frozenset()) -> int:
         """One past the highest ordinal among the instances of the same group."""
-        if cls == CHASSIS_KEY:
-            return 1  # `chassis` carries no ordinal at all
-        disc = str(attrs.get("role") or attrs.get("kind") or "")
-        prefix = f"{cls}.{disc}." if disc else f"{cls}."
-        top = 0
-        for key in (*self.instances, *staged):
-            if not key.startswith(prefix):
-                continue
-            match = _ORDINAL.match(key[len(prefix) - 1 :])
-            if match:
-                top = max(top, int(match.group(1)))
-        return top + 1
+        return X.next_ordinal((*self.instances, *staged), cls, attrs)
+
+
+def _queue_verified(db: Db, desktop: int) -> int:
+    """Queue every verified frame of ``desktop`` for a truth re-check.
+
+    The truth service turns a frozen frame that gained an instance into
+    ``needs_review`` when it recompiles it (spec 3.4); queueing makes that
+    happen now, in the background, rather than at the next export.
+    """
+    by_view: dict[str, list[int]] = {}
+    for view, step in db.verified_frames(desktop):
+        by_view.setdefault(view, []).append(int(step))
+    return sum(len(db.add_rechecks(desktop, view, steps)) for view, steps in by_view.items())

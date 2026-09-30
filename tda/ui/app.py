@@ -139,8 +139,10 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
             from tda.ui.panels.steptable import StepTablePanel
 
             panel = StepTablePanel(self.db, int(self.session.desktop),
-                                   self.session.tax, self.paths.get("cache_dir", ""))
+                                   self.session.tax, self.paths.get("cache_dir", ""),
+                                   annotator=self.annotator)
             panel.sigSaved.connect(self.on_steps_saved)
+            panel.sigEdited.connect(self._mark_steps_dirty)  # a part added (U5b)
             for model in (panel.steps_model, panel.instances_model):
                 model.dataChanged.connect(self._mark_steps_dirty)
             # A staged constraint edge is an unsaved step-table edit like any

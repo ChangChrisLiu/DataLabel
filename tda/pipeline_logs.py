@@ -33,8 +33,8 @@ from tda.core.implied import implied_instances, is_implied
 from tda.core.index import DesktopIndex
 from tda.core.log_report import _expected_steps
 from tda.core.logs import LogImport, import_log, iter_desktop_csvs, read_desktop_csv
-from tda.core.model import VIEWS, StepRec, StepType
-from tda.core.states import events_from_actions
+from tda.core.model import VIEWS, StepRec, StepType, is_extra
+from tda.core.states import events_from_actions, initial_overrides
 from tda.core.taxonomy import Taxonomy
 from tda.pipeline import Log, merge_desktop_meta, split_pose_segments, wanted
 
@@ -476,6 +476,15 @@ def _hold_reasons(db: Db, desktop: int, vanished: set[str]) -> tuple[dict[str, s
         if counts
     }
     carrying_work = len(holding)
+    # an instance S1 added is never dropped (see `_plan_drops`), so whatever it
+    # rides on stays too -- its parent is what takes it out of the chassis
+    for key, rec in sorted(stored.items()):
+        if not is_extra(rec):
+            continue
+        for field_name in REFERRING_FIELDS:
+            ref = getattr(rec, field_name, None)
+            if ref in vanished and ref not in holding:
+                holding[ref] = f"named by {key}.{field_name}, which is kept"
     growing = True
     while growing:
         growing = False
@@ -516,10 +525,13 @@ def _plan_drops(db: Db, li: LogImport, tax: Taxonomy, previous: list[StepRec],
     * **only what nothing holds** -- see :func:`_hold_reasons`.
 
     Provisional ``ls:*`` keys are never in scope: they belong to ``import-ls``.
+    Nor are the instances an annotator added in S1 (:mod:`tda.core.extra`):
+    the sheet never named them, so its not naming them now says nothing.
     """
     stored = db.instances(li.desktop)
-    vanished = {key for key in stored
-                if key not in _would_exist(db, li, tax) and not is_provisional(key)}
+    produced = _would_exist(db, li, tax)
+    vanished = {key for key, rec in stored.items()
+                if key not in produced and not is_provisional(key) and not is_extra(rec)}
     if not vanished:
         return DropPlan()
     holding, carrying = _hold_reasons(db, li.desktop, vanished)
@@ -552,7 +564,7 @@ def _implausible(li: LogImport, previous: list[StepRec], stored: dict,
     there are any.
     """
     real = [key for key, rec in stored.items()
-            if not is_provisional(key) and not is_implied(rec)]
+            if not is_provisional(key) and not is_implied(rec) and not is_extra(rec)]
     if not previous and not real:  # a genuine first import: nothing to lose
         return ""
     drafts = sum(1 for key in stored if is_provisional(key))
@@ -650,9 +662,15 @@ def _write_import(
     tie on a desktop that lists two coolers. Filling them
     first also means ``events_from_actions`` below already emits the cascade,
     so the stored automatic log and the one
-    :func:`tda.core.truth_inputs.events_of` re-derives on every read agree.
+    :func:`tda.core.truth_inputs.events_of` re-derives on every read agree --
+    which is why the instances S1 added (:mod:`tda.core.extra`) are folded in
+    too: the sheet does not know them, but the cascade that takes an added RAM
+    clip out with its board is part of the same log.
     """
     declined = db.declined_implied(li.desktop)  # read before the transaction writes
+    extras = {key: rec for key, rec in db.instances(li.desktop).items()
+              if is_extra(rec) and key not in li.instances}
+    initial = initial_overrides(e for e in db.events(li.desktop) if not e.auto)
     with db.transaction():
         kept, dropped = carry_ls_notes(li.steps, previous)
         merge_desktop_meta(db, li.desktop, desktop_fields(li.meta))
@@ -665,7 +683,8 @@ def _write_import(
         # in here is what makes a desktop that raises keep both its old
         # instances and its old steps
         gone, drop_issues = _apply_drops(db, li, plan)
-        events = events_from_actions(li.instances, li.actions, tax)
+        events = events_from_actions({**extras, **li.instances}, li.actions, tax,
+                                     initial=initial)
         db.replace_events(li.desktop, events, auto_only=True)
         split_pose_segments(db, li.desktop)
     return (len(events), kept, dropped, fills,

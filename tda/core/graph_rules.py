@@ -34,7 +34,7 @@ from tda.core.graph_infer import (
     unresolved_kind,
     unresolved_relations,
 )
-from tda.core.model import InstanceRec
+from tda.core.model import InstanceRec, is_extra
 from tda.core.states import FrameState
 from tda.core.taxonomy import Taxonomy
 
@@ -460,6 +460,15 @@ def propose_edges(instances: dict[str, InstanceRec], tax: Taxonomy) -> list[Edge
     ``status="proposed"``; duplicates are collapsed, keeping the first reason.
     Instances whose relational fields are still empty simply derive nothing --
     run :func:`infer_relational_fields` first to fill the obvious ones.
+
+    An instance added in S1 (:func:`tda.core.model.is_extra`) takes part in an
+    edge only through a field that names it or that somebody filled in on it --
+    ``fastens``, ``socket_host``, ``cable``, ``of`` -- and never through a
+    reading keyed on its class, role or kind (the CPU lever over the CPU, a
+    power lead on the PSU, the cooler over the CPU, "this cover hides every
+    motherboard screw"). The log never operated it, so such an edge is either
+    one the recorded teardown "violates" or a question about it nobody asked;
+    a human who wants one adds it in the Relations tab.
     """
     out: list[Edge] = []
     for rule in (_fastened_by, _connected_to, _locked_by, _covered_by):
@@ -512,6 +521,8 @@ def _connected_to(instances: dict[str, InstanceRec], tax: Taxonomy) -> list[Edge
         host = _resolve(instances, rec.socket_host)
         if host:
             out.append(_edge("connected_to", host, key, f"{key} plugs into {host}"))
+        if is_extra(rec) and not rec.cable:
+            continue  # its kind alone names no owner (see propose_edges)
         owner = connector_owner(rec, instances)
         if owner and owner != host:
             out.append(
@@ -527,7 +538,7 @@ def _locked_by(instances: dict[str, InstanceRec], tax: Taxonomy) -> list[Edge]:
         target = None
         if rec.cls in LATCH_OF_CLASSES:
             target = _resolve(instances, rec.attrs.get("of"))
-        elif rec.cls in LATCH_TEMPLATE_HOSTS:
+        elif rec.cls in LATCH_TEMPLATE_HOSTS and not is_extra(rec):
             target = _unique_of_class(instances, LATCH_TEMPLATE_HOSTS[rec.cls])
         if target:
             out.append(_edge("locked_by", target, key, f"{key} locks {target}"))
@@ -545,7 +556,7 @@ def _covered_by(instances: dict[str, InstanceRec], tax: Taxonomy) -> list[Edge]:
     for under_cls, over_cls in FIXED_COVERED_BY:
         under = _unique_of_class(instances, under_cls)
         over = _unique_of_class(instances, over_cls)
-        if under and over:
+        if under and over and not (is_extra(instances[under]) or is_extra(instances[over])):
             out.append(_edge("covered_by", under, over, f"{over} sits on {under}"))
     return out
 
@@ -563,6 +574,8 @@ def _cover_targets(instances: dict[str, InstanceRec], cover: InstanceRec) -> lis
     kind, wanted = rule
 
     def hit(rec: InstanceRec) -> bool:
+        if is_extra(rec):
+            return False  # a class-wide reading; an added part is named or left out
         if kind == "cls":
             return rec.cls in wanted
         return rec.cls == "screw" and rec.attrs.get("role") in wanted

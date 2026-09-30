@@ -46,6 +46,7 @@ from tda.core.model import (
 from tda.core.states import (
     FrameState,
     events_from_actions,
+    initial_overrides,
     needs_geom,
     state_at,
 )
@@ -319,12 +320,17 @@ def events_of(
 
     The derived log is **not** persisted: it is a view of the step table, and
     writing it here would compete with :meth:`tda.core.db.Db.replace_events`.
+
+    A hand-written event before step 1 is an *initial* state (an instance added
+    in S1, :mod:`tda.core.extra`), so the derived log starts from it
+    (:func:`~tda.core.states.initial_overrides`).
     """
     if cache is not None and desktop in cache.events:
         return cache.events[desktop]
     instances = instances_of(db, desktop, cache)
-    derived = events_from_actions(instances, db.actions(desktop), tax)
     manual = [event for event in db.events(desktop) if not event.auto]
+    derived = events_from_actions(instances, db.actions(desktop), tax,
+                                  initial=initial_overrides(manual))
     events = _merge_events(derived, manual)
     if cache is not None:
         cache.events[desktop] = events

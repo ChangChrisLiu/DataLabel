@@ -65,6 +65,7 @@ from tda.cli_pose import _add_pose_breaks
 from tda.cli_relations import _add_infer_relations
 from tda.core import rawroot
 from tda.core.db import Db
+from tda.core.extra import extra_keys
 from tda.core.index import build_index, load_index, respell_paths, save_index
 from tda.core.index_report import write_report
 from tda.core.model import VIEWS
@@ -496,8 +497,14 @@ def format_desktop(db: Db, row: dict) -> str:
         f"Desktop {row['desktop']}  {row['brand']}",
         f"  steps {row['steps']} ({types or 'none'}), actions {row['actions']}, "
         f"instances {row['instances']}, state events {row['events']}",
-        f"  {'view':<6}{'frames':>8}{'missing':>9}{'keyframes':>11}{'done/work':>12}",
     ]
+    added = extra_keys(db.instances(row["desktop"]))
+    if added:
+        # counted among the instances above; said apart because no sheet
+        # names them, so nothing but this line says they exist (task U5b)
+        lines.append(f"  added in S1 (not in the log): {len(added)} - {', '.join(added)}")
+    lines.append(
+        f"  {'view':<6}{'frames':>8}{'missing':>9}{'keyframes':>11}{'done/work':>12}")
     for view in VIEWS:
         counts = row["views"][view]
         # done/work as the window's [done/total]: no-image frames are not work

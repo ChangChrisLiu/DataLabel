@@ -386,6 +386,42 @@ class Db(ConnectionMixin, PoseSegmentMixin, StatusMixin, DeleteMixin,
                 (desktop, target),
             )
 
+    def add_events(self, events: Iterable[StateEvent]) -> None:
+        """Append state events, leaving every stored one alone.
+
+        :meth:`replace_events` is the derived log's writer; this is for the
+        hand-written ones, which are never replaced wholesale -- the initial
+        state of an instance added in S1 (:mod:`tda.core.extra`) above all.
+        """
+        rows = [(e.desktop, e.step, e.target, e.attr, e.old, e.new, e.evidence_view,
+                 int(e.auto)) for e in events]
+        if not rows:
+            return
+        with self._tx():
+            for desktop in sorted({row[0] for row in rows}):
+                self._ensure_desktop(desktop)
+            self.conn.executemany(
+                'INSERT INTO state_event(desktop, step, target, attr, "old", "new", '
+                "evidence_view, auto) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+
+    def delete_manual_events(self, desktop: int, target: str,
+                             up_to_step: Optional[int] = None) -> int:
+        """Drop the hand-written events of one target; returns how many went.
+
+        ``up_to_step`` keeps the ones after that step: deleting an instance
+        added in S1 takes its initial state (step 0) with it and nothing else.
+        """
+        sql = "DELETE FROM state_event WHERE desktop=? AND target=? AND auto=0"
+        args: list[Any] = [desktop, target]
+        if up_to_step is not None:
+            sql += " AND step<=?"
+            args.append(int(up_to_step))
+        with self._tx():
+            cur = self.conn.execute(sql, args)
+        return int(cur.rowcount or 0)
+
     def instances(self, desktop: int) -> dict[str, InstanceRec]:
         """All instances of one desktop keyed by ``instance_key``."""
         rows = self.conn.execute(

@@ -14,8 +14,10 @@ Three tables behind a :class:`QTabWidget` (spec 4.1):
 Below them sits the list of open questions, re-derived after every edit. The
 context menus resolve them in place: split a compound row into N actions, add
 or remove an action, retarget a step at a new instance, delete an instance
-nothing points at any more. ``Apply`` writes everything back in one transaction
-and recompiles the automatic state-event log (emitting
+nothing points at any more. The ``＋ 添加零件 / Add parts`` button above the
+Instances table stages parts the picture shows and the log never names
+(:mod:`tda.ui.panels.add_parts`, :mod:`tda.core.extra`). ``Apply`` writes
+everything back in one transaction and recompiles the automatic state-event log (emitting
 :attr:`StepTablePanel.sigSaved`); ``Revert`` reloads from the database.
 
 The models and delegates live in :mod:`tda.ui.panels.steptable_models` and all
@@ -46,6 +48,10 @@ from PySide6.QtWidgets import (
 
 from tda.core.db import Db
 from tda.core.taxonomy import Taxonomy, load_taxonomy
+from tda.ui.panels.add_parts import BUTTON as ADD_PARTS_BUTTON
+from tda.ui.panels.add_parts import HINT as ADD_PARTS_HINT
+from tda.ui.panels.add_parts import TIP as ADD_PARTS_TIP
+from tda.ui.panels.add_parts import AddPartsDialog
 from tda.ui.panels.relations import RelationsTab
 from tda.ui.panels.steptable_models import (
     BLANK,
@@ -59,7 +65,13 @@ from tda.ui.panels.steptable_models import (
     InstanceTableModel,
     StepTableModel,
 )
-from tda.ui.steps_model import EditError, StepTableData, thumb_path
+from tda.ui.steps_model import (
+    ANNOTATOR,
+    DEFAULT_PARENT,
+    EditError,
+    StepTableData,
+    thumb_path,
+)
 from tda.ui.steps_values import DISCRIMINATORS
 
 __all__ = [
@@ -113,6 +125,10 @@ class StepTablePanel(QWidget):
 
     #: Emitted with the desktop id after ``Apply`` wrote the session back.
     sigSaved = Signal(int)
+    #: Emitted after a staged part is added or unstaged (task U5b): that edit
+    #: waits for ``Apply`` and is no ``dataChanged`` of either model, so the
+    #: window's unsaved-edit gate listens here.
+    sigEdited = Signal()
 
     def __init__(
         self,
@@ -121,16 +137,21 @@ class StepTablePanel(QWidget):
         taxonomy: Taxonomy | None = None,
         cache_dir: str | Path | None = None,
         parent: QWidget | None = None,
+        annotator: str = ANNOTATOR,
     ) -> None:
         super().__init__(parent)
         self.db = db
         self.desktop = desktop
         self.tax = taxonomy or load_taxonomy()
+        self.annotator = str(annotator or ANNOTATOR)
         # No literal path here: the cache directory is configuration, and a
         # default baked into the panel would write to this machine's real cache
         # from any caller (or test) that forgot to pass one.
         self.cache_dir = Path(cache_dir if cache_dir else _default_cache_dir())
-        self.data = StepTableData.load(db, desktop, self.tax)
+        self.data = StepTableData.load(db, desktop, self.tax, self.annotator)
+        #: The class the "＋ 添加零件" dialog opened on last time.
+        self.last_extra_class: Optional[str] = None
+        self.add_parts_dialog: Optional[AddPartsDialog] = None
 
         self.steps_model = StepTableModel(self.data, self.cache_dir, self)
         self.instances_model = InstanceTableModel(self.data, self)
@@ -146,7 +167,20 @@ class StepTablePanel(QWidget):
     # -- construction ------------------------------------------------------ #
     def _build(self) -> None:
         self.tabs.addTab(self.steps_view, "Steps")
-        self.tabs.addTab(self.instances_view, "Instances")
+        self.add_parts_button = QPushButton(ADD_PARTS_BUTTON, self)
+        self.add_parts_button.setToolTip(ADD_PARTS_TIP)
+        self.add_parts_button.clicked.connect(self.open_add_parts)
+        self.instances_page = QWidget(self)
+        page = QVBoxLayout(self.instances_page)
+        page.setContentsMargins(0, 0, 0, 0)
+        top = QHBoxLayout()
+        top.addWidget(self.add_parts_button)
+        hint = QLabel(ADD_PARTS_HINT, self.instances_page)
+        hint.setWordWrap(True)
+        top.addWidget(hint, 1)
+        page.addLayout(top)
+        page.addWidget(self.instances_view)
+        self.tabs.addTab(self.instances_page, "Instances")
         self.tabs.addTab(self.relations_tab, "Relations")
         self.apply_button = QPushButton("Apply", self)
         self.revert_button = QPushButton("Revert", self)
@@ -214,7 +248,7 @@ class StepTablePanel(QWidget):
     def set_desktop(self, desktop: int) -> None:
         """Load another desktop (or reload this one), dropping unsaved edits."""
         self.desktop = desktop
-        self.data = StepTableData.load(self.db, desktop, self.tax)
+        self.data = StepTableData.load(self.db, desktop, self.tax, self.annotator)
         self.steps_model.set_data(self.data)
         self.instances_model.set_data(self.data)
         self.relations_tab.set_data(self.data)
@@ -298,14 +332,59 @@ class StepTablePanel(QWidget):
         )
 
     def delete_instance(self, key: str) -> None:
-        """Delete an instance nothing references any more."""
-        self._command(lambda: self.data.delete_instance(self.db, key), f"Deleted {key}.")
+        """Delete an instance nothing references any more.
 
-    def _command(self, run, done: str) -> None:
+        A part added in S1 goes the same way -- only while it has no shape --
+        and a staged one that was never applied is simply unstaged.
+        """
+        staged = self.data.staged_extra(key)
+        self._command(lambda: self.data.delete_instance(self.db, key),
+                      f"Removed the staged {key}." if staged else f"Deleted {key}.",
+                      staged=staged)
+
+    def add_parts(self, cls: str, count: int = 1, parent=DEFAULT_PARENT,
+                  state: Optional[str] = None, note: str = "",
+                  attrs: Optional[dict] = None) -> list[str]:
+        """Stage ``count`` parts of ``cls`` the log never names (task U5b).
+
+        Written by ``Apply`` with one ``op_log`` row, dropped by ``Revert``.
+        Returns the new keys; empty when the addition was refused (the reason
+        is in the status line).
+        """
+        made: list[str] = []
+
+        def run() -> None:
+            made.extend(self.data.add_extras(cls, count, parent, state, note, attrs))
+
+        self._command(run, "", staged=True)
+        if made:
+            self.last_extra_class = cls
+            host = self.data.instances[made[0]].parent
+            where = f" on {host}" if host else ""
+            self.status.setText(
+                f"已添加 {len(made)} 个（未写入，按 Apply 保存）/ staged {len(made)} "
+                f"added part(s){where}: {', '.join(made)} - press Apply to write them.")
+        return made
+
+    def open_add_parts(self) -> AddPartsDialog:
+        """Open the "＋ 添加零件" dialog; accepting it stages the parts.
+
+        Opened with ``open()`` rather than ``exec()``, so it is window-modal
+        without blocking -- and returned, so a caller (or a test) can fill it in.
+        """
+        dialog = AddPartsDialog(self.data, self, cls=self.last_extra_class)
+        dialog.accepted.connect(lambda: self.add_parts(**dialog.values()))
+        dialog.finished.connect(dialog.deleteLater)
+        self.add_parts_dialog = dialog
+        dialog.open()
+        return dialog
+
+    def _command(self, run, done: str, staged: bool = False) -> None:
         """Run one structural command, then rebuild both tables and the issues.
 
         A refused command shows its reason; anything unexpected shows its type
-        as well, and neither takes the panel down.
+        as well, and neither takes the panel down. ``staged`` says the command
+        waits for ``Apply``, which is what :attr:`sigEdited` tells the window.
         """
         try:
             run()
@@ -319,6 +398,8 @@ class StepTablePanel(QWidget):
         self.instances_model.refresh_structure()
         self._refresh_issues()
         self.status.setText(done)
+        if staged:
+            self.sigEdited.emit()
 
     # -- context menus ----------------------------------------------------- #
     def steps_menu(self, view_row: int) -> QMenu:
