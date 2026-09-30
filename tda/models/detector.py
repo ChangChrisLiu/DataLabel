@@ -17,23 +17,42 @@ Studio drafts that finds *motherboard screws* on the scanner and on OAK camera
 * :func:`box_change` is L1's native-resolution dE inside a box, the score the
   candidates are ranked by.
 
-Importing ultralytics has two process-wide side effects this undoes: it sets
-OpenCV to one thread (``cv2.setNumThreads(0)``) -- which would slow every
-difference map and every decode in the window -- and ``OMP_NUM_THREADS=1``.
+Importing ultralytics patches the whole process, and the window shares that
+process; :func:`keep_process_state` takes a snapshot before the import and puts
+**every** one of these back the moment the import returns, and again once the
+model is built and warmed up (task U3, round 3).  For the import's own second
+or two the patched functions are live process-wide -- that cannot be helped
+short of a second process:
+
+* ``cv2.setNumThreads(0)`` -- one OpenCV thread for every difference map and
+  every decode in the window;
+* ``cv2.imread`` / ``cv2.imwrite`` / ``cv2.imshow`` replaced (Windows): the
+  replacement *raises* ``cv2.error`` on a 0-byte file where OpenCV returns
+  ``None``, and the window's image cache, the difference map's worker, the ROI
+  worker and the truth inputs all rely on ``None``;
+* ``PIL.Image.open`` and ``torch.save`` replaced;
+* the environment: ``OMP_NUM_THREADS``, ``NUMEXPR_MAX_THREADS``,
+  ``TF_CPP_MIN_LOG_LEVEL``, ``TORCH_CPP_LOG_LEVEL``, ``KINETO_LOG_LEVEL`` --
+  every variable it adds or changes;
+* numpy's and torch's print options, and the warning filters it installs.
+
 It also writes a settings file under ``%APPDATA%`` unless ``YOLO_CONFIG_DIR``
-says where; :func:`prepare_environment` points it at D: and turns downloads off.
+says where; :func:`prepare_environment` points it at D: and turns downloads
+off (those two variables are set on purpose, before the snapshot).
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import logging
 import math
 import os
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Iterator, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -42,7 +61,8 @@ __all__ = [
     "CONTAIN", "DEFAULT_FILE", "DEFAULT_YOLO_CONFIG_DIR", "EDGE_PX", "ENV_VAR",
     "MAX_DET", "NMS_IOU", "PAD_VALUE", "PREDICT_CONF", "STORE_CONF", "Det",
     "DetectorConfig", "DetectorConfigError", "DetectorUnavailable", "Tile",
-    "YoloTileDetector", "box_change", "file_sha1", "load_detector_config",
+    "YoloTileDetector", "box_change", "file_sha1", "keep_process_state",
+    "load_detector_config",
     "make_tiles", "merge", "prepare_environment", "to_native", "work_crop",
 ]
 
@@ -277,6 +297,77 @@ def prepare_environment(config: DetectorConfig) -> None:
     target.mkdir(parents=True, exist_ok=True)
     os.environ["YOLO_CONFIG_DIR"] = str(target)
     os.environ["YOLO_OFFLINE"] = "1"
+
+
+#: The OpenCV functions ultralytics replaces on Windows.
+_CV2_PATCHED = ("imread", "imwrite", "imshow")
+#: torch's print options, as ``torch.set_printoptions`` takes them.
+_TORCH_PRINT = ("precision", "threshold", "edgeitems", "linewidth", "sci_mode")
+
+
+class _TorchState:
+    """torch's own ``save`` and print options, taken once torch is imported."""
+
+    def __init__(self) -> None:
+        self.torch: Any = None
+        self.save: Any = None
+        self.print_opts: Optional[dict] = None
+
+    def watch(self, torch: Any) -> None:
+        """Remember torch's state now -- import torch, then call this, then ultralytics."""
+        if self.torch is None:
+            self.torch, self.save = torch, torch.save
+            self.print_opts = {k: getattr(torch._tensor_str.PRINT_OPTS, k)
+                               for k in _TORCH_PRINT}
+
+    def restore(self) -> None:
+        if self.torch is not None:
+            self.torch.save = self.save
+            self.torch.set_printoptions(**self.print_opts)
+
+
+@contextlib.contextmanager
+def keep_process_state(torch: Any = None) -> Iterator[_TorchState]:
+    """Put back everything importing (and running) ultralytics changes process-wide.
+
+    A snapshot on entry, restored on exit whatever happened in between: the
+    OpenCV thread count and its ``imread`` / ``imwrite`` / ``imshow``,
+    ``PIL.Image.open``, numpy's print options, the warning filters, and the
+    environment -- every variable added, changed or removed goes back to what
+    it was.  ``torch.save`` and torch's print options too, once torch is
+    known: pass it, or import it inside and call ``watch(torch)`` on what this
+    yields before ultralytics is imported.
+
+    The environment is put back whole, so a variable another thread sets
+    in between goes too; nothing in ``tda`` sets one but
+    :func:`prepare_environment`, which runs before the snapshot.
+    """
+    import PIL.Image
+
+    env = dict(os.environ)
+    threads = cv2.getNumThreads()
+    cv2_fns = {name: getattr(cv2, name) for name in _CV2_PATCHED}
+    pil_open = PIL.Image.open
+    np_print = np.get_printoptions()
+    filters = list(warnings.filters)
+    torch_state = _TorchState()
+    if torch is not None:
+        torch_state.watch(torch)
+    try:
+        yield torch_state
+    finally:
+        cv2.setNumThreads(threads)
+        for name, fn in cv2_fns.items():
+            setattr(cv2, name, fn)
+        PIL.Image.open = pil_open
+        np.set_printoptions(**np_print)
+        warnings.filters[:] = filters
+        torch_state.restore()
+        for key in [k for k in os.environ if k not in env]:
+            os.environ.pop(key, None)
+        for key, value in env.items():
+            if os.environ.get(key) != value:
+                os.environ[key] = value
 
 
 def file_sha1(path: Path) -> str:
@@ -522,41 +613,46 @@ class YoloTileDetector:
         #: What the cache is keyed by: another model is another directory.
         self.identity = self.sha1
         prepare_environment(config)
-        threads = cv2.getNumThreads()
-        omp = os.environ.get("OMP_NUM_THREADS")
+        # torch first, outside any snapshot: what torch itself sets (SAM's
+        # loader imports it too) is torch's and stays.
         try:
-            try:
-                import torch
-            except Exception as exc:  # noqa: BLE001 - the reason is the message
-                raise DetectorUnavailable(f"torch does not import: "
-                                          f"{type(exc).__name__}: {exc}") from exc
-            if not torch.cuda.is_available():
-                raise DetectorUnavailable("CUDA is not available")
+            import torch
+        except Exception as exc:  # noqa: BLE001 - the reason is the message
+            raise DetectorUnavailable(f"torch does not import: "
+                                      f"{type(exc).__name__}: {exc}") from exc
+        if not torch.cuda.is_available():
+            raise DetectorUnavailable("CUDA is not available")
+        # Two snapshots.  The first ends the moment the import returns: the
+        # window's own OpenCV calls see ultralytics' imread only for as long
+        # as the import takes.  The second covers building the model and the
+        # warm-up (YOLO() sets CUBLAS_WORKSPACE_CONFIG, a first prediction may
+        # import more of ultralytics).
+        with keep_process_state(torch):
             try:
                 from ultralytics import YOLO
             except Exception as exc:  # noqa: BLE001
                 raise DetectorUnavailable(f"ultralytics does not import: "
                                           f"{type(exc).__name__}: {exc}") from exc
-        finally:
-            # ultralytics sets OpenCV to one thread and OMP to 1 on import:
-            # every difference map in the window would pay for it.
-            cv2.setNumThreads(threads)
-            if omp is None:
-                os.environ.pop("OMP_NUM_THREADS", None)
-            else:
-                os.environ["OMP_NUM_THREADS"] = omp
-        self._torch = torch
-        self.model = YOLO(str(config.model))
-        self.names = {int(k): str(v) for k, v in dict(self.model.names).items()}
-        missing = [c for c in config.classes if c not in self.names.values()]
-        if missing:
-            raise DetectorUnavailable(f"the model has no class {missing} "
-                                      f"(it knows {sorted(self.names.values())})")
-        # cudnn autotune and lazy CUDA init, before the first real frame
-        dummy = [np.full((config.tile, config.tile, 3), PAD_VALUE, np.uint8)] * 2
-        for _ in range(2):
-            self._predict(dummy)
+        with keep_process_state(torch):
+            self._torch = torch
+            self.model = YOLO(str(config.model))
+            self.names = {int(k): str(v) for k, v in dict(self.model.names).items()}
+            missing = [c for c in config.classes if c not in self.names.values()]
+            if missing:
+                raise DetectorUnavailable(f"the model has no class {missing} "
+                                          f"(it knows {sorted(self.names.values())})")
+            # cudnn autotune and lazy CUDA init, before the first real frame
+            dummy = [np.full((config.tile, config.tile, 3), PAD_VALUE, np.uint8)] * 2
+            for _ in range(2):
+                self._predict(dummy)
         self.load_s = time.perf_counter() - started
+
+    def release(self) -> None:
+        """Give the CUDA cache back between passes (the worker thread calls it idle)."""
+        try:
+            self._torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001 - a nicety, never a failure
+            pass
 
     def _predict(self, batch: list[np.ndarray]):
         extra = {"quantize": 16} if self.config.half else {}

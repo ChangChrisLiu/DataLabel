@@ -11,9 +11,10 @@ any of them is a miss.  A different model is a different directory, so it can
 never be served another model's detections; a different recipe (tiling,
 thresholds) empties the file it would have read.
 
-The candidates' dE is cached in the same entry, keyed the same way by the
-neighbour frame it was measured against: ``Tab`` compares with the neighbour
-the task card is written against, and so does this.
+The candidates' dE is cached in the same entry, one slot per neighbour step
+(``changes``), each keyed the same way by the neighbour's file: ``Tab``
+compares with the neighbour the task card is written against, and so does
+this -- in the reverse walk the step above, browsing forward the step below.
 
 Writes are atomic (a temporary file, then :func:`os.replace`): a window closed
 mid-write leaves the previous file, never half of one.
@@ -38,6 +39,7 @@ from tda.models.detector import (
     FrameDets,
     YoloTileDetector,
     box_change,
+    file_sha1,
     whole,
 )
 
@@ -46,7 +48,8 @@ __all__ = ["CACHE_VERSION", "DetCache", "DetectionEngine", "PlanItem", "file_sta
 
 log = logging.getLogger(__name__)
 
-CACHE_VERSION = 1
+#: 2 (round 3): the candidates' dE is kept per neighbour step (``changes``).
+CACHE_VERSION = 2
 #: Decoded frames the engine keeps: ``j`` and its neighbour, and the one the
 #: walk steps onto next is always one of the two.
 DECODED_KEPT = 2
@@ -183,29 +186,68 @@ class DetectionEngine:
 
     def __init__(self, config: DetectorConfig, cache_root: Optional[Path] = None,
                  factory: Optional[Callable[[DetectorConfig], Any]] = None,
-                 change_fn: Callable = box_change) -> None:
+                 change_fn: Callable = box_change, identity: Optional[str] = None) -> None:
         self.config = config
         self.cache_root = Path(cache_root) if cache_root else Path(config.cache_root)
+        self._real_model = factory is None
         self.factory = factory or YoloTileDetector
         self.change_fn = change_fn
+        #: The cache key; the model file's SHA-1 unless a stub names one.
+        self.identity: Optional[str] = identity
         self.model: Any = None
         self.cache: Optional[DetCache] = None
         self.view: Optional[tuple[int, str]] = None
+        #: Decoded frames by ``(path, size, mtime_ns)``: a file rewritten under
+        #: the same name is a new picture.
         self._decoded: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
 
     # -- lifecycle ----------------------------------------------------------
-    def load(self) -> str:
+    def prepare(self) -> None:
+        """Open the cache -- no model, no torch: its key is the model file's SHA-1.
+
+        Round 3: a warm start is served from the disk cache while the model is
+        still loading (seconds), so the first frame gets the detector's box
+        within the frame-change budget.  A factory that is not the real model
+        (a test's stub) either names its ``identity`` up front or is built here.
+        """
+        identity = self.identity
+        if identity is None:
+            if self._real_model:
+                identity = file_sha1(self.config.model)
+            else:
+                self.model = self.factory(self.config)
+                identity = str(self.model.identity)
+        self.identity = str(identity)
+        self.cache = DetCache(self.cache_root, self.identity, self.config.recipe(),
+                              str(self.config.model))
+
+    def load_model(self) -> str:
         """Build the model; raises when it cannot run.  Returns what it is."""
-        self.model = self.factory(self.config)
+        if self.model is None:
+            model = self.factory(self.config)
+            if self.identity is not None and str(model.identity) != self.identity:
+                raise RuntimeError(f"the model changed while it loaded: {model.identity} "
+                                   f"is not {self.identity}")
+            self.model = model
         describe = getattr(self.model, "describe", None)
-        self.cache = DetCache(self.cache_root, str(self.model.identity),
-                              self.config.recipe(), str(self.config.model))
         return describe() if callable(describe) else f"model {self.model.identity}"
+
+    def load(self) -> str:
+        """:meth:`prepare` and :meth:`load_model` in one go."""
+        self.prepare()
+        return self.load_model()
+
+    def release(self) -> None:
+        """A pass is over: drop the decoded frames and the model's GPU cache."""
+        self._decoded.clear()
+        release = getattr(self.model, "release", None)
+        if callable(release):
+            release()
 
     def open_view(self, desktop: int, view: str) -> None:
         """Serve one desktop/view from here on: its cache file is read now."""
         self.flush()
-        assert self.cache is not None, "load() first"
+        assert self.cache is not None, "prepare() first"
         self.cache.open(desktop, view)
         if self.cache.discarded:
             log.info("detector cache %s ignored: %s", self.cache.path_for(desktop, view),
@@ -227,9 +269,10 @@ class DetectionEngine:
               ) -> Optional[np.ndarray]:
         if given is not None:
             return given
-        if not path:
+        stamp = file_stamp(path)
+        if stamp is None:
             return None
-        key = (str(path),)
+        key = (stamp["path"], stamp["size"], stamp["mtime_ns"])
         hit = self._decoded.get(key)
         if hit is not None:
             self._decoded.move_to_end(key)
@@ -250,6 +293,33 @@ class DetectionEngine:
                 if d.cls in wanted and d.conf >= self.config.conf]
 
     # -- one frame ----------------------------------------------------------
+    def answer_from_cache(self, item: PlanItem) -> Optional[FrameDets]:
+        """The frame's answer if the disk cache holds all of it, else ``None``.
+
+        No model and no pixels: a stat of the frame's file and of its
+        neighbour's, and a lookup.  What the worker serves while the model is
+        still loading (round 3).
+        """
+        assert self.view is not None and self.cache is not None, "open_view() first"
+        started = time.perf_counter()
+        stamp = file_stamp(first_readable(item.candidates))
+        crop = None if item.crop is None else [int(v) for v in item.crop]
+        entry = self.cache.get(item.step)
+        if not (_same_file(entry, stamp) and entry.get("crop") == crop):  # type: ignore[union-attr]
+            return None
+        dets = [Det.from_row(r) for r in entry.get("dets") or []]  # type: ignore[union-attr]
+        wanted = self.candidates_of(dets)
+        change: dict = {}
+        if item.neighbour is not None and wanted:
+            nstamp = file_stamp(first_readable(item.neighbour_candidates))
+            change = self._cached_change(entry, item, wanted, nstamp)
+            if change is None:
+                return None
+        return FrameDets(step=int(item.step), crop=None if crop is None else tuple(crop),
+                         dets=tuple(dets), neighbour=item.neighbour, change=change,
+                         detected=False, measured=False,
+                         seconds=time.perf_counter() - started)
+
     def process(self, item: PlanItem) -> Optional[FrameDets]:
         """The frame's detections and its candidates' dE; ``None`` without pixels."""
         assert self.view is not None and self.cache is not None, "open_view() first"
@@ -283,6 +353,24 @@ class DetectionEngine:
                          detected=detected, measured=measured,
                          seconds=time.perf_counter() - started)
 
+    def _cached_change(self, entry: Optional[dict], item: PlanItem, wanted: list[int],
+                       nstamp: Optional[dict]) -> Optional[dict]:
+        """``{candidate index: dE}`` from the cache for this neighbour, or ``None``.
+
+        One slot per neighbour step (round 3): browsing forward compares a
+        frame with the step *below* it, and a single slot made the two
+        directions overwrite each other on every visit.
+        """
+        slots = (entry or {}).get("changes")
+        cached = slots.get(str(int(item.neighbour))) if isinstance(slots, dict) else None
+        if (isinstance(cached, dict) and _same_file(cached, nstamp)
+                and cached.get("classes") == list(self.config.classes)
+                and cached.get("conf") == float(self.config.conf)
+                and all(str(i) in (cached.get("values") or {}) for i in wanted)):
+            values = cached["values"]
+            return {i: float(values[str(i)]) for i in wanted}
+        return None
+
     def _change(self, item: PlanItem, entry: Optional[dict], dets: list[Det],
                 img: Optional[np.ndarray], path: Optional[str]) -> tuple[dict, bool]:
         """``{candidate index: dE}`` against the neighbour, cached like the detections."""
@@ -291,14 +379,9 @@ class DetectionEngine:
             return {}, False
         npath = first_readable(item.neighbour_candidates)
         nstamp = file_stamp(npath)
-        cached = (entry or {}).get("change")
-        if (isinstance(cached, dict) and _same_file(cached, nstamp)
-                and cached.get("neighbour") == int(item.neighbour)
-                and cached.get("classes") == list(self.config.classes)
-                and cached.get("conf") == float(self.config.conf)
-                and all(str(i) in (cached.get("values") or {}) for i in wanted)):
-            values = cached["values"]
-            return {i: float(values[str(i)]) for i in wanted}, False
+        cached = self._cached_change(entry, item, wanted, nstamp)
+        if cached is not None:
+            return cached, False
         img = img if img is not None else self._read(path, item.pixels)
         other = self._read(npath, item.neighbour_pixels)
         if img is None or other is None or img.shape != other.shape:
@@ -310,9 +393,11 @@ class DetectionEngine:
             except Exception as exc:  # noqa: BLE001 - one box is not worth the frame
                 log.warning("dE of %s on step %s failed: %s", dets[i].int_box, item.step, exc)
         if entry is not None and nstamp is not None:
-            entry["change"] = dict(nstamp, neighbour=int(item.neighbour),
-                                   classes=list(self.config.classes),
-                                   conf=float(self.config.conf),
-                                   values={str(i): v for i, v in change.items()})
+            slots = entry.get("changes")
+            if not isinstance(slots, dict):
+                slots = entry["changes"] = {}
+            slots[str(int(item.neighbour))] = dict(
+                nstamp, classes=list(self.config.classes), conf=float(self.config.conf),
+                values={str(i): v for i, v in change.items()})
             self.cache.put(item.step, entry)  # type: ignore[union-attr]
         return change, True

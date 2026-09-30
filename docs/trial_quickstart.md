@@ -18,7 +18,8 @@ D:\Anaconda\envs\tda\python.exe -m tda.cli app --annotator chang --desktop 13 --
 窗口约 1 秒出现。SAM 在后台加载，右下角出现 `SAM ready` 之前，左边的「SAM 点选」「SAM 框选」
 是灰的（鼠标停上去或点一下，状态栏会说原因）。螺丝检测器也在后台加载（几秒），第一次打开一个视角
 时再在后台把这个视角的每一帧过一遍（scan 42 帧约 5–10 秒），结果存在 `D:\DataSet\cache\det`，
-下次打开就不用再算。这些都不用等，照常开始标（见第 3 节第 5 步）。
+下次打开就不用再算（模型还没加载完，存下的结果就已经能用，第一帧马上就是检测器的框）。这些都不用等，
+照常开始标（见第 3 节第 5 步）。
 
 **窗口从左到右**（图：[docs/img/u2b_start.jpg](img/u2b_start.jpg)）：
 

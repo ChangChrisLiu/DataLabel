@@ -136,6 +136,48 @@ class DiffOffer:
         self.point = None
 
 
+#: Two boxes both at most this many image pixels are "small" (a screw and the
+#: difference map's blob around it), and are one candidate at a looser match.
+SMALL_BOX_PX = 64 * 64
+#: ... namely IoU above this, or the centre of one inside the other when the
+#: two are of a size (areas within this factor): a blob four times a screw's
+#: size is the screw plus something else.
+SMALL_BOX_SAME_IOU = 0.5
+SMALL_BOX_SIZE_RATIO = 4.0
+
+
+def _same_candidate(a, b) -> bool:
+    """Are two ``Shift+C`` boxes one place (round 3, review item 5)?
+
+    IoU above :data:`~tda.ui.app_diff.ALT_DEDUP_IOU` always; for two small
+    boxes also IoU above :data:`SMALL_BOX_SAME_IOU`, or the centre of one
+    inside the other when they are of a size -- on D13/scan frame 40 the
+    detector's screw and the difference map's box around it were IoU 0.76
+    apart, and the same screw was offered three times.  A small box inside a
+    much bigger one is not the same candidate: the big one is something else
+    too.
+    """
+    if _box_iou(a, b) > ALT_DEDUP_IOU:
+        return True
+
+    def area(box) -> float:
+        return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+    small, large = sorted((area(a), area(b)))
+    if large > SMALL_BOX_PX or small <= 0.0:
+        return False
+    if _box_iou(a, b) > SMALL_BOX_SAME_IOU:
+        return True
+    if large > SMALL_BOX_SIZE_RATIO * small:
+        return False
+
+    def holds(box, other) -> bool:
+        cx, cy = 0.5 * (other[0] + other[2]), 0.5 * (other[1] + other[3])
+        return box[0] <= cx <= box[2] and box[1] <= cy <= box[3]
+
+    return holds(a, b) or holds(b, a)
+
+
 def _covers_most(box, roi, limit: float = MAX_PROMPT_BOX_FRAC) -> bool:
     """Does ``box`` take up more than ``limit`` of the ROI's area?"""
     bw, bh = max(0.0, box[2] - box[0]), max(0.0, box[3] - box[1])
@@ -749,14 +791,18 @@ class AssistMixin(DetectMixin):
         config = self.det_config
         if self.det_worker is None or config is None or not self._det_frames:
             return False
-        if not compat.is_open(self.session):
+        try:
+            if not compat.is_open(self.session):
+                return False
+            key = self.session.current()
+            frame = self._det_frames.get(int(key.step))
+            if frame is None or not config.applies(key.view) or not frame.change:
+                return False
+            asked = detector_asked(rows or [])
+            return any(frame.dets[i].cls in asked for i in frame.change)
+        except Exception:  # noqa: BLE001 - the difference map's box must still come
+            self.logger.exception("detector: the frame's answer could not be read")
             return False
-        key = self.session.current()
-        frame = self._det_frames.get(int(key.step))
-        if frame is None or not config.applies(key.view) or not frame.change:
-            return False
-        asked = detector_asked(rows or [])
-        return any(frame.dets[i].cls in asked for i in frame.change)
 
     def begin_add_shape(self, blob: Optional[DiffBlob], rows: Optional[list] = None) -> None:
         """Feed a changed region's box to SAM as the box half of point+box.
@@ -825,9 +871,16 @@ class AssistMixin(DetectMixin):
         No gate, no 60 %-of-the-ROI rule: those are about the difference map's
         blob, and this is a box the size of the part.  One log line per arming
         with every candidate's box, confidence and dE -- to validate a dE
-        threshold later, never to apply one now.
+        threshold later, never to apply one now.  A failure here is logged with
+        its traceback and the difference map arms as before (round 3).
         """
-        ranking = self.detector_ranking(rows)
+        if self.det_worker is None:
+            return False
+        try:
+            ranking = self.detector_ranking(rows)
+        except Exception:  # noqa: BLE001 - the difference map's box must still come
+            self.logger.exception("detector: ranking failed; the difference map's box")
+            return False
         if ranking is None or not ranking.chosen:
             return False
         top = ranking.chosen[0]
@@ -934,8 +987,8 @@ class AssistMixin(DetectMixin):
         rank 1 would have been without the detector, when the 60 % rule and the
         gate would have armed it (:class:`DiffOffer`) -- and its split
         proposals behind that, exactly as they would stand behind it.  A diff
-        box that repeats one of the detector's (IoU above
-        :data:`~tda.ui.app_diff.ALT_DEDUP_IOU`) is not offered twice.
+        box that repeats one of the detector's, or one already offered
+        (:func:`_same_candidate`), is not offered twice.
         """
         out: list = list(self._det_behind)
         taken = [self._rank_one] + [c.box for c in out]
@@ -962,7 +1015,7 @@ class AssistMixin(DetectMixin):
         diff += alternate_parts(inside, own if own is not None else withheld)
         for part in diff:
             box = tuple(float(v) for v in part.box)
-            if any(t is not None and _box_iou(box, t) > ALT_DEDUP_IOU for t in taken):
+            if any(t is not None and _same_candidate(box, t) for t in taken):
                 continue
             out.append(part)
             taken.append(box)

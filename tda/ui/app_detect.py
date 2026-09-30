@@ -168,14 +168,19 @@ class _Bridge(QObject):
 class DetectionWorker(QObject):
     """One thread, one frame at a time: the frame on screen first, then the walk.
 
-    The model is built on the thread before anything else (seconds: torch,
-    ultralytics, the weights, a warm-up); what it cannot do is said once on
-    :attr:`sigState` and the thread ends.  Requests are a **plan** -- the
-    frames of the open view in walk order -- and at most one **priority**
-    frame, which is taken next.  Opening another view (or re-planning this
-    one) bumps a generation; an answer from an older one is dropped on
-    delivery, like :class:`tda.ui.app_diff.AssistController`'s superseded
-    comparisons.
+    The model is built on a second, short-lived thread (seconds: torch,
+    ultralytics, the weights, a warm-up).  Meanwhile this one serves what the
+    disk cache already holds -- its key is the model file's SHA-1, no torch
+    needed -- and sets aside the frames that need the model; they go first
+    once it is up (round 3: a warm start arms the first frame at once, not
+    after 6-20 s).  What the model cannot do is said once on :attr:`sigState`
+    and the thread ends.  Requests are a **plan** -- the frames of the open
+    view in walk order -- and at most one **priority** frame, which is taken
+    next.  Opening another view (or re-planning this one) bumps a generation;
+    an answer from an older one is dropped on delivery, like
+    :class:`tda.ui.app_diff.AssistController`'s superseded comparisons.  When
+    a pass ends the engine lets go of its decoded frames and of the model's
+    CUDA cache.
 
     Signals:
         sigFrame: a :class:`~tda.models.detector.FrameDets` of the current
@@ -202,6 +207,8 @@ class DetectionWorker(QObject):
         self._stopped = False
         #: ``None`` while the model loads, then whether it did.
         self._loaded: Optional[bool] = None
+        #: ``(generation, item)`` the cache could not answer before the model was up.
+        self._deferred: list[tuple[int, PlanItem]] = []
         self._stats: dict = {}
         self._bridge = _Bridge(self)
         conn = Qt.ConnectionType.QueuedConnection
@@ -241,18 +248,34 @@ class DetectionWorker(QObject):
             self._plan = deque(below + above)
             self._lock.notify_all()
 
+    def _busy_locked(self) -> bool:
+        if self._stopped or self._loaded is False:
+            return self._busy
+        return (self._loaded is None or self._busy or self._priority is not None
+                or bool(self._plan) or bool(self._deferred))
+
     def pending(self) -> bool:
         """Is anything still to do (or being done, or the model still loading)?"""
         with self._lock:
-            return (self._loaded is None or self._busy or self._priority is not None
-                    or (bool(self._plan) and self._loaded is True))
+            return self._busy_locked()
 
     def wait(self, timeout: float = 30.0) -> bool:
         """Block until the model has loaded and the plan has run out; ``True`` if so."""
         deadline = time.perf_counter() + float(timeout)
         with self._lock:
-            while (self._loaded is None or self._busy or self._priority is not None
-                   or (self._plan and self._loaded is True and not self._stopped)):
+            while self._busy_locked():
+                left = deadline - time.perf_counter()
+                if left <= 0:
+                    return False
+                self._lock.wait(left)
+        return True
+
+    def served_before_load(self, timeout: float = 30.0) -> bool:
+        """Block until everything the cache can answer has been answered (tests, probes)."""
+        deadline = time.perf_counter() + float(timeout)
+        with self._lock:
+            while (self._busy or self._priority is not None or self._plan) and \
+                    not self._stopped:
                 left = deadline - time.perf_counter()
                 if left <= 0:
                     return False
@@ -260,18 +283,18 @@ class DetectionWorker(QObject):
         return True
 
     def shutdown(self, timeout: float = 10.0) -> None:
-        """Refuse new work, let the frame in hand finish, write the cache, join."""
+        """Refuse new work, let the frame in hand finish, write the cache, join.
+
+        The model's loader thread is not waited for: importing torch and
+        ultralytics cannot be interrupted, it ends on its own once the load
+        returns, and closing the window does not wait seconds for it.
+        """
         with self._lock:
             self._stopped = True
             self._plan.clear()
             self._priority = None
-            loading = self._loaded is None
+            self._deferred = []
             self._lock.notify_all()
-        if loading:
-            # Importing torch and ultralytics cannot be interrupted, and there
-            # is nothing to write yet: the thread ends on its own once the
-            # load returns, and closing the window does not wait seconds for it.
-            return
         if self._thread.is_alive():
             self._thread.join(timeout)
 
@@ -299,12 +322,14 @@ class DetectionWorker(QObject):
         except RuntimeError:        # the Qt object was deleted under us
             pass
 
-    def _run(self) -> None:
+    def _load_model(self) -> None:
+        """The loader thread: build the model, then say whether it is on."""
         try:
-            text = self.engine.load()
+            text = self.engine.load_model()
         except BaseException as exc:  # noqa: BLE001 - off, never a crash
             with self._lock:
                 self._loaded = False
+                self._deferred = []
                 stopped = self._stopped
                 self._lock.notify_all()
             if not stopped:
@@ -314,32 +339,71 @@ class DetectionWorker(QObject):
             self._loaded = True
             stopped = self._stopped
             self._lock.notify_all()
-        if stopped:
+        if not stopped:
+            self._emit("sigState", ("on", text))
+
+    def _next(self) -> Optional[tuple]:
+        """The next job ``(item, gen, view, stats, model_up)``, or ``None`` to stop.
+
+        Called with the lock held.  Once the model is up, what waited for it
+        goes first -- of the current generation only.
+        """
+        while True:
+            if self._stopped or self._loaded is False:
+                return None
+            if self._loaded is True and self._deferred:
+                fresh = [item for gen, item in self._deferred if gen == self._gen]
+                self._deferred = []
+                waiting = [item for item in fresh if item.priority]
+                if waiting and self._priority is None:
+                    self._priority = waiting[-1]
+                self._plan.extendleft(reversed([item for item in fresh if not item.priority]))
+            if self._priority is not None or self._plan:
+                break
+            self._lock.wait()
+        if self._priority is not None:
+            item, self._priority = self._priority, None
+        else:
+            item = self._plan.popleft()
+        # the pass is timed from its first frame, not from the request: the
+        # first view may wait for the model to load
+        self._stats.setdefault("first", time.perf_counter())
+        self._busy = True
+        return item, self._gen, self._view, self._stats, self._loaded is True
+
+    def _run(self) -> None:
+        try:
+            self.engine.prepare()
+        except BaseException as exc:  # noqa: BLE001 - off, never a crash
+            with self._lock:
+                self._loaded = False
+                stopped = self._stopped
+                self._lock.notify_all()
+            if not stopped:
+                self._emit("sigState", ("off", f"{type(exc).__name__}: {exc}"))
             return
-        self._emit("sigState", ("on", text))
+        threading.Thread(target=self._load_model, name="tda-detect-load",
+                         daemon=True).start()
         opened: Optional[tuple[int, str]] = None
         since_flush = 0
         while True:
             with self._lock:
-                while not self._stopped and self._priority is None and not self._plan:
-                    self._lock.wait()
-                if self._stopped:
-                    break
-                if self._priority is not None:
-                    item, self._priority = self._priority, None
-                else:
-                    item = self._plan.popleft()
-                gen, view, stats = self._gen, self._view, self._stats
-                # the pass is timed from its first frame, not from the request:
-                # the first view waits for the model to load
-                stats.setdefault("first", time.perf_counter())
-                self._busy = True
+                job = self._next()
+            if job is None:
+                break
+            item, gen, view, stats, model_up = job
             computed = False
             try:
                 if view != opened and view is not None:
                     self.engine.open_view(*view)
                     opened = view
-                frame = self.engine.process(item)
+                if model_up:
+                    frame = self.engine.process(item)
+                else:
+                    frame = self.engine.answer_from_cache(item)
+                    if frame is None:
+                        with self._lock:
+                            self._deferred.append((gen, item))
                 if frame is not None:
                     computed = frame.detected or frame.measured
                     stats["frames"] += 1
@@ -349,22 +413,33 @@ class DetectionWorker(QObject):
                     self._emit("sigFrame", (gen, frame))
             except Exception as exc:  # noqa: BLE001 - one frame is not worth the pass
                 log.warning("detector: step %s failed: %s: %s", item.step,
-                            type(exc).__name__, exc)
+                            type(exc).__name__, exc, exc_info=True)
             with self._lock:
-                self._busy = False
-                idle = self._priority is None and not self._plan
-                self._lock.notify_all()
-            since_flush += int(computed)
-            if since_flush and (idle or since_flush >= FLUSH_EVERY):
-                self.engine.flush()
-                since_flush = 0
-            if idle:
-                now = time.perf_counter()
-                done = dict(stats, seconds=now - stats.get("first", now))
-                done.pop("first", None)
-                done.pop("started", None)
-                self._emit("sigIdle", (gen, done))
-            elif computed and self.engine.config.yield_ms > 0:
+                idle = (self._priority is None and not self._plan
+                        and self._loaded is True and not self._deferred)
+            try:
+                since_flush += int(computed)
+                if since_flush and (idle or since_flush >= FLUSH_EVERY):
+                    self.engine.flush()
+                    since_flush = 0
+                if idle:
+                    # The pass is over: two decoded 12 MP frames are ~73 MB, and
+                    # the model's CUDA cache is SAM's to use until the next one.
+                    self.engine.release()
+                    now = time.perf_counter()
+                    done = dict(stats, seconds=now - stats.get("first", now))
+                    done.pop("first", None)
+                    done.pop("started", None)
+                    self._emit("sigIdle", (gen, done))
+            except Exception as exc:  # noqa: BLE001 - housekeeping is not worth the pass
+                log.warning("detector: after step %s: %s: %s", item.step,
+                            type(exc).__name__, exc, exc_info=True)
+            finally:
+                # Not idle until the housekeeping is done: wait() means "all of it".
+                with self._lock:
+                    self._busy = False
+                    self._lock.notify_all()
+            if not idle and computed and self.engine.config.yield_ms > 0:
                 # One frame at a time, and room between frames for a SAM click.
                 time.sleep(self.engine.config.yield_ms / 1000.0)
         self.engine.flush()
@@ -399,18 +474,47 @@ class DetectMixin:
         #: Set while a late answer re-arms rank 1, for the log line.
         self._det_arming_late = False
         self.canvas.sigMousePress.connect(self._det_on_press)
-        config = load_detector_config()
-        if config is not None:
-            self.enable_detector(config)
+        # Round 3: nothing the detector does may stop the window opening.
+        try:
+            config = load_detector_config()
+            if config is not None:
+                self.enable_detector(config)
+        except Exception:  # noqa: BLE001 - off, never a window that does not open
+            log.exception("small-part detector OFF: it failed while the window was built")
+            self.det_worker, self.det_config, self.det_state = None, None, "off"
+
+    def detect_window_built(self) -> None:
+        """The window is built: the frame it opened on is visited *now*.
+
+        :meth:`_init_detect` runs inside ``MainWindow.__init__``, before the
+        first ``render_frame``, whose ``_sync_editing_layer`` resets the SAM
+        prompt -- a touch.  The visit recorded before it made the first frame
+        look touched, and a late answer never armed there (round 3, review
+        item 1).  Called once, at the end of construction.
+        """
+        try:
+            if compat.is_open(self.session):
+                self._det_visit = (self.session.current(),
+                                   getattr(self.session, "editing_instance", None),
+                                   self._det_touches)
+        except Exception:  # noqa: BLE001 - a hint for the late answer, not a failure
+            log.exception("detector: the first frame's visit could not be recorded")
 
     def enable_detector(self, config: DetectorConfig,
                         factory: Optional[Callable[[DetectorConfig], Any]] = None,
                         cache_root: Optional[str] = None,
-                        change_fn: Optional[Callable] = None) -> None:
-        """Start a worker for ``config`` (a test passes a stub model ``factory``)."""
+                        change_fn: Optional[Callable] = None,
+                        identity: Optional[str] = None) -> None:
+        """Start a worker for ``config`` (a test passes a stub model ``factory``).
+
+        ``identity`` is the cache key a stub goes by without being built; the
+        real model's is its file's SHA-1.
+        """
         self.shutdown_detector()
         root = cache_root or (self.paths or {}).get("det_cache_dir") or config.cache_root
-        kwargs = {} if change_fn is None else {"change_fn": change_fn}
+        kwargs: dict = {} if change_fn is None else {"change_fn": change_fn}
+        if identity is not None:
+            kwargs["identity"] = identity
         engine = DetectionEngine(config, Path(root), factory=factory, **kwargs)
         worker = DetectionWorker(engine, parent=self)
         worker.sigFrame.connect(self._on_det_frame)
@@ -426,7 +530,10 @@ class DetectMixin:
     def shutdown_detector(self) -> None:
         worker, self.det_worker = self.det_worker, None
         if worker is not None:
-            worker.shutdown()
+            try:
+                worker.shutdown()
+            except Exception:  # noqa: BLE001 - closing must go on
+                log.exception("detector: the worker did not shut down cleanly")
         self.det_state = "off"
         self._det_frames = {}
 
@@ -466,8 +573,18 @@ class DetectMixin:
         """Arriving on a frame: plan the view if it is new, ask for this frame if not ready.
 
         Costs a dictionary lookup and the ROI read when the answer is on hand
-        -- which, after the first pass over a view, it always is.
+        -- which, after the first pass over a view, it always is.  It runs
+        before the difference map's request, so it may never raise: a failure
+        is logged with its traceback and the frame goes on without the
+        detector (round 3).
         """
+        try:
+            self._on_frame_changed_detect(key)
+        except Exception:  # noqa: BLE001 - the comparison must still be asked for
+            log.exception("detector: frame %s: planning failed; the difference map goes on",
+                          key)
+
+    def _on_frame_changed_detect(self, key) -> None:
         worker, config = self.det_worker, self.det_config
         if worker is None or config is None or self.det_state == "off":
             return
@@ -608,7 +725,19 @@ class DetectMixin:
             self._det_arming_late = False
 
     def _det_untouched(self) -> bool:
-        """Nothing has happened to the prompt since the frame was reached."""
+        """Nothing has happened to the prompt since the frame was reached.
+
+        **Touches**: a press of any tool on the canvas, a SAM click or drag, a
+        stroke, a refused box, ``Shift+C``, anything that resets the SAM prompt
+        (a commit, ``Esc`` or an undo that changes the layer, a restored
+        sidecar), another editing instance, another frame.
+
+        **Not touches, on purpose** -- none of them changes the prompt: a tool
+        switch, ``Esc`` with nothing to clear, ``Ctrl+Z`` with nothing to
+        undo, ``Shift+R`` (storing the ROI starts the frame's comparison over,
+        and the visit with it), holding ``Tab``, a detour through Steps or
+        Review, the heat map ``D``.
+        """
         visit = self._det_visit
         if visit is None or not compat.is_open(self.session):
             return False

@@ -320,11 +320,12 @@ def test_already_drawn_both_ways_within_two_pixels_or_at_iou_03():
     assert already_drawn((12.0, 10.0, 26.0, 20.0), drawn)           # centre 19: within 2 px
     assert already_drawn((0.0, 0.0, 100.0, 100.0), [(40, 40, 50, 50)])   # the drawn centre
     assert already_drawn((40.0, 40.0, 50.0, 50.0), [(0, 0, 100, 100)])   # the candidate's
-    # IoU: 0.3 is skipped, just under is not (centres far apart on purpose)
-    assert already_drawn((0.0, 0.0, 10.0, 13.0), [(0.0, 3.0, 10.0, 13.0)])
-    a, b = (0.0, 0.0, 100.0, 10.0), (0.0, 0.0, 30.0, 10.0)
-    assert already_drawn(a, [b])                                    # IoU 0.3 exactly
-    assert not already_drawn((0.0, 0.0, 100.0, 10.0), [(71.0, 0.0, 100.0, 10.0)][:0])
+    # IoU: from 0.3 up it is drawn, just under it is not -- with both centres
+    # more than 2 px outside the other box, so only the IoU rule can decide
+    a = (0.0, 0.0, 100.0, 100.0)
+    assert already_drawn(a, [(53.0, 0.0, 153.0, 100.0)])            # IoU 0.307
+    assert not already_drawn(a, [(54.0, 0.0, 154.0, 100.0)])        # IoU 0.299
+    assert not already_drawn(a, [])
 
 
 def test_no_candidate_left_is_todays_box(window, tmp_path):
@@ -779,3 +780,199 @@ def test_the_real_de_ranks_the_screw_that_left_first(window, tmp_path):
     assert ranking.chosen[0].change > 20.0 > 1.0 > ranking.chosen[1].change
     assert isinstance(ranking.chosen[0], DetCandidate)
     assert not isinstance(ranking.chosen[0], DiffOffer)
+
+
+# --------------------------------------------------------------------------- #
+# round 3 (the review)
+# --------------------------------------------------------------------------- #
+def _loosen(session) -> None:
+    """:func:`loose_screws` on a session, before any window exists."""
+    real = session.task_card
+    session.task_card = lambda: [
+        {k: v for k, v in row.items() if not (k == "parent" and row.get("cls") == "screw")}
+        for row in real()]
+
+
+def _built_with_a_detector(tmp_path, monkeypatch, factory, identity=None,
+                           cache_root=None, cache_dir=None, change=CHANGE):
+    """A window whose detector is switched on *while it is built* -- the app's own way.
+
+    ``load_detector_config`` answers a stub configuration and the engine is
+    given the stub model; the ROI is stored and the session stands on frame
+    12 before ``MainWindow`` exists.
+    """
+    from tda.models.det_engine import DetectionEngine
+    from tda.ui import app_detect
+
+    session = make_session(tmp_path)
+    session.db.set_pose_segment_roi(13, "scan", 1, [9, 9, 55, 55], annotator="tester",
+                                    hw=(64, 64))
+    if cache_dir is not None:
+        session.cache_dir = str(cache_dir)
+    _loosen(session)
+    session.goto(SCREW_STEP)
+    config = det_config(tmp_path)
+    change_fn = None if change is None else (
+        lambda j, k, box: float(change.get(tuple(int(v) for v in box), 0.5)))
+    root = cache_root or tmp_path / "det"
+
+    def engine(cfg, _root, factory=None, **_kw):
+        extra = {} if change_fn is None else {"change_fn": change_fn}
+        return DetectionEngine(cfg, root, factory=engine.factory, identity=identity, **extra)
+
+    engine.factory = factory
+    monkeypatch.setattr(app_detect, "load_detector_config", lambda: config)
+    monkeypatch.setattr(app_detect, "DetectionEngine", engine)
+    queue = StubSamQueue()
+    win = MainWindow(session, make_paths(tmp_path), "tester", sam_queue=queue)
+    win.resize(900, 700)
+    win.show()
+    QApplication.processEvents()
+    win.sam_queue = queue
+    return win
+
+
+def test_the_frame_the_window_opens_on_gets_a_late_answer_while_untouched(
+        qapp, tmp_path, monkeypatch):
+    """Review item 1: the first frame's visit is recorded after the first render."""
+    model = StubModel({SCREW_STEP: [det(A_BOX), det(B_BOX)]}, hold={SCREW_STEP})
+    win = _built_with_a_detector(tmp_path, monkeypatch, lambda _c: model)
+    # the window's own logger setup replaces handlers added before it existed
+    keep = Keep()
+    logging.getLogger("tda.app").addHandler(keep)
+    logged = keep.lines
+    try:
+        assert win.det_worker is not None and win.session.current().step == SCREW_STEP
+        assert win.roi() == (9, 9, 55, 55) and not win.roi_editing
+        assert win.assist.wait(10)
+        QApplication.processEvents()
+        blob = win.assist_result["unexplained"][0]
+        assert win._prompt_box == fbox(blob.box), "the difference map armed first"
+        assert win._det_late == win.session.current()
+        model.release.set()
+        pump(win)
+        assert win._prompt_box == fbox(A_BOX)
+        assert win.canvas.prompt_band()[1] == DET_CHIP.format(name="螺丝")
+        assert any("(late answer)" in m for _l, m in logged)
+        assert not any("kept, not armed" in m for _l, m in logged)
+    finally:
+        logging.getLogger("tda.app").removeHandler(keep)
+        model.release.set()
+        close_window(win)
+
+
+def test_a_warm_cache_arms_the_first_frame_before_the_model_has_loaded(
+        qapp, tmp_path, monkeypatch):
+    """Review item 3: the cache is keyed by the model file, not by a loaded model."""
+    first = _built_with_a_detector(
+        tmp_path / "a", monkeypatch,
+        lambda _c: StubModel({SCREW_STEP: [det(A_BOX), det(B_BOX)]}, identity="warm-u3"),
+        identity="warm-u3", cache_root=tmp_path / "det")
+    try:
+        pump(first)
+        assert first._prompt_box == fbox(A_BOX)
+        scene = first.session.cache_dir
+    finally:
+        close_window(first)
+
+    gate = threading.Event()
+    built = []
+
+    def slow(_config):
+        gate.wait(30)
+        built.append(True)
+        return StubModel({}, identity="warm-u3")
+
+    started = time.perf_counter()
+    second = _built_with_a_detector(tmp_path / "b", monkeypatch, slow, identity="warm-u3",
+                                    cache_root=tmp_path / "det", cache_dir=scene)
+    try:
+        assert second.det_worker.served_before_load(10)
+        assert second.assist.wait(10)
+        for _ in range(5):
+            QApplication.processEvents()
+        assert second.det_state == "loading" and built == [], "the model had loaded"
+        assert SCREW_STEP in second._det_frames
+        assert second._prompt_box == fbox(A_BOX)
+        assert time.perf_counter() - started < 5.0
+    finally:
+        gate.set()
+        close_window(second)
+
+
+def test_a_detector_that_raises_on_arrival_leaves_the_difference_map(window, tmp_path,
+                                                                     monkeypatch, logged):
+    """Review item 4: a detector failure before the comparison is asked for is logged."""
+    enable(window, tmp_path, {SCREW_STEP: [det(A_BOX)]})
+    pump(window)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("detector broke")
+
+    monkeypatch.setattr(window, "_det_ready", boom)
+    go(window, SCREW_STEP)
+    blob = window.assist_result["unexplained"][0]
+    assert window._prompt_box == fbox(blob.box)
+    assert any(m.startswith("detector: frame") and "planning failed" in m
+               for _l, m in logged), logged
+    monkeypatch.setattr(window, "detector_ranking", boom)
+    window.clear_prompt_box()
+    window.begin_add_shape(blob)
+    assert window._prompt_box == fbox(blob.box)
+    assert any("ranking failed" in m for _l, m in logged)
+
+
+def test_a_detector_that_raises_while_the_window_is_built_is_off(qapp, tmp_path, monkeypatch,
+                                                                logged):
+    from tda.ui import app_detect
+
+    def boom():
+        raise RuntimeError("config reader broke")
+
+    monkeypatch.setattr(app_detect, "load_detector_config", boom)
+    win = _window(tmp_path)
+    try:
+        assert win.det_worker is None and win.det_state == "off"
+        go(win, SCREW_STEP)
+        assert win._prompt_box is not None
+        assert any("failed while the window was built" in m for _l, m in logged)
+    finally:
+        close_window(win)
+
+
+def test_small_boxes_of_one_screw_are_one_shift_c_candidate(window, tmp_path):
+    """Review item 5: D13/scan 40 offered the same screw three times (IoU 0.76)."""
+    from tda.ui.app_assist import _same_candidate
+
+    assert _same_candidate((898, 800, 919, 820), (898, 799, 922, 822))    # frame 40
+    assert not _same_candidate((898, 800, 919, 820), (700, 600, 1000, 900))  # a big box
+    assert not _same_candidate((12, 40, 20, 48), (40, 40, 48, 48))
+    enable(window, tmp_path, {SCREW_STEP: [det(A_BOX), det(B_BOX)]})
+    go(window, SCREW_STEP)
+    near_b = _blob((12, 39, 21, 49), area=60)          # IoU 0.71 with B, centre inside it
+    other = _proposal((40, 40, 48, 48))
+    window.assist_result = dict(window.assist_result, blobs=[near_b], unexplained=[near_b],
+                                explained=[], proposals=[other])
+    window.begin_add_shape(near_b)
+    alts = window.prompt_alternates()
+    assert [tuple(a.box) for a in alts] == [fbox(B_BOX), tuple(other.box)]
+
+
+def test_the_worker_lets_go_of_the_model_cache_when_the_pass_is_over(window, tmp_path):
+    """Review item 7: a pass that ends releases the decoded frames and the GPU cache."""
+    released = []
+
+    class Releasing:            # (StubModel's own ``release`` is its hold event)
+        names = {0: "screw"}
+        identity = "stub-releasing"
+
+        def detect(self, img, crop, view, step=None):
+            return []
+
+        def release(self):
+            released.append(True)
+
+    enable(window, tmp_path, {}, model=Releasing())
+    pump(window)
+    assert released, "the idle worker kept its GPU cache"
+    assert window.det_worker.engine._decoded == {}

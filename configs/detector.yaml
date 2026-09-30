@@ -18,13 +18,14 @@
 # `classes` on its own: a row that comes back *with* a parent -- D13's captive
 # CPU-cooler screws, back in with the fan -- does not count, because the part
 # removed at j+1 was the parent.  Everywhere else the difference map (and the
-# U2h gate) is exactly what it was.  The dE of a candidate is logged, never used as a gate: L2's
-# "dE < 3 is mostly wrong" was found after the fact and is not validated.
+# U2h gate) is exactly what it was.  The dE of a candidate is logged, never
+# used as a gate: L2's "dE < 3 is mostly wrong" was found after the fact and
+# is not validated.
 #
 # Swapping the model -- L3's all-desktop one -- is this file alone: `model`,
-# and `tiling` if it was trained on other tiles.  The detections are cached per
-# model (by the file's SHA-1) under `cache_root`, so a new model starts cold and
-# an old cache is never read for it.  The weights are not in git.
+# and `tiling` if it was trained on other tiles.  The detections are cached
+# per model (by the file's SHA-1) under `cache_root`, so a new model starts
+# cold and an old cache is never read for it.  The weights are not in git.
 #
 # Anything wrong here -- a missing or malformed file, a missing model file,
 # ultralytics that does not import, no CUDA -- is a WARNING in the log and a

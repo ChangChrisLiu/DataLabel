@@ -127,6 +127,9 @@ class MainWindow(EditMixin, CommitMixin, RoiMixin, AdoptMixin, PoseMixin, Assist
         # before the status line listened, and render_frame has just cleared
         # the line: say it now, in the order every arrival does (U2d).
         self.task_card.announce()
+        # The first frame's visit starts now that render_frame has reset the
+        # prompt, like every other arrival (task U3, round 3).
+        self.detect_window_built()
 
     # ------------------------------------------------------- lazy step table
     @property

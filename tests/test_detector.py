@@ -246,6 +246,8 @@ def test_no_cuda_stops_the_model_before_ultralytics_is_imported(tmp_path, monkey
     torch = pytest.importorskip("torch")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setitem(sys.modules, "ultralytics", None)   # would raise if reached
+    for name in ("YOLO_CONFIG_DIR", "YOLO_OFFLINE"):        # put back after the test
+        monkeypatch.setenv(name, "unset by the test")
     threads = cv2.getNumThreads()
     cfg = config(tmp_path, model=tmp_path / "w.pt",
                  yolo_config_dir=tmp_path / "ycfg")
@@ -264,6 +266,8 @@ def test_ultralytics_that_does_not_import_is_unavailable_and_opencv_keeps_its_th
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setitem(sys.modules, "ultralytics", None)
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    for name in ("YOLO_CONFIG_DIR", "YOLO_OFFLINE"):        # put back after the test
+        monkeypatch.setenv(name, "unset by the test")
     threads = cv2.getNumThreads()
     cfg = config(tmp_path, model=tmp_path / "w.pt", yolo_config_dir=tmp_path / "ycfg")
     cfg.model.write_bytes(b"x")
@@ -466,8 +470,226 @@ def test_the_cache_file_is_one_per_desktop_and_view(tmp_path, frames):
                       .read_text(encoding="utf-8"))
     entry = body["steps"]["12"]
     assert entry["path"] == frames[0].replace("\\", "/") and entry["crop"] == [0, 0, 64, 64]
-    assert {"size", "mtime_ns", "dets", "change"} <= set(entry)
-    assert entry["change"]["neighbour"] == 13 and entry["change"]["classes"] == ["screw"]
+    assert {"size", "mtime_ns", "dets", "changes"} <= set(entry)
+    assert list(entry["changes"]) == ["13"] and entry["changes"]["13"]["classes"] == ["screw"]
+
+
+# --------------------------------------------------------------------------- #
+# round 3
+# --------------------------------------------------------------------------- #
+def test_de_is_kept_per_neighbour_so_browsing_both_ways_measures_once(tmp_path, frames):
+    """Forward browsing compares with the step below: two slots, no overwriting."""
+    calls = []
+
+    def change(j, k, box):
+        calls.append(tuple(box))
+        return 1.0
+
+    below = write_frame(Path(frames[0]).with_name("s011.png"), square_at=20)
+    eng = DetectionEngine(config(tmp_path), tmp_path / "det",
+                          factory=lambda _c: StubModel({12: [A]}), change_fn=change)
+    eng.load()
+    eng.open_view(13, "scan")
+    down = PlanItem(step=12, candidates=(frames[0],), crop=(0, 0, 64, 64), neighbour=11,
+                    neighbour_candidates=(below,))
+    for walk in (item(frames), down, item(frames), down):
+        eng.process(walk)
+    assert len(calls) == 2, "a visit from the other side measured again"
+    assert sorted(eng.cache.get(12)["changes"]) == ["11", "13"]
+
+
+def test_decoded_frames_are_keyed_by_the_files_stamp_and_let_go_when_idle(tmp_path, frames):
+    released = []
+
+    class Releasing(StubModel):
+        def release(self):
+            released.append(True)
+
+    eng = engine_for(tmp_path, Releasing({12: [A]}))
+    eng.process(item(frames))
+    keys = list(eng._decoded)
+    assert keys and all(len(k) == 3 and isinstance(k[1], int) for k in keys)
+    stamp = file_stamp(frames[1])
+    assert (stamp["path"], stamp["size"], stamp["mtime_ns"]) in keys
+    eng.release()
+    assert eng._decoded == {} and released == [True]
+
+
+def test_the_cache_answers_before_the_model_exists(tmp_path, frames):
+    """Round 3: the cache key needs no model, so a warm start needs no model either."""
+    first = DetectionEngine(config(tmp_path), tmp_path / "det",
+                            factory=lambda _c: StubModel({12: [A, B]}, identity="warm-id"))
+    first.load()
+    first.open_view(13, "scan")
+    served = first.process(item(frames))
+    first.flush()
+
+    built = []
+
+    def never(_config):
+        built.append(True)
+        raise AssertionError("the model was built to read the cache")
+
+    eng = DetectionEngine(config(tmp_path), tmp_path / "det", factory=never,
+                          identity="warm-id")
+    eng.prepare()
+    eng.open_view(13, "scan")
+    got = eng.answer_from_cache(item(frames))
+    assert built == [] and eng.model is None
+    assert got is not None and got.dets == served.dets and got.change == served.change
+    assert not got.detected and not got.measured
+    # a frame the cache does not hold is no answer (the worker keeps it for later)
+    assert eng.answer_from_cache(item(frames, crop=(0, 0, 60, 60))) is None
+    assert eng.answer_from_cache(PlanItem(step=12, candidates=(frames[0],),
+                                          crop=(0, 0, 64, 64), neighbour=14,
+                                          neighbour_candidates=(frames[1],))) is None
+
+
+def test_the_real_models_cache_key_is_its_files_sha1_without_building_it(tmp_path):
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"weights")
+    eng = DetectionEngine(config(tmp_path, model=weights), tmp_path / "det")
+    eng.prepare()
+    assert eng.model is None and eng.identity == DM.file_sha1(weights)
+    assert eng.cache.dir == tmp_path / "det" / DM.file_sha1(weights)[:12]
+
+
+def _fake_ultralytics(monkeypatch, zero: Path):
+    """An ``ultralytics`` whose import and ``YOLO()`` patch the process like the real one."""
+    import types
+
+    import PIL.Image
+    torch = pytest.importorskip("torch")
+
+    def patch_everything():
+        cv2.setNumThreads(1)
+        cv2.imread = lambda *a, **k: (_ for _ in ()).throw(cv2.error("patched imread"))
+        cv2.imwrite = lambda *a, **k: True
+        PIL.Image.open = lambda *a, **k: None
+        torch.save = lambda *a, **k: None
+        os.environ["NUMEXPR_MAX_THREADS"] = "8"
+        os.environ["OMP_NUM_THREADS"] = "1"
+        np.set_printoptions(linewidth=320)
+        import warnings
+        warnings.filterwarnings("ignore", message="u3 fake")
+
+    class YOLO:
+        names = {0: "screw", 1: "connector"}
+
+        def __init__(self, path):
+            patch_everything()
+
+        def predict(self, batch, **kw):
+            return []
+
+    fake = types.ModuleType("ultralytics")
+    fake.YOLO = YOLO
+    monkeypatch.setitem(sys.modules, "ultralytics", fake)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    return fake
+
+
+@pytest.fixture
+def guard_process(monkeypatch):
+    """Whatever the code under test fails to put back, the suite gets back."""
+    import warnings
+
+    import PIL.Image
+    torch = pytest.importorskip("torch")
+    for owner, name in ((cv2, "imread"), (cv2, "imwrite"), (cv2, "imshow"),
+                        (PIL.Image, "open"), (torch, "save")):
+        monkeypatch.setattr(owner, name, getattr(owner, name))
+    threads, printopts, filters = cv2.getNumThreads(), np.get_printoptions(), list(warnings.filters)
+    env = dict(os.environ)
+    yield
+    cv2.setNumThreads(threads)
+    np.set_printoptions(**printopts)
+    warnings.filters[:] = filters
+    for key in [k for k in os.environ if k not in env]:
+        os.environ.pop(key, None)
+    os.environ.update(env)
+
+
+def test_after_the_model_has_loaded_the_process_is_as_it_was(tmp_path, monkeypatch,
+                                                             guard_process):
+    """Round 3, review item 2: every ultralytics patch undone once the engine has loaded."""
+    import warnings
+
+    import PIL.Image
+    torch = pytest.importorskip("torch")
+    zero = tmp_path / "empty.png"
+    zero.write_bytes(b"")
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"weights")
+    monkeypatch.setenv("YOLO_CONFIG_DIR", str(tmp_path / "ycfg"))
+    monkeypatch.setenv("YOLO_OFFLINE", "1")
+    _fake_ultralytics(monkeypatch, zero)
+    before = {"env": dict(os.environ), "threads": cv2.getNumThreads(),
+              "imread": cv2.imread, "imwrite": cv2.imwrite, "imshow": cv2.imshow,
+              "pil": PIL.Image.open, "save": torch.save,
+              "np": np.get_printoptions(), "filters": list(warnings.filters)}
+    eng = DetectionEngine(config(tmp_path, model=weights,
+                                 yolo_config_dir=tmp_path / "ycfg"), tmp_path / "det")
+    eng.load()
+    assert eng.model is not None and eng.model.names[0] == "screw"
+    assert cv2.imread(str(zero)) is None
+    assert cv2.imread is before["imread"] and cv2.imwrite is before["imwrite"]
+    assert cv2.imshow is before["imshow"] and cv2.getNumThreads() == before["threads"]
+    assert PIL.Image.open is before["pil"] and torch.save is before["save"]
+    assert dict(os.environ) == before["env"]
+    assert np.get_printoptions() == before["np"] and warnings.filters == before["filters"]
+
+
+@pytest.mark.slow
+def test_importing_the_real_ultralytics_inside_keep_process_state_changes_nothing(tmp_path):
+    """The real import (no model, no GPU), in a fresh process: it patches, and it is undone."""
+    import importlib.util
+    import subprocess
+
+    # find_spec, not importorskip: importing it here would patch *this* process
+    if importlib.util.find_spec("ultralytics") is None:
+        pytest.skip("ultralytics is not installed")
+    zero = tmp_path / "empty.png"
+    zero.write_bytes(b"")
+    code = f"""
+import json, os, sys
+sys.path.insert(0, {str(REPO)!r})
+import cv2, numpy as np, torch, PIL.Image
+from tda.models.detector import keep_process_state
+zero = {str(zero)!r}
+before = dict(os.environ)
+fns = (cv2.imread, cv2.imwrite, cv2.imshow, PIL.Image.open, torch.save)
+threads = cv2.getNumThreads()
+printopts = np.get_printoptions()
+with keep_process_state(torch):
+    import ultralytics
+    from ultralytics import YOLO
+    inside = [cv2.imread is not fns[0], PIL.Image.open is not fns[3],
+              torch.save is not fns[4], os.environ.get("NUMEXPR_MAX_THREADS"),
+              cv2.getNumThreads()]
+print(json.dumps({{
+    "inside": inside,
+    "imread_none": cv2.imread(zero) is None,
+    "same_fns": [a is b for a, b in zip((cv2.imread, cv2.imwrite, cv2.imshow,
+                                         PIL.Image.open, torch.save), fns)],
+    "env_same": dict(os.environ) == before,
+    "numexpr": os.environ.get("NUMEXPR_MAX_THREADS"),
+    "threads_same": cv2.getNumThreads() == threads,
+    "np_same": np.get_printoptions() == printopts,
+}}))
+"""
+    env = dict(os.environ, YOLO_CONFIG_DIR=str(tmp_path / "ycfg"), YOLO_OFFLINE="1",
+               TMP=str(tmp_path), TEMP=str(tmp_path))
+    env.pop("NUMEXPR_MAX_THREADS", None)
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          env=env, timeout=300)
+    assert done.returncode == 0, done.stderr[-2000:]
+    out = json.loads(done.stdout.strip().splitlines()[-1])
+    # ultralytics really did patch the process ...
+    assert out["inside"][:3] == [True, True, True] and out["inside"][3] is not None
+    # ... and none of it survived
+    assert out["imread_none"] and all(out["same_fns"]) and out["env_same"]
+    assert out["numexpr"] is None and out["threads_same"] and out["np_same"]
 
 
 def test_detcache_flush_writes_only_when_something_changed(tmp_path):
